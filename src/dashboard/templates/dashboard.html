@@ -23,27 +23,39 @@
 </div>
 
 <!-- Stat Cards -->
+{% set balance = snapshot.balance_usd | default(0) | float %}
+{% set allocated = trades | sum(attribute='entry_cost_usd') | default(0) | float if trades else 0 %}
 <div class="stats-grid">
     <div class="stat-card">
         <div class="stat-label">Equity</div>
-        <div class="stat-value">${{ "%.2f" | format(snapshot.balance_usd | default(0) | float) }}</div>
+        <div class="stat-value" id="equity-value">${{ "%.2f" | format(balance) }}</div>
         <div class="stat-sub">of ${{ "%.2f" | format(config.initial_balance | default(100.0) | float) }} initial</div>
+    </div>
+    <div class="stat-card" style="border-left: 3px solid #22c55e;">
+        <div class="stat-label">Available Cash</div>
+        <div class="stat-value sm" id="available-value">${{ "%.2f" | format(balance) }}</div>
+        <div class="stat-sub">free to trade</div>
+    </div>
+    <div class="stat-card" style="border-left: 3px solid #f59e0b;">
+        <div class="stat-label">Allocated</div>
+        <div class="stat-value sm" id="allocated-value">${{ "%.2f" | format(allocated) }}</div>
+        <div class="stat-sub">across {{ trades | length }} position{{ 's' if (trades | length) != 1 else '' }}</div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Daily P&L</div>
-        <div class="stat-value {{ 'positive' if (snapshot.daily_pnl_usd | default(0) | float) >= 0 else 'negative' }}">
+        <div class="stat-value {{ 'positive' if (snapshot.daily_pnl_usd | default(0) | float) >= 0 else 'negative' }}" id="daily-pnl-value">
             {{ "+" if (snapshot.daily_pnl_usd | default(0) | float) >= 0 else "" }}${{ "%.2f" | format(snapshot.daily_pnl_usd | default(0) | float) }}
         </div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Total P&L</div>
-        <div class="stat-value {{ 'positive' if (snapshot.total_pnl_usd | default(0) | float) >= 0 else 'negative' }}">
+        <div class="stat-value {{ 'positive' if (snapshot.total_pnl_usd | default(0) | float) >= 0 else 'negative' }}" id="total-pnl-value">
             {{ "+" if (snapshot.total_pnl_usd | default(0) | float) >= 0 else "" }}${{ "%.2f" | format(snapshot.total_pnl_usd | default(0) | float) }}
         </div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Drawdown</div>
-        <div class="stat-value sm {{ 'negative' if (snapshot.drawdown_pct | default(0) | float) > 0.05 else '' }}">
+        <div class="stat-value sm {{ 'negative' if (snapshot.drawdown_pct | default(0) | float) > 0.05 else '' }}" id="drawdown-value">
             {{ "%.1f" | format((snapshot.drawdown_pct | default(0) | float) * 100) }}%
         </div>
         <div class="stat-sub">circuit break {{ "%.0f" | format(config.circuit_breaker_pct * 100) if config else 15 }}%</div>
@@ -79,6 +91,8 @@
         <h2>Open Positions</h2>
         <div style="display:flex; align-items:center; gap:8px;">
             <span class="badge text-blue">{{ trades | length }}</span>
+            <button id="refresh-btn" class="btn" onclick="manualRefresh()" style="font-size:0.8rem; padding:4px 10px;">Refresh Prices</button>
+            <span id="last-updated" class="text-muted" style="font-size:0.7rem;"></span>
             {% if trades %}
             <button id="nuke-btn" class="btn btn-nuke" onclick="confirmNuke()">NUKE ALL</button>
             {% endif %}
@@ -297,7 +311,6 @@ async function loadChart() {
 loadChart();
 
 // --- Net P&L (realized + unrealized) ---
-// Track the latest realized P&L from server. Initialized from the page render.
 let _lastRealizedPnl = {{ snapshot.total_pnl_usd | default(0) | float }};
 
 function updateNetPnl(unrealized) {
@@ -312,17 +325,30 @@ function updateNetPnl(unrealized) {
     const uSign = unrealized >= 0 ? '+' : '';
     netSub.textContent = rSign + '$' + _lastRealizedPnl.toFixed(2) + ' realized, ' + uSign + '$' + unrealized.toFixed(2) + ' unrealized';
 }
-// Show initial net on page load (unrealized = 0 until first AJAX)
 updateNetPnl(0);
 
-// --- Unrealized P&L ---
+// --- Unrealized P&L + position price refresh ---
+let _refreshing = false;
+
 async function loadUnrealizedPnl() {
+    if (_refreshing) return;
+    _refreshing = true;
+    const btn = document.getElementById('refresh-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Refreshing...'; }
+
     try {
         const resp = await fetch('/api/unrealized-pnl');
         const data = await resp.json();
 
         const el = document.getElementById('unrealized-value');
         const sub = document.getElementById('unrealized-sub');
+        const ts = document.getElementById('last-updated');
+
+        // Update timestamp
+        if (ts) {
+            const now = new Date();
+            ts.textContent = 'Updated ' + now.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+        }
 
         if (data.error) {
             el.textContent = '--';
@@ -345,8 +371,13 @@ async function loadUnrealizedPnl() {
         el.textContent = sign + '$' + total.toFixed(2);
         el.className = 'stat-value sm ' + (total >= 0 ? 'positive' : 'negative');
 
-        // Update Net P&L (realized + unrealized)
         updateNetPnl(total);
+
+        // Update allocated total from live data
+        let totalAllocated = 0;
+        data.positions.forEach(p => { totalAllocated += (p.cost_usd || 0); });
+        const allocEl = document.getElementById('allocated-value');
+        if (allocEl) allocEl.textContent = '$' + totalAllocated.toFixed(2);
 
         const errCount = data.positions.filter(p => p.current_price === null).length;
         const liveCount = data.positions.length - errCount;
@@ -354,7 +385,7 @@ async function loadUnrealizedPnl() {
         if (errCount > 0) subText += ' (' + errCount + ' fetch errors)';
         sub.textContent = subText;
 
-        // Build lookup by trade_id for accurate matching (handles duplicate symbols)
+        // Build lookup by trade_id
         const posById = {};
         data.positions.forEach(p => { posById[p.trade_id] = p; });
 
@@ -370,7 +401,7 @@ async function loadUnrealizedPnl() {
             if (pos.current_price !== null) {
                 priceCell.textContent = '$' + pos.current_price.toFixed(4);
                 const pnlSign = pos.unrealized_pnl >= 0 ? '+' : '';
-                pnlCell.textContent = pnlSign + '$' + pos.unrealized_pnl.toFixed(2);
+                pnlCell.textContent = pnlSign + '$' + pos.unrealized_pnl.toFixed(2) + ' (' + (pos.unrealized_pnl >= 0 ? '+' : '') + pos.unrealized_pct.toFixed(1) + '%)';
                 pnlCell.className = 'mono ' + (pos.unrealized_pnl >= 0 ? 'positive' : 'negative');
             } else {
                 priceCell.textContent = 'err';
@@ -379,12 +410,21 @@ async function loadUnrealizedPnl() {
         });
     } catch (e) {
         console.error('Unrealized P&L load failed:', e);
-        document.getElementById('unrealized-sub').textContent = 'Retry in 15s...';
+        const sub = document.getElementById('unrealized-sub');
+        if (sub) sub.textContent = 'Retry in 10s...';
+    } finally {
+        _refreshing = false;
+        if (btn) { btn.disabled = false; btn.textContent = 'Refresh Prices'; }
     }
 }
+
+function manualRefresh() {
+    loadUnrealizedPnl();
+}
+
 loadUnrealizedPnl();
-// Refresh unrealized P&L every 15s
-setInterval(loadUnrealizedPnl, 15000);
+// Auto-refresh prices every 10s
+setInterval(loadUnrealizedPnl, 10000);
 
 // --- NUKE ---
 async function confirmNuke() {
@@ -425,8 +465,7 @@ async function confirmNuke() {
     }
 }
 
-// Soft-refresh stat cards every 120s without full page reload.
-// Full reload only if the number of open positions changes (new trades opened/closed).
+// Soft-refresh stat cards every 30s. Full reload if position count changes.
 let _knownPositionCount = document.querySelectorAll('#positions-tbody tr[data-trade-id]').length;
 
 async function softRefreshStats() {
@@ -435,17 +474,20 @@ async function softRefreshStats() {
         const data = await resp.json();
         if (data.current) {
             const s = data.current;
-            const eqEl = document.querySelector('.stats-grid .stat-card:nth-child(1) .stat-value');
+            const eqEl = document.getElementById('equity-value');
             if (eqEl) eqEl.textContent = '$' + parseFloat(s.balance_usd || 0).toFixed(2);
 
-            const dpEl = document.querySelector('.stats-grid .stat-card:nth-child(2) .stat-value');
+            const avEl = document.getElementById('available-value');
+            if (avEl) avEl.textContent = '$' + parseFloat(s.balance_usd || 0).toFixed(2);
+
+            const dpEl = document.getElementById('daily-pnl-value');
             if (dpEl) {
                 const dp = parseFloat(s.daily_pnl_usd || 0);
                 dpEl.textContent = (dp >= 0 ? '+' : '') + '$' + dp.toFixed(2);
                 dpEl.className = 'stat-value ' + (dp >= 0 ? 'positive' : 'negative');
             }
 
-            const tpEl = document.querySelector('.stats-grid .stat-card:nth-child(3) .stat-value');
+            const tpEl = document.getElementById('total-pnl-value');
             if (tpEl) {
                 const tp = parseFloat(s.total_pnl_usd || 0);
                 tpEl.textContent = (tp >= 0 ? '+' : '') + '$' + tp.toFixed(2);
@@ -453,11 +495,11 @@ async function softRefreshStats() {
                 _lastRealizedPnl = tp;
             }
 
-            const ddEl = document.querySelector('.stats-grid .stat-card:nth-child(4) .stat-value');
+            const ddEl = document.getElementById('drawdown-value');
             if (ddEl) ddEl.textContent = (parseFloat(s.drawdown_pct || 0) * 100).toFixed(1) + '%';
         }
 
-        // Check if positions changed — if so, do a full reload to pick up new rows
+        // Check if positions changed
         const openResp = await fetch('/api/trades/open');
         const openData = await openResp.json();
         const serverCount = (openData.trades || []).length;
@@ -468,6 +510,6 @@ async function softRefreshStats() {
         console.error('Soft refresh failed:', e);
     }
 }
-setInterval(softRefreshStats, 120000);
+setInterval(softRefreshStats, 30000);
 </script>
 {% endblock %}
