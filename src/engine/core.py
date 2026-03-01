@@ -74,32 +74,34 @@ class TradingEngine:
         self.portfolio.daily_pnl = self.state.daily_pnl
         self.portfolio.total_pnl = self.state.total_pnl
 
-        # Reconcile P&L from closed trades (DB is ground truth)
-        stats = await self.repo.get_trade_stats()
-        if stats["total"] > 0:
-            db_total_pnl = stats["total_pnl"]
-            if abs(db_total_pnl - self.portfolio.total_pnl) > 0.01:
-                logger.info(
-                    "total_pnl_reconciled",
-                    old=self.portfolio.total_pnl,
-                    from_db=db_total_pnl,
-                )
-                self.portfolio.total_pnl = db_total_pnl
-                self.state.total_pnl = db_total_pnl
+        # Reconcile open positions against trade records FIRST
+        # (this may close stale positions and add to P&L counters)
+        await self._reconcile_positions()
 
-        # Reconcile daily P&L from today's closed trades
+        # THEN set P&L from closed trades in DB — this is the ground truth
+        # and overwrites whatever _reconcile_positions accumulated,
+        # preventing double-counting.
+        stats = await self.repo.get_trade_stats()
+        db_total_pnl = stats["total_pnl"]
         db_daily_pnl = await self.repo.get_daily_realized_pnl()
+
+        if abs(db_total_pnl - self.portfolio.total_pnl) > 0.01:
+            logger.info(
+                "total_pnl_reconciled",
+                old=self.portfolio.total_pnl,
+                from_db=db_total_pnl,
+            )
         if abs(db_daily_pnl - self.portfolio.daily_pnl) > 0.01:
             logger.info(
                 "daily_pnl_reconciled",
                 old=self.portfolio.daily_pnl,
                 from_db=db_daily_pnl,
             )
-            self.portfolio.daily_pnl = db_daily_pnl
-            self.state.daily_pnl = db_daily_pnl
 
-        # Reconcile open positions against trade records
-        await self._reconcile_positions()
+        self.portfolio.total_pnl = db_total_pnl
+        self.state.total_pnl = db_total_pnl
+        self.portfolio.daily_pnl = db_daily_pnl
+        self.state.daily_pnl = db_daily_pnl
 
         self._running = True
 
