@@ -25,7 +25,7 @@
 <!-- Stat Cards -->
 <div class="stats-grid">
     <div class="stat-card">
-        <div class="stat-label">Balance</div>
+        <div class="stat-label">Equity</div>
         <div class="stat-value">${{ "%.2f" | format(snapshot.balance_usd | default(0) | float) }}</div>
         <div class="stat-sub">of ${{ "%.2f" | format(config.initial_balance | default(100.0) | float) }} initial</div>
     </div>
@@ -46,7 +46,7 @@
         <div class="stat-value sm {{ 'negative' if (snapshot.drawdown_pct | default(0) | float) > 0.05 else '' }}">
             {{ "%.1f" | format((snapshot.drawdown_pct | default(0) | float) * 100) }}%
         </div>
-        <div class="stat-sub">max {{ "%.0f" | format(config.max_daily_drawdown * 100) if config else 10 }}% daily</div>
+        <div class="stat-sub">circuit break {{ "%.0f" | format(config.circuit_breaker_pct * 100) if config else 15 }}%</div>
     </div>
     <div class="stat-card" id="unrealized-card">
         <div class="stat-label">Unrealized P&L</div>
@@ -68,82 +68,80 @@
     {% endif %}
 </div>
 
-<div class="two-col">
-    <!-- Balance Chart -->
-    <div class="panel">
-        <div class="panel-header">
-            <h2>Balance History</h2>
-            <span class="badge text-muted">7 days</span>
-        </div>
-        <div class="chart-container">
-            <canvas id="balanceChart"></canvas>
+<!-- Open Positions (full width) -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>Open Positions</h2>
+        <div style="display:flex; align-items:center; gap:8px;">
+            <span class="badge text-blue">{{ trades | length }}</span>
+            {% if trades %}
+            <button id="nuke-btn" class="btn btn-nuke" onclick="confirmNuke()">NUKE ALL</button>
+            {% endif %}
         </div>
     </div>
-
-    <!-- Open Positions -->
-    <div class="panel">
-        <div class="panel-header">
-            <h2>Open Positions</h2>
-            <div style="display:flex; align-items:center; gap:8px;">
-                <span class="badge text-blue">{{ trades | length }}</span>
-                {% if trades %}
-                <button id="nuke-btn" class="btn btn-nuke" onclick="confirmNuke()">NUKE ALL</button>
-                {% endif %}
-            </div>
-        </div>
-        {% if trades %}
-        <div class="panel-body no-pad">
-            <div class="overflow-x">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Symbol</th>
-                            <th>Dir</th>
-                            <th>Entry</th>
-                            <th>Current</th>
-                            <th>P&L</th>
-                            <th>SL</th>
-                            <th>TP</th>
-                            <th>Size</th>
-                            <th>Score</th>
-                        </tr>
-                    </thead>
-                    <tbody id="positions-tbody">
-                        {% for t in trades %}
-                        <tr data-symbol="{{ t.symbol }}">
-                            <td><strong>{{ t.symbol }}</strong></td>
-                            <td>
-                                <span class="dir-badge {{ t.direction | default('long') }}">
-                                    {{ t.direction | default('long') }}
-                                </span>
-                            </td>
-                            <td class="mono">${{ "%.4f" | format(t.entry_price | float) }}</td>
-                            <td class="mono pos-current-price">--</td>
-                            <td class="mono pos-pnl">--</td>
-                            <td class="mono negative">${{ "%.4f" | format(t.stop_loss | float) }}</td>
-                            <td class="mono positive">{{ ("$%.4f" | format(t.take_profit | float)) if t.take_profit else '-' }}</td>
-                            <td class="mono">${{ "%.2f" | format(t.entry_cost_usd | default(0) | float) }}</td>
-                            <td>
-                                <div class="score-bar">
-                                    <span class="score-num {{ 'positive' if (t.confluence_score | int) >= 65 else ('text-orange' if (t.confluence_score | int) >= 50 else 'negative') }}">{{ t.confluence_score }}</span>
-                                    <div class="bar-track">
-                                        <div class="bar-fill {{ 'high' if (t.confluence_score | int) >= 65 else ('medium' if (t.confluence_score | int) >= 50 else 'low') }}"
-                                             style="width: {{ t.confluence_score | int }}%"></div>
-                                    </div>
+    {% if trades %}
+    <div class="panel-body no-pad">
+        <div class="overflow-x">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Dir</th>
+                        <th>Entry</th>
+                        <th>Current</th>
+                        <th>P&L</th>
+                        <th>SL</th>
+                        <th>TP</th>
+                        <th>Size</th>
+                        <th>Score</th>
+                    </tr>
+                </thead>
+                <tbody id="positions-tbody">
+                    {% for t in trades %}
+                    <tr data-symbol="{{ t.symbol }}">
+                        <td><strong>{{ t.symbol }}</strong></td>
+                        <td>
+                            <span class="dir-badge {{ t.direction | default('long') }}">
+                                {{ t.direction | default('long') }}
+                            </span>
+                        </td>
+                        <td class="mono">${{ "%.4f" | format(t.entry_price | float) }}</td>
+                        <td class="mono pos-current-price">--</td>
+                        <td class="mono pos-pnl">--</td>
+                        <td class="mono negative">${{ "%.4f" | format(t.stop_loss | float) }}</td>
+                        <td class="mono positive">{{ ("$%.4f" | format(t.take_profit | float)) if t.take_profit else '-' }}</td>
+                        <td class="mono">${{ "%.2f" | format(t.entry_cost_usd | default(0) | float) }}</td>
+                        <td>
+                            <div class="score-bar">
+                                <span class="score-num {{ 'positive' if (t.confluence_score | int) >= 65 else ('text-orange' if (t.confluence_score | int) >= 50 else 'negative') }}">{{ t.confluence_score }}</span>
+                                <div class="bar-track">
+                                    <div class="bar-fill {{ 'high' if (t.confluence_score | int) >= 65 else ('medium' if (t.confluence_score | int) >= 50 else 'low') }}"
+                                         style="width: {{ t.confluence_score | int }}%"></div>
                                 </div>
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
         </div>
-        {% else %}
-        <div class="empty-state">
-            <div class="empty-icon">---</div>
-            <p>No open positions. Waiting for signals above threshold.</p>
-        </div>
-        {% endif %}
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <div class="empty-icon">---</div>
+        <p>No open positions. Waiting for signals above threshold.</p>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Balance Chart (full width, below positions) -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>Equity History</h2>
+        <span class="badge text-muted">7 days</span>
+    </div>
+    <div class="chart-container">
+        <canvas id="balanceChart"></canvas>
     </div>
 </div>
 
@@ -247,7 +245,7 @@ async function loadChart() {
             data: {
                 labels: labels,
                 datasets: [{
-                    label: 'Balance',
+                    label: 'Equity',
                     data: values,
                     borderColor: lineColor,
                     backgroundColor: fillColor,
@@ -281,7 +279,7 @@ async function loadChart() {
                     legend: { display: false },
                     tooltip: {
                         callbacks: {
-                            label: ctx => 'Balance: $' + ctx.parsed.y.toFixed(2)
+                            label: ctx => 'Equity: $' + ctx.parsed.y.toFixed(2)
                         }
                     }
                 }

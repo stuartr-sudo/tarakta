@@ -51,7 +51,7 @@ class RiskManager:
         """
         Calculate position size based on risk amount.
 
-        With $100 balance and 2% risk = $2 max loss per trade.
+        With $2000 balance and 10% risk = $200 max loss per trade.
         Position size = risk_amount / distance_to_SL
         """
         if entry_price <= 0 or stop_loss_price <= 0:
@@ -69,12 +69,13 @@ class RiskManager:
         fee_multiplier = 1.004
         total_cost = cost * fee_multiplier
 
-        # Cap: max 5% of balance per position
-        max_position_cost = balance * self.max_position_pct
-        if total_cost > max_position_cost:
-            quantity = max_position_cost / (entry_price * fee_multiplier)
-            cost = quantity * entry_price
-            total_cost = cost * fee_multiplier
+        # Cap per position (percentage of balance)
+        if self.max_position_pct < 1.0:
+            max_position_cost = balance * self.max_position_pct
+            if total_cost > max_position_cost:
+                quantity = max_position_cost / (entry_price * fee_multiplier)
+                cost = quantity * entry_price
+                total_cost = cost * fee_multiplier
 
         # Cannot exceed available balance
         if total_cost > balance:

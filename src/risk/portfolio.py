@@ -56,9 +56,10 @@ class PortfolioTracker:
         self.daily_pnl += pnl
         self.total_pnl += pnl
 
-        # Update peak balance
-        if self.current_balance > self.peak_balance:
-            self.peak_balance = self.current_balance
+        # Update peak balance using equity (cash + remaining positions)
+        equity = self.get_equity()
+        if equity > self.peak_balance:
+            self.peak_balance = equity
 
         logger.info(
             "position_closed",
@@ -76,26 +77,41 @@ class PortfolioTracker:
         self.daily_pnl = 0.0
         logger.info("daily_reset", balance=self.current_balance)
 
-    def get_equity(self, current_prices: dict[str, float]) -> float:
-        """Calculate total equity including unrealized PnL."""
-        unrealized = 0.0
-        for symbol, pos in self.open_positions.items():
-            if symbol in current_prices:
-                if pos.direction == "short":
-                    unrealized += (pos.entry_price - current_prices[symbol]) * pos.quantity
-                else:
-                    unrealized += (current_prices[symbol] - pos.entry_price) * pos.quantity
-        return self.current_balance + unrealized
+    def get_equity(self, current_prices: dict[str, float] | None = None) -> float:
+        """Calculate total equity = cash + open position costs.
+
+        If current_prices is provided, uses mark-to-market (unrealized P&L).
+        Otherwise uses entry cost as a conservative proxy.
+        """
+        if current_prices:
+            unrealized = 0.0
+            for symbol, pos in self.open_positions.items():
+                if symbol in current_prices:
+                    if pos.direction == "short":
+                        unrealized += (pos.entry_price - current_prices[symbol]) * pos.quantity
+                    else:
+                        unrealized += (current_prices[symbol] - pos.entry_price) * pos.quantity
+            return self.current_balance + sum(
+                pos.cost_usd for pos in self.open_positions.values()
+            ) + unrealized
+        # No live prices — equity = cash + deployed capital (at-cost)
+        return self.current_balance + sum(
+            pos.cost_usd for pos in self.open_positions.values()
+        )
 
     def get_drawdown_pct(self) -> float:
+        """Drawdown from peak, measured against equity (not cash)."""
         if self.peak_balance <= 0:
             return 0.0
-        return (self.peak_balance - self.current_balance) / self.peak_balance
+        equity = self.get_equity()
+        return max(0.0, (self.peak_balance - equity) / self.peak_balance)
 
     def to_snapshot_dict(self, cycle_number: int, mode: str) -> dict:
+        equity = self.get_equity()
         return {
-            "balance_usd": self.current_balance,
-            "equity_usd": self.current_balance,  # updated with unrealized later
+            "balance_usd": equity,  # Show equity (cash + positions) as the headline number
+            "equity_usd": equity,
+            "cash_balance": self.current_balance,
             "open_positions": len(self.open_positions),
             "daily_pnl_usd": self.daily_pnl,
             "total_pnl_usd": self.total_pnl,
@@ -120,6 +136,10 @@ class PortfolioTracker:
                 "cost_usd": pos.cost_usd,
                 "direction": pos.direction,
             }
+        equity = self.get_equity()
+        # Update peak if equity has grown
+        if equity > self.peak_balance:
+            self.peak_balance = equity
         return {
             "status": status,
             "mode": mode,
