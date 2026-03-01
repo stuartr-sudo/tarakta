@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     trading_mode: Literal["paper", "live"] = "paper"
     initial_balance: float = 100.0
     entry_threshold: float = 65.0
-    max_risk_pct: float = 0.10  # Max 10% of balance risked per trade (SL distance)
-    max_position_pct: float = 1.0  # No artificial cap — SL controls actual risk
+    max_risk_pct: float = 0.10  # Max 10% of balance lost per trade (SL distance)
+    max_position_pct: float = 0.05  # Max 5% of balance allocated per trade
     max_exposure_pct: float = 1.0  # Allow full budget deployment across positions
     max_concurrent: int = 20
     max_daily_drawdown: float = 0.10

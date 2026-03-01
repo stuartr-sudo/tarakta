@@ -51,8 +51,9 @@ class RiskManager:
         """
         Calculate position size based on risk amount.
 
-        With $2000 balance and 10% risk = $200 max loss per trade.
-        Position size = risk_amount / distance_to_SL
+        With $2000 balance: each trade allocated max 5% ($100),
+        but can lose up to 10% ($200) if SL is hit.
+        Position size = risk_amount / distance_to_SL, capped by max_position_pct.
         """
         if entry_price <= 0 or stop_loss_price <= 0:
             return PositionSize(valid=False, reason="Invalid price")
