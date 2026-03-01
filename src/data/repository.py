@@ -25,15 +25,23 @@ class Repository:
     # --- Trades ---
 
     async def insert_trade(self, trade: dict[str, Any]) -> dict:
-        result = await asyncio.to_thread(_exec, self.db.table("trades").insert(trade))
-        return result.data[0] if result.data else {}
+        try:
+            result = await asyncio.to_thread(_exec, self.db.table("trades").insert(trade))
+            return result.data[0] if result.data else {}
+        except Exception as e:
+            logger.error("insert_trade_failed", error=str(e), symbol=trade.get("symbol"))
+            return {}
 
     async def update_trade(self, trade_id: str, updates: dict[str, Any]) -> dict:
-        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-        result = await asyncio.to_thread(
-            _exec, self.db.table("trades").update(updates).eq("id", trade_id)
-        )
-        return result.data[0] if result.data else {}
+        try:
+            updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+            result = await asyncio.to_thread(
+                _exec, self.db.table("trades").update(updates).eq("id", trade_id)
+            )
+            return result.data[0] if result.data else {}
+        except Exception as e:
+            logger.error("update_trade_failed", error=str(e), trade_id=trade_id)
+            return {}
 
     async def close_trade(
         self,
@@ -107,8 +115,12 @@ class Repository:
     # --- Signals ---
 
     async def insert_signal(self, signal: dict[str, Any]) -> dict:
-        result = await asyncio.to_thread(_exec, self.db.table("signals").insert(signal))
-        return result.data[0] if result.data else {}
+        try:
+            result = await asyncio.to_thread(_exec, self.db.table("signals").insert(signal))
+            return result.data[0] if result.data else {}
+        except Exception as e:
+            logger.error("insert_signal_failed", error=str(e), symbol=signal.get("symbol"))
+            return {}
 
     async def get_recent_signals(self, limit: int = 10) -> list[dict]:
         result = await asyncio.to_thread(

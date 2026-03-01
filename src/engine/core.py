@@ -171,58 +171,78 @@ class TradingEngine:
         signals = await self.scanner.scan(pairs)
 
         # Execute entries for top signals
+        signals_saved = 0
+        trades_entered = 0
         for signal in signals:
-            position = None
+            try:
+                position = None
 
-            # Validate trade
-            # Calculate total exposure across open positions
-            total_exposure = sum(
-                pos.cost_usd for pos in self.portfolio.open_positions.values()
-            )
-            validation = self.risk_manager.validate_trade(
-                open_position_count=len(self.portfolio.open_positions),
-                open_position_symbols=set(self.portfolio.open_positions.keys()),
-                current_balance=self.portfolio.current_balance,
-                daily_start_balance=self.portfolio.daily_start_balance,
-                daily_pnl=self.portfolio.daily_pnl,
-                signal=signal,
-                total_exposure_usd=total_exposure,
-            )
-
-            if not validation.allowed:
-                logger.info("trade_rejected", symbol=signal.symbol, reason=validation.reason)
-            else:
-                # Execute entry
-                position, order_result, trade_record = await self.order_executor.execute_entry(
-                    signal=signal,
+                # Validate trade
+                # Calculate total exposure across open positions
+                total_exposure = sum(
+                    pos.cost_usd for pos in self.portfolio.open_positions.values()
+                )
+                validation = self.risk_manager.validate_trade(
+                    open_position_count=len(self.portfolio.open_positions),
+                    open_position_symbols=set(self.portfolio.open_positions.keys()),
                     current_balance=self.portfolio.current_balance,
-                    mode=self.state.mode,
+                    daily_start_balance=self.portfolio.daily_start_balance,
+                    daily_pnl=self.portfolio.daily_pnl,
+                    signal=signal,
+                    total_exposure_usd=total_exposure,
                 )
 
-                if position and trade_record:
-                    # Save to DB
-                    db_trade = await self.repo.insert_trade(trade_record)
-                    if db_trade:
-                        position.trade_id = db_trade.get("id", "")
+                if not validation.allowed:
+                    logger.info("trade_rejected", symbol=signal.symbol, reason=validation.reason)
+                else:
+                    # Execute entry
+                    position, order_result, trade_record = await self.order_executor.execute_entry(
+                        signal=signal,
+                        current_balance=self.portfolio.current_balance,
+                        mode=self.state.mode,
+                    )
 
-                    # Update portfolio
-                    self.portfolio.record_entry(position)
-                    self.state.open_positions[signal.symbol] = position
+                    if position and trade_record:
+                        # Save to DB
+                        db_trade = await self.repo.insert_trade(trade_record)
+                        if db_trade:
+                            position.trade_id = db_trade.get("id", "")
 
-            # Log the signal regardless of whether trade was executed
-            await self.repo.insert_signal(
-                {
-                    "symbol": signal.symbol,
-                    "direction": signal.direction or "none",
-                    "score": signal.score,
-                    "reasons": signal.reasons,
-                    "components": {},
-                    "current_price": signal.entry_price,
-                    "acted_on": position is not None,
-                    "trade_id": position.trade_id if position else None,
-                    "scan_cycle": cycle,
-                }
-            )
+                        # Update portfolio
+                        self.portfolio.record_entry(position)
+                        self.state.open_positions[signal.symbol] = position
+                        trades_entered += 1
+
+                # Log the signal regardless of whether trade was executed
+                await self.repo.insert_signal(
+                    {
+                        "symbol": signal.symbol,
+                        "direction": signal.direction or "none",
+                        "score": signal.score,
+                        "reasons": signal.reasons,
+                        "components": {},
+                        "current_price": signal.entry_price,
+                        "acted_on": position is not None,
+                        "trade_id": position.trade_id if position else None,
+                        "scan_cycle": cycle,
+                    }
+                )
+                signals_saved += 1
+
+            except Exception as e:
+                logger.error(
+                    "signal_processing_failed",
+                    symbol=signal.symbol,
+                    score=signal.score,
+                    error=str(e),
+                )
+                await self.repo.log_error(
+                    "engine",
+                    "error",
+                    f"Signal processing failed for {signal.symbol}: {e}",
+                    details={"symbol": signal.symbol, "score": signal.score},
+                    stack_trace=traceback.format_exc(),
+                )
 
         # Update state
         self.state.last_scan_time = datetime.now(timezone.utc)
@@ -238,6 +258,8 @@ class TradingEngine:
             balance=self.portfolio.current_balance,
             open_positions=len(self.portfolio.open_positions),
             signals_found=len(signals),
+            signals_saved=signals_saved,
+            trades_entered=trades_entered,
         )
 
     async def _monitor_tick(self) -> None:
