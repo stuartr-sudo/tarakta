@@ -82,6 +82,9 @@ class TradingEngine:
         """Main event loop."""
         await self.startup()
 
+        # Persist initial state immediately so the dashboard has data
+        await self._persist_state()
+
         logger.info(
             "engine_started",
             mode=self.state.mode,
