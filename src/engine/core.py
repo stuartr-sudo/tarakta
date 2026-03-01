@@ -73,6 +73,9 @@ class TradingEngine:
         self.portfolio.open_positions = dict(self.state.open_positions)
         self.portfolio.daily_pnl = self.state.daily_pnl
 
+        # Reconcile open positions against trade records
+        await self._reconcile_positions()
+
         self._running = True
 
     async def run(self) -> None:
@@ -330,6 +333,117 @@ class TradingEngine:
             )
         except Exception as e:
             logger.error("state_persist_failed", error=str(e))
+
+    async def _reconcile_positions(self) -> None:
+        """Cross-check open positions in state against trade records in DB.
+
+        Handles two cases on restart/deploy:
+        1. Closed trades still in state — remove them and credit balance.
+        2. Open trades in DB but missing from state — restore them.
+        """
+        changed = False
+
+        # --- Case 1: Remove stale closed positions from state ---
+        if self.state.open_positions:
+            trade_ids = [
+                pos.trade_id for pos in self.state.open_positions.values() if pos.trade_id
+            ]
+            if trade_ids:
+                db_trades = await self.repo.get_trades_by_ids(trade_ids)
+                trade_map = {t["id"]: t for t in db_trades}
+
+                removed = []
+                for symbol, position in list(self.state.open_positions.items()):
+                    db_trade = trade_map.get(position.trade_id)
+                    if not db_trade:
+                        continue
+
+                    if db_trade.get("status") == "closed":
+                        pnl = float(db_trade.get("pnl_usd", 0))
+                        fees = float(db_trade.get("fees_usd", 0))
+
+                        if position.direction == "short":
+                            self.portfolio.current_balance += position.cost_usd + pnl
+                        else:
+                            exit_price = float(db_trade.get("exit_price", position.entry_price))
+                            exit_qty = float(db_trade.get("exit_quantity", position.quantity))
+                            revenue = exit_qty * exit_price
+                            self.portfolio.current_balance += revenue - fees
+
+                        self.portfolio.open_positions.pop(symbol, None)
+                        self.state.open_positions.pop(symbol, None)
+                        removed.append(symbol)
+
+                        logger.info(
+                            "reconciled_stale_position",
+                            symbol=symbol,
+                            trade_id=position.trade_id,
+                            pnl=pnl,
+                            balance=self.portfolio.current_balance,
+                        )
+
+                if removed:
+                    changed = True
+                    logger.info(
+                        "reconciliation_removed",
+                        removed=removed,
+                        balance=self.portfolio.current_balance,
+                    )
+
+        # --- Case 2: Restore open trades missing from state ---
+        db_open_trades = await self.repo.get_open_trades(mode=self.state.mode)
+        state_trade_ids = {
+            pos.trade_id for pos in self.state.open_positions.values() if pos.trade_id
+        }
+
+        restored = []
+        for t in db_open_trades:
+            if t["id"] in state_trade_ids:
+                continue
+            # This trade is open in DB but missing from engine state
+            symbol = t["symbol"]
+            if symbol in self.state.open_positions:
+                continue  # Already tracked (different trade_id edge case)
+
+            position = Position(
+                trade_id=t["id"],
+                symbol=symbol,
+                direction=t.get("direction", "long"),
+                entry_price=float(t.get("entry_price", 0)),
+                quantity=float(t.get("entry_quantity", 0)),
+                stop_loss=float(t.get("stop_loss", 0)),
+                take_profit=float(t.get("take_profit")) if t.get("take_profit") else None,
+                high_water_mark=float(t.get("entry_price", 0)),
+                entry_time=datetime.fromisoformat(t["entry_time"]) if t.get("entry_time") else datetime.now(timezone.utc),
+                cost_usd=float(t.get("entry_cost_usd", 0)),
+            )
+
+            self.state.open_positions[symbol] = position
+            self.portfolio.open_positions[symbol] = position
+            # Deduct cost from balance (was already deducted when trade was placed)
+            self.portfolio.current_balance -= position.cost_usd
+            restored.append(symbol)
+
+            logger.info(
+                "reconciled_missing_position",
+                symbol=symbol,
+                trade_id=t["id"],
+                cost=position.cost_usd,
+                balance=self.portfolio.current_balance,
+            )
+
+        if restored:
+            changed = True
+            logger.info(
+                "reconciliation_restored",
+                restored=restored,
+                balance=self.portfolio.current_balance,
+                total_positions=len(self.state.open_positions),
+            )
+
+        if changed:
+            self.state.current_balance = self.portfolio.current_balance
+            self.state.peak_balance = self.portfolio.peak_balance
 
     async def shutdown(self) -> None:
         """Graceful shutdown."""

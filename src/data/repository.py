@@ -69,6 +69,14 @@ class Repository:
             },
         )
 
+    async def get_trades_by_ids(self, trade_ids: list[str]) -> list[dict]:
+        if not trade_ids:
+            return []
+        result = await asyncio.to_thread(
+            _exec, self.db.table("trades").select("*").in_("id", trade_ids)
+        )
+        return result.data or []
+
     async def get_open_trades(self, mode: str | None = None) -> list[dict]:
         query = self.db.table("trades").select("*").eq("status", "open")
         if mode:

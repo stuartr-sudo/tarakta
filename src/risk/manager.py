@@ -123,9 +123,10 @@ class RiskManager:
                 allowed=False, reason=f"Max {self.max_concurrent} concurrent positions reached"
             )
 
-        # Daily drawdown check
+        # Daily drawdown check — use equity (cash + positions), not just cash
         if daily_start_balance > 0:
-            daily_dd = (daily_start_balance - current_balance) / daily_start_balance
+            current_equity = current_balance + total_exposure_usd
+            daily_dd = (daily_start_balance - current_equity) / daily_start_balance
             if daily_dd >= self.max_daily_drawdown:
                 return TradeValidation(
                     allowed=False, reason=f"Daily drawdown {daily_dd:.1%} exceeds {self.max_daily_drawdown:.0%}"
