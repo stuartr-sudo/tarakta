@@ -111,7 +111,6 @@ class PortfolioTracker:
         return {
             "balance_usd": equity,  # Show equity (cash + positions) as the headline number
             "equity_usd": equity,
-            "cash_balance": self.current_balance,
             "open_positions": len(self.open_positions),
             "daily_pnl_usd": self.daily_pnl,
             "total_pnl_usd": self.total_pnl,
