@@ -53,6 +53,11 @@
         <div class="stat-value sm" id="unrealized-value">--</div>
         <div class="stat-sub" id="unrealized-sub">Loading live prices...</div>
     </div>
+    <div class="stat-card" id="net-pnl-card" style="border-left: 3px solid #8b5cf6;">
+        <div class="stat-label">Net P&L</div>
+        <div class="stat-value sm" id="net-pnl-value">--</div>
+        <div class="stat-sub" id="net-pnl-sub">realized + unrealized</div>
+    </div>
     {% if stats and stats.total > 0 %}
     <div class="stat-card">
         <div class="stat-label">Win Rate</div>
@@ -291,6 +296,25 @@ async function loadChart() {
 }
 loadChart();
 
+// --- Net P&L (realized + unrealized) ---
+// Track the latest realized P&L from server. Initialized from the page render.
+let _lastRealizedPnl = {{ snapshot.total_pnl_usd | default(0) | float }};
+
+function updateNetPnl(unrealized) {
+    const net = _lastRealizedPnl + unrealized;
+    const netEl = document.getElementById('net-pnl-value');
+    const netSub = document.getElementById('net-pnl-sub');
+    if (!netEl) return;
+    const s = net >= 0 ? '+' : '';
+    netEl.textContent = s + '$' + net.toFixed(2);
+    netEl.className = 'stat-value sm ' + (net >= 0 ? 'positive' : 'negative');
+    const rSign = _lastRealizedPnl >= 0 ? '+' : '';
+    const uSign = unrealized >= 0 ? '+' : '';
+    netSub.textContent = rSign + '$' + _lastRealizedPnl.toFixed(2) + ' realized, ' + uSign + '$' + unrealized.toFixed(2) + ' unrealized';
+}
+// Show initial net on page load (unrealized = 0 until first AJAX)
+updateNetPnl(0);
+
 // --- Unrealized P&L ---
 async function loadUnrealizedPnl() {
     try {
@@ -304,6 +328,7 @@ async function loadUnrealizedPnl() {
             el.textContent = '--';
             el.className = 'stat-value sm';
             sub.textContent = data.error;
+            updateNetPnl(0);
             return;
         }
 
@@ -311,6 +336,7 @@ async function loadUnrealizedPnl() {
             el.textContent = '$0.00';
             el.className = 'stat-value sm';
             sub.textContent = 'No open positions';
+            updateNetPnl(0);
             return;
         }
 
@@ -318,6 +344,9 @@ async function loadUnrealizedPnl() {
         const sign = total >= 0 ? '+' : '';
         el.textContent = sign + '$' + total.toFixed(2);
         el.className = 'stat-value sm ' + (total >= 0 ? 'positive' : 'negative');
+
+        // Update Net P&L (realized + unrealized)
+        updateNetPnl(total);
 
         const errCount = data.positions.filter(p => p.current_price === null).length;
         const liveCount = data.positions.length - errCount;
@@ -421,6 +450,7 @@ async function softRefreshStats() {
                 const tp = parseFloat(s.total_pnl_usd || 0);
                 tpEl.textContent = (tp >= 0 ? '+' : '') + '$' + tp.toFixed(2);
                 tpEl.className = 'stat-value ' + (tp >= 0 ? 'positive' : 'negative');
+                _lastRealizedPnl = tp;
             }
 
             const ddEl = document.querySelector('.stats-grid .stat-card:nth-child(4) .stat-value');
