@@ -10,7 +10,7 @@
 {% if stats and stats.total > 0 %}
 <div class="stats-grid">
     <div class="stat-card">
-        <div class="stat-label">Total Trades</div>
+        <div class="stat-label">Closed Trades</div>
         <div class="stat-value sm">{{ stats.total }}</div>
         <div class="stat-sub">{{ stats.wins }}W / {{ stats.losses }}L</div>
     </div>
@@ -27,11 +27,25 @@
         </div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">Avg P&L per Trade</div>
+        <div class="stat-label">Avg P&L / Trade</div>
         <div class="stat-value sm {{ 'positive' if (stats.avg_pnl | float) >= 0 else 'negative' }}">
             {{ "+" if (stats.avg_pnl | float) >= 0 else "" }}${{ "%.2f" | format(stats.avg_pnl) }}
         </div>
     </div>
+    {% if stats.best_pnl is defined and stats.best_pnl is not none %}
+    <div class="stat-card">
+        <div class="stat-label">Best Trade</div>
+        <div class="stat-value sm positive">+${{ "%.2f" | format(stats.best_pnl) }}</div>
+        <div class="stat-sub">{{ stats.best_symbol }}</div>
+    </div>
+    {% endif %}
+    {% if stats.worst_pnl is defined and stats.worst_pnl is not none %}
+    <div class="stat-card">
+        <div class="stat-label">Worst Trade</div>
+        <div class="stat-value sm negative">${{ "%.2f" | format(stats.worst_pnl) }}</div>
+        <div class="stat-sub">{{ stats.worst_symbol }}</div>
+    </div>
+    {% endif %}
 </div>
 {% endif %}
 
@@ -53,17 +67,16 @@
                         <th>Symbol</th>
                         <th>Dir</th>
                         <th>Status</th>
-                        <th>Mode</th>
                         <th>Entry</th>
                         <th>Exit</th>
-                        <th>SL</th>
+                        <th>SL / TP</th>
                         <th>Size $</th>
-                        <th>Risk $</th>
-                        <th>R:R</th>
                         <th>P&L</th>
+                        <th>P&L %</th>
                         <th>Score</th>
                         <th>Exit Reason</th>
                         <th>Opened</th>
+                        <th>Closed</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -84,20 +97,27 @@
                             <span class="status-badge closed-loss">LOSS</span>
                             {% endif %}
                         </td>
-                        <td>
-                            <span class="status-badge {{ t.mode }}">{{ t.mode }}</span>
-                        </td>
                         <td class="mono">${{ "%.4f" | format(t.entry_price | float) }}</td>
                         <td class="mono">
                             {{ ("$%.4f" | format(t.exit_price | float)) if t.exit_price else '-' }}
                         </td>
-                        <td class="mono">${{ "%.4f" | format(t.stop_loss | float) }}</td>
+                        <td class="mono">
+                            ${{ "%.4f" | format(t.stop_loss | float) }}
+                            {% if t.take_profit %}
+                            / ${{ "%.4f" | format(t.take_profit | float) }}
+                            {% endif %}
+                        </td>
                         <td class="mono">${{ "%.2f" | format(t.entry_cost_usd | default(0) | float) }}</td>
-                        <td class="mono negative">${{ "%.2f" | format(t.risk_usd | default(0) | float) }}</td>
-                        <td class="mono">{{ t.risk_reward | default('-') }}</td>
                         <td class="mono {{ 'positive' if (t.pnl_usd | default(0) | float) > 0 else ('negative' if (t.pnl_usd | default(0) | float) < 0 else '') }}">
                             {% if t.pnl_usd is not none %}
                             {{ "+" if (t.pnl_usd | float) >= 0 else "" }}${{ "%.2f" | format(t.pnl_usd | float) }}
+                            {% else %}
+                            -
+                            {% endif %}
+                        </td>
+                        <td class="mono {{ 'positive' if (t.pnl_percent | default(0) | float) > 0 else ('negative' if (t.pnl_percent | default(0) | float) < 0 else '') }}">
+                            {% if t.pnl_percent is not none %}
+                            {{ "+" if (t.pnl_percent | float) >= 0 else "" }}{{ "%.1f" | format(t.pnl_percent | float) }}%
                             {% else %}
                             -
                             {% endif %}
@@ -109,12 +129,13 @@
                         </td>
                         <td>
                             {% if t.exit_reason %}
-                            <span class="reason-pill">{{ t.exit_reason }}</span>
+                            <span class="reason-pill reason-{{ t.exit_reason | lower }}">{{ t.exit_reason }}</span>
                             {% else %}
                             <span class="text-muted">-</span>
                             {% endif %}
                         </td>
                         <td class="text-muted">{{ t.entry_time[:16] if t.entry_time else '-' }}</td>
+                        <td class="text-muted">{{ t.exit_time[:16] if t.exit_time else '-' }}</td>
                     </tr>
                     {% endfor %}
                 </tbody>

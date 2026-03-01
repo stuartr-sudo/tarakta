@@ -98,13 +98,20 @@ class TradingEngine:
 
                 # Daily reset check
                 if is_new_day(self.state.last_scan_time):
+                    # Use equity (cash + open position costs) so daily drawdown
+                    # comparison is consistent with risk manager's equity calc
+                    equity = self.portfolio.current_balance + sum(
+                        pos.cost_usd for pos in self.portfolio.open_positions.values()
+                    )
                     self.portfolio.reset_daily()
-                    self.state.daily_start_balance = self.portfolio.current_balance
+                    self.portfolio.daily_start_balance = equity
+                    self.state.daily_start_balance = equity
                     self.state.daily_pnl = 0.0
                     self.state.last_scan_time = datetime.now(timezone.utc)
                     logger.info(
                         "daily_reset",
                         daily_start_balance=self.state.daily_start_balance,
+                        equity=equity,
                     )
 
                 if tick_type == TickType.MONITOR:
@@ -379,6 +386,8 @@ class TradingEngine:
                             revenue = exit_qty * exit_price
                             self.portfolio.current_balance += revenue - fees
 
+                        self.portfolio.daily_pnl += pnl
+                        self.portfolio.total_pnl += pnl
                         self.portfolio.open_positions.pop(symbol, None)
                         self.state.open_positions.pop(symbol, None)
                         removed.append(symbol)

@@ -12,6 +12,8 @@ from src.strategy.fair_value_gaps import FairValueGapAnalyzer
 from src.strategy.liquidity import LiquidityAnalyzer
 from src.strategy.market_structure import MarketStructureAnalyzer
 from src.strategy.order_blocks import OrderBlockAnalyzer
+from src.strategy.premium_discount import PremiumDiscountAnalyzer
+from src.strategy.volume import VolumeAnalyzer
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -31,6 +33,8 @@ class AltcoinScanner:
         self.liq_analyzer = LiquidityAnalyzer()
         self.ob_analyzer = OrderBlockAnalyzer()
         self.fvg_analyzer = FairValueGapAnalyzer()
+        self.vol_analyzer = VolumeAnalyzer()
+        self.pd_analyzer = PremiumDiscountAnalyzer()
         self.confluence = ConfluenceEngine(entry_threshold=config.entry_threshold)
 
     async def scan(self, pairs: list[str]) -> list[SignalCandidate]:
@@ -84,32 +88,53 @@ class AltcoinScanner:
         for tf in TIMEFRAMES:
             candles[tf] = await self.candles.get_candles(symbol, tf, limit=200)
 
-        # Run market structure on all timeframes
+        # --- Market Structure on all timeframes ---
         ms_results = {}
         for tf, df in candles.items():
             ms_results[tf] = self.ms_analyzer.analyze(df, timeframe=tf)
 
-        # Run liquidity on all timeframes
+        # --- Liquidity on all timeframes ---
         liq_results = {}
         for tf, df in candles.items():
             swing_hl = ms_results[tf].swing_highs_lows
             liq_results[tf] = self.liq_analyzer.analyze(df, swing_hl)
 
-        # Run order blocks on entry timeframes
+        # --- Order Blocks on entry timeframes ---
         ob_results = {}
         for tf in ["15m", "1h"]:
             swing_hl = ms_results[tf].swing_highs_lows
             ob_results[tf] = self.ob_analyzer.analyze(candles[tf], swing_hl)
 
-        # Run FVG on entry timeframes
+        # --- Fair Value Gaps on entry timeframes ---
         fvg_results = {}
         for tf in ["15m", "1h"]:
             fvg_results[tf] = self.fvg_analyzer.analyze(candles[tf])
 
+        # --- Determine HTF directional bias (pre-pass for volume/PD scoring) ---
+        direction = self._resolve_htf_direction(ms_results)
+
+        # --- Volume / Displacement analysis on key timeframes ---
+        volume_profiles = {}
+        for tf in ["15m", "1h", "4h"]:
+            df = candles.get(tf)
+            if df is not None and not df.empty:
+                volume_profiles[tf] = self.vol_analyzer.analyze(df)
+        volume_result = self.vol_analyzer.score_volume(volume_profiles, direction)
+
+        # --- Premium / Discount zone analysis ---
+        pd_results = {}
+        for tf in ["15m", "1h", "4h"]:
+            df = candles.get(tf)
+            if df is not None and not df.empty:
+                swing_hl = ms_results.get(tf, None)
+                swing_hl_data = swing_hl.swing_highs_lows if swing_hl else None
+                pd_results[tf] = self.pd_analyzer.analyze(df, swing_hl_data)
+        pd_score = self.pd_analyzer.score(pd_results, direction)
+
         # Get current price from most recent 15m close
         current_price = float(candles["15m"]["close"].iloc[-1]) if not candles["15m"].empty else 0
 
-        # Score the signal
+        # --- Score the full signal ---
         signal = self.confluence.score_signal(
             symbol=symbol,
             current_price=current_price,
@@ -117,6 +142,8 @@ class AltcoinScanner:
             liq_results=liq_results,
             ob_results=ob_results,
             fvg_results=fvg_results,
+            volume_result=volume_result,
+            pd_result=pd_score,
         )
 
         if signal.score >= self.config.entry_threshold:
@@ -129,3 +156,24 @@ class AltcoinScanner:
             )
 
         return signal
+
+    def _resolve_htf_direction(self, ms_results: dict) -> str | None:
+        """Quick pre-pass to determine HTF directional bias.
+
+        Uses the same logic as ConfluenceEngine._score_htf_trend but only
+        returns the direction (needed for volume and P/D scoring before
+        the full confluence pass).
+        """
+        htf_4h = ms_results.get("4h")
+        htf_1d = ms_results.get("1d")
+
+        trend_4h = htf_4h.trend if htf_4h else "ranging"
+        trend_1d = htf_1d.trend if htf_1d else "ranging"
+
+        if trend_4h == trend_1d and trend_4h != "ranging":
+            return trend_4h
+        if trend_4h != "ranging":
+            return trend_4h
+        if trend_1d != "ranging":
+            return trend_1d
+        return None

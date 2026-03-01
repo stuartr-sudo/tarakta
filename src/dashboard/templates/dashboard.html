@@ -48,6 +48,11 @@
         </div>
         <div class="stat-sub">max {{ "%.0f" | format(config.max_daily_drawdown * 100) if config else 10 }}% daily</div>
     </div>
+    <div class="stat-card" id="unrealized-card">
+        <div class="stat-label">Unrealized P&L</div>
+        <div class="stat-value sm" id="unrealized-value">--</div>
+        <div class="stat-sub" id="unrealized-sub">Loading live prices...</div>
+    </div>
     {% if stats and stats.total > 0 %}
     <div class="stat-card">
         <div class="stat-label">Win Rate</div>
@@ -79,7 +84,12 @@
     <div class="panel">
         <div class="panel-header">
             <h2>Open Positions</h2>
-            <span class="badge text-blue">{{ trades | length }}</span>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span class="badge text-blue">{{ trades | length }}</span>
+                {% if trades %}
+                <button id="nuke-btn" class="btn btn-nuke" onclick="confirmNuke()">NUKE ALL</button>
+                {% endif %}
+            </div>
         </div>
         {% if trades %}
         <div class="panel-body no-pad">
@@ -90,16 +100,17 @@
                             <th>Symbol</th>
                             <th>Dir</th>
                             <th>Entry</th>
+                            <th>Current</th>
+                            <th>P&L</th>
                             <th>SL</th>
                             <th>TP</th>
                             <th>Size</th>
-                            <th>Risk $</th>
                             <th>Score</th>
                         </tr>
                     </thead>
-                    <tbody>
+                    <tbody id="positions-tbody">
                         {% for t in trades %}
-                        <tr>
+                        <tr data-symbol="{{ t.symbol }}">
                             <td><strong>{{ t.symbol }}</strong></td>
                             <td>
                                 <span class="dir-badge {{ t.direction | default('long') }}">
@@ -107,10 +118,11 @@
                                 </span>
                             </td>
                             <td class="mono">${{ "%.4f" | format(t.entry_price | float) }}</td>
+                            <td class="mono pos-current-price">--</td>
+                            <td class="mono pos-pnl">--</td>
                             <td class="mono negative">${{ "%.4f" | format(t.stop_loss | float) }}</td>
                             <td class="mono positive">{{ ("$%.4f" | format(t.take_profit | float)) if t.take_profit else '-' }}</td>
                             <td class="mono">${{ "%.2f" | format(t.entry_cost_usd | default(0) | float) }}</td>
-                            <td class="mono negative">${{ "%.2f" | format(t.risk_usd | default(0) | float) }}</td>
                             <td>
                                 <div class="score-bar">
                                     <span class="score-num {{ 'positive' if (t.confluence_score | int) >= 65 else ('text-orange' if (t.confluence_score | int) >= 50 else 'negative') }}">{{ t.confluence_score }}</span>
@@ -280,6 +292,100 @@ async function loadChart() {
     }
 }
 loadChart();
+
+// --- Unrealized P&L ---
+async function loadUnrealizedPnl() {
+    try {
+        const resp = await fetch('/api/unrealized-pnl');
+        const data = await resp.json();
+
+        const el = document.getElementById('unrealized-value');
+        const sub = document.getElementById('unrealized-sub');
+        const card = document.getElementById('unrealized-card');
+
+        if (!data.positions || data.positions.length === 0) {
+            el.textContent = '$0.00';
+            el.className = 'stat-value sm';
+            sub.textContent = 'No open positions';
+            return;
+        }
+
+        const total = data.total_unrealized;
+        const sign = total >= 0 ? '+' : '';
+        el.textContent = sign + '$' + total.toFixed(2);
+        el.className = 'stat-value sm ' + (total >= 0 ? 'positive' : 'negative');
+        sub.textContent = data.positions.length + ' position' + (data.positions.length > 1 ? 's' : '') + ' live';
+
+        // Update per-position prices in the table
+        const rows = document.querySelectorAll('#positions-tbody tr[data-symbol]');
+        const posMap = {};
+        data.positions.forEach(p => posMap[p.symbol] = p);
+
+        rows.forEach(row => {
+            const symbol = row.getAttribute('data-symbol');
+            const pos = posMap[symbol];
+            if (!pos) return;
+
+            const priceCell = row.querySelector('.pos-current-price');
+            const pnlCell = row.querySelector('.pos-pnl');
+
+            if (pos.current_price !== null) {
+                priceCell.textContent = '$' + pos.current_price.toFixed(4);
+                const pnlSign = pos.unrealized_pnl >= 0 ? '+' : '';
+                pnlCell.textContent = pnlSign + '$' + pos.unrealized_pnl.toFixed(2);
+                pnlCell.className = 'mono ' + (pos.unrealized_pnl >= 0 ? 'positive' : 'negative');
+            } else {
+                priceCell.textContent = 'err';
+                pnlCell.textContent = '--';
+            }
+        });
+    } catch (e) {
+        console.error('Unrealized P&L load failed:', e);
+        document.getElementById('unrealized-sub').textContent = 'Failed to load';
+    }
+}
+loadUnrealizedPnl();
+// Refresh unrealized P&L every 30s
+setInterval(loadUnrealizedPnl, 30000);
+
+// --- NUKE ---
+async function confirmNuke() {
+    const count = document.querySelectorAll('#positions-tbody tr[data-symbol]').length;
+    if (count === 0) { alert('No open positions.'); return; }
+
+    const ok = confirm(
+        'NUKE ALL POSITIONS\n\n' +
+        'This will close ' + count + ' position(s) at MARKET price immediately.\n\n' +
+        'Are you sure?'
+    );
+    if (!ok) return;
+
+    const btn = document.getElementById('nuke-btn');
+    btn.disabled = true;
+    btn.textContent = 'NUKING...';
+
+    try {
+        const resp = await fetch('/api/nuke', { method: 'POST' });
+        const data = await resp.json();
+
+        if (data.success) {
+            const sign = data.total_pnl >= 0 ? '+' : '';
+            alert(
+                'NUKE COMPLETE\n\n' +
+                'Closed: ' + data.closed + ' position(s)\n' +
+                'Total P&L: ' + sign + '$' + data.total_pnl.toFixed(2)
+            );
+            location.reload();
+        } else {
+            alert('NUKE had errors:\n' + JSON.stringify(data.errors));
+            location.reload();
+        }
+    } catch (e) {
+        alert('NUKE failed: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = 'NUKE ALL';
+    }
+}
 
 // Auto-refresh every 60s
 setTimeout(() => location.reload(), 60000);

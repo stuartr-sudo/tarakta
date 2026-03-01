@@ -81,7 +81,10 @@ class PortfolioTracker:
         unrealized = 0.0
         for symbol, pos in self.open_positions.items():
             if symbol in current_prices:
-                unrealized += (current_prices[symbol] - pos.entry_price) * pos.quantity
+                if pos.direction == "short":
+                    unrealized += (pos.entry_price - current_prices[symbol]) * pos.quantity
+                else:
+                    unrealized += (current_prices[symbol] - pos.entry_price) * pos.quantity
         return self.current_balance + unrealized
 
     def get_drawdown_pct(self) -> float:
@@ -115,6 +118,7 @@ class PortfolioTracker:
                 "high_water_mark": pos.high_water_mark,
                 "entry_time": pos.entry_time.isoformat() if pos.entry_time else None,
                 "cost_usd": pos.cost_usd,
+                "direction": pos.direction,
             }
         return {
             "status": status,

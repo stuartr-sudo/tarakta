@@ -68,6 +68,7 @@ class EngineState:
                         high_water_mark=float(pos_data.get("high_water_mark", pos_data.get("entry_price", 0))),
                         entry_time=entry_time,
                         cost_usd=float(pos_data.get("cost_usd", 0)),
+                        direction=pos_data.get("direction", "long"),
                     )
                 except (ValueError, TypeError, KeyError) as e:
                     logger.warning("position_restore_failed", symbol=sym, error=str(e))

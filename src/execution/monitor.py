@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from src.exchange.models import ExitSignal, Position
 from src.utils.logging import get_logger
 
@@ -7,6 +9,7 @@ logger = get_logger(__name__)
 
 TRAILING_STOP_ACTIVATION_RR = 1.5
 TRAILING_STOP_PCT = 0.02
+TICKER_FETCH_TIMEOUT = 45  # seconds — safety net above ccxt's 30s timeout
 
 
 class PositionMonitor:
@@ -20,8 +23,13 @@ class PositionMonitor:
 
         for symbol, pos in positions.items():
             try:
-                ticker = await exchange.fetch_ticker(symbol)
+                ticker = await asyncio.wait_for(
+                    exchange.fetch_ticker(symbol), timeout=TICKER_FETCH_TIMEOUT
+                )
                 current_price = float(ticker["last"])
+            except asyncio.TimeoutError:
+                logger.warning("ticker_fetch_timeout", symbol=symbol, timeout=TICKER_FETCH_TIMEOUT)
+                continue
             except Exception as e:
                 logger.warning("ticker_fetch_failed", symbol=symbol, error=str(e))
                 continue

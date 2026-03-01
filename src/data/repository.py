@@ -111,6 +111,17 @@ class Repository:
             }
         wins = [t for t in trades if float(t.get("pnl_usd", 0)) > 0]
         total_pnl = sum(float(t.get("pnl_usd", 0)) for t in trades)
+
+        # Best and worst trades
+        best_trade = max(trades, key=lambda t: float(t.get("pnl_usd", 0)))
+        worst_trade = min(trades, key=lambda t: float(t.get("pnl_usd", 0)))
+
+        # Exit reason breakdown
+        exit_reasons: dict[str, int] = {}
+        for t in trades:
+            reason = t.get("exit_reason", "unknown") or "unknown"
+            exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
+
         return {
             "total": len(trades),
             "wins": len(wins),
@@ -118,6 +129,11 @@ class Repository:
             "win_rate": len(wins) / len(trades) if trades else 0,
             "total_pnl": total_pnl,
             "avg_pnl": total_pnl / len(trades) if trades else 0,
+            "best_pnl": float(best_trade.get("pnl_usd", 0)),
+            "best_symbol": best_trade.get("symbol", ""),
+            "worst_pnl": float(worst_trade.get("pnl_usd", 0)),
+            "worst_symbol": worst_trade.get("symbol", ""),
+            "exit_reasons": exit_reasons,
         }
 
     # --- Signals ---

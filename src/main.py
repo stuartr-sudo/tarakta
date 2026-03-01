@@ -52,7 +52,7 @@ async def main() -> None:
     # Dashboard
     from src.dashboard.app import create_dashboard_app
 
-    dashboard_app = create_dashboard_app(config, repo)
+    dashboard_app = create_dashboard_app(config, repo, exchange)
     port = int(os.getenv("PORT", config.port))
 
     dashboard_thread = threading.Thread(

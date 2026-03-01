@@ -22,6 +22,7 @@ class KrakenClient:
                 "apiKey": api_key,
                 "secret": api_secret,
                 "enableRateLimit": True,
+                "timeout": 30000,  # 30-second request timeout to prevent hangs
                 "options": {"defaultType": "spot"},
             }
         )
