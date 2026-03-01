@@ -60,8 +60,9 @@ class RiskManager:
         actual_risk = quantity * sl_distance
 
         # Check Kraken minimum order (~$5 for most pairs)
-        if cost < 5.0:
-            return PositionSize(valid=False, reason=f"Position cost ${cost:.2f} below Kraken minimum ~$5")
+        # Use total_cost (incl. fees) since cost is the raw notional before fees
+        if total_cost < 5.0:
+            return PositionSize(valid=False, reason=f"Position cost ${total_cost:.2f} below Kraken minimum ~$5")
 
         return PositionSize(
             valid=True,
