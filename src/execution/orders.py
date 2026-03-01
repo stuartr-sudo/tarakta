@@ -201,8 +201,8 @@ class OrderExecutor:
             if level and level < entry:
                 return level * 0.998
 
-        # Fallback: 3% below entry
-        return entry * 0.97
+        # Fallback: 9% below entry
+        return entry * 0.91
 
     def _sl_for_short(self, signal: SignalCandidate, entry: float) -> float:
         """SL above entry for short trades."""
@@ -224,8 +224,8 @@ class OrderExecutor:
             if level and level > entry:
                 return level * 1.002
 
-        # Fallback: 3% above entry
-        return entry * 1.03
+        # Fallback: 9% above entry
+        return entry * 1.09
 
     def _calculate_take_profit(self, signal: SignalCandidate, sl_price: float) -> float | None:
         """Calculate TP based on direction."""
