@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from src.config import Settings
 from src.exchange.models import PositionSize, SignalCandidate, TradeValidation
 from src.utils.logging import get_logger
@@ -17,6 +19,28 @@ class RiskManager:
         self.max_concurrent = config.max_concurrent
         self.max_daily_drawdown = config.max_daily_drawdown
         self.min_rr_ratio = config.min_rr_ratio
+        self.cooldown_hours = config.cooldown_hours
+        self._symbol_cooldowns: dict[str, datetime] = {}
+
+    def record_stop_out(self, symbol: str) -> None:
+        """Record a stop-loss exit — symbol goes on cooldown."""
+        until = datetime.now(timezone.utc) + timedelta(hours=self.cooldown_hours)
+        self._symbol_cooldowns[symbol] = until
+        logger.info("symbol_cooldown_set", symbol=symbol, until=until.isoformat(), hours=self.cooldown_hours)
+
+    def _check_cooldown(self, symbol: str) -> str | None:
+        """Return rejection reason if symbol is on cooldown, else None."""
+        until = self._symbol_cooldowns.get(symbol)
+        if until is None:
+            return None
+        now = datetime.now(timezone.utc)
+        if now < until:
+            remaining = until - now
+            mins = int(remaining.total_seconds() / 60)
+            return f"{symbol} on cooldown for {mins}m after stop-loss (until {until.strftime('%H:%M UTC')})"
+        # Cooldown expired — clean up
+        del self._symbol_cooldowns[symbol]
+        return None
 
     def calculate_position_size(
         self,
@@ -112,6 +136,11 @@ class RiskManager:
             return TradeValidation(
                 allowed=False, reason=f"Already in position for {signal.symbol}"
             )
+
+        # Symbol cooldown after stop-loss
+        cooldown_reason = self._check_cooldown(signal.symbol)
+        if cooldown_reason:
+            return TradeValidation(allowed=False, reason=cooldown_reason)
 
         # Minimum balance check
         if current_balance < 10:

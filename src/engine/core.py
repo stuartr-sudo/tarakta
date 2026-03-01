@@ -300,6 +300,10 @@ class TradingEngine:
                 # Update portfolio
                 self.portfolio.record_exit(exit_signal.symbol, exit_signal.price, order_result.fee)
 
+                # Record cooldown on stop-loss exits
+                if exit_signal.reason == "sl_hit":
+                    self.risk_manager.record_stop_out(exit_signal.symbol)
+
                 # Remove from state
                 self.state.open_positions.pop(exit_signal.symbol, None)
 

@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     max_daily_drawdown: float = 0.10
     circuit_breaker_pct: float = 0.15
     min_rr_ratio: float = 2.0
+    cooldown_hours: float = 4.0  # Hours to wait before re-entering a symbol after SL hit
 
     # Scanning
     scan_interval_minutes: int = 15
