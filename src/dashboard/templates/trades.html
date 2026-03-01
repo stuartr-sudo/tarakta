@@ -35,14 +35,18 @@
     {% if stats.best_pnl is defined and stats.best_pnl is not none %}
     <div class="stat-card">
         <div class="stat-label">Best Trade</div>
-        <div class="stat-value sm positive">+${{ "%.2f" | format(stats.best_pnl) }}</div>
+        <div class="stat-value sm {{ 'positive' if (stats.best_pnl | float) >= 0 else 'negative' }}">
+            {{ "+" if (stats.best_pnl | float) >= 0 else "" }}${{ "%.2f" | format(stats.best_pnl) }}
+        </div>
         <div class="stat-sub">{{ stats.best_symbol }}</div>
     </div>
     {% endif %}
     {% if stats.worst_pnl is defined and stats.worst_pnl is not none %}
     <div class="stat-card">
         <div class="stat-label">Worst Trade</div>
-        <div class="stat-value sm negative">${{ "%.2f" | format(stats.worst_pnl) }}</div>
+        <div class="stat-value sm {{ 'positive' if (stats.worst_pnl | float) >= 0 else 'negative' }}">
+            {{ "+" if (stats.worst_pnl | float) >= 0 else "" }}${{ "%.2f" | format(stats.worst_pnl) }}
+        </div>
         <div class="stat-sub">{{ stats.worst_symbol }}</div>
     </div>
     {% endif %}
