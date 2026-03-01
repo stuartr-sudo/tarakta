@@ -77,6 +77,18 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx["current_page"] = page
         return templates.TemplateResponse("signals.html", ctx)
 
+    @router.get("/chart", response_class=HTMLResponse)
+    @login_required
+    async def chart_page(request: Request):
+        ctx = await _base_context(request)
+        symbol = request.query_params.get("symbol", "")
+        # Collect open position symbols for quick-pick buttons
+        state = ctx.get("state") or {}
+        open_positions = state.get("open_positions", {})
+        ctx["open_symbols"] = list(open_positions.keys())
+        ctx["initial_symbol"] = symbol
+        return templates.TemplateResponse("chart.html", ctx)
+
     @router.get("/settings", response_class=HTMLResponse)
     @login_required
     async def settings_page(request: Request):

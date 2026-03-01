@@ -384,10 +384,62 @@ main.content {
     font-size: 0.85rem;
 }
 
-/* ---- Chart Container ---- */
+/* ---- Small Chart (dashboard panels) ---- */
 .chart-container {
     padding: 1rem 1.25rem 0.5rem;
     height: 200px;
+}
+
+/* ---- Full-page Chart (TradingView) ---- */
+.page-header .chart-symbol-picker {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.chart-symbol-picker input {
+    padding: 0.4rem 0.75rem;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-surface);
+    color: #fff;
+    font-size: 0.85rem;
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    width: 220px;
+}
+
+.chart-symbol-picker input:focus {
+    outline: none;
+    border-color: var(--blue);
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+
+.chart-symbol-picker label {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.chart-quick-picks {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-bottom: 1rem;
+}
+
+.chart-quick-picks .btn-sm {
+    padding: 0.2rem 0.6rem;
+    font-size: 0.7rem;
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+}
+
+#chartContainer {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    height: calc(100vh - 220px);
+    min-height: 500px;
+    overflow: hidden;
 }
 
 /* ---- Buttons ---- */

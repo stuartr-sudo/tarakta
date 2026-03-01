@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Tarakta - Chart{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Live Chart</h1>
+    <div class="chart-symbol-picker">
+        <label for="symbolInput">Symbol:</label>
+        <input type="text" id="symbolInput" value="KRAKEN:BTCUSD" placeholder="e.g. KRAKEN:SKYUSD" spellcheck="false">
+        <button class="btn" onclick="loadChart()">Load</button>
+    </div>
+</div>
+
+<!-- Open positions quick-pick -->
+{% if open_symbols %}
+<div class="chart-quick-picks">
+    <span class="text-muted">Open positions:</span>
+    {% for sym in open_symbols %}
+    <button class="btn btn-sm" onclick="loadSymbol('{{ sym }}')">{{ sym }}</button>
+    {% endfor %}
+</div>
+{% endif %}
+
+<div id="chartContainer">
+    <!-- TradingView Widget BEGIN -->
+    <div id="tradingview_widget" style="height: 100%; width: 100%;"></div>
+    <!-- TradingView Widget END -->
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+<script>
+function getTVSymbol(raw) {
+    // Convert "BTC/USD" → "KRAKEN:BTCUSD", or pass through if already formatted
+    if (raw.includes(':')) return raw;
+    return 'KRAKEN:' + raw.replace('/', '');
+}
+
+function loadChart() {
+    var symbol = document.getElementById('symbolInput').value.trim();
+    if (!symbol) return;
+    symbol = getTVSymbol(symbol);
+    document.getElementById('symbolInput').value = symbol;
+    renderWidget(symbol);
+}
+
+function loadSymbol(sym) {
+    var tvSym = getTVSymbol(sym);
+    document.getElementById('symbolInput').value = tvSym;
+    renderWidget(tvSym);
+}
+
+function renderWidget(symbol) {
+    var container = document.getElementById('tradingview_widget');
+    container.innerHTML = '';
+    new TradingView.widget({
+        "autosize": true,
+        "symbol": symbol,
+        "interval": "15",
+        "timezone": "Etc/UTC",
+        "theme": "dark",
+        "style": "1",
+        "locale": "en",
+        "toolbar_bg": "#1a1d23",
+        "enable_publishing": false,
+        "hide_side_toolbar": false,
+        "allow_symbol_change": true,
+        "container_id": "tradingview_widget",
+        "studies": [
+            "Volume@tv-basicstudies"
+        ]
+    });
+}
+
+// Load on page ready
+document.addEventListener('DOMContentLoaded', function() {
+    loadChart();
+});
+</script>
+{% endblock %}
