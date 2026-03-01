@@ -1,0 +1,131 @@
+from __future__ import annotations
+
+import asyncio
+
+import pandas as pd
+
+from src.config import Settings
+from src.data.candles import CandleManager
+from src.exchange.models import SignalCandidate
+from src.strategy.confluence import ConfluenceEngine
+from src.strategy.fair_value_gaps import FairValueGapAnalyzer
+from src.strategy.liquidity import LiquidityAnalyzer
+from src.strategy.market_structure import MarketStructureAnalyzer
+from src.strategy.order_blocks import OrderBlockAnalyzer
+from src.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+TIMEFRAMES = ["15m", "1h", "4h", "1d"]
+BATCH_SIZE = 16
+BATCH_DELAY = 1.0  # seconds between batches
+
+
+class AltcoinScanner:
+    """Scans all tradeable pairs, runs strategy pipeline, ranks by score."""
+
+    def __init__(self, candle_manager: CandleManager, config: Settings) -> None:
+        self.candles = candle_manager
+        self.config = config
+        self.ms_analyzer = MarketStructureAnalyzer()
+        self.liq_analyzer = LiquidityAnalyzer()
+        self.ob_analyzer = OrderBlockAnalyzer()
+        self.fvg_analyzer = FairValueGapAnalyzer()
+        self.confluence = ConfluenceEngine(entry_threshold=config.entry_threshold)
+
+    async def scan(self, pairs: list[str]) -> list[SignalCandidate]:
+        """Scan all pairs through the full strategy pipeline."""
+        all_signals: list[SignalCandidate] = []
+        total = len(pairs)
+
+        for batch_idx in range(0, total, BATCH_SIZE):
+            batch = pairs[batch_idx : batch_idx + BATCH_SIZE]
+            batch_num = batch_idx // BATCH_SIZE + 1
+            total_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
+
+            logger.info(
+                "scanning_batch",
+                batch=batch_num,
+                total_batches=total_batches,
+                pairs=len(batch),
+            )
+
+            tasks = [self._analyze_pair(pair) for pair in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.warning("pair_analysis_failed", error=str(result))
+                    continue
+                if isinstance(result, SignalCandidate) and result.score >= self.config.entry_threshold:
+                    all_signals.append(result)
+
+            # Rate limit between batches
+            if batch_idx + BATCH_SIZE < total:
+                await asyncio.sleep(BATCH_DELAY)
+
+        # Sort by score descending
+        all_signals.sort(key=lambda s: s.score, reverse=True)
+
+        logger.info(
+            "scan_complete",
+            pairs_scanned=total,
+            signals_above_threshold=len(all_signals),
+            top_signal=all_signals[0].symbol if all_signals else None,
+            top_score=all_signals[0].score if all_signals else 0,
+        )
+
+        return all_signals
+
+    async def _analyze_pair(self, symbol: str) -> SignalCandidate:
+        """Full strategy pipeline for a single pair."""
+        # Fetch candles for all timeframes
+        candles: dict[str, pd.DataFrame] = {}
+        for tf in TIMEFRAMES:
+            candles[tf] = await self.candles.get_candles(symbol, tf, limit=200)
+
+        # Run market structure on all timeframes
+        ms_results = {}
+        for tf, df in candles.items():
+            ms_results[tf] = self.ms_analyzer.analyze(df, timeframe=tf)
+
+        # Run liquidity on all timeframes
+        liq_results = {}
+        for tf, df in candles.items():
+            swing_hl = ms_results[tf].swing_highs_lows
+            liq_results[tf] = self.liq_analyzer.analyze(df, swing_hl)
+
+        # Run order blocks on entry timeframes
+        ob_results = {}
+        for tf in ["15m", "1h"]:
+            swing_hl = ms_results[tf].swing_highs_lows
+            ob_results[tf] = self.ob_analyzer.analyze(candles[tf], swing_hl)
+
+        # Run FVG on entry timeframes
+        fvg_results = {}
+        for tf in ["15m", "1h"]:
+            fvg_results[tf] = self.fvg_analyzer.analyze(candles[tf])
+
+        # Get current price from most recent 15m close
+        current_price = float(candles["15m"]["close"].iloc[-1]) if not candles["15m"].empty else 0
+
+        # Score the signal
+        signal = self.confluence.score_signal(
+            symbol=symbol,
+            current_price=current_price,
+            ms_results=ms_results,
+            liq_results=liq_results,
+            ob_results=ob_results,
+            fvg_results=fvg_results,
+        )
+
+        if signal.score >= self.config.entry_threshold:
+            logger.info(
+                "signal_detected",
+                symbol=symbol,
+                score=signal.score,
+                direction=signal.direction,
+                reasons=signal.reasons,
+            )
+
+        return signal

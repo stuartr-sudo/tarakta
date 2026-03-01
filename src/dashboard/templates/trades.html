@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block title %}Tarakta - Trades{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Trade History</h1>
+</div>
+
+<!-- Stats Summary -->
+{% if stats and stats.total > 0 %}
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-label">Total Trades</div>
+        <div class="stat-value sm">{{ stats.total }}</div>
+        <div class="stat-sub">{{ stats.wins }}W / {{ stats.losses }}L</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Win Rate</div>
+        <div class="stat-value sm {{ 'positive' if (stats.win_rate | float) >= 0.5 else 'negative' }}">
+            {{ "%.0f" | format(stats.win_rate * 100) }}%
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Total P&L</div>
+        <div class="stat-value sm {{ 'positive' if (stats.total_pnl | float) >= 0 else 'negative' }}">
+            {{ "+" if (stats.total_pnl | float) >= 0 else "" }}${{ "%.2f" | format(stats.total_pnl) }}
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Avg P&L per Trade</div>
+        <div class="stat-value sm {{ 'positive' if (stats.avg_pnl | float) >= 0 else 'negative' }}">
+            {{ "+" if (stats.avg_pnl | float) >= 0 else "" }}${{ "%.2f" | format(stats.avg_pnl) }}
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- Filters -->
+<div class="filter-tabs">
+    <a href="/trades?status=all" class="{{ 'active' if current_status == 'all' else '' }}">All</a>
+    <a href="/trades?status=open" class="{{ 'active' if current_status == 'open' else '' }}">Open</a>
+    <a href="/trades?status=closed" class="{{ 'active' if current_status == 'closed' else '' }}">Closed</a>
+</div>
+
+<!-- Trades Table -->
+<div class="panel">
+    {% if trades %}
+    <div class="panel-body no-pad">
+        <div class="overflow-x">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Dir</th>
+                        <th>Status</th>
+                        <th>Mode</th>
+                        <th>Entry</th>
+                        <th>Exit</th>
+                        <th>SL</th>
+                        <th>Size $</th>
+                        <th>Risk $</th>
+                        <th>R:R</th>
+                        <th>P&L</th>
+                        <th>Score</th>
+                        <th>Exit Reason</th>
+                        <th>Opened</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for t in trades %}
+                    <tr>
+                        <td><strong>{{ t.symbol }}</strong></td>
+                        <td>
+                            <span class="dir-badge {{ t.direction | default('long') }}">
+                                {{ t.direction | default('long') }}
+                            </span>
+                        </td>
+                        <td>
+                            {% if t.status == 'open' %}
+                            <span class="status-badge open">OPEN</span>
+                            {% elif (t.pnl_usd | default(0) | float) >= 0 %}
+                            <span class="status-badge closed-win">WIN</span>
+                            {% else %}
+                            <span class="status-badge closed-loss">LOSS</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <span class="status-badge {{ t.mode }}">{{ t.mode }}</span>
+                        </td>
+                        <td class="mono">${{ "%.4f" | format(t.entry_price | float) }}</td>
+                        <td class="mono">
+                            {{ ("$%.4f" | format(t.exit_price | float)) if t.exit_price else '-' }}
+                        </td>
+                        <td class="mono">${{ "%.4f" | format(t.stop_loss | float) }}</td>
+                        <td class="mono">${{ "%.2f" | format(t.entry_cost_usd | default(0) | float) }}</td>
+                        <td class="mono negative">${{ "%.2f" | format(t.risk_usd | default(0) | float) }}</td>
+                        <td class="mono">{{ t.risk_reward | default('-') }}</td>
+                        <td class="mono {{ 'positive' if (t.pnl_usd | default(0) | float) > 0 else ('negative' if (t.pnl_usd | default(0) | float) < 0 else '') }}">
+                            {% if t.pnl_usd is not none %}
+                            {{ "+" if (t.pnl_usd | float) >= 0 else "" }}${{ "%.2f" | format(t.pnl_usd | float) }}
+                            {% else %}
+                            -
+                            {% endif %}
+                        </td>
+                        <td>
+                            <div class="score-bar">
+                                <span class="score-num">{{ t.confluence_score }}</span>
+                            </div>
+                        </td>
+                        <td>
+                            {% if t.exit_reason %}
+                            <span class="reason-pill">{{ t.exit_reason }}</span>
+                            {% else %}
+                            <span class="text-muted">-</span>
+                            {% endif %}
+                        </td>
+                        <td class="text-muted">{{ t.entry_time[:16] if t.entry_time else '-' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Pagination -->
+    <div class="pagination">
+        {% if (current_page | int) > 1 %}
+        <a href="/trades?status={{ current_status }}&page={{ (current_page | int) - 1 }}" class="btn">Previous</a>
+        {% endif %}
+        <span>Page {{ current_page }}</span>
+        {% if trades | length == 25 %}
+        <a href="/trades?status={{ current_status }}&page={{ (current_page | int) + 1 }}" class="btn">Next</a>
+        {% endif %}
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <div class="empty-icon">---</div>
+        <p>No trades found for this filter.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% block title %}Tarakta - Settings{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Settings</h1>
+</div>
+
+<div class="two-col">
+    <!-- Engine State -->
+    <div class="panel">
+        <div class="panel-header">
+            <h2>Engine Status</h2>
+            {% if state %}
+            <span class="pulse-dot {{ 'green animate' if state.status == 'running' else 'orange' }}"></span>
+            {% endif %}
+        </div>
+        <div class="panel-body">
+            {% if state %}
+            <table class="config-table">
+                <tr>
+                    <td>Status</td>
+                    <td>
+                        <span class="status-badge {{ 'open' if state.status == 'running' else 'paper' }}">
+                            {{ state.status | default('unknown') | upper }}
+                        </span>
+                    </td>
+                </tr>
+                <tr>
+                    <td>Mode</td>
+                    <td>
+                        <span class="status-badge {{ state.mode | default('paper') }}">
+                            {{ state.mode | default('paper') | upper }}
+                        </span>
+                    </td>
+                </tr>
+                <tr>
+                    <td>Cycle Count</td>
+                    <td>{{ state.cycle_count | default(0) }}</td>
+                </tr>
+                <tr>
+                    <td>Last Scan</td>
+                    <td>{{ (state.last_scan_time[:19]) if state.last_scan_time else 'Never' }}</td>
+                </tr>
+                <tr>
+                    <td>Balance</td>
+                    <td>${{ "%.2f" | format(state.current_balance | default(0) | float) }}</td>
+                </tr>
+                <tr>
+                    <td>Peak Balance</td>
+                    <td>${{ "%.2f" | format(state.peak_balance | default(0) | float) }}</td>
+                </tr>
+                <tr>
+                    <td>Daily P&L</td>
+                    <td class="{{ 'positive' if (state.daily_pnl_usd | default(0) | float) >= 0 else 'negative' }}">
+                        ${{ "%.2f" | format(state.daily_pnl_usd | default(0) | float) }}
+                    </td>
+                </tr>
+                <tr>
+                    <td>Open Positions</td>
+                    <td>{{ (state.open_positions | length) if state.open_positions is mapping else 0 }}</td>
+                </tr>
+            </table>
+            {% else %}
+            <div class="empty-state">
+                <p>Engine has not started yet.</p>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Trading Mode -->
+    <div class="panel">
+        <div class="panel-header">
+            <h2>Trading Mode</h2>
+        </div>
+        <div class="panel-body">
+            <p>
+                Currently:
+                <span class="status-badge {{ (state.mode | default('paper')) }}">
+                    {{ (state.mode | default('paper')) | upper }}
+                </span>
+            </p>
+            <p class="text-muted mode-description">
+                {% if state and state.mode == 'live' %}
+                Live mode places real orders on Kraken. Switch to paper to use simulated trades.
+                {% else %}
+                Paper mode uses real market data but all trades are simulated. No real money is used.
+                Switch to live only when you are confident in the strategy.
+                {% endif %}
+            </p>
+            <form method="post" action="/settings/toggle-mode">
+                {% if state and state.mode == 'live' %}
+                <button type="submit" class="btn primary">Switch to Paper Mode</button>
+                {% else %}
+                <button type="submit" class="btn danger">Switch to Live Mode</button>
+                {% endif %}
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Configuration -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>Configuration</h2>
+        <span class="badge text-muted">Read-only (edit .env to change)</span>
+    </div>
+    <div class="panel-body no-pad">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Parameter</th>
+                    <th>Value</th>
+                    <th>Description</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Entry Threshold</td>
+                    <td><strong>{{ config.entry_threshold }}</strong>/100</td>
+                    <td class="text-muted">Minimum confluence score to enter a trade</td>
+                </tr>
+                <tr>
+                    <td>Max Risk Per Trade</td>
+                    <td><strong>{{ "%.0f" | format(config.max_risk_pct * 100) }}%</strong></td>
+                    <td class="text-muted">Percentage of balance risked per trade (max loss if SL hits)</td>
+                </tr>
+                <tr>
+                    <td>Max Position Size</td>
+                    <td><strong>{{ "%.0f" | format(config.max_position_pct * 100) }}%</strong></td>
+                    <td class="text-muted">Max cost of a single trade as % of balance</td>
+                </tr>
+                <tr>
+                    <td>Max Total Exposure</td>
+                    <td><strong>{{ "%.0f" | format(config.max_exposure_pct * 100) }}%</strong></td>
+                    <td class="text-muted">Max total $ in open positions as % of balance</td>
+                </tr>
+                <tr>
+                    <td>Max Concurrent Positions</td>
+                    <td><strong>{{ config.max_concurrent }}</strong></td>
+                    <td class="text-muted">Maximum open positions at once</td>
+                </tr>
+                <tr>
+                    <td>Max Daily Drawdown</td>
+                    <td><strong>{{ "%.0f" | format(config.max_daily_drawdown * 100) }}%</strong></td>
+                    <td class="text-muted">Pause trading if daily loss exceeds this</td>
+                </tr>
+                <tr>
+                    <td>Circuit Breaker</td>
+                    <td><strong>{{ "%.0f" | format(config.circuit_breaker_pct * 100) }}%</strong></td>
+                    <td class="text-muted">Halt engine if total drawdown exceeds this</td>
+                </tr>
+                <tr>
+                    <td>Min R:R Ratio</td>
+                    <td><strong>{{ config.min_rr_ratio }}</strong></td>
+                    <td class="text-muted">Minimum reward-to-risk ratio for entries</td>
+                </tr>
+                <tr>
+                    <td>Scan Interval</td>
+                    <td><strong>{{ config.scan_interval_minutes }} min</strong></td>
+                    <td class="text-muted">Time between market scans</td>
+                </tr>
+                <tr>
+                    <td>Min Volume</td>
+                    <td><strong>${{ "{:,.0f}".format(config.min_volume_usd) }}</strong></td>
+                    <td class="text-muted">Minimum 24h volume to consider a pair</td>
+                </tr>
+                <tr>
+                    <td>Quote Currencies</td>
+                    <td><strong>{{ config.quote_currencies | join(', ') }}</strong></td>
+                    <td class="text-muted">Only trade pairs quoted in these currencies</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Tarakta{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+    {% block head %}{% endblock %}
+</head>
+<body>
+    {% set current_page = request.url.path %}
+    {% set mode = (state.mode | default('paper')) if state else 'paper' %}
+
+    <!-- Mode Banner -->
+    <div class="mode-banner {{ mode }}">
+        {% if mode == 'paper' %}
+            PAPER TRADING — No real money is being used. All trades are simulated.
+        {% else %}
+            LIVE TRADING — Real orders are being placed on Kraken.
+        {% endif %}
+    </div>
+
+    <!-- Navigation -->
+    <nav class="top-nav">
+        <a href="/" class="brand">Tarakta</a>
+        <div class="nav-links">
+            <a href="/" class="{{ 'active' if current_page == '/' else '' }}">Dashboard</a>
+            <a href="/trades" class="{{ 'active' if current_page == '/trades' else '' }}">Trades</a>
+            <a href="/signals" class="{{ 'active' if current_page == '/signals' else '' }}">Signals</a>
+            <a href="/settings" class="{{ 'active' if current_page == '/settings' else '' }}">Settings</a>
+        </div>
+        <div class="nav-right">
+            <div class="scan-timer" id="scanTimer">
+                <div class="timer-label">Next Scan</div>
+                <div class="timer-countdown" id="timerCountdown">--:--</div>
+                <div class="timer-bar">
+                    <div class="timer-bar-fill" id="timerBarFill"></div>
+                </div>
+            </div>
+            <a href="/logout" class="btn nav-logout">Logout</a>
+        </div>
+    </nav>
+
+    <main class="content">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="site-footer">
+        Tarakta Trading Bot &mdash; Private Use Only
+    </footer>
+    <script>
+    (function() {
+        const INTERVAL = {{ config.scan_interval_minutes if config else 15 }};
+        const timerEl = document.getElementById('timerCountdown');
+        const barEl = document.getElementById('timerBarFill');
+        if (!timerEl) return;
+
+        function update() {
+            const now = new Date();
+            const utcMs = now.getTime();
+            const intervalMs = INTERVAL * 60 * 1000;
+
+            // Next aligned tick: ceiling to interval boundary
+            const nextTick = Math.ceil(utcMs / intervalMs) * intervalMs;
+            const remainMs = nextTick - utcMs;
+            const remainSec = Math.max(0, Math.floor(remainMs / 1000));
+
+            const mins = Math.floor(remainSec / 60);
+            const secs = remainSec % 60;
+            timerEl.textContent = String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
+
+            // Progress bar: how far through the interval we are
+            const elapsed = intervalMs - remainMs;
+            const pct = Math.min(100, (elapsed / intervalMs) * 100);
+            barEl.style.width = pct + '%';
+
+            // Color shift as we approach scan
+            if (remainSec <= 30) {
+                timerEl.classList.add('imminent');
+            } else {
+                timerEl.classList.remove('imminent');
+            }
+        }
+
+        update();
+        setInterval(update, 1000);
+    })();
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

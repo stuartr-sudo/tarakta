@@ -1,0 +1,287 @@
+{% extends "base.html" %}
+{% block title %}Tarakta - Dashboard{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="page-header">
+    <div>
+        <h1>Dashboard</h1>
+        {% if state %}
+        <span class="subtitle">
+            <span class="pulse-dot {{ 'green animate' if state.status == 'running' else 'orange' }}"></span>
+            Cycle #{{ state.cycle_count | default(0) }}
+            {% if state.last_scan_time %}
+             &middot; Last scan {{ state.last_scan_time[:16] }}
+            {% endif %}
+        </span>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Stat Cards -->
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-label">Balance</div>
+        <div class="stat-value">${{ "%.2f" | format(snapshot.balance_usd | default(0) | float) }}</div>
+        <div class="stat-sub">of ${{ "%.2f" | format(100.0) }} initial</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Daily P&L</div>
+        <div class="stat-value {{ 'positive' if (snapshot.daily_pnl_usd | default(0) | float) >= 0 else 'negative' }}">
+            {{ "+" if (snapshot.daily_pnl_usd | default(0) | float) >= 0 else "" }}${{ "%.2f" | format(snapshot.daily_pnl_usd | default(0) | float) }}
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Total P&L</div>
+        <div class="stat-value {{ 'positive' if (snapshot.total_pnl_usd | default(0) | float) >= 0 else 'negative' }}">
+            {{ "+" if (snapshot.total_pnl_usd | default(0) | float) >= 0 else "" }}${{ "%.2f" | format(snapshot.total_pnl_usd | default(0) | float) }}
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Drawdown</div>
+        <div class="stat-value sm {{ 'negative' if (snapshot.drawdown_pct | default(0) | float) > 0.05 else '' }}">
+            {{ "%.1f" | format((snapshot.drawdown_pct | default(0) | float) * 100) }}%
+        </div>
+        <div class="stat-sub">max {{ "%.0f" | format(config.max_daily_drawdown * 100) if config else 10 }}% daily</div>
+    </div>
+    {% if stats and stats.total > 0 %}
+    <div class="stat-card">
+        <div class="stat-label">Win Rate</div>
+        <div class="stat-value sm">{{ "%.0f" | format(stats.win_rate * 100) }}%</div>
+        <div class="stat-sub">{{ stats.wins }}W / {{ stats.losses }}L ({{ stats.total }} trades)</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Avg P&L</div>
+        <div class="stat-value sm {{ 'positive' if stats.avg_pnl >= 0 else 'negative' }}">
+            {{ "+" if stats.avg_pnl >= 0 else "" }}${{ "%.2f" | format(stats.avg_pnl) }}
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<div class="two-col">
+    <!-- Balance Chart -->
+    <div class="panel">
+        <div class="panel-header">
+            <h2>Balance History</h2>
+            <span class="badge text-muted">7 days</span>
+        </div>
+        <div class="chart-container">
+            <canvas id="balanceChart"></canvas>
+        </div>
+    </div>
+
+    <!-- Open Positions -->
+    <div class="panel">
+        <div class="panel-header">
+            <h2>Open Positions</h2>
+            <span class="badge text-blue">{{ trades | length }}</span>
+        </div>
+        {% if trades %}
+        <div class="panel-body no-pad">
+            <div class="overflow-x">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Dir</th>
+                            <th>Entry</th>
+                            <th>SL</th>
+                            <th>TP</th>
+                            <th>Size</th>
+                            <th>Risk $</th>
+                            <th>Score</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for t in trades %}
+                        <tr>
+                            <td><strong>{{ t.symbol }}</strong></td>
+                            <td>
+                                <span class="dir-badge {{ t.direction | default('long') }}">
+                                    {{ t.direction | default('long') }}
+                                </span>
+                            </td>
+                            <td class="mono">${{ "%.4f" | format(t.entry_price | float) }}</td>
+                            <td class="mono negative">${{ "%.4f" | format(t.stop_loss | float) }}</td>
+                            <td class="mono positive">{{ ("$%.4f" | format(t.take_profit | float)) if t.take_profit else '-' }}</td>
+                            <td class="mono">${{ "%.2f" | format(t.entry_cost_usd | default(0) | float) }}</td>
+                            <td class="mono negative">${{ "%.2f" | format(t.risk_usd | default(0) | float) }}</td>
+                            <td>
+                                <div class="score-bar">
+                                    <span class="score-num {{ 'positive' if (t.confluence_score | int) >= 65 else ('text-orange' if (t.confluence_score | int) >= 50 else 'negative') }}">{{ t.confluence_score }}</span>
+                                    <div class="bar-track">
+                                        <div class="bar-fill {{ 'high' if (t.confluence_score | int) >= 65 else ('medium' if (t.confluence_score | int) >= 50 else 'low') }}"
+                                             style="width: {{ t.confluence_score | int }}%"></div>
+                                    </div>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <div class="empty-icon">---</div>
+            <p>No open positions. Waiting for signals above threshold.</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Recent Signals -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>Recent Signals</h2>
+        <a href="/signals" class="btn">View All</a>
+    </div>
+    {% if signals %}
+    <div class="panel-body no-pad">
+        <div class="overflow-x">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Direction</th>
+                        <th>Score</th>
+                        <th>Acted</th>
+                        <th>Reasons</th>
+                        <th>Time</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for s in signals %}
+                    <tr>
+                        <td><strong>{{ s.symbol }}</strong></td>
+                        <td>
+                            <span class="dir-badge {{ s.direction }}">{{ s.direction }}</span>
+                        </td>
+                        <td>
+                            <div class="score-bar">
+                                <span class="score-num {{ 'positive' if (s.score | int) >= 65 else ('text-orange' if (s.score | int) >= 50 else 'negative') }}">{{ s.score }}</span>
+                                <div class="bar-track">
+                                    <div class="bar-fill {{ 'high' if (s.score | int) >= 65 else ('medium' if (s.score | int) >= 50 else 'low') }}"
+                                         style="width: {{ s.score | int }}%"></div>
+                                </div>
+                            </div>
+                        </td>
+                        <td>
+                            {% if s.acted_on %}
+                            <span class="positive">Yes</span>
+                            {% else %}
+                            <span class="text-muted">No</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if s.reasons %}
+                            <div class="reason-pills">
+                                {% for r in s.reasons[:4] %}
+                                <span class="reason-pill">{{ r }}</span>
+                                {% endfor %}
+                                {% if s.reasons | length > 4 %}
+                                <span class="reason-pill">+{{ s.reasons | length - 4 }}</span>
+                                {% endif %}
+                            </div>
+                            {% else %}
+                            <span class="text-muted">-</span>
+                            {% endif %}
+                        </td>
+                        <td class="text-muted">{{ s.created_at[:16] }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <p>No signals yet. Waiting for first scan cycle to complete.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadChart() {
+    try {
+        const resp = await fetch('/api/portfolio');
+        const data = await resp.json();
+        if (!data.history || data.history.length === 0) {
+            document.getElementById('balanceChart').parentElement.innerHTML =
+                '<div class="empty-state"><p>Chart will appear after a few scan cycles.</p></div>';
+            return;
+        }
+
+        const labels = data.history.map(s => {
+            const d = new Date(s.created_at);
+            return d.toLocaleDateString('en-US', {month:'short', day:'numeric'}) + ' ' +
+                   d.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit'});
+        });
+        const values = data.history.map(s => parseFloat(s.balance_usd));
+        const initial = 100;
+        const current = values[values.length - 1] || initial;
+        const lineColor = current >= initial ? '#22c55e' : '#ef4444';
+        const fillColor = current >= initial ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)';
+
+        new Chart(document.getElementById('balanceChart'), {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Balance',
+                    data: values,
+                    borderColor: lineColor,
+                    backgroundColor: fillColor,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 0,
+                    borderWidth: 2,
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { intersect: false, mode: 'index' },
+                scales: {
+                    x: {
+                        display: true,
+                        grid: { color: 'rgba(255,255,255,0.03)' },
+                        ticks: { color: '#6b7280', font: { size: 10 }, maxTicksLimit: 6 }
+                    },
+                    y: {
+                        display: true,
+                        grid: { color: 'rgba(255,255,255,0.03)' },
+                        ticks: {
+                            color: '#6b7280',
+                            font: { size: 10 },
+                            callback: v => '$' + v.toFixed(2)
+                        }
+                    }
+                },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: ctx => 'Balance: $' + ctx.parsed.y.toFixed(2)
+                        }
+                    }
+                }
+            }
+        });
+    } catch (e) {
+        console.error('Chart load failed:', e);
+    }
+}
+loadChart();
+
+// Auto-refresh every 60s
+setTimeout(() => location.reload(), 60000);
+</script>
+{% endblock %}
