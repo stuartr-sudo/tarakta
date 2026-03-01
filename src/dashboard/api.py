@@ -114,52 +114,48 @@ def create_router(repo: Repository, exchange=None, api_key: str = "", api_secret
         positions = []
         total_unrealized = 0.0
 
-        # Fetch tickers concurrently
-        async def fetch_one(trade):
-            symbol = trade["symbol"]
+        # Deduplicate ticker fetches — multiple trades may share a symbol
+        unique_symbols = list({t["symbol"] for t in trades})
+
+        async def fetch_ticker(symbol: str) -> float | None:
             try:
                 ticker = await _dash_exchange.fetch_ticker(symbol)
-                current_price = float(ticker["last"])
-                entry_price = float(trade.get("entry_price", 0))
-                quantity = float(trade.get("entry_quantity", 0))
-                direction = trade.get("direction", "long")
+                return float(ticker["last"])
+            except Exception as e:
+                logger.error("unrealized_pnl_fetch_failed", symbol=symbol, error=str(e))
+                return None
 
+        ticker_results = await asyncio.gather(*[fetch_ticker(s) for s in unique_symbols])
+        price_map = dict(zip(unique_symbols, ticker_results))
+
+        for trade in trades:
+            symbol = trade["symbol"]
+            current_price = price_map.get(symbol)
+            entry_price = float(trade.get("entry_price", 0))
+            quantity = float(trade.get("entry_quantity", 0))
+            direction = trade.get("direction", "long")
+            cost_usd = float(trade.get("entry_cost_usd", 0))
+
+            if current_price is not None:
                 if direction == "short":
                     unrealized = (entry_price - current_price) * quantity
                 else:
                     unrealized = (current_price - entry_price) * quantity
+            else:
+                unrealized = 0
 
-                return {
-                    "symbol": symbol,
-                    "direction": direction,
-                    "entry_price": entry_price,
-                    "current_price": current_price,
-                    "quantity": quantity,
-                    "cost_usd": float(trade.get("entry_cost_usd", 0)),
-                    "unrealized_pnl": round(unrealized, 4),
-                    "unrealized_pct": round(unrealized / float(trade.get("entry_cost_usd", 1)) * 100, 2)
-                        if float(trade.get("entry_cost_usd", 0)) > 0 else 0,
-                    "trade_id": trade.get("id"),
-                }
-            except Exception as e:
-                logger.error("unrealized_pnl_fetch_failed", symbol=symbol, error=str(e))
-                return {
-                    "symbol": symbol,
-                    "direction": trade.get("direction", "long"),
-                    "entry_price": float(trade.get("entry_price", 0)),
-                    "current_price": None,
-                    "quantity": float(trade.get("entry_quantity", 0)),
-                    "cost_usd": float(trade.get("entry_cost_usd", 0)),
-                    "unrealized_pnl": 0,
-                    "unrealized_pct": 0,
-                    "trade_id": trade.get("id"),
-                    "error": str(e),
-                }
-
-        results = await asyncio.gather(*[fetch_one(t) for t in trades])
-        for pos in results:
-            positions.append(pos)
-            total_unrealized += pos["unrealized_pnl"]
+            positions.append({
+                "symbol": symbol,
+                "direction": direction,
+                "entry_price": entry_price,
+                "current_price": current_price,
+                "quantity": quantity,
+                "cost_usd": cost_usd,
+                "unrealized_pnl": round(unrealized, 4),
+                "unrealized_pct": round(unrealized / cost_usd * 100, 2) if cost_usd > 0 else 0,
+                "trade_id": trade.get("id"),
+            })
+            total_unrealized += unrealized
 
         return {
             "positions": positions,
