@@ -15,7 +15,10 @@ from src.execution.orders import OrderExecutor
 from src.risk.circuit_breaker import CircuitBreaker
 from src.risk.manager import RiskManager
 from src.risk.portfolio import PortfolioTracker
+from src.strategy.adaptive_threshold import AdaptiveThreshold
 from src.strategy.scanner import AltcoinScanner
+from src.strategy.sentiment import SentimentFilter
+from src.strategy.trade_analyzer import TradeAnalyzer
 from src.utils.logging import get_logger
 from src.utils.time_utils import is_new_day
 
@@ -46,6 +49,11 @@ class TradingEngine:
         self.order_executor = OrderExecutor(exchange, self.risk_manager, config.min_rr_ratio)
         self.position_monitor = PositionMonitor()
         self.scanner = AltcoinScanner(candle_manager, config)
+
+        # Self-improving components
+        self.trade_analyzer = TradeAnalyzer(repo)
+        self.adaptive_threshold = AdaptiveThreshold(config.entry_threshold)
+        self.sentiment_filter = SentimentFilter()
 
         self.state: EngineState | None = None
         self.portfolio: PortfolioTracker | None = None
@@ -102,6 +110,23 @@ class TradingEngine:
         self.state.total_pnl = db_total_pnl
         self.portfolio.daily_pnl = db_daily_pnl
         self.state.daily_pnl = db_daily_pnl
+
+        # Load historical trade data for self-improving components
+        await self.trade_analyzer.load_history()
+
+        # Bootstrap adaptive threshold from recent closed trades
+        try:
+            recent_trades = await self.repo.get_trades(status="closed", per_page=50)
+            outcomes = [float(t.get("pnl_usd", 0)) > 0 for t in reversed(recent_trades)]
+            if outcomes:
+                self.adaptive_threshold.load_outcomes(outcomes)
+                logger.info(
+                    "adaptive_threshold_ready",
+                    threshold=self.adaptive_threshold.threshold,
+                    base=self.adaptive_threshold.base_threshold,
+                )
+        except Exception as e:
+            logger.warning("adaptive_threshold_load_failed", error=str(e))
 
         self._running = True
 
@@ -215,12 +240,99 @@ class TradingEngine:
         # Scan for signals
         signals = await self.scanner.scan(pairs)
 
+        # Apply adaptive threshold filter
+        active_threshold = self.adaptive_threshold.threshold
+        if active_threshold != self.config.entry_threshold:
+            pre_count = len(signals)
+            signals = [s for s in signals if s.score >= active_threshold]
+            if pre_count != len(signals):
+                logger.info(
+                    "adaptive_threshold_filtered",
+                    threshold=active_threshold,
+                    before=pre_count,
+                    after=len(signals),
+                )
+
         # Execute entries for top signals
         signals_saved = 0
         trades_entered = 0
         for signal in signals:
             try:
                 position = None
+
+                # --- Sentiment filter (Strategy A) ---
+                sentiment_score = await self.sentiment_filter.get_sentiment(signal.symbol)
+
+                if signal.direction and self.sentiment_filter.should_block_trade(
+                    sentiment_score, signal.direction
+                ):
+                    logger.info(
+                        "trade_blocked_by_sentiment",
+                        symbol=signal.symbol,
+                        direction=signal.direction,
+                        sentiment=round(sentiment_score, 2),
+                    )
+                    # Still log the signal but skip trade
+                    vol_24h = self.exchange.get_24h_volume(signal.symbol)
+                    await self.repo.insert_signal(
+                        {
+                            "symbol": signal.symbol,
+                            "direction": signal.direction or "none",
+                            "score": signal.score,
+                            "reasons": signal.reasons + [f"BLOCKED:sentiment={sentiment_score:.1f}"],
+                            "components": {"volume_24h": vol_24h, "sentiment": sentiment_score},
+                            "current_price": signal.entry_price,
+                            "acted_on": False,
+                            "scan_cycle": cycle,
+                        }
+                    )
+                    signals_saved += 1
+                    continue
+
+                # Apply sentiment score adjustment to confluence score
+                sentiment_adj = self.sentiment_filter.score_adjustment(
+                    sentiment_score, signal.direction or "long"
+                )
+                adjusted_score = signal.score + sentiment_adj
+
+                # Also check pattern-based score from trade analyzer (Strategy B)
+                pattern_modifier = self.trade_analyzer.get_pattern_score(
+                    signal.reasons, signal.direction or "long", signal.score
+                )
+                if pattern_modifier is not None and pattern_modifier < -0.5:
+                    # Patterns suggest this is a losing setup — penalize
+                    adjusted_score -= 5.0
+                    logger.info(
+                        "pattern_penalty_applied",
+                        symbol=signal.symbol,
+                        pattern_modifier=round(pattern_modifier, 2),
+                    )
+
+                # Re-check against threshold after adjustments
+                if adjusted_score < active_threshold:
+                    logger.info(
+                        "trade_below_adjusted_threshold",
+                        symbol=signal.symbol,
+                        original_score=signal.score,
+                        adjusted_score=round(adjusted_score, 2),
+                        threshold=active_threshold,
+                        sentiment_adj=sentiment_adj,
+                    )
+                    vol_24h = self.exchange.get_24h_volume(signal.symbol)
+                    await self.repo.insert_signal(
+                        {
+                            "symbol": signal.symbol,
+                            "direction": signal.direction or "none",
+                            "score": signal.score,
+                            "reasons": signal.reasons + [f"adj_score={adjusted_score:.1f}"],
+                            "components": {"volume_24h": vol_24h, "sentiment": sentiment_score},
+                            "current_price": signal.entry_price,
+                            "acted_on": False,
+                            "scan_cycle": cycle,
+                        }
+                    )
+                    signals_saved += 1
+                    continue
 
                 # Validate trade
                 # Calculate total exposure across open positions
@@ -266,7 +378,11 @@ class TradingEngine:
                         "direction": signal.direction or "none",
                         "score": signal.score,
                         "reasons": signal.reasons,
-                        "components": {"volume_24h": vol_24h},
+                        "components": {
+                            "volume_24h": vol_24h,
+                            "sentiment": sentiment_score,
+                            "adjusted_score": round(adjusted_score, 2),
+                        },
                         "current_price": signal.entry_price,
                         "acted_on": position is not None,
                         "trade_id": position.trade_id if position else None,
@@ -350,6 +466,30 @@ class TradingEngine:
                 # Record cooldown on stop-loss exits
                 if exit_signal.reason == "sl_hit":
                     self.risk_manager.record_stop_out(exit_signal.symbol)
+
+                # --- Post-trade analysis (Strategy B) ---
+                holding_seconds = 0.0
+                if position.entry_time:
+                    holding_seconds = (datetime.now(timezone.utc) - position.entry_time).total_seconds()
+
+                try:
+                    await self.trade_analyzer.analyze_closed_trade(
+                        trade_id=position.trade_id,
+                        symbol=exit_signal.symbol,
+                        direction=position.direction,
+                        entry_price=position.entry_price,
+                        exit_price=order_result.avg_price or exit_signal.price,
+                        pnl_usd=pnl,
+                        pnl_percent=pnl_pct,
+                        exit_reason=exit_signal.reason,
+                        confluence_score=0,  # Not stored on position; will be enriched from signal
+                        holding_seconds=holding_seconds,
+                    )
+                except Exception as e:
+                    logger.warning("post_trade_analysis_failed", error=str(e))
+
+                # --- Adaptive threshold update (Strategy C) ---
+                self.adaptive_threshold.record_outcome(is_win=(pnl > 0))
 
                 # Remove from state
                 self.state.open_positions.pop(exit_signal.symbol, None)
@@ -497,4 +637,5 @@ class TradingEngine:
         logger.info("engine_shutting_down")
         self._running = False
         await self._persist_state()
+        await self.sentiment_filter.close()
         logger.info("engine_shutdown_complete")
