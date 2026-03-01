@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     initial_balance: float = 100.0
     entry_threshold: float = 65.0
     max_risk_pct: float = 0.10  # Max 10% of balance lost per trade (SL distance)
-    max_position_pct: float = 0.05  # Max 5% of balance allocated per trade
+    max_position_pct: float = 0.10  # Max 10% of balance allocated per trade
     max_exposure_pct: float = 1.0  # Allow full budget deployment across positions
     max_concurrent: int = 20
     max_daily_drawdown: float = 0.10
