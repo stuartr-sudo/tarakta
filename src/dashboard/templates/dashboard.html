@@ -33,7 +33,7 @@
     </div>
     <div class="stat-card" style="border-left: 3px solid #22c55e;">
         <div class="stat-label">Available Cash</div>
-        <div class="stat-value sm" id="available-value">${{ "%.2f" | format(balance) }}</div>
+        <div class="stat-value sm" id="available-value">${{ "%.2f" | format(balance - allocated) }}</div>
         <div class="stat-sub">free to trade</div>
     </div>
     <div class="stat-card" style="border-left: 3px solid #f59e0b;">
@@ -373,11 +373,17 @@ async function loadUnrealizedPnl() {
 
         updateNetPnl(total);
 
-        // Update allocated total from live data
+        // Update allocated total and available cash from live data
         let totalAllocated = 0;
         data.positions.forEach(p => { totalAllocated += (p.cost_usd || 0); });
         const allocEl = document.getElementById('allocated-value');
         if (allocEl) allocEl.textContent = '$' + totalAllocated.toFixed(2);
+
+        // Available = equity - allocated
+        const eqText = (document.getElementById('equity-value') || {}).textContent || '';
+        const eqVal = parseFloat(eqText.replace(/[^0-9.\-]/g, '')) || 0;
+        const avEl = document.getElementById('available-value');
+        if (avEl) avEl.textContent = '$' + (eqVal - totalAllocated).toFixed(2);
 
         const errCount = data.positions.filter(p => p.current_price === null).length;
         const liveCount = data.positions.length - errCount;
@@ -477,9 +483,6 @@ async function softRefreshStats() {
             const eqEl = document.getElementById('equity-value');
             if (eqEl) eqEl.textContent = '$' + parseFloat(s.balance_usd || 0).toFixed(2);
 
-            const avEl = document.getElementById('available-value');
-            if (avEl) avEl.textContent = '$' + parseFloat(s.balance_usd || 0).toFixed(2);
-
             const dpEl = document.getElementById('daily-pnl-value');
             if (dpEl) {
                 const dp = parseFloat(s.daily_pnl_usd || 0);
@@ -499,12 +502,23 @@ async function softRefreshStats() {
             if (ddEl) ddEl.textContent = (parseFloat(s.drawdown_pct || 0) * 100).toFixed(1) + '%';
         }
 
-        // Check if positions changed
+        // Check if positions changed and update available cash
         const openResp = await fetch('/api/trades/open');
         const openData = await openResp.json();
-        const serverCount = (openData.trades || []).length;
+        const openTrades = openData.trades || [];
+        const serverCount = openTrades.length;
         if (serverCount !== _knownPositionCount) {
             location.reload();
+            return;
+        }
+
+        // Update available cash = equity - allocated
+        if (data.current) {
+            const equity = parseFloat(data.current.balance_usd || 0);
+            let allocated = 0;
+            openTrades.forEach(t => { allocated += parseFloat(t.entry_cost_usd || 0); });
+            const avEl = document.getElementById('available-value');
+            if (avEl) avEl.textContent = '$' + (equity - allocated).toFixed(2);
         }
     } catch (e) {
         console.error('Soft refresh failed:', e);
