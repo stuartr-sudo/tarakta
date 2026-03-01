@@ -109,6 +109,13 @@ class RiskManager:
         total_exposure_usd: float = 0.0,
     ) -> TradeValidation:
         """Pre-trade validation checks."""
+        # Spot account cannot short — reject bearish signals
+        if signal.direction == "bearish":
+            return TradeValidation(
+                allowed=False,
+                reason="Spot accounts cannot short. Bearish signal rejected.",
+            )
+
         # Max total exposure (50% of equity = cash + open positions)
         equity = current_balance + total_exposure_usd
         if equity > 0:
