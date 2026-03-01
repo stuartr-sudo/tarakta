@@ -352,23 +352,36 @@ class TradingEngine:
                 if not validation.allowed:
                     logger.info("trade_rejected", symbol=signal.symbol, reason=validation.reason)
                 else:
-                    # Execute entry
-                    position, order_result, trade_record = await self.order_executor.execute_entry(
-                        signal=signal,
-                        current_balance=self.portfolio.current_balance,
-                        mode=self.state.mode,
-                    )
+                    # --- Liquidity check: position size vs 24h volume ---
+                    vol_24h_check = self.exchange.get_24h_volume(signal.symbol)
+                    max_position_cost = self.portfolio.current_balance * self.config.max_position_pct
+                    if vol_24h_check > 0 and max_position_cost / vol_24h_check > self.config.max_position_volume_pct:
+                        logger.info(
+                            "trade_rejected_low_liquidity",
+                            symbol=signal.symbol,
+                            position_cost=round(max_position_cost, 2),
+                            volume_24h=round(vol_24h_check, 2),
+                            pct_of_volume=round(max_position_cost / vol_24h_check * 100, 4),
+                            max_pct=self.config.max_position_volume_pct * 100,
+                        )
+                    else:
+                        # Execute entry
+                        position, order_result, trade_record = await self.order_executor.execute_entry(
+                            signal=signal,
+                            current_balance=self.portfolio.current_balance,
+                            mode=self.state.mode,
+                        )
 
-                    if position and trade_record:
-                        # Save to DB
-                        db_trade = await self.repo.insert_trade(trade_record)
-                        if db_trade:
-                            position.trade_id = db_trade.get("id", "")
+                        if position and trade_record:
+                            # Save to DB
+                            db_trade = await self.repo.insert_trade(trade_record)
+                            if db_trade:
+                                position.trade_id = db_trade.get("id", "")
 
-                        # Update portfolio
-                        self.portfolio.record_entry(position)
-                        self.state.open_positions[signal.symbol] = position
-                        trades_entered += 1
+                            # Update portfolio
+                            self.portfolio.record_entry(position)
+                            self.state.open_positions[signal.symbol] = position
+                            trades_entered += 1
 
                 # Log the signal regardless of whether trade was executed
                 vol_24h = self.exchange.get_24h_volume(signal.symbol)
