@@ -1,11 +1,13 @@
-"""Lightweight sentiment filter for crypto trades.
+"""Sentiment filter for crypto trades using Hugging Face Inference API.
 
-Uses CryptoCompare's free news API + keyword-based sentiment scoring.
-No ML model needed — fits within 512MB Fly.io constraint.
+Primary: FinBERT (ProsusAI/finbert) for financial sentiment classification.
+Secondary: Zero-shot classification (facebook/bart-large-mnli) for critical
+event detection (hacks, rugs, delistings).
+Fallback: Keyword-based scoring when HF API is unavailable.
 
-Sentiment is used as a pre-trade filter: if strong negative sentiment
-is detected for a long signal (or strong positive for a short signal),
-the trade is skipped or score is penalized.
+All HF calls use aiohttp with strict timeouts so the async trading engine
+is never blocked. If HF is slow or down, we fall back to keywords and
+continue — never miss a stop-loss check.
 """
 from __future__ import annotations
 
@@ -22,10 +24,37 @@ logger = get_logger(__name__)
 # CryptoCompare news API (free, no key needed for basic access)
 NEWS_API_URL = "https://min-api.cryptocompare.com/data/v2/news/"
 
-# Cache TTL in seconds (avoid hammering the API)
+# Hugging Face Inference API
+HF_API_BASE = "https://api-inference.huggingface.co/models"
+FINBERT_MODEL = "ProsusAI/finbert"
+ZERO_SHOT_MODEL = "facebook/bart-large-mnli"
+
+# Cache TTL in seconds
 CACHE_TTL = 900  # 15 minutes
 
-# Sentiment keywords (weighted)
+# HF API timeout — strict to avoid blocking the engine
+HF_TIMEOUT = aiohttp.ClientTimeout(total=5)
+
+# Critical event categories for zero-shot classification
+CRITICAL_EVENTS = [
+    "security breach or hack",
+    "rug pull or exit scam",
+    "delisting from exchange",
+    "regulatory ban or enforcement action",
+    "major partnership or adoption",
+    "routine market news",
+]
+
+# Events that should trigger immediate trade blocking
+NUKE_EVENTS = {"security breach or hack", "rug pull or exit scam", "delisting from exchange"}
+NUKE_THRESHOLD = 0.70  # Minimum confidence to trigger event blocking
+
+# Score thresholds for filtering
+STRONG_NEGATIVE = -3.0
+MODERATE_NEGATIVE = -1.5
+STRONG_POSITIVE = 3.0
+
+# --- Keyword fallback (used when HF API is unavailable) ---
 POSITIVE_KEYWORDS = {
     "bullish": 2, "surge": 2, "rally": 2, "breakout": 2, "soar": 2,
     "moon": 1, "gain": 1, "rise": 1, "up": 0.5, "high": 0.5,
@@ -42,23 +71,50 @@ NEGATIVE_KEYWORDS = {
     "rug": 3, "ponzi": 3, "warning": 1, "risk": 0.5, "decline": 1,
 }
 
-# Score thresholds for filtering
-STRONG_NEGATIVE = -3.0  # Block trade if sentiment below this
-MODERATE_NEGATIVE = -1.5  # Penalize score if below this
-STRONG_POSITIVE = 3.0
-
 
 class SentimentFilter:
-    """Keyword-based sentiment analysis from crypto news."""
+    """FinBERT-powered sentiment analysis with keyword fallback."""
 
-    def __init__(self) -> None:
-        self._cache: dict[str, tuple[float, float]] = {}  # symbol -> (score, timestamp)
+    def __init__(self, hf_api_token: str = "") -> None:
+        self._cache: dict[str, tuple[float, list[str], float]] = {}  # symbol -> (score, events, timestamp)
         self._session: aiohttp.ClientSession | None = None
+        self._hf_token = hf_api_token
+        self._hf_available = bool(hf_api_token)
+        self._hf_fail_count = 0
+        self._hf_backoff_until = 0.0
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
         return self._session
+
+    def _hf_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._hf_token}"}
+
+    def _should_try_hf(self) -> bool:
+        """Check if HF API should be attempted (not in backoff)."""
+        if not self._hf_available:
+            return False
+        if time.time() < self._hf_backoff_until:
+            return False
+        return True
+
+    def _record_hf_failure(self) -> None:
+        """Track HF API failures with exponential backoff."""
+        self._hf_fail_count += 1
+        backoff = min(300, 30 * (2 ** (self._hf_fail_count - 1)))  # 30s, 60s, 120s, 300s max
+        self._hf_backoff_until = time.time() + backoff
+        logger.warning(
+            "hf_api_backoff",
+            fail_count=self._hf_fail_count,
+            backoff_seconds=backoff,
+        )
+
+    def _record_hf_success(self) -> None:
+        """Reset failure counter on success."""
+        if self._hf_fail_count > 0:
+            self._hf_fail_count = 0
+            logger.info("hf_api_recovered")
 
     async def get_sentiment(self, symbol: str) -> float:
         """Get sentiment score for a symbol. Returns float in range ~[-10, +10].
@@ -66,26 +122,35 @@ class SentimentFilter:
         Positive = bullish sentiment, Negative = bearish sentiment.
         Returns 0.0 if no news found or on error.
         """
-        # Extract base asset from pair (e.g., "BTC/USD" -> "BTC")
         base = symbol.split("/")[0].upper()
 
         # Check cache
         cached = self._cache.get(base)
         if cached:
-            score, ts = cached
+            score, _events, ts = cached
             if time.time() - ts < CACHE_TTL:
                 return score
 
         try:
-            score = await self._fetch_and_score(base)
-            self._cache[base] = (score, time.time())
+            score, events = await self._fetch_and_score(base)
+            self._cache[base] = (score, events, time.time())
             return score
         except Exception as e:
             logger.warning("sentiment_fetch_failed", symbol=symbol, error=str(e))
             return 0.0
 
-    async def _fetch_and_score(self, asset: str) -> float:
-        """Fetch news from CryptoCompare and compute sentiment score."""
+    def get_critical_events(self, symbol: str) -> list[str]:
+        """Get cached critical events detected for a symbol."""
+        base = symbol.split("/")[0].upper()
+        cached = self._cache.get(base)
+        if cached:
+            _score, events, ts = cached
+            if time.time() - ts < CACHE_TTL:
+                return events
+        return []
+
+    async def _fetch_and_score(self, asset: str) -> tuple[float, list[str]]:
+        """Fetch news and compute sentiment using FinBERT or keyword fallback."""
         session = await self._get_session()
 
         params: dict[str, Any] = {"categories": asset, "excludeCategories": "Sponsored"}
@@ -93,50 +158,182 @@ class SentimentFilter:
         try:
             async with session.get(NEWS_API_URL, params=params) as resp:
                 if resp.status != 200:
-                    return 0.0
+                    return 0.0, []
                 data = await resp.json()
         except (aiohttp.ClientError, asyncio.TimeoutError):
-            return 0.0
+            return 0.0, []
 
         articles = data.get("Data", [])
         if not articles:
-            return 0.0
+            return 0.0, []
 
-        # Score the most recent articles (up to 20)
-        total_score = 0.0
-        articles_scored = 0
+        # Extract titles and bodies from most recent articles
+        texts = []
+        for article in articles[:10]:  # Reduced from 20 to 10 for API efficiency
+            title = (article.get("title") or "").strip()
+            body = (article.get("body") or "")[:300].strip()
+            if title:
+                texts.append(f"{title}. {body}" if body else title)
 
-        for article in articles[:20]:
-            title = (article.get("title") or "").lower()
-            body = (article.get("body") or "")[:500].lower()
-            text = f"{title} {body}"
+        if not texts:
+            return 0.0, []
 
-            article_score = 0.0
-            for word, weight in POSITIVE_KEYWORDS.items():
-                if word in text:
-                    article_score += weight
-            for word, weight in NEGATIVE_KEYWORDS.items():
-                if word in text:
-                    article_score -= weight
+        # Try FinBERT, fall back to keywords
+        if self._should_try_hf():
+            try:
+                score = await self._finbert_score(texts)
+                events = await self._detect_critical_events(texts)
+                self._record_hf_success()
 
-            total_score += article_score
-            articles_scored += 1
+                logger.debug(
+                    "sentiment_scored_finbert",
+                    asset=asset,
+                    articles=len(texts),
+                    score=round(score, 2),
+                    events=events,
+                )
+                return score, events
+            except Exception as e:
+                logger.warning("finbert_failed_using_keywords", asset=asset, error=str(e))
+                self._record_hf_failure()
 
-        if articles_scored == 0:
-            return 0.0
-
-        # Normalize by number of articles
-        normalized = total_score / articles_scored
-
+        # Keyword fallback
+        score = self._keyword_score(texts)
         logger.debug(
-            "sentiment_scored",
+            "sentiment_scored_keywords",
             asset=asset,
-            articles=articles_scored,
-            raw_score=round(total_score, 2),
-            normalized=round(normalized, 2),
+            articles=len(texts),
+            score=round(score, 2),
         )
+        return score, []
+
+    async def _finbert_score(self, texts: list[str]) -> float:
+        """Score texts using FinBERT via HF Inference API.
+
+        FinBERT returns: positive, negative, neutral for each text.
+        We convert to a single score: positive contributes +1, negative -1,
+        neutral 0, weighted by confidence. Then scale to [-10, +10] range.
+        """
+        session = await self._get_session()
+        url = f"{HF_API_BASE}/{FINBERT_MODEL}"
+
+        total_score = 0.0
+        scored = 0
+
+        # Send texts in a single batch request
+        try:
+            async with session.post(
+                url,
+                json={"inputs": texts},
+                headers=self._hf_headers(),
+                timeout=HF_TIMEOUT,
+            ) as resp:
+                if resp.status == 503:
+                    # Model loading — raise to trigger fallback
+                    raise RuntimeError("FinBERT model loading (503)")
+                if resp.status != 200:
+                    raise RuntimeError(f"FinBERT API returned {resp.status}")
+                results = await resp.json()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            raise RuntimeError(f"FinBERT request failed: {e}") from e
+
+        # results is list of list of {label, score} for each text
+        for article_results in results:
+            if not isinstance(article_results, list):
+                continue
+            # Find best label
+            best = max(article_results, key=lambda x: x.get("score", 0))
+            label = best.get("label", "neutral").lower()
+            confidence = best.get("score", 0.5)
+
+            if label == "positive":
+                total_score += confidence
+            elif label == "negative":
+                total_score -= confidence
+            # neutral contributes 0
+            scored += 1
+
+        if scored == 0:
+            return 0.0
+
+        # Normalize: raw is in [-1, +1] per article, averaged
+        # Scale to [-10, +10] range to match existing thresholds
+        normalized = (total_score / scored) * 10.0
 
         return normalized
+
+    async def _detect_critical_events(self, texts: list[str]) -> list[str]:
+        """Detect critical events using zero-shot classification.
+
+        Only classifies the first 3 headlines to minimize API calls.
+        Returns list of detected critical event types.
+        """
+        session = await self._get_session()
+        url = f"{HF_API_BASE}/{ZERO_SHOT_MODEL}"
+
+        detected_events: list[str] = []
+
+        # Only check top 3 headlines for critical events
+        for text in texts[:3]:
+            try:
+                async with session.post(
+                    url,
+                    json={
+                        "inputs": text,
+                        "parameters": {
+                            "candidate_labels": CRITICAL_EVENTS,
+                            "multi_label": False,
+                        },
+                    },
+                    headers=self._hf_headers(),
+                    timeout=HF_TIMEOUT,
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    result = await resp.json()
+
+                labels = result.get("labels", [])
+                scores = result.get("scores", [])
+
+                if labels and scores:
+                    top_label = labels[0]
+                    top_score = scores[0]
+
+                    if top_label in NUKE_EVENTS and top_score >= NUKE_THRESHOLD:
+                        detected_events.append(f"{top_label} ({top_score:.0%})")
+                        logger.warning(
+                            "critical_event_detected",
+                            event=top_label,
+                            confidence=round(top_score, 2),
+                            headline=text[:100],
+                        )
+
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                continue
+
+        return detected_events
+
+    def _keyword_score(self, texts: list[str]) -> float:
+        """Fallback keyword-based scoring."""
+        total_score = 0.0
+        scored = 0
+
+        for text in texts:
+            text_lower = text.lower()
+            article_score = 0.0
+            for word, weight in POSITIVE_KEYWORDS.items():
+                if word in text_lower:
+                    article_score += weight
+            for word, weight in NEGATIVE_KEYWORDS.items():
+                if word in text_lower:
+                    article_score -= weight
+            total_score += article_score
+            scored += 1
+
+        if scored == 0:
+            return 0.0
+
+        return total_score / scored
 
     def should_block_trade(self, sentiment_score: float, direction: str) -> bool:
         """Check if sentiment is strongly against the proposed trade direction.
@@ -149,6 +346,16 @@ class SentimentFilter:
             return True
         return False
 
+    def has_critical_event(self, symbol: str) -> str | None:
+        """Check if a critical event was detected for this symbol.
+
+        Returns the event description if found, None otherwise.
+        """
+        events = self.get_critical_events(symbol)
+        if events:
+            return "; ".join(events)
+        return None
+
     def score_adjustment(self, sentiment_score: float, direction: str) -> float:
         """Return a confluence score adjustment based on sentiment alignment.
 
@@ -156,21 +363,21 @@ class SentimentFilter:
         """
         if direction == "long":
             if sentiment_score <= STRONG_NEGATIVE:
-                return -10.0  # Strong penalty
+                return -10.0
             elif sentiment_score <= MODERATE_NEGATIVE:
-                return -5.0  # Moderate penalty
+                return -5.0
             elif sentiment_score >= STRONG_POSITIVE:
-                return 5.0  # Bonus
+                return 5.0
             elif sentiment_score > 0:
-                return 2.0  # Mild bonus
+                return 2.0
             return 0.0
         elif direction == "short":
             if sentiment_score >= STRONG_POSITIVE:
-                return -10.0  # Strong penalty (market bullish, shorting risky)
+                return -10.0
             elif sentiment_score > MODERATE_NEGATIVE:
                 return -5.0 if sentiment_score > 0 else 0.0
             elif sentiment_score <= STRONG_NEGATIVE:
-                return 5.0  # Bonus — market is bearish, short aligns
+                return 5.0
             return 0.0
         return 0.0
 

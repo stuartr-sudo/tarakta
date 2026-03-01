@@ -53,7 +53,7 @@ class TradingEngine:
         # Self-improving components
         self.trade_analyzer = TradeAnalyzer(repo)
         self.adaptive_threshold = AdaptiveThreshold(config.entry_threshold)
-        self.sentiment_filter = SentimentFilter()
+        self.sentiment_filter = SentimentFilter(hf_api_token=config.hf_api_token)
 
         self.state: EngineState | None = None
         self.portfolio: PortfolioTracker | None = None
@@ -280,6 +280,30 @@ class TradingEngine:
                             "direction": signal.direction or "none",
                             "score": signal.score,
                             "reasons": signal.reasons + [f"BLOCKED:sentiment={sentiment_score:.1f}"],
+                            "components": {"volume_24h": vol_24h, "sentiment": sentiment_score},
+                            "current_price": signal.entry_price,
+                            "acted_on": False,
+                            "scan_cycle": cycle,
+                        }
+                    )
+                    signals_saved += 1
+                    continue
+
+                # --- Critical event detection (zero-shot classification) ---
+                critical_event = self.sentiment_filter.has_critical_event(signal.symbol)
+                if critical_event:
+                    logger.warning(
+                        "trade_blocked_critical_event",
+                        symbol=signal.symbol,
+                        event=critical_event,
+                    )
+                    vol_24h = self.exchange.get_24h_volume(signal.symbol)
+                    await self.repo.insert_signal(
+                        {
+                            "symbol": signal.symbol,
+                            "direction": signal.direction or "none",
+                            "score": signal.score,
+                            "reasons": signal.reasons + [f"BLOCKED:critical_event={critical_event}"],
                             "components": {"volume_24h": vol_24h, "sentiment": sentiment_score},
                             "current_price": signal.entry_price,
                             "acted_on": False,

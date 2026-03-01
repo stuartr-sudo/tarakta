@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     max_position_volume_pct: float = 0.001  # Position size must be < 0.1% of 24h volume
     quote_currencies: list[str] = Field(default_factory=lambda: ["USD", "USDT"])
 
+    # Hugging Face Inference API
+    hf_api_token: str = ""  # For FinBERT sentiment + zero-shot classification
+
     # Logging
     log_level: str = "INFO"
     log_format: Literal["json", "text"] = "json"
