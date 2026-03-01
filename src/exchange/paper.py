@@ -130,5 +130,9 @@ class PaperExchange:
         """Delegate to live exchange."""
         return await self.live.get_tradeable_pairs(min_volume_usd, quote_currencies, exclude)
 
+    def get_24h_volume(self, symbol: str) -> float:
+        """Delegate to live exchange."""
+        return self.live.get_24h_volume(symbol)
+
     async def close(self) -> None:
         await self.live.close()

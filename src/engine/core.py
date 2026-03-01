@@ -98,6 +98,11 @@ class TradingEngine:
                     self.portfolio.reset_daily()
                     self.state.daily_start_balance = self.portfolio.current_balance
                     self.state.daily_pnl = 0.0
+                    self.state.last_scan_time = datetime.now(timezone.utc)
+                    logger.info(
+                        "daily_reset",
+                        daily_start_balance=self.state.daily_start_balance,
+                    )
 
                 if tick_type == TickType.MONITOR:
                     await self._monitor_tick()
@@ -217,13 +222,14 @@ class TradingEngine:
                         trades_entered += 1
 
                 # Log the signal regardless of whether trade was executed
+                vol_24h = self.exchange.get_24h_volume(signal.symbol)
                 await self.repo.insert_signal(
                     {
                         "symbol": signal.symbol,
                         "direction": signal.direction or "none",
                         "score": signal.score,
                         "reasons": signal.reasons,
-                        "components": {},
+                        "components": {"volume_24h": vol_24h},
                         "current_price": signal.entry_price,
                         "acted_on": position is not None,
                         "trade_id": position.trade_id if position else None,

@@ -150,13 +150,20 @@ class KrakenClient:
             self._last_request_time = time.time()
 
         filtered = []
+        volume_map = {}
         for symbol, ticker in tickers.items():
-            quote_vol = ticker.get("quoteVolume") or 0
-            if float(quote_vol) >= min_volume_usd:
+            quote_vol = float(ticker.get("quoteVolume") or 0)
+            if quote_vol >= min_volume_usd:
                 filtered.append(symbol)
+                volume_map[symbol] = quote_vol
 
-        logger.info("pairs_scanned", total_candidates=len(candidates), filtered=len(filtered))
+        logger.info("pairs_scanned", total_candidates=len(candidates), filtered=len(filtered), min_volume=min_volume_usd)
+        self._last_volume_map = volume_map
         return sorted(filtered)
+
+    def get_24h_volume(self, symbol: str) -> float:
+        """Return the last known 24h quote volume for a symbol."""
+        return getattr(self, "_last_volume_map", {}).get(symbol, 0.0)
 
     async def close(self) -> None:
         await self.exchange.close()
