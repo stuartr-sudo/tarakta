@@ -89,6 +89,7 @@
                 Switch to live only when you are confident in the strategy.
                 {% endif %}
             </p>
+            {% if role == 'admin' %}
             <form method="post" action="/settings/toggle-mode">
                 {% if state and state.mode == 'live' %}
                 <button type="submit" class="btn primary">Switch to Paper Mode</button>
@@ -96,6 +97,9 @@
                 <button type="submit" class="btn danger">Switch to Live Mode</button>
                 {% endif %}
             </form>
+            {% else %}
+            <p class="text-muted">View-only access. Mode changes require admin login.</p>
+            {% endif %}
         </div>
     </div>
 </div>

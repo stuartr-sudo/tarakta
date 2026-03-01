@@ -93,7 +93,7 @@
             <span class="badge text-blue">{{ trades | length }}</span>
             <button id="refresh-btn" class="btn" onclick="manualRefresh()" style="font-size:0.8rem; padding:4px 10px;">Refresh Prices</button>
             <span id="last-updated" class="text-muted" style="font-size:0.7rem;"></span>
-            {% if trades %}
+            {% if trades and role == 'admin' %}
             <button id="nuke-btn" class="btn btn-nuke" onclick="confirmNuke()">NUKE ALL</button>
             {% endif %}
         </div>

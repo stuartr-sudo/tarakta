@@ -38,6 +38,7 @@
                     <div class="timer-bar-fill" id="timerBarFill"></div>
                 </div>
             </div>
+            {% if role == 'viewer' %}<span class="badge text-muted" style="font-size:0.7rem;">view-only</span>{% endif %}
             <a href="/logout" class="btn nav-logout">Logout</a>
         </div>
     </nav>

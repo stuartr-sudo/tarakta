@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from src.config import Settings
-from src.dashboard.auth import login_required, verify_password
+from src.dashboard.auth import admin_required, login_required, verify_password
 from src.data.repository import Repository
 
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
@@ -20,7 +20,8 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
     async def _base_context(request: Request) -> dict:
         """Common context for all authenticated pages (mode banner, nav)."""
         state = await repo.get_engine_state()
-        return {"request": request, "state": state, "config": config}
+        role = request.session.get("role", "viewer")
+        return {"request": request, "state": state, "config": config, "role": role}
 
     @router.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request):
@@ -32,11 +33,24 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         username: str = Form(...),
         password: str = Form(...),
     ):
+        # Check admin credentials
         if username == config.dashboard_username and verify_password(
             password, config.dashboard_password_hash
         ):
             request.session["authenticated"] = True
+            request.session["role"] = "admin"
             return RedirectResponse(url="/", status_code=303)
+
+        # Check viewer credentials
+        if (
+            config.viewer_password_hash
+            and username == config.viewer_username
+            and verify_password(password, config.viewer_password_hash)
+        ):
+            request.session["authenticated"] = True
+            request.session["role"] = "viewer"
+            return RedirectResponse(url="/", status_code=303)
+
         return templates.TemplateResponse(
             "login.html", {"request": request, "error": "Invalid credentials"}
         )
@@ -96,7 +110,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         return templates.TemplateResponse("settings.html", ctx)
 
     @router.post("/settings/toggle-mode")
-    @login_required
+    @admin_required
     async def toggle_mode(request: Request):
         state = await repo.get_engine_state()
         if state:

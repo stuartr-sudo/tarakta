@@ -17,12 +17,26 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 def login_required(func: Callable) -> Callable:
-    """Decorator that redirects to /login if not authenticated."""
+    """Decorator that redirects to /login if not authenticated (any role)."""
 
     @wraps(func)
     async def wrapper(request: Request, *args, **kwargs):
         if not request.session.get("authenticated"):
             return RedirectResponse(url="/login", status_code=303)
+        return await func(request, *args, **kwargs)
+
+    return wrapper
+
+
+def admin_required(func: Callable) -> Callable:
+    """Decorator that restricts access to admin role only."""
+
+    @wraps(func)
+    async def wrapper(request: Request, *args, **kwargs):
+        if not request.session.get("authenticated"):
+            return RedirectResponse(url="/login", status_code=303)
+        if request.session.get("role") != "admin":
+            return RedirectResponse(url="/", status_code=303)
         return await func(request, *args, **kwargs)
 
     return wrapper

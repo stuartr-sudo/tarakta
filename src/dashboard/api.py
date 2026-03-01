@@ -5,7 +5,7 @@ import asyncio
 import ccxt.async_support as ccxt
 from fastapi import APIRouter, Request
 
-from src.dashboard.auth import login_required
+from src.dashboard.auth import admin_required, login_required
 from src.data.repository import Repository
 from src.exchange.models import OrderResult
 from src.utils.logging import get_logger
@@ -163,7 +163,7 @@ def create_router(repo: Repository, exchange=None, api_key: str = "", api_secret
         }
 
     @router.post("/nuke")
-    @login_required
+    @admin_required
     async def nuke_all_positions(request: Request):
         """Close ALL open positions at market price immediately."""
         if not _dash_exchange:

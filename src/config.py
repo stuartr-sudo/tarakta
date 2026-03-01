@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     # Dashboard
     dashboard_username: str = "admin"
     dashboard_password_hash: str = ""
+    viewer_username: str = "viewer"
+    viewer_password_hash: str = ""
     session_secret: str = "change-me-to-a-random-32-char-string"
 
     # Trading

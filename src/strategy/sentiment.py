@@ -338,11 +338,12 @@ class SentimentFilter:
     def should_block_trade(self, sentiment_score: float, direction: str) -> bool:
         """Check if sentiment is strongly against the proposed trade direction.
 
+        Accepts both scanner labels (bullish/bearish) and position labels (long/short).
         Returns True if the trade should be blocked.
         """
-        if direction == "long" and sentiment_score <= STRONG_NEGATIVE:
+        if direction in ("long", "bullish") and sentiment_score <= STRONG_NEGATIVE:
             return True
-        if direction == "short" and sentiment_score >= STRONG_POSITIVE:
+        if direction in ("short", "bearish") and sentiment_score >= STRONG_POSITIVE:
             return True
         return False
 
@@ -359,9 +360,10 @@ class SentimentFilter:
     def score_adjustment(self, sentiment_score: float, direction: str) -> float:
         """Return a confluence score adjustment based on sentiment alignment.
 
+        Accepts both scanner labels (bullish/bearish) and position labels (long/short).
         Returns a value between -10 and +5 to add to the confluence score.
         """
-        if direction == "long":
+        if direction in ("long", "bullish"):
             if sentiment_score <= STRONG_NEGATIVE:
                 return -10.0
             elif sentiment_score <= MODERATE_NEGATIVE:
@@ -371,7 +373,7 @@ class SentimentFilter:
             elif sentiment_score > 0:
                 return 2.0
             return 0.0
-        elif direction == "short":
+        elif direction in ("short", "bearish"):
             if sentiment_score >= STRONG_POSITIVE:
                 return -10.0
             elif sentiment_score > MODERATE_NEGATIVE:
