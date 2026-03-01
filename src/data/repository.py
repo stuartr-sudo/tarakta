@@ -98,6 +98,18 @@ class Repository:
         )
         return result.data or []
 
+    async def get_daily_realized_pnl(self) -> float:
+        """Sum pnl_usd of trades closed today (UTC)."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00+00:00")
+        result = await asyncio.to_thread(
+            _exec,
+            self.db.table("trades")
+            .select("pnl_usd")
+            .eq("status", "closed")
+            .gte("exit_time", today),
+        )
+        return sum(float(t.get("pnl_usd", 0)) for t in (result.data or []))
+
     async def get_trade_stats(self, mode: str | None = None) -> dict:
         query = self.db.table("trades").select("*").eq("status", "closed")
         if mode:

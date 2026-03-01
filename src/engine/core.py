@@ -72,6 +72,31 @@ class TradingEngine:
         )
         self.portfolio.open_positions = dict(self.state.open_positions)
         self.portfolio.daily_pnl = self.state.daily_pnl
+        self.portfolio.total_pnl = self.state.total_pnl
+
+        # Reconcile P&L from closed trades (DB is ground truth)
+        stats = await self.repo.get_trade_stats()
+        if stats["total"] > 0:
+            db_total_pnl = stats["total_pnl"]
+            if abs(db_total_pnl - self.portfolio.total_pnl) > 0.01:
+                logger.info(
+                    "total_pnl_reconciled",
+                    old=self.portfolio.total_pnl,
+                    from_db=db_total_pnl,
+                )
+                self.portfolio.total_pnl = db_total_pnl
+                self.state.total_pnl = db_total_pnl
+
+        # Reconcile daily P&L from today's closed trades
+        db_daily_pnl = await self.repo.get_daily_realized_pnl()
+        if abs(db_daily_pnl - self.portfolio.daily_pnl) > 0.01:
+            logger.info(
+                "daily_pnl_reconciled",
+                old=self.portfolio.daily_pnl,
+                from_db=db_daily_pnl,
+            )
+            self.portfolio.daily_pnl = db_daily_pnl
+            self.state.daily_pnl = db_daily_pnl
 
         # Reconcile open positions against trade records
         await self._reconcile_positions()
@@ -268,6 +293,7 @@ class TradingEngine:
         self.state.current_balance = self.portfolio.current_balance
         self.state.peak_balance = self.portfolio.peak_balance
         self.state.daily_pnl = self.portfolio.daily_pnl
+        self.state.total_pnl = self.portfolio.total_pnl
 
         await self._persist_state()
 
@@ -330,6 +356,7 @@ class TradingEngine:
         self.state.current_balance = self.portfolio.current_balance
         self.state.peak_balance = self.portfolio.peak_balance
         self.state.daily_pnl = self.portfolio.daily_pnl
+        self.state.total_pnl = self.portfolio.total_pnl
 
     async def _persist_state(self) -> None:
         """Save engine state and portfolio snapshot to DB."""

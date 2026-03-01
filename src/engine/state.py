@@ -41,6 +41,7 @@ class EngineState:
         state.daily_start_balance = float(data.get("daily_start_bal", 100.0))
         state.peak_balance = float(data.get("peak_balance", 100.0))
         state.daily_pnl = float(data.get("daily_pnl_usd", 0))
+        state.total_pnl = float(data.get("total_pnl_usd", 0))
         state.cycle_count = int(data.get("cycle_count", 0))
 
         if data.get("last_scan_time"):
