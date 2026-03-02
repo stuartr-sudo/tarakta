@@ -27,6 +27,9 @@ class Position:
     entry_time: datetime
     cost_usd: float = 0.0
     direction: str = "long"  # "long" or "short"
+    leverage: int = 1
+    margin_used: float = 0.0  # actual margin locked (cost_usd / leverage)
+    liquidation_price: float = 0.0
 
 
 @dataclass

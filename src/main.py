@@ -33,14 +33,24 @@ async def main() -> None:
         api_key, api_secret = config.binance_api_key, config.binance_api_secret
     else:
         api_key, api_secret = config.kraken_api_key, config.kraken_api_secret
-    live_exchange = create_exchange(config.exchange_name, api_key, api_secret)
+    live_exchange = create_exchange(
+        config.exchange_name, api_key, api_secret,
+        account_type=config.account_type,
+        leverage=config.leverage,
+        margin_mode=config.margin_mode,
+    )
 
     if config.trading_mode == "paper":
-        exchange = PaperExchange(initial_balance=config.initial_balance, live_exchange=live_exchange)
-        logger.info("paper_mode_active", balance=config.initial_balance)
+        exchange = PaperExchange(
+            initial_balance=config.initial_balance,
+            live_exchange=live_exchange,
+            account_type=config.account_type,
+            leverage=config.leverage,
+        )
+        logger.info("paper_mode_active", balance=config.initial_balance, account_type=config.account_type, leverage=config.leverage)
     else:
         exchange = live_exchange
-        logger.info("live_mode_active")
+        logger.info("live_mode_active", account_type=config.account_type, leverage=config.leverage)
 
     # Candle manager
     candle_manager = CandleManager(exchange=live_exchange, repo=repo)

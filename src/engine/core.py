@@ -140,6 +140,8 @@ class TradingEngine:
         logger.info(
             "engine_started",
             mode=self.state.mode,
+            account_type=self.config.account_type,
+            leverage=self.config.leverage,
             balance=self.state.current_balance,
             positions=len(self.state.open_positions),
         )
@@ -150,11 +152,8 @@ class TradingEngine:
 
                 # Daily reset check
                 if is_new_day(self.state.last_scan_time):
-                    # Use equity (cash + open position costs) so daily drawdown
-                    # comparison is consistent with risk manager's equity calc
-                    equity = self.portfolio.current_balance + sum(
-                        pos.cost_usd for pos in self.portfolio.open_positions.values()
-                    )
+                    # Use equity (cash + deployed capital) — margin-aware
+                    equity = self.portfolio.get_equity()
                     self.portfolio.reset_daily()
                     self.portfolio.daily_start_balance = equity
                     self.state.daily_start_balance = equity
@@ -201,10 +200,8 @@ class TradingEngine:
         cycle = self.state.cycle_count
         logger.info("primary_tick_start", cycle=cycle)
 
-        # Circuit breaker check — use equity (cash + open positions), not just cash
-        equity = self.portfolio.current_balance + sum(
-            pos.cost_usd for pos in self.portfolio.open_positions.values()
-        )
+        # Circuit breaker check — use equity (cash + deployed capital, margin-aware)
+        equity = self.portfolio.get_equity()
         cb_status = self.circuit_breaker.check(
             current_balance=equity,
             daily_start_balance=self.portfolio.daily_start_balance,
@@ -463,9 +460,53 @@ class TradingEngine:
         )
 
     async def _monitor_tick(self) -> None:
-        """Check open positions for SL/TP/trailing stop hits."""
+        """Check open positions for SL/TP/trailing stop + liquidation proximity."""
         if not self.portfolio.open_positions:
             return
+
+        # Liquidation proximity check for leveraged positions
+        from src.exchange.models import ExitSignal
+        liq_exits: list[ExitSignal] = []
+        for symbol, pos in list(self.portfolio.open_positions.items()):
+            if pos.leverage <= 1 or pos.liquidation_price <= 0:
+                continue
+            try:
+                ticker = await self.exchange.fetch_ticker(symbol)
+                cur_price = float(ticker["last"])
+                dist_pct = abs(cur_price - pos.liquidation_price) / cur_price
+                if dist_pct < 0.02:
+                    logger.warning(
+                        "liquidation_proximity_exit",
+                        symbol=symbol, current_price=cur_price,
+                        liquidation_price=pos.liquidation_price,
+                        distance_pct=round(dist_pct * 100, 2),
+                    )
+                    liq_exits.append(ExitSignal(symbol=symbol, reason="liquidation_proximity", price=cur_price))
+            except Exception as e:
+                logger.warning("liq_check_failed", symbol=symbol, error=str(e))
+
+        for liq_exit in liq_exits:
+            liq_pos = self.portfolio.open_positions.get(liq_exit.symbol)
+            if not liq_pos:
+                continue
+            liq_result, liq_pnl = await self.order_executor.execute_exit(
+                symbol=liq_exit.symbol, position=liq_pos,
+                reason=liq_exit.reason, current_price=liq_exit.price,
+            )
+            if liq_result:
+                liq_pnl_pct = (liq_pnl / liq_pos.cost_usd * 100) if liq_pos.cost_usd > 0 else 0
+                await self.repo.close_trade(
+                    trade_id=liq_pos.trade_id,
+                    exit_price=liq_result.avg_price or liq_exit.price,
+                    exit_quantity=liq_result.filled_quantity or liq_pos.quantity,
+                    exit_order_id=liq_result.order_id,
+                    exit_reason=liq_exit.reason,
+                    pnl_usd=liq_pnl, pnl_percent=liq_pnl_pct, fees_usd=liq_result.fee,
+                )
+                self.portfolio.record_exit(liq_exit.symbol, liq_exit.price, liq_result.fee)
+                self.risk_manager.record_stop_out(liq_exit.symbol)
+                self.adaptive_threshold.record_outcome(is_win=(liq_pnl > 0))
+                self.state.open_positions.pop(liq_exit.symbol, None)
 
         exits = await self.position_monitor.check_positions(
             self.portfolio.open_positions, self.exchange
@@ -584,7 +625,11 @@ class TradingEngine:
                         pnl = float(db_trade.get("pnl_usd", 0))
                         fees = float(db_trade.get("fees_usd", 0))
 
-                        if position.direction == "short":
+                        if position.leverage > 1:
+                            # Leveraged: return margin + PnL
+                            margin = position.margin_used or (position.cost_usd / position.leverage)
+                            self.portfolio.current_balance += margin + pnl
+                        elif position.direction == "short":
                             self.portfolio.current_balance += position.cost_usd + pnl
                         else:
                             exit_price = db_trade.get("exit_price") or position.entry_price
@@ -631,6 +676,10 @@ class TradingEngine:
             if symbol in self.state.open_positions:
                 continue  # Already tracked (different trade_id edge case)
 
+            leverage = int(t.get("leverage", 1) or 1)
+            cost_usd = float(t.get("entry_cost_usd", 0))
+            margin_used = cost_usd / leverage if leverage > 1 else 0.0
+
             position = Position(
                 trade_id=t["id"],
                 symbol=symbol,
@@ -641,13 +690,17 @@ class TradingEngine:
                 take_profit=float(t.get("take_profit")) if t.get("take_profit") else None,
                 high_water_mark=float(t.get("entry_price", 0)),
                 entry_time=datetime.fromisoformat(t["entry_time"]) if t.get("entry_time") else datetime.now(timezone.utc),
-                cost_usd=float(t.get("entry_cost_usd", 0)),
+                cost_usd=cost_usd,
+                leverage=leverage,
+                margin_used=margin_used,
+                liquidation_price=float(t.get("liquidation_price", 0) or 0),
             )
 
             self.state.open_positions[symbol] = position
             self.portfolio.open_positions[symbol] = position
-            # Deduct cost from balance (was already deducted when trade was placed)
-            self.portfolio.current_balance -= position.cost_usd
+            # Deduct margin (for leveraged) or full cost (for spot)
+            deduction = margin_used if leverage > 1 else cost_usd
+            self.portfolio.current_balance -= deduction
             restored.append(symbol)
 
             logger.info(

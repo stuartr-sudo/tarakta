@@ -45,6 +45,7 @@ def create_dashboard_app(config: Settings, repo: Repository, exchange=None) -> F
             exchange_name=config.exchange_name,
             api_key=dash_api_key,
             api_secret=dash_api_secret,
+            account_type=config.account_type,
         ),
         prefix="/api",
     )

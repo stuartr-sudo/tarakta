@@ -23,6 +23,8 @@ class RiskManager:
         self._symbol_cooldowns: dict[str, datetime] = {}
         self._exchange_name = getattr(exchange, "exchange_name", config.exchange_name) if exchange else config.exchange_name
         self._min_order_usd = getattr(exchange, "min_order_usd", 5.0) if exchange else 5.0
+        self._account_type = config.account_type
+        self._leverage = config.leverage
 
     def record_stop_out(self, symbol: str) -> None:
         """Record a stop-loss exit — symbol goes on cooldown."""
@@ -64,37 +66,58 @@ class RiskManager:
         if sl_distance == 0:
             return PositionSize(valid=False, reason="SL distance is zero")
 
+        # For futures with leverage: ensure SL triggers before liquidation
+        if self._leverage > 1:
+            liq_distance = entry_price / self._leverage
+            if sl_distance > liq_distance * 0.8:
+                return PositionSize(
+                    valid=False,
+                    reason=f"SL distance ({sl_distance:.4f}) too wide for {self._leverage}x leverage "
+                           f"(liquidation at {liq_distance:.4f}, 80% safety at {liq_distance * 0.8:.4f})",
+                )
+
         risk_amount = balance * self.max_risk_pct
         quantity = risk_amount / sl_distance
         cost = quantity * entry_price
 
-        # Account for fees + slippage (~0.36% total)
-        fee_multiplier = 1.004
+        # Account for fees + slippage (~0.36% total for spot, ~0.14% for futures)
+        fee_multiplier = 1.002 if self._account_type == "futures" else 1.004
         total_cost = cost * fee_multiplier
+
+        # For futures: the margin required is notional / leverage
+        if self._leverage > 1:
+            margin_cost = total_cost / self._leverage
+        else:
+            margin_cost = total_cost
 
         # Cap per position (percentage of balance)
         if self.max_position_pct < 1.0:
-            max_position_cost = balance * self.max_position_pct
-            if total_cost > max_position_cost:
-                quantity = max_position_cost / (entry_price * fee_multiplier)
+            max_margin = balance * self.max_position_pct
+            if margin_cost > max_margin:
+                # Scale down: margin_cost = max_margin, so total_cost = max_margin * leverage
+                total_cost = max_margin * self._leverage
+                quantity = total_cost / (entry_price * fee_multiplier)
                 cost = quantity * entry_price
-                total_cost = cost * fee_multiplier
+                margin_cost = total_cost / self._leverage if self._leverage > 1 else total_cost
 
-        # Cannot exceed available balance
-        if total_cost > balance:
-            quantity = balance / (entry_price * fee_multiplier)
+        # Cannot exceed available balance (margin check)
+        if margin_cost > balance:
+            margin_cost = balance
+            total_cost = margin_cost * self._leverage if self._leverage > 1 else margin_cost
+            quantity = total_cost / (entry_price * fee_multiplier)
             cost = quantity * entry_price
 
         actual_risk = quantity * sl_distance
 
-        # Check exchange minimum order size
-        if total_cost < self._min_order_usd:
-            return PositionSize(valid=False, reason=f"Position cost ${total_cost:.2f} below {self._exchange_name} minimum ~${self._min_order_usd:.0f}")
+        # Check exchange minimum order size (notional value, not margin)
+        notional = quantity * entry_price
+        if notional < self._min_order_usd:
+            return PositionSize(valid=False, reason=f"Position notional ${notional:.2f} below {self._exchange_name} minimum ~${self._min_order_usd:.0f}")
 
         return PositionSize(
             valid=True,
             quantity=quantity,
-            cost_usd=quantity * entry_price,
+            cost_usd=notional,  # Full notional value
             risk_usd=actual_risk,
             risk_pct=actual_risk / balance if balance > 0 else 0,
         )
@@ -111,20 +134,25 @@ class RiskManager:
     ) -> TradeValidation:
         """Pre-trade validation checks."""
         # Spot account cannot short — reject bearish signals
-        if signal.direction == "bearish":
+        if signal.direction == "bearish" and self._account_type == "spot":
             return TradeValidation(
                 allowed=False,
                 reason="Spot accounts cannot short. Bearish signal rejected.",
             )
 
-        # Max total exposure (50% of equity = cash + open positions)
-        equity = current_balance + total_exposure_usd
+        # Max total exposure (pct of equity = cash + open positions)
+        # For futures: exposure is margin-based (notional / leverage)
+        if self._leverage > 1:
+            effective_exposure = total_exposure_usd / self._leverage
+        else:
+            effective_exposure = total_exposure_usd
+        equity = current_balance + effective_exposure
         if equity > 0:
             max_exposure = equity * self.max_exposure_pct
-            if total_exposure_usd >= max_exposure:
+            if effective_exposure >= max_exposure:
                 return TradeValidation(
                     allowed=False,
-                    reason=f"Total exposure ${total_exposure_usd:.2f} exceeds {self.max_exposure_pct:.0%} of equity (${max_exposure:.2f})",
+                    reason=f"Total exposure ${effective_exposure:.2f} (margin) exceeds {self.max_exposure_pct:.0%} of equity (${max_exposure:.2f})",
                 )
 
         # Max concurrent positions

@@ -70,6 +70,9 @@ class EngineState:
                         entry_time=entry_time,
                         cost_usd=float(pos_data.get("cost_usd", 0)),
                         direction=pos_data.get("direction", "long"),
+                        leverage=int(pos_data.get("leverage", 1) or 1),
+                        margin_used=float(pos_data.get("margin_used", 0) or 0),
+                        liquidation_price=float(pos_data.get("liquidation_price", 0) or 0),
                     )
                 except (ValueError, TypeError, KeyError) as e:
                     logger.warning("position_restore_failed", symbol=sym, error=str(e))

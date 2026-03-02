@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     viewer_password_hash: str = ""
     session_secret: str = "change-me-to-a-random-32-char-string"
 
+    # Account type
+    account_type: Literal["spot", "margin", "futures"] = "spot"
+    leverage: int = 1  # 1x–10x (futures/margin)
+    margin_mode: Literal["isolated", "cross"] = "isolated"  # futures only
+
     # Trading
     trading_mode: Literal["paper", "live"] = "paper"
     initial_balance: float = 100.0
@@ -55,3 +60,12 @@ class Settings(BaseSettings):
     port: int = 8080
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if self.leverage < 1:
+            self.leverage = 1
+        if self.leverage > 10:
+            self.leverage = 10
+        if self.account_type == "spot":
+            self.leverage = 1

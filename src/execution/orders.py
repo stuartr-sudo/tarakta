@@ -88,17 +88,32 @@ class OrderExecutor:
 
         # Build position
         direction = "long" if is_long else "short"
+        entry_px = result.avg_price if result.avg_price > 0 else signal.entry_price
+        leverage = getattr(self.exchange, "leverage", 1) or 1
+        margin_used = pos_size.cost_usd / leverage if leverage > 1 else 0.0
+        # Calculate liquidation price
+        if leverage > 1:
+            if is_long:
+                liq_price = entry_px * (1 - 1 / leverage * 0.95)
+            else:
+                liq_price = entry_px * (1 + 1 / leverage * 0.95)
+        else:
+            liq_price = 0.0
+
         position = Position(
             trade_id="",
             symbol=signal.symbol,
             direction=direction,
-            entry_price=result.avg_price if result.avg_price > 0 else signal.entry_price,
+            entry_price=entry_px,
             quantity=result.filled_quantity if result.filled_quantity > 0 else pos_size.quantity,
             stop_loss=sl_price,
             take_profit=tp_price,
-            high_water_mark=result.avg_price if result.avg_price > 0 else signal.entry_price,
+            high_water_mark=entry_px,
             entry_time=datetime.now(timezone.utc),
             cost_usd=pos_size.cost_usd,
+            leverage=leverage,
+            margin_used=margin_used,
+            liquidation_price=liq_price,
         )
 
         trade_record = {
@@ -119,6 +134,9 @@ class OrderExecutor:
             "signal_reasons": signal.reasons,
             "timeframes_used": {"htf": "4h", "entry": "15m"},
             "fees_usd": result.fee,
+            "leverage": leverage,
+            "margin_used": margin_used,
+            "liquidation_price": liq_price,
         }
 
         logger.info(
@@ -131,6 +149,7 @@ class OrderExecutor:
             tp=tp_price,
             rr=f"{rr_ratio:.1f}",
             risk_usd=pos_size.risk_usd,
+            leverage=leverage,
             score=signal.score,
         )
 

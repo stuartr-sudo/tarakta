@@ -27,13 +27,22 @@ class PortfolioTracker:
     def record_entry(self, position: Position) -> None:
         """Record a new position entry."""
         self.open_positions[position.symbol] = position
-        self.current_balance -= position.cost_usd
+
+        # For leveraged positions, only deduct the margin (notional / leverage)
+        if position.leverage > 1:
+            deduction = position.margin_used or (position.cost_usd / position.leverage)
+        else:
+            deduction = position.cost_usd
+        self.current_balance -= deduction
+
         logger.info(
             "position_opened",
             symbol=position.symbol,
             entry_price=position.entry_price,
             quantity=position.quantity,
             cost=position.cost_usd,
+            margin=deduction,
+            leverage=position.leverage,
             balance=self.current_balance,
         )
 
@@ -44,15 +53,24 @@ class PortfolioTracker:
             logger.warning("exit_no_position", symbol=symbol)
             return 0.0
 
-        if position.direction == "short":
-            # Short: profit when price drops. Return collateral +/- PnL.
+        if position.leverage > 1:
+            # Leveraged position: PnL on full notional, return margin + PnL
+            margin = position.margin_used or (position.cost_usd / position.leverage)
+            if position.direction == "short":
+                pnl = (position.entry_price - exit_price) * position.quantity - fee
+            else:
+                pnl = (exit_price - position.entry_price) * position.quantity - fee
+            self.current_balance += margin + pnl
+        elif position.direction == "short":
+            # Spot/margin short: return collateral +/- PnL
             pnl = (position.entry_price - exit_price) * position.quantity - fee
             self.current_balance += position.cost_usd + pnl
         else:
-            # Long: sold the asset, get revenue back
+            # Spot long: sold the asset, get revenue back
             revenue = position.quantity * exit_price
             pnl = revenue - position.cost_usd - fee
             self.current_balance += revenue - fee
+
         self.daily_pnl += pnl
         self.total_pnl += pnl
 
@@ -67,6 +85,7 @@ class PortfolioTracker:
             entry=position.entry_price,
             exit=exit_price,
             pnl=pnl,
+            leverage=position.leverage,
             balance=self.current_balance,
         )
         return pnl
@@ -78,11 +97,18 @@ class PortfolioTracker:
         logger.info("daily_reset", balance=self.current_balance)
 
     def get_equity(self, current_prices: dict[str, float] | None = None) -> float:
-        """Calculate total equity = cash + open position costs.
+        """Calculate total equity = cash + deployed capital + unrealized P&L.
 
+        For leveraged positions: deployed capital = margin (cost/leverage).
         If current_prices is provided, uses mark-to-market (unrealized P&L).
-        Otherwise uses entry cost as a conservative proxy.
         """
+        deployed = 0.0
+        for pos in self.open_positions.values():
+            if pos.leverage > 1:
+                deployed += pos.margin_used or (pos.cost_usd / pos.leverage)
+            else:
+                deployed += pos.cost_usd
+
         if current_prices:
             unrealized = 0.0
             for symbol, pos in self.open_positions.items():
@@ -91,13 +117,9 @@ class PortfolioTracker:
                         unrealized += (pos.entry_price - current_prices[symbol]) * pos.quantity
                     else:
                         unrealized += (current_prices[symbol] - pos.entry_price) * pos.quantity
-            return self.current_balance + sum(
-                pos.cost_usd for pos in self.open_positions.values()
-            ) + unrealized
-        # No live prices — equity = cash + deployed capital (at-cost)
-        return self.current_balance + sum(
-            pos.cost_usd for pos in self.open_positions.values()
-        )
+            return self.current_balance + deployed + unrealized
+
+        return self.current_balance + deployed
 
     def get_drawdown_pct(self) -> float:
         """Drawdown from peak, measured against equity (not cash)."""
@@ -134,6 +156,9 @@ class PortfolioTracker:
                 "entry_time": pos.entry_time.isoformat() if pos.entry_time else None,
                 "cost_usd": pos.cost_usd,
                 "direction": pos.direction,
+                "leverage": pos.leverage,
+                "margin_used": pos.margin_used,
+                "liquidation_price": pos.liquidation_price,
             }
         equity = self.get_equity()
         # Update peak if equity has grown

@@ -24,17 +24,25 @@ class _DashboardExchange:
     primitives bind to the dashboard's loop.
     """
 
-    def __init__(self, exchange_name: str, api_key: str, api_secret: str) -> None:
+    def __init__(self, exchange_name: str, api_key: str, api_secret: str, account_type: str = "spot") -> None:
         self._exchange_name = exchange_name
         self._api_key = api_key
         self._api_secret = api_secret
+        self._account_type = account_type
         self._exchange = None
 
     def _ensure_client(self):
         if self._exchange is None:
-            ccxt_cls = ccxt.binance if self._exchange_name == "binance" else ccxt.kraken
-            opts = {"defaultType": "spot"}
-            if self._exchange_name == "binance":
+            ccxt_cls = ccxt.binance if self._exchange_name in ("binance", "binance_futures", "binance_margin") else ccxt.kraken
+            # Map account type to ccxt defaultType
+            if self._account_type == "futures":
+                default_type = "future"
+            elif self._account_type == "margin":
+                default_type = "margin"
+            else:
+                default_type = "spot"
+            opts = {"defaultType": default_type}
+            if self._exchange_name in ("binance", "binance_futures", "binance_margin"):
                 opts["fetchCurrencies"] = False
             self._exchange = ccxt_cls({
                 "apiKey": self._api_key,
@@ -72,11 +80,11 @@ class _DashboardExchange:
             self._exchange = None
 
 
-def create_router(repo: Repository, exchange=None, exchange_name: str = "kraken", api_key: str = "", api_secret: str = "") -> APIRouter:
+def create_router(repo: Repository, exchange=None, exchange_name: str = "kraken", api_key: str = "", api_secret: str = "", account_type: str = "spot") -> APIRouter:
     router = APIRouter()
     _dash_exchange: _DashboardExchange | None = None
     if api_key and api_secret:
-        _dash_exchange = _DashboardExchange(exchange_name, api_key, api_secret)
+        _dash_exchange = _DashboardExchange(exchange_name, api_key, api_secret, account_type=account_type)
 
     @router.get("/portfolio")
     @login_required
@@ -159,6 +167,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "kraken"
             else:
                 unrealized = 0
 
+            leverage = int(trade.get("leverage", 1) or 1)
             positions.append({
                 "symbol": symbol,
                 "direction": direction,
@@ -168,6 +177,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "kraken"
                 "cost_usd": cost_usd,
                 "unrealized_pnl": round(unrealized, 4),
                 "unrealized_pct": round(unrealized / cost_usd * 100, 2) if cost_usd > 0 else 0,
+                "leverage": leverage,
                 "trade_id": trade.get("id"),
             })
             total_unrealized += unrealized
