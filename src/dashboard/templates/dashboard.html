@@ -416,8 +416,11 @@ async function loadUnrealizedPnl() {
         });
     } catch (e) {
         console.error('Unrealized P&L load failed:', e);
+        const el = document.getElementById('unrealized-value');
         const sub = document.getElementById('unrealized-sub');
+        if (el) { el.textContent = '--'; el.className = 'stat-value sm'; }
         if (sub) sub.textContent = 'Retry in 10s...';
+        updateNetPnl(0);
     } finally {
         _refreshing = false;
         if (btn) { btn.disabled = false; btn.textContent = 'Refresh Prices'; }
