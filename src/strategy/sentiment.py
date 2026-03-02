@@ -25,7 +25,7 @@ logger = get_logger(__name__)
 NEWS_API_URL = "https://min-api.cryptocompare.com/data/v2/news/"
 
 # Hugging Face Inference API
-HF_API_BASE = "https://api-inference.huggingface.co/models"
+HF_API_BASE = "https://router.huggingface.co/hf-inference/models"
 FINBERT_MODEL = "ProsusAI/finbert"
 ZERO_SHOT_MODEL = "facebook/bart-large-mnli"
 
