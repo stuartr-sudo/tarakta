@@ -168,6 +168,13 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "kraken"
                 unrealized = 0
 
             leverage = int(trade.get("leverage", 1) or 1)
+            margin_used = float(trade.get("margin_used", 0) or 0)
+            if leverage > 1 and margin_used > 0:
+                effective_cost = margin_used
+            elif leverage > 1:
+                effective_cost = cost_usd / leverage
+            else:
+                effective_cost = cost_usd
             positions.append({
                 "symbol": symbol,
                 "direction": direction,
@@ -175,8 +182,9 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "kraken"
                 "current_price": current_price,
                 "quantity": quantity,
                 "cost_usd": cost_usd,
+                "margin_used": round(effective_cost, 4),
                 "unrealized_pnl": round(unrealized, 4),
-                "unrealized_pct": round(unrealized / cost_usd * 100, 2) if cost_usd > 0 else 0,
+                "unrealized_pct": round(unrealized / effective_cost * 100, 2) if effective_cost > 0 else 0,
                 "leverage": leverage,
                 "trade_id": trade.get("id"),
             })

@@ -24,7 +24,20 @@
 
 <!-- Stat Cards -->
 {% set balance = snapshot.balance_usd | default(0) | float %}
-{% set allocated = trades | sum(attribute='entry_cost_usd') | default(0) | float if trades else 0 %}
+{% set ns = namespace(allocated=0.0) %}
+{% if trades %}
+{% for t in trades %}
+    {% set lev = t.leverage | default(1) | int %}
+    {% if lev > 1 and t.margin_used %}
+        {% set ns.allocated = ns.allocated + (t.margin_used | float) %}
+    {% elif lev > 1 %}
+        {% set ns.allocated = ns.allocated + (t.entry_cost_usd | default(0) | float) / lev %}
+    {% else %}
+        {% set ns.allocated = ns.allocated + (t.entry_cost_usd | default(0) | float) %}
+    {% endif %}
+{% endfor %}
+{% endif %}
+{% set allocated = ns.allocated %}
 <div class="stats-grid">
     <div class="stat-card">
         <div class="stat-label">Equity</div>
@@ -373,9 +386,9 @@ async function loadUnrealizedPnl() {
 
         updateNetPnl(total);
 
-        // Update allocated total and available cash from live data
+        // Update allocated total and available cash from live data (margin-based)
         let totalAllocated = 0;
-        data.positions.forEach(p => { totalAllocated += (p.cost_usd || 0); });
+        data.positions.forEach(p => { totalAllocated += (p.margin_used || p.cost_usd || 0); });
         const allocEl = document.getElementById('allocated-value');
         if (allocEl) allocEl.textContent = '$' + totalAllocated.toFixed(2);
 
@@ -512,11 +525,22 @@ async function softRefreshStats() {
             return;
         }
 
-        // Update available cash = equity - allocated
+        // Update available cash = equity - allocated (margin-based)
         if (data.current) {
             const equity = parseFloat(data.current.balance_usd || 0);
             let allocated = 0;
-            openTrades.forEach(t => { allocated += parseFloat(t.entry_cost_usd || 0); });
+            openTrades.forEach(t => {
+                const lev = parseInt(t.leverage || 1) || 1;
+                const mu = parseFloat(t.margin_used || 0);
+                const cost = parseFloat(t.entry_cost_usd || 0);
+                if (lev > 1 && mu > 0) {
+                    allocated += mu;
+                } else if (lev > 1) {
+                    allocated += cost / lev;
+                } else {
+                    allocated += cost;
+                }
+            });
             const avEl = document.getElementById('available-value');
             if (avEl) avEl.textContent = '$' + (equity - allocated).toFixed(2);
         }
