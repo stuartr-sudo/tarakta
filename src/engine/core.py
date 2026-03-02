@@ -587,8 +587,10 @@ class TradingEngine:
                         if position.direction == "short":
                             self.portfolio.current_balance += position.cost_usd + pnl
                         else:
-                            exit_price = float(db_trade.get("exit_price", position.entry_price))
-                            exit_qty = float(db_trade.get("exit_quantity", position.quantity))
+                            exit_price = db_trade.get("exit_price") or position.entry_price
+                            exit_qty = db_trade.get("exit_quantity") or position.quantity
+                            exit_price = float(exit_price)
+                            exit_qty = float(exit_qty)
                             revenue = exit_qty * exit_price
                             self.portfolio.current_balance += revenue - fees
 

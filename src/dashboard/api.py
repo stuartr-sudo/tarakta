@@ -33,11 +33,14 @@ class _DashboardExchange:
     def _ensure_client(self):
         if self._exchange is None:
             ccxt_cls = ccxt.binance if self._exchange_name == "binance" else ccxt.kraken
+            opts = {"defaultType": "spot"}
+            if self._exchange_name == "binance":
+                opts["fetchCurrencies"] = False
             self._exchange = ccxt_cls({
                 "apiKey": self._api_key,
                 "secret": self._api_secret,
                 "enableRateLimit": True,
-                "options": {"defaultType": "spot"},
+                "options": opts,
             })
         return self._exchange
 
