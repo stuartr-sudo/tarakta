@@ -43,7 +43,10 @@ class CandleManager:
                 )
                 if not new_candles.empty:
                     await self._cache_df(symbol, timeframe, new_candles)
-                    df = pd.concat([df, new_candles]).drop_duplicates()
+                    combined = pd.concat([df, new_candles])
+                    del df
+                    df = combined.drop_duplicates()
+                    del combined
             except Exception as e:
                 logger.warning("candle_refresh_failed", symbol=symbol, tf=timeframe, error=str(e))
             return df.tail(limit)

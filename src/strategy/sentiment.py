@@ -116,6 +116,13 @@ class SentimentFilter:
             self._hf_fail_count = 0
             logger.info("hf_api_recovered")
 
+    def _evict_stale_cache(self) -> None:
+        """Remove expired entries from the sentiment cache."""
+        now = time.time()
+        stale = [k for k, (_, _, ts) in self._cache.items() if now - ts >= CACHE_TTL]
+        for k in stale:
+            del self._cache[k]
+
     async def get_sentiment(self, symbol: str) -> float:
         """Get sentiment score for a symbol. Returns float in range ~[-10, +10].
 
@@ -123,6 +130,10 @@ class SentimentFilter:
         Returns 0.0 if no news found or on error.
         """
         base = symbol.split("/")[0].upper()
+
+        # Evict stale entries periodically
+        if len(self._cache) > 50:
+            self._evict_stale_cache()
 
         # Check cache
         cached = self._cache.get(base)

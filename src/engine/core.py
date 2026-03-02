@@ -600,65 +600,99 @@ class TradingEngine:
     async def _reconcile_positions(self) -> None:
         """Cross-check open positions in state against trade records in DB.
 
-        Handles two cases on restart/deploy:
+        Handles three cases on restart/deploy:
         1. Closed trades still in state — remove them and credit balance.
         2. Open trades in DB but missing from state — restore them.
+        3. Orphaned positions (no trade_id or trade_id missing from DB) — remove them.
         """
         changed = False
 
         # --- Case 1: Remove stale closed positions from state ---
+        # --- Case 3: Remove orphaned positions (no DB trade record) ---
         if self.state.open_positions:
             trade_ids = [
                 pos.trade_id for pos in self.state.open_positions.values() if pos.trade_id
             ]
+            trade_map = {}
             if trade_ids:
                 db_trades = await self.repo.get_trades_by_ids(trade_ids)
                 trade_map = {t["id"]: t for t in db_trades}
 
-                removed = []
-                for symbol, position in list(self.state.open_positions.items()):
-                    db_trade = trade_map.get(position.trade_id)
-                    if not db_trade:
-                        continue
-
-                    if db_trade.get("status") == "closed":
-                        pnl = float(db_trade.get("pnl_usd", 0))
-                        fees = float(db_trade.get("fees_usd", 0))
-
-                        if position.leverage > 1:
-                            # Leveraged: return margin + PnL
-                            margin = position.margin_used or (position.cost_usd / position.leverage)
-                            self.portfolio.current_balance += margin + pnl
-                        elif position.direction == "short":
-                            self.portfolio.current_balance += position.cost_usd + pnl
-                        else:
-                            exit_price = db_trade.get("exit_price") or position.entry_price
-                            exit_qty = db_trade.get("exit_quantity") or position.quantity
-                            exit_price = float(exit_price)
-                            exit_qty = float(exit_qty)
-                            revenue = exit_qty * exit_price
-                            self.portfolio.current_balance += revenue - fees
-
-                        self.portfolio.daily_pnl += pnl
-                        self.portfolio.total_pnl += pnl
-                        self.portfolio.open_positions.pop(symbol, None)
-                        self.state.open_positions.pop(symbol, None)
-                        removed.append(symbol)
-
-                        logger.info(
-                            "reconciled_stale_position",
-                            symbol=symbol,
-                            trade_id=position.trade_id,
-                            pnl=pnl,
-                            balance=self.portfolio.current_balance,
-                        )
-
-                if removed:
-                    changed = True
-                    logger.info(
-                        "reconciliation_removed",
-                        removed=removed,
+            removed = []
+            orphaned = []
+            for symbol, position in list(self.state.open_positions.items()):
+                # Case 3: No trade_id or trade_id not found in DB — orphaned position
+                if not position.trade_id or (position.trade_id and position.trade_id not in trade_map):
+                    # Return margin/cost to balance
+                    if position.leverage > 1:
+                        margin = position.margin_used or (position.cost_usd / position.leverage)
+                        self.portfolio.current_balance += margin
+                    else:
+                        self.portfolio.current_balance += position.cost_usd
+                    self.portfolio.open_positions.pop(symbol, None)
+                    self.state.open_positions.pop(symbol, None)
+                    orphaned.append(symbol)
+                    logger.warning(
+                        "reconciled_orphaned_position",
+                        symbol=symbol,
+                        trade_id=position.trade_id or "(none)",
+                        cost_usd=position.cost_usd,
                         balance=self.portfolio.current_balance,
+                    )
+                    continue
+
+                db_trade = trade_map.get(position.trade_id)
+                if not db_trade:
+                    continue
+
+                # Case 1: Trade is closed in DB but still in state
+                if db_trade.get("status") == "closed":
+                    pnl = float(db_trade.get("pnl_usd", 0))
+                    fees = float(db_trade.get("fees_usd", 0))
+
+                    if position.leverage > 1:
+                        # Leveraged: return margin + PnL
+                        margin = position.margin_used or (position.cost_usd / position.leverage)
+                        self.portfolio.current_balance += margin + pnl
+                    elif position.direction == "short":
+                        self.portfolio.current_balance += position.cost_usd + pnl
+                    else:
+                        exit_price = db_trade.get("exit_price") or position.entry_price
+                        exit_qty = db_trade.get("exit_quantity") or position.quantity
+                        exit_price = float(exit_price)
+                        exit_qty = float(exit_qty)
+                        revenue = exit_qty * exit_price
+                        self.portfolio.current_balance += revenue - fees
+
+                    self.portfolio.daily_pnl += pnl
+                    self.portfolio.total_pnl += pnl
+                    self.portfolio.open_positions.pop(symbol, None)
+                    self.state.open_positions.pop(symbol, None)
+                    removed.append(symbol)
+
+                    logger.info(
+                        "reconciled_stale_position",
+                        symbol=symbol,
+                        trade_id=position.trade_id,
+                        pnl=pnl,
+                        balance=self.portfolio.current_balance,
+                    )
+
+            if orphaned:
+                changed = True
+                logger.warning(
+                    "reconciliation_orphaned",
+                    orphaned=orphaned,
+                    count=len(orphaned),
+                    balance=self.portfolio.current_balance,
+                )
+
+            if removed:
+                changed = True
+                logger.info(
+                    "reconciliation_removed",
+                    removed=removed,
+                    balance=self.portfolio.current_balance,
                     )
 
         # --- Case 2: Restore open trades missing from state ---
@@ -677,8 +711,11 @@ class TradingEngine:
                 continue  # Already tracked (different trade_id edge case)
 
             leverage = int(t.get("leverage", 1) or 1)
+            # Fallback: if DB says 1x but config is leveraged, use config leverage
+            if leverage <= 1 and self.config.leverage > 1:
+                leverage = self.config.leverage
             cost_usd = float(t.get("entry_cost_usd", 0))
-            margin_used = cost_usd / leverage if leverage > 1 else 0.0
+            margin_used = float(t.get("margin_used") or 0) or (cost_usd / leverage if leverage > 1 else 0.0)
 
             position = Position(
                 trade_id=t["id"],
@@ -708,6 +745,8 @@ class TradingEngine:
                 symbol=symbol,
                 trade_id=t["id"],
                 cost=position.cost_usd,
+                margin=deduction,
+                leverage=leverage,
                 balance=self.portfolio.current_balance,
             )
 

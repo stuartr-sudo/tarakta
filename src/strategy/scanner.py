@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 
 import pandas as pd
 
@@ -19,8 +20,8 @@ from src.utils.logging import get_logger
 logger = get_logger(__name__)
 
 TIMEFRAMES = ["15m", "1h", "4h", "1d"]
-BATCH_SIZE = 16
-BATCH_DELAY = 1.0  # seconds between batches
+BATCH_SIZE = 8
+BATCH_DELAY = 1.5  # seconds between batches
 
 
 class AltcoinScanner:
@@ -63,6 +64,9 @@ class AltcoinScanner:
                     continue
                 if isinstance(result, SignalCandidate) and result.score >= self.config.entry_threshold:
                     all_signals.append(result)
+
+            # Free memory between batches
+            gc.collect()
 
             # Rate limit between batches
             if batch_idx + BATCH_SIZE < total:
