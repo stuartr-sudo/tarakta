@@ -337,7 +337,10 @@ async function loadUnrealizedPnl() {
     if (btn) { btn.disabled = true; btn.textContent = 'Refreshing...'; }
 
     try {
-        const resp = await fetch('/api/unrealized-pnl');
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 15000);
+        const resp = await fetch('/api/unrealized-pnl', { signal: controller.signal });
+        clearTimeout(timeout);
         const data = await resp.json();
 
         const el = document.getElementById('unrealized-value');
@@ -351,10 +354,7 @@ async function loadUnrealizedPnl() {
         }
 
         if (data.error) {
-            el.textContent = '--';
-            el.className = 'stat-value sm';
-            sub.textContent = data.error;
-            updateNetPnl(0);
+            sub.textContent = data.error + ' — retrying...';
             return;
         }
 
@@ -416,11 +416,8 @@ async function loadUnrealizedPnl() {
         });
     } catch (e) {
         console.error('Unrealized P&L load failed:', e);
-        const el = document.getElementById('unrealized-value');
         const sub = document.getElementById('unrealized-sub');
-        if (el) { el.textContent = '--'; el.className = 'stat-value sm'; }
         if (sub) sub.textContent = 'Retry in 10s...';
-        updateNetPnl(0);
     } finally {
         _refreshing = false;
         if (btn) { btn.disabled = false; btn.textContent = 'Refresh Prices'; }

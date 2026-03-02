@@ -107,7 +107,12 @@ def create_router(repo: Repository, exchange=None, api_key: str = "", api_secret
         if not _dash_exchange:
             return {"positions": [], "total_unrealized": 0, "error": "No exchange configured"}
 
-        trades = await repo.get_open_trades()
+        try:
+            trades = await repo.get_open_trades()
+        except Exception as e:
+            logger.error("unrealized_pnl_db_failed", error=str(e))
+            return {"positions": [], "total_unrealized": 0, "error": "DB error"}
+
         if not trades:
             return {"positions": [], "total_unrealized": 0}
 
@@ -125,7 +130,12 @@ def create_router(repo: Repository, exchange=None, api_key: str = "", api_secret
                 logger.error("unrealized_pnl_fetch_failed", symbol=symbol, error=str(e))
                 return None
 
-        ticker_results = await asyncio.gather(*[fetch_ticker(s) for s in unique_symbols])
+        try:
+            ticker_results = await asyncio.gather(*[fetch_ticker(s) for s in unique_symbols])
+        except Exception as e:
+            logger.error("unrealized_pnl_gather_failed", error=str(e))
+            ticker_results = [None] * len(unique_symbols)
+
         price_map = dict(zip(unique_symbols, ticker_results))
 
         for trade in trades:

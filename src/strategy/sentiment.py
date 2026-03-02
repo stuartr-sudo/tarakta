@@ -224,7 +224,7 @@ class SentimentFilter:
         try:
             async with session.post(
                 url,
-                json={"inputs": texts},
+                json={"inputs": texts, "parameters": {"top_k": None}},
                 headers=self._hf_headers(),
                 timeout=HF_TIMEOUT,
             ) as resp:
@@ -241,6 +241,9 @@ class SentimentFilter:
         for article_results in results:
             if not isinstance(article_results, list):
                 continue
+            # Handle extra nesting from HF router API
+            if article_results and isinstance(article_results[0], list):
+                article_results = article_results[0]
             # Find best label
             best = max(article_results, key=lambda x: x.get("score", 0))
             label = best.get("label", "neutral").lower()
