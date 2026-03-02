@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from src.exchange.client import KrakenClient
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 
 async def get_scannable_pairs(
-    client: KrakenClient,
+    client,
     min_volume_usd: float = 50_000,
     quote_currencies: list[str] | None = None,
 ) -> list[str]:

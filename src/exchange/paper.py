@@ -5,27 +5,26 @@ from uuid import uuid4
 
 import pandas as pd
 
-from src.exchange.client import KrakenClient
 from src.exchange.models import OrderResult
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 SIMULATED_SLIPPAGE = 0.001  # 0.1%
-SIMULATED_FEE_RATE = 0.0026  # Kraken taker fee
 
 
 class PaperExchange:
     """
     Paper trading exchange mock.
     Uses real market data from live exchange, simulates order fills.
-    Same interface as KrakenClient for drop-in replacement.
+    Same interface as exchange clients for drop-in replacement.
     """
 
-    def __init__(self, initial_balance: float, live_exchange: KrakenClient) -> None:
+    def __init__(self, initial_balance: float, live_exchange) -> None:
         self.balance: dict[str, float] = {"USD": initial_balance}
         self.live = live_exchange
         self.order_history: list[dict] = []
+        self._fee_rate = getattr(live_exchange, "taker_fee_rate", 0.0026)
         logger.info("paper_exchange_init", balance=initial_balance)
 
     async def fetch_candles(
@@ -46,7 +45,7 @@ class PaperExchange:
         if side == "buy":
             fill_price = price * (1 + SIMULATED_SLIPPAGE)
             cost = quantity * fill_price
-            fee = cost * SIMULATED_FEE_RATE
+            fee = cost * self._fee_rate
 
             base = symbol.split("/")[0]
             short_key = f"SHORT_{base}"
@@ -69,7 +68,7 @@ class PaperExchange:
         else:
             fill_price = price * (1 - SIMULATED_SLIPPAGE)
             revenue = quantity * fill_price
-            fee = revenue * SIMULATED_FEE_RATE
+            fee = revenue * self._fee_rate
 
             base = symbol.split("/")[0]
             base_balance = self.balance.get(base, 0)
@@ -133,6 +132,18 @@ class PaperExchange:
     def get_24h_volume(self, symbol: str) -> float:
         """Delegate to live exchange."""
         return self.live.get_24h_volume(symbol)
+
+    @property
+    def exchange_name(self) -> str:
+        return getattr(self.live, "exchange_name", "unknown")
+
+    @property
+    def taker_fee_rate(self) -> float:
+        return self._fee_rate
+
+    @property
+    def min_order_usd(self) -> float:
+        return getattr(self.live, "min_order_usd", 5.0)
 
     async def close(self) -> None:
         await self.live.close()

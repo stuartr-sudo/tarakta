@@ -12,7 +12,7 @@ from src.data.candles import CandleManager
 from src.data.db import Database
 from src.data.repository import Repository
 from src.engine.core import TradingEngine
-from src.exchange.client import KrakenClient
+from src.exchange.client import create_exchange
 from src.exchange.paper import PaperExchange
 from src.utils.logging import get_logger, setup_logging
 
@@ -29,7 +29,11 @@ async def main() -> None:
     repo = Repository(db)
 
     # Exchange
-    live_exchange = KrakenClient(config.kraken_api_key, config.kraken_api_secret)
+    if config.exchange_name == "binance":
+        api_key, api_secret = config.binance_api_key, config.binance_api_secret
+    else:
+        api_key, api_secret = config.kraken_api_key, config.kraken_api_secret
+    live_exchange = create_exchange(config.exchange_name, api_key, api_secret)
 
     if config.trading_mode == "paper":
         exchange = PaperExchange(initial_balance=config.initial_balance, live_exchange=live_exchange)

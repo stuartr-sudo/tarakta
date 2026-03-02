@@ -44,7 +44,7 @@ class TradingEngine:
             primary_interval_minutes=config.scan_interval_minutes,
             monitor_interval_seconds=60,
         )
-        self.risk_manager = RiskManager(config)
+        self.risk_manager = RiskManager(config, exchange=exchange)
         self.circuit_breaker = CircuitBreaker(config)
         self.order_executor = OrderExecutor(exchange, self.risk_manager, config.min_rr_ratio)
         self.position_monitor = PositionMonitor()

@@ -8,8 +8,11 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # Exchange
+    exchange_name: str = "kraken"  # "kraken" or "binance"
     kraken_api_key: str = ""
     kraken_api_secret: str = ""
+    binance_api_key: str = ""
+    binance_api_secret: str = ""
 
     # Supabase
     supabase_url: str = ""

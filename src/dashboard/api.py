@@ -16,7 +16,7 @@ logger = get_logger(__name__)
 class _DashboardExchange:
     """Lightweight ccxt client that initializes lazily on the dashboard's event loop.
 
-    The main engine's KrakenClient has an asyncio.Semaphore bound to the engine's
+    The main engine's exchange client has an asyncio.Semaphore bound to the engine's
     event loop.  The dashboard runs in a separate thread (its own loop), so calling
     the engine's client causes 'attached to a different loop' errors.
 
@@ -24,14 +24,16 @@ class _DashboardExchange:
     primitives bind to the dashboard's loop.
     """
 
-    def __init__(self, api_key: str, api_secret: str) -> None:
+    def __init__(self, exchange_name: str, api_key: str, api_secret: str) -> None:
+        self._exchange_name = exchange_name
         self._api_key = api_key
         self._api_secret = api_secret
-        self._exchange: ccxt.kraken | None = None
+        self._exchange = None
 
-    def _ensure_client(self) -> ccxt.kraken:
+    def _ensure_client(self):
         if self._exchange is None:
-            self._exchange = ccxt.kraken({
+            ccxt_cls = ccxt.binance if self._exchange_name == "binance" else ccxt.kraken
+            self._exchange = ccxt_cls({
                 "apiKey": self._api_key,
                 "secret": self._api_secret,
                 "enableRateLimit": True,
@@ -67,11 +69,11 @@ class _DashboardExchange:
             self._exchange = None
 
 
-def create_router(repo: Repository, exchange=None, api_key: str = "", api_secret: str = "") -> APIRouter:
+def create_router(repo: Repository, exchange=None, exchange_name: str = "kraken", api_key: str = "", api_secret: str = "") -> APIRouter:
     router = APIRouter()
     _dash_exchange: _DashboardExchange | None = None
     if api_key and api_secret:
-        _dash_exchange = _DashboardExchange(api_key, api_secret)
+        _dash_exchange = _DashboardExchange(exchange_name, api_key, api_secret)
 
     @router.get("/portfolio")
     @login_required

@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 class RiskManager:
     """Position sizing, trade validation, and risk controls."""
 
-    def __init__(self, config: Settings) -> None:
+    def __init__(self, config: Settings, exchange=None) -> None:
         self.max_risk_pct = config.max_risk_pct
         self.max_position_pct = config.max_position_pct
         self.max_exposure_pct = config.max_exposure_pct
@@ -21,6 +21,8 @@ class RiskManager:
         self.min_rr_ratio = config.min_rr_ratio
         self.cooldown_hours = config.cooldown_hours
         self._symbol_cooldowns: dict[str, datetime] = {}
+        self._exchange_name = getattr(exchange, "exchange_name", config.exchange_name) if exchange else config.exchange_name
+        self._min_order_usd = getattr(exchange, "min_order_usd", 5.0) if exchange else 5.0
 
     def record_stop_out(self, symbol: str) -> None:
         """Record a stop-loss exit — symbol goes on cooldown."""
@@ -85,10 +87,9 @@ class RiskManager:
 
         actual_risk = quantity * sl_distance
 
-        # Check Kraken minimum order (~$5 for most pairs)
-        # Use total_cost (incl. fees) since cost is the raw notional before fees
-        if total_cost < 5.0:
-            return PositionSize(valid=False, reason=f"Position cost ${total_cost:.2f} below Kraken minimum ~$5")
+        # Check exchange minimum order size
+        if total_cost < self._min_order_usd:
+            return PositionSize(valid=False, reason=f"Position cost ${total_cost:.2f} below {self._exchange_name} minimum ~${self._min_order_usd:.0f}")
 
         return PositionSize(
             valid=True,

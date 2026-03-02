@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from src.data.repository import Repository
-from src.exchange.client import KrakenClient
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -16,7 +15,7 @@ TF_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86
 class CandleManager:
     """Manages candle data with DB caching to minimize API calls."""
 
-    def __init__(self, exchange: KrakenClient, repo: Repository) -> None:
+    def __init__(self, exchange, repo: Repository) -> None:
         self.exchange = exchange
         self.repo = repo
 
