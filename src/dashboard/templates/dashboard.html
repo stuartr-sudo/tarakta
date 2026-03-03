@@ -141,7 +141,7 @@
                 <tbody id="positions-tbody">
                     {% for t in trades %}
                     <tr data-symbol="{{ t.symbol }}" data-trade-id="{{ t.id }}">
-                        <td><strong>{{ t.symbol }}</strong></td>
+                        <td><strong>{{ t.symbol }}</strong>{% if t.test_group == 'llm' %} <span class="llm-bolt" title="LLM Analyst trade">&#9889;</span>{% endif %}</td>
                         <td>
                             <span class="dir-badge {{ t.direction | default('long') }}">
                                 {{ t.direction | default('long') }}{% if (t.leverage | default(1) | int) > 1 %} {{ t.leverage }}x{% endif %}
