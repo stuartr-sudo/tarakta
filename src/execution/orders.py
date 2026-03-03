@@ -24,16 +24,26 @@ class OrderExecutor:
         signal: SignalCandidate,
         current_balance: float,
         mode: str,
+        sl_override: float | None = None,
+        tp_override: float | None = None,
     ) -> tuple[Position | None, OrderResult | None, dict | None]:
         """
         Calculate SL/TP, validate R:R, size position, place order.
+
+        Args:
+            sl_override: Optional SL price from LLM analyst (still validated).
+            tp_override: Optional TP price from LLM analyst (still validated).
 
         Returns (Position, OrderResult, trade_record) or (None, None, None) if skipped.
         """
         is_long = signal.direction == "bullish"
 
-        # Calculate stop loss
-        sl_price = self._calculate_stop_loss(signal)
+        # Calculate stop loss (use override if provided)
+        if sl_override is not None:
+            sl_price = sl_override
+            logger.info("using_llm_sl_override", symbol=signal.symbol, sl=sl_override)
+        else:
+            sl_price = self._calculate_stop_loss(signal)
         if sl_price is None:
             logger.info("skip_invalid_sl", symbol=signal.symbol, sl=sl_price)
             return None, None, None
@@ -46,8 +56,12 @@ class OrderExecutor:
             logger.info("skip_sl_below_entry", symbol=signal.symbol, sl=sl_price, entry=signal.entry_price)
             return None, None, None
 
-        # Calculate take profit
-        tp_price = self._calculate_take_profit(signal, sl_price)
+        # Calculate take profit (use override if provided)
+        if tp_override is not None:
+            tp_price = tp_override
+            logger.info("using_llm_tp_override", symbol=signal.symbol, tp=tp_override)
+        else:
+            tp_price = self._calculate_take_profit(signal, sl_price)
 
         # Validate R:R ratio
         sl_distance = abs(signal.entry_price - sl_price)

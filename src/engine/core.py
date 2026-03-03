@@ -18,8 +18,10 @@ from src.risk.circuit_breaker import CircuitBreaker
 from src.risk.manager import RiskManager
 from src.risk.portfolio import PortfolioTracker
 from src.strategy.adaptive_threshold import AdaptiveThreshold
+from src.strategy.llm_analyst import LLMTradeAnalyst
 from src.strategy.scanner import AltcoinScanner
 from src.strategy.sentiment import SentimentFilter
+from src.strategy.split_test import SplitTestManager
 from src.strategy.trade_analyzer import TradeAnalyzer
 from src.utils.logging import get_logger
 from src.utils.time_utils import is_new_day
@@ -56,6 +58,13 @@ class TradingEngine:
         self.trade_analyzer = TradeAnalyzer(repo)
         self.adaptive_threshold = AdaptiveThreshold(config.entry_threshold)
         self.sentiment_filter = SentimentFilter(hf_api_token=config.hf_api_token)
+
+        # LLM split test components
+        self.split_test = SplitTestManager(config)
+        self.llm_analyst: LLMTradeAnalyst | None = None
+        if config.llm_enabled:
+            self.llm_analyst = LLMTradeAnalyst(config)
+            logger.info("llm_split_test_enabled", model=config.llm_model, ratio=config.llm_split_ratio)
 
         self.state: EngineState | None = None
         self.portfolio: PortfolioTracker | None = None
@@ -363,6 +372,62 @@ class TradingEngine:
                     signals_saved += 1
                     continue
 
+                # --- LLM Split Test: assign group and optionally analyze ---
+                test_group = self.split_test.assign_group(signal)
+                llm_analysis_data = None
+                sl_override = None
+                tp_override = None
+
+                if test_group == "llm" and self.llm_analyst:
+                    llm_context = {
+                        "sentiment_score": sentiment_score,
+                        "adjusted_score": adjusted_score,
+                        "active_threshold": active_threshold,
+                    }
+                    llm_result = await self.llm_analyst.analyze_signal(signal, llm_context)
+                    llm_analysis_data = {
+                        "approve": llm_result.approve,
+                        "confidence": llm_result.confidence,
+                        "reasoning": llm_result.reasoning,
+                        "suggested_sl": llm_result.suggested_sl,
+                        "suggested_tp": llm_result.suggested_tp,
+                        "latency_ms": round(llm_result.latency_ms, 1),
+                        "error": llm_result.error,
+                    }
+
+                    if not llm_result.approve:
+                        logger.info(
+                            "trade_blocked_by_llm",
+                            symbol=signal.symbol,
+                            confidence=llm_result.confidence,
+                            reasoning=llm_result.reasoning[:100],
+                        )
+                        vol_24h = self.exchange.get_24h_volume(signal.symbol)
+                        await self.repo.insert_signal(
+                            {
+                                "symbol": signal.symbol,
+                                "direction": signal.direction or "none",
+                                "score": signal.score,
+                                "reasons": signal.reasons + [f"BLOCKED:llm_reject(conf={llm_result.confidence:.0f})"],
+                                "components": {
+                                    "volume_24h": vol_24h,
+                                    "sentiment": sentiment_score,
+                                    "adjusted_score": round(adjusted_score, 2),
+                                    "test_group": test_group,
+                                    "llm_analysis": llm_analysis_data,
+                                },
+                                "current_price": signal.entry_price,
+                                "acted_on": False,
+                                "scan_cycle": cycle,
+                            }
+                        )
+                        signals_saved += 1
+                        continue
+
+                    # Apply LLM SL/TP suggestions if provided
+                    sl_override = llm_result.suggested_sl
+                    tp_override = llm_result.suggested_tp
+
                 # --- Opposite signal reversal check ---
                 existing_pos = self.portfolio.open_positions.get(signal.symbol)
                 if existing_pos:
@@ -385,6 +450,7 @@ class TradingEngine:
                                         "volume_24h": vol_24h,
                                         "sentiment": sentiment_score,
                                         "adjusted_score": round(adjusted_score, 2),
+                                        "test_group": test_group,
                                     },
                                     "current_price": signal.entry_price,
                                     "acted_on": True,
@@ -427,14 +493,21 @@ class TradingEngine:
                             max_pct=self.config.max_position_volume_pct * 100,
                         )
                     else:
-                        # Execute entry
+                        # Execute entry (with optional LLM SL/TP overrides)
                         position, order_result, trade_record = await self.order_executor.execute_entry(
                             signal=signal,
                             current_balance=self.portfolio.current_balance,
                             mode=self.state.mode,
+                            sl_override=sl_override,
+                            tp_override=tp_override,
                         )
 
                         if position and trade_record:
+                            # Tag trade with split test metadata
+                            trade_record["test_group"] = test_group
+                            if llm_analysis_data:
+                                trade_record["llm_analysis"] = llm_analysis_data
+
                             # Save to DB
                             db_trade = await self.repo.insert_trade(trade_record)
                             if db_trade:
@@ -447,17 +520,21 @@ class TradingEngine:
 
                 # Log the signal regardless of whether trade was executed
                 vol_24h = self.exchange.get_24h_volume(signal.symbol)
+                signal_components = {
+                    "volume_24h": vol_24h,
+                    "sentiment": sentiment_score,
+                    "adjusted_score": round(adjusted_score, 2),
+                    "test_group": test_group,
+                }
+                if llm_analysis_data:
+                    signal_components["llm_analysis"] = llm_analysis_data
                 await self.repo.insert_signal(
                     {
                         "symbol": signal.symbol,
                         "direction": signal.direction or "none",
                         "score": signal.score,
                         "reasons": signal.reasons,
-                        "components": {
-                            "volume_24h": vol_24h,
-                            "sentiment": sentiment_score,
-                            "adjusted_score": round(adjusted_score, 2),
-                        },
+                        "components": signal_components,
                         "current_price": signal.entry_price,
                         "acted_on": position is not None,
                         "trade_id": position.trade_id if position else None,
@@ -1146,4 +1223,6 @@ class TradingEngine:
         self._running = False
         await self._persist_state()
         await self.sentiment_filter.close()
+        if self.llm_analyst:
+            await self.llm_analyst.close()
         logger.info("engine_shutdown_complete")
