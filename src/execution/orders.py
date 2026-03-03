@@ -80,13 +80,59 @@ class OrderExecutor:
         # Use limit orders at best bid/ask for maker fees
         side = "buy" if is_long else "sell"
         try:
-            ob = await self.exchange.fetch_order_book(signal.symbol, limit=5)
+            ob = await self.exchange.fetch_order_book(signal.symbol, limit=10)
+
+            # --- Liquidity gate: check spread and depth before entering ---
+            bids = ob.get("bids") or []
+            asks = ob.get("asks") or []
+            if not bids or not asks:
+                logger.info("skip_no_orderbook", symbol=signal.symbol)
+                return None, None, None
+
+            best_bid = float(bids[0][0])
+            best_ask = float(asks[0][0])
+            mid_price = (best_bid + best_ask) / 2
+            spread_pct = (best_ask - best_bid) / mid_price if mid_price > 0 else 1.0
+
+            if spread_pct > self.config.max_spread_pct:
+                logger.info(
+                    "skip_wide_spread",
+                    symbol=signal.symbol,
+                    spread_pct=f"{spread_pct:.4f}",
+                    max_spread=f"{self.config.max_spread_pct:.4f}",
+                    best_bid=best_bid,
+                    best_ask=best_ask,
+                )
+                return None, None, None
+
+            # Check depth at best level (price * qty = USD value available)
+            bid_depth_usd = best_bid * float(bids[0][1])
+            ask_depth_usd = best_ask * float(asks[0][1])
+            relevant_depth = bid_depth_usd if is_long else ask_depth_usd
+
+            if relevant_depth < self.config.min_ob_depth_usd:
+                logger.info(
+                    "skip_thin_orderbook",
+                    symbol=signal.symbol,
+                    depth_usd=f"{relevant_depth:.2f}",
+                    min_depth=self.config.min_ob_depth_usd,
+                    side=side,
+                )
+                return None, None, None
+
+            logger.info(
+                "liquidity_check_passed",
+                symbol=signal.symbol,
+                spread_pct=f"{spread_pct:.4f}",
+                bid_depth_usd=f"{bid_depth_usd:.0f}",
+                ask_depth_usd=f"{ask_depth_usd:.0f}",
+            )
+
             if is_long:
-                # Buy at best bid to be a maker
-                limit_price = float(ob["bids"][0][0]) if ob.get("bids") else signal.entry_price
+                limit_price = best_bid
             else:
-                # Sell at best ask to be a maker
-                limit_price = float(ob["asks"][0][0]) if ob.get("asks") else signal.entry_price
+                limit_price = best_ask
+
             result = await self.exchange.place_limit_order(
                 symbol=signal.symbol,
                 side=side,
@@ -191,14 +237,22 @@ class OrderExecutor:
     async def execute_exit(
         self, symbol: str, position: Position, reason: str, current_price: float
     ) -> tuple[OrderResult | None, float]:
-        """Execute an order to close a position. Returns (OrderResult, pnl_usd)."""
+        """Execute an order to close a position using limit order. Returns (OrderResult, pnl_usd)."""
         # Long exit = sell, short exit = buy
         side = "sell" if position.direction == "long" else "buy"
         try:
-            result = await self.exchange.place_market_order(
+            ob = await self.exchange.fetch_order_book(symbol, limit=5)
+            if side == "sell":
+                # Selling: place at best ask to be maker
+                limit_price = float(ob["asks"][0][0]) if ob.get("asks") else current_price
+            else:
+                # Buying (closing short): place at best bid to be maker
+                limit_price = float(ob["bids"][0][0]) if ob.get("bids") else current_price
+            result = await self.exchange.place_limit_order(
                 symbol=symbol,
                 side=side,
                 quantity=position.quantity,
+                price=limit_price,
             )
         except Exception as e:
             logger.error("exit_order_failed", symbol=symbol, reason=reason, error=str(e))

@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     scan_interval_minutes: int = 15
     min_volume_usd: float = 1_000_000
     max_position_volume_pct: float = 0.001  # Position size must be < 0.1% of 24h volume
+    max_spread_pct: float = 0.003  # Max 0.3% bid-ask spread — skip illiquid pairs
+    min_ob_depth_usd: float = 500.0  # Min $500 depth at best bid/ask level
     quote_currencies: list[str] = Field(default_factory=lambda: ["USD", "USDT"])
 
     # Hugging Face Inference API
