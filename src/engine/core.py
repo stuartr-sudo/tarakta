@@ -660,6 +660,17 @@ class TradingEngine:
                             max_pct=self.config.max_position_volume_pct * 100,
                         )
                     else:
+                        # Reverse direction for control group trades (contrarian experiment)
+                        if test_group == "control":
+                            original_dir = signal.direction
+                            signal.direction = "bearish" if signal.direction == "bullish" else "bullish"
+                            logger.info(
+                                "control_direction_reversed",
+                                symbol=signal.symbol,
+                                original=original_dir,
+                                reversed=signal.direction,
+                            )
+
                         # Execute entry (with optional LLM SL/TP overrides)
                         position, order_result, trade_record = await self.order_executor.execute_entry(
                             signal=signal,
