@@ -191,6 +191,25 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             "total_unrealized": round(total_unrealized, 4),
         }
 
+    @router.get("/trades/{trade_id}/detail")
+    @login_required
+    async def get_trade_detail(request: Request, trade_id: str):
+        """Full trade record + partial exits for expandable detail row."""
+        try:
+            trades = await repo.get_trades_by_ids([trade_id])
+            if not trades:
+                return {"error": "Trade not found"}
+            trade = trades[0]
+            partial_exits = await repo.get_partial_exits(trade_id)
+            return {
+                "trade": trade,
+                "partial_exits": partial_exits,
+                "account_type": account_type,
+            }
+        except Exception as e:
+            logger.error("trade_detail_failed", trade_id=trade_id, error=str(e))
+            return {"error": str(e)}
+
     @router.post("/nuke")
     @admin_required
     async def nuke_all_positions(request: Request):

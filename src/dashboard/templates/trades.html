@@ -85,11 +85,11 @@
                 </thead>
                 <tbody>
                     {% for t in trades %}
-                    <tr>
+                    <tr class="clickable-row" data-trade-id="{{ t.id }}" onclick="toggleDetail(this)">
                         <td><strong>{{ t.symbol }}</strong></td>
                         <td>
                             <span class="dir-badge {{ t.direction | default('long') }}">
-                                {{ t.direction | default('long') }}
+                                {{ t.direction | default('long') }}{% if (t.leverage | default(1) | int) > 1 %} {{ t.leverage }}x{% endif %}
                             </span>
                         </td>
                         <td>
@@ -109,6 +109,14 @@
                             ${{ "%.4f" | format(t.stop_loss | float) }}
                             {% if t.take_profit %}
                             / ${{ "%.4f" | format(t.take_profit | float) }}
+                            {% endif %}
+                            {% if t.tp_tiers %}
+                            <div class="tp-tiers" style="margin-top:3px;">
+                                {% set tiers_done = t.current_tier | default(0) | int %}
+                                {% for tier in t.tp_tiers %}
+                                <div class="tp-tier-seg {{ 'filled' if tier.level <= tiers_done else ('target' if tier.level == tiers_done + 1 else 'pending') }}" title="TP{{ tier.level }}"></div>
+                                {% endfor %}
+                            </div>
                             {% endif %}
                         </td>
                         <td class="mono">${{ "%.2f" | format(t.entry_cost_usd | default(0) | float) }}</td>
@@ -164,4 +172,119 @@
     </div>
     {% endif %}
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const _detailCache = {};
+
+async function toggleDetail(row) {
+    const tradeId = row.getAttribute('data-trade-id');
+    const existing = document.getElementById('detail-' + tradeId);
+
+    if (existing) {
+        existing.remove();
+        return;
+    }
+
+    // Create detail row
+    const colCount = row.cells.length;
+    const detailRow = document.createElement('tr');
+    detailRow.id = 'detail-' + tradeId;
+    detailRow.className = 'trade-detail-row';
+    const td = document.createElement('td');
+    td.colSpan = colCount;
+    td.innerHTML = '<div class="detail-loading">Loading...</div>';
+    detailRow.appendChild(td);
+    row.after(detailRow);
+
+    // Fetch if not cached
+    if (!_detailCache[tradeId]) {
+        try {
+            const resp = await fetch('/api/trades/' + tradeId + '/detail');
+            _detailCache[tradeId] = await resp.json();
+        } catch (e) {
+            td.innerHTML = '<div class="detail-loading">Failed to load details</div>';
+            return;
+        }
+    }
+
+    const data = _detailCache[tradeId];
+    if (data.error) {
+        td.innerHTML = '<div class="detail-loading">' + data.error + '</div>';
+        return;
+    }
+
+    const trade = data.trade;
+    const exits = data.partial_exits || [];
+
+    // Build TP tiers table
+    let tiersHtml = '';
+    const tiers = trade.tp_tiers;
+    if (tiers && tiers.length > 0) {
+        tiersHtml = '<div class="detail-section">' +
+            '<h4>Take Profit Tiers</h4>' +
+            '<table class="detail-table">' +
+            '<thead><tr><th>Tier</th><th>Target</th><th>%</th><th>Qty</th><th>Status</th></tr></thead>' +
+            '<tbody>';
+        const tiersDone = parseInt(trade.current_tier || 0);
+        tiers.forEach(function(t) {
+            const status = t.level <= tiersDone ? '<span class="positive">Filled</span>'
+                : t.level === tiersDone + 1 ? '<span class="text-orange">Target</span>'
+                : '<span class="text-muted">Pending</span>';
+            const price = t.price ? '$' + parseFloat(t.price).toFixed(4) : 'Trail';
+            tiersHtml += '<tr><td>TP' + t.level + '</td><td>' + price + '</td><td>' + Math.round(t.pct * 100) + '%</td><td>' + parseFloat(t.quantity).toFixed(6) + '</td><td>' + status + '</td></tr>';
+        });
+        tiersHtml += '</tbody></table></div>';
+    }
+
+    // Build partial exits table
+    let exitsHtml = '';
+    if (exits.length > 0) {
+        exitsHtml = '<div class="detail-section">' +
+            '<h4>Partial Exits</h4>' +
+            '<table class="detail-table">' +
+            '<thead><tr><th>Tier</th><th>Exit Price</th><th>Qty</th><th>P&L</th><th>Fees</th><th>Time</th></tr></thead>' +
+            '<tbody>';
+        exits.forEach(function(e) {
+            const pnl = parseFloat(e.pnl_usd || 0);
+            const pnlClass = pnl >= 0 ? 'positive' : 'negative';
+            const pnlSign = pnl >= 0 ? '+' : '';
+            exitsHtml += '<tr>' +
+                '<td>TP' + (e.tier || '-') + '</td>' +
+                '<td>$' + parseFloat(e.exit_price || 0).toFixed(4) + '</td>' +
+                '<td>' + parseFloat(e.quantity || 0).toFixed(6) + '</td>' +
+                '<td class="' + pnlClass + '">' + pnlSign + '$' + pnl.toFixed(2) + '</td>' +
+                '<td>$' + parseFloat(e.fees_usd || 0).toFixed(4) + '</td>' +
+                '<td>' + (e.created_at || '').substring(0, 16) + '</td>' +
+                '</tr>';
+        });
+        exitsHtml += '</tbody></table></div>';
+    }
+
+    // Build metadata section
+    const lev = parseInt(trade.leverage || 1);
+    const margin = parseFloat(trade.margin_used || 0);
+    const liqPrice = parseFloat(trade.liquidation_price || 0);
+    let metaHtml = '<div class="detail-section">' +
+        '<h4>Trade Details</h4>' +
+        '<dl class="detail-meta">' +
+        '<dt>Mode</dt><dd>' + (trade.mode || '-').toUpperCase() + '</dd>' +
+        '<dt>Leverage</dt><dd>' + lev + 'x</dd>';
+    if (lev > 1) {
+        metaHtml += '<dt>Margin Used</dt><dd>$' + margin.toFixed(2) + '</dd>';
+        metaHtml += '<dt>Liquidation</dt><dd>$' + liqPrice.toFixed(4) + '</dd>';
+    }
+    metaHtml += '<dt>R:R</dt><dd>' + (trade.risk_reward || '-') + '</dd>';
+    metaHtml += '<dt>Risk $</dt><dd>$' + parseFloat(trade.risk_usd || 0).toFixed(2) + '</dd>';
+    metaHtml += '</dl></div>';
+
+    // Combine
+    const rightSide = tiersHtml || exitsHtml
+        ? (tiersHtml + exitsHtml)
+        : '<div class="detail-section"><h4>No TP Tiers</h4><p class="text-muted" style="font-size:0.8rem;">Single take-profit target</p></div>';
+
+    td.innerHTML = '<div class="trade-detail-content">' + metaHtml + rightSide + '</div>';
+}
+</script>
 {% endblock %}

@@ -106,7 +106,11 @@
 <!-- Open Positions (full width) -->
 <div class="panel">
     <div class="panel-header">
-        <h2>Open Positions</h2>
+        <h2>Open Positions
+            {% if config and config.account_type != 'spot' %}
+            <span class="account-badge">{{ config.account_type | upper }} {{ config.leverage }}x</span>
+            {% endif %}
+        </h2>
         <div style="display:flex; align-items:center; gap:8px;">
             <span class="badge text-blue">{{ trades | length }}</span>
             <button id="refresh-btn" class="btn" onclick="manualRefresh()" style="font-size:0.8rem; padding:4px 10px;">Refresh Prices</button>
@@ -139,14 +143,26 @@
                         <td><strong>{{ t.symbol }}</strong></td>
                         <td>
                             <span class="dir-badge {{ t.direction | default('long') }}">
-                                {{ t.direction | default('long') }}
+                                {{ t.direction | default('long') }}{% if (t.leverage | default(1) | int) > 1 %} {{ t.leverage }}x{% endif %}
                             </span>
                         </td>
                         <td class="mono">${{ "%.4f" | format(t.entry_price | float) }}</td>
                         <td class="mono pos-current-price">--</td>
                         <td class="mono pos-pnl">--</td>
                         <td class="mono negative">${{ "%.4f" | format(t.stop_loss | float) }}</td>
-                        <td class="mono positive">{{ ("$%.4f" | format(t.take_profit | float)) if t.take_profit else '-' }}</td>
+                        <td class="mono">
+                            {% if t.tp_tiers %}
+                                {% set tiers_done = t.current_tier | default(0) | int %}
+                                <div class="tp-tiers">
+                                    {% for tier in t.tp_tiers %}
+                                    <div class="tp-tier-seg {{ 'filled' if tier.level <= tiers_done else ('target' if tier.level == tiers_done + 1 else 'pending') }}" title="TP{{ tier.level }}: ${{ '%.4f' | format(tier.price | float) if tier.price else 'trail' }} ({{ (tier.pct * 100) | int }}%)"></div>
+                                    {% endfor %}
+                                    <span class="tp-tier-label">{% if tiers_done >= 3 %}Done{% else %}TP{{ tiers_done + 1 }}{% endif %}</span>
+                                </div>
+                            {% else %}
+                                <span class="positive">{{ ("$%.4f" | format(t.take_profit | float)) if t.take_profit else '-' }}</span>
+                            {% endif %}
+                        </td>
                         <td class="mono">${{ "%.2f" | format(t.entry_cost_usd | default(0) | float) }}</td>
                         <td>
                             <div class="score-bar">

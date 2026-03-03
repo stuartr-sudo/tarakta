@@ -833,3 +833,137 @@ p { margin: 0 0 0.5rem; }
     .scan-timer .timer-bar { display: none; }
     .scan-timer .timer-label { display: none; }
 }
+
+/* ---- Account Type Badge ---- */
+.account-badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: var(--purple-dim);
+    color: var(--purple);
+    margin-left: 0.5rem;
+}
+
+/* ---- TP Tier Progress Bar ---- */
+.tp-tiers {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.tp-tier-seg {
+    width: 14px;
+    height: 10px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.08);
+    position: relative;
+}
+
+.tp-tier-seg.filled {
+    background: var(--green);
+}
+
+.tp-tier-seg.target {
+    background: var(--orange);
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+.tp-tier-seg.pending {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.tp-tier-label {
+    font-size: 0.65rem;
+    color: var(--text-muted);
+    margin-left: 4px;
+    white-space: nowrap;
+}
+
+/* ---- Expandable Detail Rows ---- */
+.data-table tr.clickable-row {
+    cursor: pointer;
+}
+
+.data-table tr.clickable-row:hover td {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.trade-detail-row td {
+    padding: 0 !important;
+    background: rgba(255, 255, 255, 0.015) !important;
+    border-bottom: 1px solid var(--border) !important;
+}
+
+.trade-detail-content {
+    padding: 1rem 1.25rem;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+}
+
+@media (max-width: 768px) {
+    .trade-detail-content { grid-template-columns: 1fr; }
+}
+
+.detail-section h4 {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+}
+
+.detail-meta {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.35rem 1rem;
+    font-size: 0.8rem;
+}
+
+.detail-meta dt {
+    color: var(--text-muted);
+}
+
+.detail-meta dd {
+    color: #fff;
+    font-weight: 500;
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 0.75rem;
+}
+
+.detail-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.75rem;
+}
+
+.detail-table th {
+    text-align: left;
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    padding: 0.35rem 0.5rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    font-weight: 600;
+}
+
+.detail-table td {
+    padding: 0.35rem 0.5rem;
+    color: var(--text-secondary);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 0.7rem;
+}
+
+.detail-loading {
+    text-align: center;
+    padding: 1rem;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+}
