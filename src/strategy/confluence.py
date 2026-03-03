@@ -8,6 +8,7 @@ from src.exchange.models import (
     SignalCandidate,
 )
 from src.strategy.premium_discount import PremiumDiscountScore
+from src.strategy.regime import MarketRegime
 from src.strategy.volume import VolumeResult
 from src.utils.logging import get_logger
 
@@ -63,6 +64,7 @@ class ConfluenceEngine:
         fvg_results: dict[str, FVGResult],
         volume_result: VolumeResult | None = None,
         pd_result: PremiumDiscountScore | None = None,
+        regime: MarketRegime | None = None,
     ) -> SignalCandidate:
         score = 0.0
         reasons: list[str] = []

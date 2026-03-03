@@ -14,6 +14,7 @@ from src.strategy.liquidity import LiquidityAnalyzer
 from src.strategy.market_structure import MarketStructureAnalyzer
 from src.strategy.order_blocks import OrderBlockAnalyzer
 from src.strategy.premium_discount import PremiumDiscountAnalyzer
+from src.strategy.regime import MarketRegimeAnalyzer
 from src.strategy.volume import VolumeAnalyzer
 from src.utils.logging import get_logger
 
@@ -36,6 +37,7 @@ class AltcoinScanner:
         self.fvg_analyzer = FairValueGapAnalyzer()
         self.vol_analyzer = VolumeAnalyzer()
         self.pd_analyzer = PremiumDiscountAnalyzer()
+        self.regime_analyzer = MarketRegimeAnalyzer()
         self.confluence = ConfluenceEngine(entry_threshold=config.entry_threshold)
 
     async def scan(self, pairs: list[str]) -> list[SignalCandidate]:
@@ -135,6 +137,12 @@ class AltcoinScanner:
                 pd_results[tf] = self.pd_analyzer.analyze(df, swing_hl_data)
         pd_score = self.pd_analyzer.score(pd_results, direction)
 
+        # --- Market Regime (ADX + Choppiness) ---
+        regime = self.regime_analyzer.analyze(
+            ohlc_4h=candles.get("4h", pd.DataFrame()),
+            ohlc_1d=candles.get("1d"),
+        )
+
         # Get current price from most recent 15m close
         current_price = float(candles["15m"]["close"].iloc[-1]) if not candles["15m"].empty else 0
 
@@ -148,6 +156,7 @@ class AltcoinScanner:
             fvg_results=fvg_results,
             volume_result=volume_result,
             pd_result=pd_score,
+            regime=regime,
         )
 
         if signal.score >= self.config.entry_threshold:

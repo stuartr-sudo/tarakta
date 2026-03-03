@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     llm_model: str = "claude-haiku-4-5-20251001"
     llm_timeout_seconds: float = 15.0
     llm_split_ratio: float = 0.5  # 0.5 = 50% of signals go through LLM
+    llm_min_confidence: float = 40.0  # Reject approvals below this confidence (0-100)
     llm_fallback_approve: bool = True  # If API fails, approve trade by default
 
     # Logging

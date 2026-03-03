@@ -52,6 +52,86 @@ class SplitTestManager:
         return group
 
     @staticmethod
+    def _compute_group_stats(group_trades: list[dict[str, Any]]) -> dict[str, Any]:
+        """Compute detailed stats for a single group."""
+        if not group_trades:
+            return {
+                "trade_count": 0,
+                "win_rate": 0.0,
+                "avg_pnl_pct": 0.0,
+                "total_pnl_usd": 0.0,
+                "avg_pnl_usd": 0.0,
+                "profit_factor": 0.0,
+                "max_drawdown_usd": 0.0,
+                "avg_rr_achieved": 0.0,
+                "best_trade_usd": 0.0,
+                "worst_trade_usd": 0.0,
+                "avg_holding_hours": 0.0,
+            }
+
+        wins = sum(1 for t in group_trades if (t.get("pnl_usd") or 0) > 0)
+        pnls_usd = [float(t.get("pnl_usd") or 0) for t in group_trades]
+        pnls_pct = [float(t.get("pnl_percent") or 0) for t in group_trades]
+        count = len(group_trades)
+
+        # Profit factor: gross wins / gross losses
+        gross_wins = sum(p for p in pnls_usd if p > 0)
+        gross_losses = abs(sum(p for p in pnls_usd if p < 0))
+        profit_factor = round(gross_wins / gross_losses, 2) if gross_losses > 0 else (
+            float("inf") if gross_wins > 0 else 0.0
+        )
+
+        # Max drawdown: largest peak-to-trough in cumulative PnL
+        cumulative = 0.0
+        peak = 0.0
+        max_dd = 0.0
+        for pnl in pnls_usd:
+            cumulative += pnl
+            if cumulative > peak:
+                peak = cumulative
+            dd = peak - cumulative
+            if dd > max_dd:
+                max_dd = dd
+
+        # Average R:R achieved (from trade records)
+        rr_values = [float(t.get("risk_reward") or 0) for t in group_trades if t.get("risk_reward")]
+        avg_rr = round(sum(rr_values) / len(rr_values), 2) if rr_values else 0.0
+
+        # Average holding time
+        holding_hours = []
+        for t in group_trades:
+            entry_time = t.get("entry_time")
+            exit_time = t.get("exit_time")
+            if entry_time and exit_time:
+                try:
+                    from datetime import datetime
+                    if isinstance(entry_time, str):
+                        et = datetime.fromisoformat(entry_time.replace("Z", "+00:00"))
+                    else:
+                        et = entry_time
+                    if isinstance(exit_time, str):
+                        xt = datetime.fromisoformat(exit_time.replace("Z", "+00:00"))
+                    else:
+                        xt = exit_time
+                    holding_hours.append((xt - et).total_seconds() / 3600)
+                except (ValueError, TypeError):
+                    pass
+
+        return {
+            "trade_count": count,
+            "win_rate": round(wins / count * 100, 1),
+            "avg_pnl_pct": round(sum(pnls_pct) / count, 2),
+            "total_pnl_usd": round(sum(pnls_usd), 2),
+            "avg_pnl_usd": round(sum(pnls_usd) / count, 2),
+            "profit_factor": profit_factor if profit_factor != float("inf") else 999.0,
+            "max_drawdown_usd": round(max_dd, 2),
+            "avg_rr_achieved": avg_rr,
+            "best_trade_usd": round(max(pnls_usd), 2),
+            "worst_trade_usd": round(min(pnls_usd), 2),
+            "avg_holding_hours": round(sum(holding_hours) / len(holding_hours), 1) if holding_hours else 0.0,
+        }
+
+    @staticmethod
     def compute_stats(trades: list[dict[str, Any]]) -> dict[str, Any]:
         """Compute per-group comparison statistics from closed trades.
 
@@ -73,30 +153,9 @@ class SplitTestManager:
 
         result: dict[str, Any] = {}
         for group, group_trades in groups.items():
-            if not group_trades:
-                result[group] = {
-                    "trade_count": 0,
-                    "win_rate": 0.0,
-                    "avg_pnl_pct": 0.0,
-                    "total_pnl_usd": 0.0,
-                    "avg_pnl_usd": 0.0,
-                }
-                continue
+            result[group] = SplitTestManager._compute_group_stats(group_trades)
 
-            wins = sum(1 for t in group_trades if (t.get("pnl_usd") or 0) > 0)
-            pnls_usd = [t.get("pnl_usd") or 0.0 for t in group_trades]
-            pnls_pct = [t.get("pnl_percent") or 0.0 for t in group_trades]
-            count = len(group_trades)
-
-            result[group] = {
-                "trade_count": count,
-                "win_rate": round(wins / count * 100, 1) if count else 0.0,
-                "avg_pnl_pct": round(sum(pnls_pct) / count, 2) if count else 0.0,
-                "total_pnl_usd": round(sum(pnls_usd), 2),
-                "avg_pnl_usd": round(sum(pnls_usd) / count, 2) if count else 0.0,
-            }
-
-        # Basic significance test (z-test on win rates)
+        # Significance test and comparison
         ctrl = result.get("control", {})
         llm = result.get("llm", {})
         n_ctrl = ctrl.get("trade_count", 0)
@@ -106,13 +165,15 @@ class SplitTestManager:
             p_ctrl = ctrl["win_rate"] / 100
             p_llm = llm["win_rate"] / 100
             p_pool = (p_ctrl * n_ctrl + p_llm * n_llm) / (n_ctrl + n_llm)
-            se = (p_pool * (1 - p_pool) * (1 / n_ctrl + 1 / n_llm)) ** 0.5 if p_pool > 0 and p_pool < 1 else 0
+            se = (p_pool * (1 - p_pool) * (1 / n_ctrl + 1 / n_llm)) ** 0.5 if 0 < p_pool < 1 else 0
             z_score = (p_llm - p_ctrl) / se if se > 0 else 0
             result["comparison"] = {
                 "z_score": round(z_score, 2),
                 "significant_at_95": abs(z_score) >= 1.96,
                 "llm_win_rate_delta": round(llm["win_rate"] - ctrl["win_rate"], 1),
                 "llm_avg_pnl_delta": round(llm["avg_pnl_usd"] - ctrl["avg_pnl_usd"], 2),
+                "llm_profit_factor_delta": round(llm["profit_factor"] - ctrl["profit_factor"], 2),
+                "llm_max_dd_delta": round(llm["max_drawdown_usd"] - ctrl["max_drawdown_usd"], 2),
             }
         else:
             min_needed = max(5 - n_ctrl, 5 - n_llm, 0)

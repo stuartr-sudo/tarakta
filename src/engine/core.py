@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import traceback
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import pandas as pd
 
@@ -267,6 +268,41 @@ class TradingEngine:
                     after=len(signals),
                 )
 
+        # Read LLM runtime toggle ONCE per tick (not per signal)
+        state_dict = await self.repo.get_engine_state() or {}
+        llm_runtime_enabled = state_dict.get("llm_enabled", self.config.llm_enabled)
+
+        # Pre-fetch recent performance for LLM context (once per tick)
+        llm_perf_context: dict[str, Any] = {}
+        if llm_runtime_enabled and self.llm_analyst:
+            try:
+                recent_trades = await self.repo.get_trades(status="closed", per_page=20)
+                if recent_trades:
+                    wins = sum(1 for t in recent_trades if (t.get("pnl_usd") or 0) > 0)
+                    llm_perf_context["recent_win_rate"] = round(wins / len(recent_trades) * 100, 1)
+                    llm_perf_context["recent_trade_count"] = len(recent_trades)
+                    rr_values = [float(t.get("risk_reward") or 0) for t in recent_trades if t.get("risk_reward")]
+                    if rr_values:
+                        llm_perf_context["recent_avg_rr"] = round(sum(rr_values) / len(rr_values), 2)
+                    # Calculate current streak
+                    streak = 0
+                    streak_type = None
+                    for t in recent_trades:
+                        is_win = (t.get("pnl_usd") or 0) > 0
+                        if streak_type is None:
+                            streak_type = is_win
+                            streak = 1
+                        elif is_win == streak_type:
+                            streak += 1
+                        else:
+                            break
+                    if streak_type is True:
+                        llm_perf_context["winning_streak"] = streak
+                    elif streak_type is False:
+                        llm_perf_context["losing_streak"] = streak
+            except Exception as e:
+                logger.debug("llm_perf_context_failed", error=str(e))
+
         # Execute entries for top signals
         signals_saved = 0
         trades_entered = 0
@@ -373,10 +409,6 @@ class TradingEngine:
                     continue
 
                 # --- LLM Split Test: assign group and optionally analyze ---
-                # Check runtime toggle from engine state (dashboard toggle)
-                state_dict = await self.repo.get_engine_state() or {}
-                llm_runtime_enabled = state_dict.get("llm_enabled", self.config.llm_enabled)
-
                 if llm_runtime_enabled:
                     test_group = self.split_test.assign_group(signal)
                 else:
@@ -386,21 +418,48 @@ class TradingEngine:
                 tp_override = None
 
                 if test_group == "llm" and self.llm_analyst:
+                    # Pre-calculate SL/TP so the LLM can evaluate R:R
+                    pre_sl = self.order_executor._calculate_stop_loss(signal)
+                    pre_tp = None
+                    pre_rr = None
+                    if pre_sl is not None:
+                        pre_tp = self.order_executor._calculate_take_profit(signal, pre_sl)
+                        sl_dist = abs(signal.entry_price - pre_sl)
+                        if sl_dist > 0 and pre_tp is not None:
+                            pre_rr = abs(pre_tp - signal.entry_price) / sl_dist
+
                     llm_context = {
                         "sentiment_score": sentiment_score,
                         "adjusted_score": adjusted_score,
                         "active_threshold": active_threshold,
+                        "sl_price": pre_sl,
+                        "tp_price": pre_tp,
+                        "rr_ratio": round(pre_rr, 2) if pre_rr else None,
+                        "open_position_count": len(self.portfolio.open_positions),
+                        **llm_perf_context,
                     }
                     llm_result = await self.llm_analyst.analyze_signal(signal, llm_context)
-                    llm_analysis_data = {
-                        "approve": llm_result.approve,
-                        "confidence": llm_result.confidence,
-                        "reasoning": llm_result.reasoning,
-                        "suggested_sl": llm_result.suggested_sl,
-                        "suggested_tp": llm_result.suggested_tp,
-                        "latency_ms": round(llm_result.latency_ms, 1),
-                        "error": llm_result.error,
-                    }
+
+                    # If LLM errored, demote to control group to preserve split test integrity
+                    if llm_result.error and llm_result.error != "api_backoff":
+                        test_group = "control"
+                        logger.info(
+                            "llm_error_demoted_to_control",
+                            symbol=signal.symbol,
+                            error=llm_result.error,
+                        )
+                    else:
+                        llm_analysis_data = {
+                            "approve": llm_result.approve,
+                            "confidence": llm_result.confidence,
+                            "reasoning": llm_result.reasoning,
+                            "suggested_sl": llm_result.suggested_sl,
+                            "suggested_tp": llm_result.suggested_tp,
+                            "latency_ms": round(llm_result.latency_ms, 1),
+                            "error": llm_result.error,
+                            "input_tokens": llm_result.input_tokens,
+                            "output_tokens": llm_result.output_tokens,
+                        }
 
                     if not llm_result.approve:
                         logger.info(
