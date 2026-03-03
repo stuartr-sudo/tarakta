@@ -686,7 +686,6 @@ class TradingEngine:
 
                             # Tag trade with split test metadata
                             trade_record["test_group"] = test_group
-                            trade_record["confluence_components"] = getattr(signal, "components", None)
                             if llm_analysis_data:
                                 trade_record["llm_analysis"] = llm_analysis_data
                             if recent_headlines:
