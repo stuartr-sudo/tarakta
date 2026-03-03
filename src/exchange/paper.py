@@ -29,6 +29,64 @@ class PaperExchange:
         self._leverage = leverage
         logger.info("paper_exchange_init", balance=initial_balance, account_type=account_type, leverage=leverage)
 
+    def restore_positions(self, open_positions: dict) -> None:
+        """Restore internal position tracking from engine state after restart.
+
+        Without this, partial/full exits would fail to close positions correctly
+        because the PaperExchange wouldn't know about them (it resets on restart).
+
+        Args:
+            open_positions: dict of symbol -> Position from engine state
+        """
+        if not open_positions:
+            return
+
+        total_margin_deployed = 0.0
+        restored = 0
+
+        for symbol, pos in open_positions.items():
+            base = symbol.split("/")[0]
+            base = base.split(":")[0] if ":" in base else base
+            leverage = pos.leverage or self._leverage
+
+            if self._account_type == "futures":
+                if pos.direction == "long":
+                    key = f"LONG_{base}"
+                    price_key = f"LONG_PRICE_{base}"
+                else:
+                    key = f"SHORT_{base}"
+                    price_key = f"SHORT_PRICE_{base}"
+
+                # Track the position quantity and entry price
+                self.balance[key] = self.balance.get(key, 0) + pos.quantity
+                self.balance[price_key] = pos.entry_price
+
+                # Deduct margin from USD balance
+                margin = pos.margin_used or (pos.cost_usd / leverage)
+                total_margin_deployed += margin
+            else:
+                # Spot: track base tokens (long) or SHORT keys (short)
+                if pos.direction == "long":
+                    self.balance[base] = self.balance.get(base, 0) + pos.quantity
+                    total_margin_deployed += pos.cost_usd
+                else:
+                    key = f"SHORT_{base}"
+                    self.balance[key] = self.balance.get(key, 0) + pos.quantity
+                    total_margin_deployed += pos.cost_usd
+
+            restored += 1
+
+        # Adjust USD balance: the initial_balance already accounts for all capital,
+        # but we need to deduct what's deployed in positions
+        self.balance["USD"] = self.balance.get("USD", 0) - total_margin_deployed
+
+        logger.info(
+            "paper_positions_restored",
+            count=restored,
+            margin_deployed=round(total_margin_deployed, 2),
+            usd_balance=round(self.balance.get("USD", 0), 2),
+        )
+
     async def fetch_candles(
         self, symbol: str, timeframe: str, limit: int = 200, since: int | None = None
     ) -> pd.DataFrame:

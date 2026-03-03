@@ -28,12 +28,13 @@
 {% if trades %}
 {% for t in trades %}
     {% set lev = t.leverage | default(1) | int %}
-    {% if lev > 1 and t.margin_used %}
-        {% set ns.allocated = ns.allocated + (t.margin_used | float) %}
-    {% elif lev > 1 %}
-        {% set ns.allocated = ns.allocated + (t.entry_cost_usd | default(0) | float) / lev %}
+    {% set qty = (t.remaining_quantity or t.entry_quantity or 0) | float %}
+    {% set ep = (t.entry_price or 0) | float %}
+    {% set current_notional = qty * ep %}
+    {% if lev > 1 %}
+        {% set ns.allocated = ns.allocated + current_notional / lev %}
     {% else %}
-        {% set ns.allocated = ns.allocated + (t.entry_cost_usd | default(0) | float) %}
+        {% set ns.allocated = ns.allocated + current_notional %}
     {% endif %}
 {% endfor %}
 {% endif %}
@@ -575,22 +576,19 @@ async function softRefreshStats() {
             return;
         }
 
-        // Update available cash = equity - allocated (margin-based)
+        // Update available cash and allocated (using remaining qty for partial exits)
         if (data.current) {
             const equity = parseFloat(data.current.balance_usd || 0);
             let allocated = 0;
             openTrades.forEach(t => {
                 const lev = parseInt(t.leverage || 1) || 1;
-                const mu = parseFloat(t.margin_used || 0);
-                const cost = parseFloat(t.entry_cost_usd || 0);
-                if (lev > 1 && mu > 0) {
-                    allocated += mu;
-                } else if (lev > 1) {
-                    allocated += cost / lev;
-                } else {
-                    allocated += cost;
-                }
+                const qty = parseFloat(t.remaining_quantity || t.entry_quantity || 0);
+                const ep = parseFloat(t.entry_price || 0);
+                const notional = qty * ep;
+                allocated += lev > 1 ? notional / lev : notional;
             });
+            const allocEl = document.getElementById('allocated-value');
+            if (allocEl) allocEl.textContent = '$' + allocated.toFixed(2);
             const avEl = document.getElementById('available-value');
             if (avEl) avEl.textContent = '$' + (equity - allocated).toFixed(2);
         }

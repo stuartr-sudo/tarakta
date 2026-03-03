@@ -164,13 +164,12 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 unrealized = 0
 
             leverage = int(trade.get("leverage", 1) or 1)
-            margin_used = float(trade.get("margin_used", 0) or 0)
-            if leverage > 1 and margin_used > 0:
-                effective_cost = margin_used
-            elif leverage > 1:
-                effective_cost = cost_usd / leverage
+            # Use remaining quantity to compute current margin (handles partial exits)
+            current_notional = quantity * entry_price
+            if leverage > 1:
+                effective_cost = current_notional / leverage
             else:
-                effective_cost = cost_usd
+                effective_cost = current_notional
             positions.append({
                 "symbol": symbol,
                 "direction": direction,

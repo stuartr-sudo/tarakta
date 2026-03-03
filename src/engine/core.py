@@ -114,6 +114,11 @@ class TradingEngine:
         self.portfolio.daily_pnl = db_daily_pnl
         self.state.daily_pnl = db_daily_pnl
 
+        # Restore PaperExchange internal position tracking after restart
+        # Without this, partial exits would create phantom positions instead of closing
+        if hasattr(self.exchange, "restore_positions"):
+            self.exchange.restore_positions(self.state.open_positions)
+
         # Load historical trade data for self-improving components
         await self.trade_analyzer.load_history()
 
@@ -628,12 +633,27 @@ class TradingEngine:
                         new_stop_loss=position.stop_loss,
                     )
 
-                    # Update trade record with current tier state
-                    await self.repo.update_trade(position.trade_id, {
+                    # Update trade record with current tier state (including filled flags)
+                    update_data = {
                         "current_tier": position.current_tier,
                         "remaining_quantity": position.quantity,
                         "stop_loss": position.stop_loss,
-                    })
+                        "margin_used": position.margin_used,
+                    }
+                    if position.tp_tiers:
+                        update_data["tp_tiers"] = [
+                            {
+                                "level": t.level,
+                                "price": t.price,
+                                "pct": t.pct,
+                                "quantity": t.quantity,
+                                "filled": t.filled,
+                                "fill_price": t.fill_price,
+                                "fill_time": t.fill_time.isoformat() if t.fill_time else None,
+                            }
+                            for t in position.tp_tiers
+                        ]
+                    await self.repo.update_trade(position.trade_id, update_data)
 
                     # Position stays in state — NOT removed
 
