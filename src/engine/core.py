@@ -362,6 +362,13 @@ class TradingEngine:
         # Read LLM runtime toggle ONCE per tick (not per signal)
         state_dict = await self.repo.get_engine_state() or {}
         llm_runtime_enabled = state_dict.get("llm_enabled", self.config.llm_enabled)
+        logger.info(
+            "llm_toggle_check",
+            llm_runtime_enabled=llm_runtime_enabled,
+            db_value=state_dict.get("llm_enabled"),
+            config_default=self.config.llm_enabled,
+            has_analyst=self.llm_analyst is not None,
+        )
 
         # Pre-fetch recent performance for LLM context (once per tick)
         llm_perf_context: dict[str, Any] = {}
