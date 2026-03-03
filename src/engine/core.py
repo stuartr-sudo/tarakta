@@ -1226,6 +1226,12 @@ class TradingEngine:
             )
             if self.dynamic_weights:
                 state_dict["dynamic_weights"] = self.dynamic_weights.to_state()
+            # Preserve dashboard-toggled fields that aren't in portfolio state
+            existing = await self.repo.get_engine_state()
+            if existing:
+                for key in ("llm_enabled",):
+                    if key in existing and key not in state_dict:
+                        state_dict[key] = existing[key]
             await self.repo.upsert_engine_state(state_dict)
             await self.repo.insert_snapshot(
                 self.portfolio.to_snapshot_dict(
