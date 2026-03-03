@@ -39,6 +39,148 @@ class PaperExchange:
         """Delegate to live exchange for real prices."""
         return await self.live.fetch_ticker(symbol)
 
+    async def fetch_order_book(self, symbol: str, limit: int = 5) -> dict:
+        """Delegate to live exchange for real order book."""
+        return await self.live.fetch_order_book(symbol, limit=limit)
+
+    async def place_limit_order(self, symbol: str, side: str, quantity: float, price: float) -> OrderResult:
+        """Simulate a limit order fill at the specified price (instant fill for paper trading)."""
+        # For paper trading, treat limit orders as immediate fills at the limit price
+        # This is a simplification — real limit orders may not fill immediately
+        ticker = await self.live.fetch_ticker(symbol)
+        last_price = float(ticker["last"])
+
+        # Use the limit price for fill, but apply minimal slippage
+        fill_price = price
+
+        if self._account_type == "futures":
+            return await self._futures_limit_order(symbol, side, quantity, fill_price)
+
+        base = symbol.split("/")[0]
+        if side == "buy":
+            cost = quantity * fill_price
+            fee = cost * self._fee_rate
+            short_key = f"SHORT_{base}"
+
+            if self.balance.get(short_key, 0) >= quantity * 0.99:
+                self.balance[short_key] = max(0, self.balance[short_key] - quantity)
+                self.balance["USD"] = self.balance.get("USD", 0) - cost - fee
+            else:
+                total_cost = cost + fee
+                usd_balance = self.balance.get("USD", 0)
+                if total_cost > usd_balance:
+                    raise ValueError(
+                        f"Insufficient paper balance: need ${total_cost:.2f}, have ${usd_balance:.2f}"
+                    )
+                self.balance["USD"] = usd_balance - total_cost
+                self.balance[base] = self.balance.get(base, 0) + quantity
+        else:
+            revenue = quantity * fill_price
+            fee = revenue * self._fee_rate
+            base_balance = self.balance.get(base, 0)
+
+            if base_balance >= quantity * 0.99:
+                self.balance[base] = max(0, base_balance - quantity)
+                self.balance["USD"] = self.balance.get("USD", 0) + revenue - fee
+            else:
+                usd_balance = self.balance.get("USD", 0)
+                self.balance["USD"] = usd_balance + revenue - fee
+                short_key = f"SHORT_{base}"
+                self.balance[short_key] = self.balance.get(short_key, 0) + quantity
+
+        order_id = f"paper-{uuid4().hex[:8]}"
+        result = OrderResult(
+            order_id=order_id,
+            symbol=symbol,
+            side=side,
+            filled_quantity=quantity,
+            avg_price=fill_price,
+            fee=fee,
+            status="closed",
+        )
+        self.order_history.append({
+            "order_id": order_id, "symbol": symbol, "side": side,
+            "quantity": quantity, "price": fill_price, "fee": fee,
+        })
+        logger.info(
+            "paper_limit_order",
+            side=side, symbol=symbol, quantity=quantity,
+            price=fill_price, fee=fee,
+            usd_balance=self.balance.get("USD", 0),
+        )
+        return result
+
+    async def _futures_limit_order(self, symbol: str, side: str, quantity: float, fill_price: float) -> OrderResult:
+        """Simulate a futures limit order with leverage."""
+        leverage = self._leverage
+        base = symbol.split("/")[0]
+        long_key = f"LONG_{base}"
+        short_key = f"SHORT_{base}"
+        notional = quantity * fill_price
+        fee = notional * self._fee_rate
+        margin_required = notional / leverage
+
+        if side == "buy":
+            if self.balance.get(short_key, 0) >= quantity * 0.99:
+                open_price_key = f"SHORT_PRICE_{base}"
+                open_price = self.balance.get(open_price_key, fill_price)
+                pnl = (open_price - fill_price) * quantity
+                open_margin = (open_price * quantity) / leverage
+                self.balance["USD"] = self.balance.get("USD", 0) + open_margin + pnl - fee
+                self.balance[short_key] = max(0, self.balance[short_key] - quantity)
+                if self.balance[short_key] == 0:
+                    self.balance.pop(open_price_key, None)
+            else:
+                usd_balance = self.balance.get("USD", 0)
+                if margin_required + fee > usd_balance:
+                    raise ValueError(
+                        f"Insufficient paper margin: need ${margin_required + fee:.2f}, have ${usd_balance:.2f}"
+                    )
+                self.balance["USD"] = usd_balance - margin_required - fee
+                self.balance[long_key] = self.balance.get(long_key, 0) + quantity
+                self.balance[f"LONG_PRICE_{base}"] = fill_price
+        else:
+            if self.balance.get(long_key, 0) >= quantity * 0.99:
+                open_price_key = f"LONG_PRICE_{base}"
+                open_price = self.balance.get(open_price_key, fill_price)
+                pnl = (fill_price - open_price) * quantity
+                open_margin = (open_price * quantity) / leverage
+                self.balance["USD"] = self.balance.get("USD", 0) + open_margin + pnl - fee
+                self.balance[long_key] = max(0, self.balance[long_key] - quantity)
+                if self.balance[long_key] == 0:
+                    self.balance.pop(open_price_key, None)
+            else:
+                usd_balance = self.balance.get("USD", 0)
+                if margin_required + fee > usd_balance:
+                    raise ValueError(
+                        f"Insufficient paper margin: need ${margin_required + fee:.2f}, have ${usd_balance:.2f}"
+                    )
+                self.balance["USD"] = usd_balance - margin_required - fee
+                self.balance[short_key] = self.balance.get(short_key, 0) + quantity
+                self.balance[f"SHORT_PRICE_{base}"] = fill_price
+
+        order_id = f"paper-{uuid4().hex[:8]}"
+        result = OrderResult(
+            order_id=order_id,
+            symbol=symbol,
+            side=side,
+            filled_quantity=quantity,
+            avg_price=fill_price,
+            fee=fee,
+            status="closed",
+        )
+        self.order_history.append({
+            "order_id": order_id, "symbol": symbol, "side": side,
+            "quantity": quantity, "price": fill_price, "fee": fee,
+        })
+        logger.info(
+            "paper_futures_limit_order",
+            side=side, symbol=symbol, quantity=quantity,
+            price=fill_price, fee=fee, leverage=leverage,
+            usd_balance=self.balance.get("USD", 0),
+        )
+        return result
+
     async def place_market_order(self, symbol: str, side: str, quantity: float) -> OrderResult:
         """Simulate a market order fill at current price with slippage."""
         ticker = await self.live.fetch_ticker(symbol)
