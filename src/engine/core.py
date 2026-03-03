@@ -508,6 +508,7 @@ class TradingEngine:
                         "rr_ratio": round(pre_rr, 2) if pre_rr else None,
                         "open_position_count": len(self.portfolio.open_positions),
                         "recent_headlines": recent_headlines,
+                        "ml_win_probability": round((pattern_modifier + 1) / 2 * 100, 1) if pattern_modifier is not None else None,
                         **llm_perf_context,
                     }
                     llm_result = await self.llm_analyst.analyze_signal(signal, llm_context)

@@ -75,6 +75,8 @@ Price should be within or near (not far from) the key structure.
 5. Market structure — is the higher timeframe trend aligned with the trade direction?
 6. Recent bot performance — if the bot is on a losing streak, apply higher scrutiny. \
 If win rate is below 40%, only approve the strongest setups (score 80+, R:R 3+).
+7. ML win probability — if the XGBoost/pattern model gives a historical win probability, \
+weigh it as one signal among many. Below 40% is a red flag; above 60% is supportive.
 
 Be selective. Only approve trades with genuine edge. When in doubt, reject.
 
@@ -405,6 +407,10 @@ class LLMTradeAnalyst:
         else:
             headlines_section = "No recent headlines available"
 
+        # ML win probability from XGBoost/pattern analysis
+        ml_win_prob = context.get("ml_win_probability")
+        ml_section = f"{ml_win_prob:.0f}%" if ml_win_prob is not None else "Not available"
+
         # Open positions context
         open_count = context.get("open_position_count", 0)
 
@@ -437,6 +443,9 @@ class LLMTradeAnalyst:
 
 ### Recent News Headlines
 {headlines_section}
+
+### ML Historical Win Probability
+{ml_section}
 
 ### Recent Bot Performance
 {perf_section}
