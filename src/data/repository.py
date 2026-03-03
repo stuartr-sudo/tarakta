@@ -24,26 +24,27 @@ class Repository:
 
     # --- Trades ---
 
+    # Known columns in the Supabase trades table
+    _TRADE_COLUMNS = {
+        "symbol", "direction", "status", "mode",
+        "entry_price", "entry_quantity", "entry_cost_usd", "entry_order_id", "entry_time",
+        "exit_price", "exit_quantity", "exit_order_id", "exit_time", "exit_reason",
+        "stop_loss", "take_profit", "risk_usd", "risk_reward",
+        "pnl_usd", "pnl_percent", "fees_usd",
+        "confluence_score", "signal_reasons", "timeframes_used",
+        "leverage", "margin_used", "liquidation_price",
+        "test_group",
+        "created_at", "updated_at",
+    }
+
     async def insert_trade(self, trade: dict[str, Any]) -> dict:
+        # Only send columns that exist in the DB schema
+        clean = {k: v for k, v in trade.items() if k in self._TRADE_COLUMNS}
         try:
-            result = await asyncio.to_thread(_exec, self.db.table("trades").insert(trade))
+            result = await asyncio.to_thread(_exec, self.db.table("trades").insert(clean))
             return result.data[0] if result.data else {}
         except Exception as e:
-            err_str = str(e)
-            if "PGRST204" in err_str or "column" in err_str.lower():
-                # Column doesn't exist in DB — retry without extra columns
-                _extra = {"leverage", "margin_used", "liquidation_price", "confluence_components", "entry_headlines"}
-                stripped = {k: v for k, v in trade.items() if k not in _extra}
-                try:
-                    result = await asyncio.to_thread(
-                        _exec, self.db.table("trades").insert(stripped)
-                    )
-                    logger.warning("insert_trade_stripped_columns", symbol=trade.get("symbol"))
-                    return result.data[0] if result.data else {}
-                except Exception as e2:
-                    logger.error("insert_trade_failed", error=str(e2), symbol=trade.get("symbol"))
-                    return {}
-            logger.error("insert_trade_failed", error=err_str, symbol=trade.get("symbol"))
+            logger.error("insert_trade_failed", error=str(e), symbol=trade.get("symbol"))
             return {}
 
     async def update_trade(self, trade_id: str, updates: dict[str, Any]) -> dict:

@@ -696,10 +696,8 @@ class TradingEngine:
 
                             # Tag trade with split test metadata
                             trade_record["test_group"] = test_group
-                            if llm_analysis_data:
-                                trade_record["llm_analysis"] = llm_analysis_data
-                            # Note: entry_headlines stored in signal_components, not trade record
-                            # (column doesn't exist in Supabase trades table)
+                            # Note: llm_analysis and entry_headlines stored in signal_components,
+                            # not trade record (columns don't exist in Supabase trades table)
 
                             # Save to DB
                             db_trade = await self.repo.insert_trade(trade_record)
