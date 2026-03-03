@@ -30,7 +30,7 @@ class Settings(BaseSettings):
 
     # Trading
     trading_mode: Literal["paper", "live"] = "paper"
-    initial_balance: float = 100.0
+    initial_balance: float = 2000.0
     entry_threshold: float = 65.0
     max_risk_pct: float = 0.10  # Max 10% of balance lost per trade (SL distance)
     max_position_pct: float = 0.10  # Max 10% of balance allocated per trade
@@ -78,6 +78,9 @@ class Settings(BaseSettings):
 
     # Dynamic strategy weights
     dynamic_weights_enabled: bool = False  # Adjust confluence weights based on trade outcomes
+
+    # One-time force reset — set FORCE_RESET=true to wipe all data on next startup
+    force_reset: bool = False
 
     # Logging
     log_level: str = "INFO"

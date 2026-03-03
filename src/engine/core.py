@@ -86,17 +86,27 @@ class TradingEngine:
 
     async def startup(self) -> None:
         """Initialize engine state from DB or create fresh."""
-        saved = await self.repo.get_engine_state()
 
-        if saved:
-            self.state = EngineState.from_db(saved, mode=self.config.trading_mode)
-            logger.info("engine_recovered", cycle=self.state.cycle_count)
-        else:
+        # Force reset: wipe all DB data and start fresh (set FORCE_RESET=true env var)
+        if self.config.force_reset:
+            logger.info("force_reset_triggered", balance=self.config.initial_balance)
+            await self.repo.wipe_all_data()
             self.state = EngineState(
                 mode=self.config.trading_mode,
                 initial_balance=self.config.initial_balance,
             )
-            logger.info("engine_fresh_start", balance=self.config.initial_balance)
+            logger.info("engine_fresh_start_after_reset", balance=self.config.initial_balance)
+        else:
+            saved = await self.repo.get_engine_state()
+            if saved:
+                self.state = EngineState.from_db(saved, mode=self.config.trading_mode)
+                logger.info("engine_recovered", cycle=self.state.cycle_count)
+            else:
+                self.state = EngineState(
+                    mode=self.config.trading_mode,
+                    initial_balance=self.config.initial_balance,
+                )
+                logger.info("engine_fresh_start", balance=self.config.initial_balance)
 
         self.portfolio = PortfolioTracker(
             initial_balance=self.state.current_balance,
