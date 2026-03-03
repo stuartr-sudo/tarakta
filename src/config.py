@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     max_risk_pct: float = 0.10  # Max 10% of balance lost per trade (SL distance)
     max_position_pct: float = 0.10  # Max 10% of balance allocated per trade
     max_exposure_pct: float = 1.0  # Allow full budget deployment across positions
-    max_concurrent: int = 20
+    max_concurrent: int = 100
     max_daily_drawdown: float = 0.10
     circuit_breaker_pct: float = 0.15
     min_rr_ratio: float = 2.0
