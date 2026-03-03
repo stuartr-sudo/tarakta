@@ -686,7 +686,7 @@ class TradingEngine:
 
                             # Tag trade with split test metadata
                             trade_record["test_group"] = test_group
-                            trade_record["confluence_components"] = getattr(signal, "components", {})
+                            trade_record["confluence_components"] = getattr(signal, "components", None)
                             if llm_analysis_data:
                                 trade_record["llm_analysis"] = llm_analysis_data
                             if recent_headlines:
@@ -721,7 +721,7 @@ class TradingEngine:
                         "components": signal_components,
                         "current_price": signal.entry_price,
                         "acted_on": position is not None,
-                        "trade_id": position.trade_id if position else None,
+                        "trade_id": position.trade_id if position and position.trade_id else None,
                         "scan_cycle": cycle,
                     }
                 )

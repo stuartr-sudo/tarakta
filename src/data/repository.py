@@ -32,7 +32,7 @@ class Repository:
             err_str = str(e)
             if "PGRST204" in err_str or "column" in err_str.lower():
                 # Column doesn't exist in DB — retry without extra columns
-                _extra = {"leverage", "margin_used", "liquidation_price"}
+                _extra = {"leverage", "margin_used", "liquidation_price", "confluence_components"}
                 stripped = {k: v for k, v in trade.items() if k not in _extra}
                 try:
                     result = await asyncio.to_thread(
