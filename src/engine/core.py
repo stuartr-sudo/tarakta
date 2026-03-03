@@ -220,6 +220,7 @@ class TradingEngine:
 
                 if tick_type == TickType.MONITOR:
                     await self._monitor_tick()
+                    await self._persist_state()
                 else:
                     await self._primary_tick()
 

@@ -200,6 +200,8 @@ class PortfolioTracker:
     def to_state_dict(self, status: str, mode: str, cycle_count: int) -> dict:
         positions_data = {}
         for sym, pos in self.open_positions.items():
+            if pos.quantity <= 0:
+                continue  # Skip dead positions (fully exited via partial exits)
             pos_dict = {
                 "trade_id": pos.trade_id,
                 "symbol": pos.symbol,
