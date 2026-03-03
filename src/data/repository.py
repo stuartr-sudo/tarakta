@@ -49,9 +49,11 @@ class Repository:
 
     async def update_trade(self, trade_id: str, updates: dict[str, Any]) -> dict:
         try:
-            updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+            # Only send columns that exist in the DB schema
+            clean = {k: v for k, v in updates.items() if k in self._TRADE_COLUMNS}
+            clean["updated_at"] = datetime.now(timezone.utc).isoformat()
             result = await asyncio.to_thread(
-                _exec, self.db.table("trades").update(updates).eq("id", trade_id)
+                _exec, self.db.table("trades").update(clean).eq("id", trade_id)
             )
             return result.data[0] if result.data else {}
         except Exception as e:
