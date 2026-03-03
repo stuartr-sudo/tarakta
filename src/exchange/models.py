@@ -47,6 +47,7 @@ class Position:
     original_quantity: float = 0.0   # quantity at entry (before partial closes)
     original_stop_loss: float = 0.0  # original SL before breakeven move
     current_tier: int = 0            # 0=no tiers hit, 1=TP1 hit, 2=TP2 hit
+    confluence_score: float = 0.0    # confluence score at entry (for post-trade analysis)
 
 
 @dataclass
@@ -148,6 +149,7 @@ class SignalCandidate:
     ob_context: OrderBlock | None = None
     fvg_context: FairValueGap | None = None
     key_levels: dict = field(default_factory=dict)
+    components: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass

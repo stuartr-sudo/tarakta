@@ -19,6 +19,8 @@ from src.risk.circuit_breaker import CircuitBreaker
 from src.risk.manager import RiskManager
 from src.risk.portfolio import PortfolioTracker
 from src.strategy.adaptive_threshold import AdaptiveThreshold
+from src.strategy.confluence import WEIGHTS
+from src.strategy.dynamic_weights import DynamicWeightOptimizer
 from src.strategy.llm_analyst import LLMTradeAnalyst
 from src.strategy.scanner import AltcoinScanner
 from src.strategy.sentiment import SentimentFilter
@@ -71,6 +73,12 @@ class TradingEngine:
         self.portfolio: PortfolioTracker | None = None
         self._running = False
         self._reversal_cooldowns: dict[str, datetime] = {}
+
+        # Dynamic weight optimizer
+        self.dynamic_weights: DynamicWeightOptimizer | None = None
+        if config.dynamic_weights_enabled:
+            self.dynamic_weights = DynamicWeightOptimizer(WEIGHTS)
+            logger.info("dynamic_weights_enabled")
 
         # Background task infrastructure (for async post-mortems)
         self._postmortem_semaphore = asyncio.Semaphore(2)
@@ -149,6 +157,19 @@ class TradingEngine:
                 )
         except Exception as e:
             logger.warning("adaptive_threshold_load_failed", error=str(e))
+
+        # Bootstrap dynamic weights from saved state
+        if self.dynamic_weights:
+            try:
+                raw_state = await self.repo.get_engine_state() or {}
+                dw_state = raw_state.get("dynamic_weights")
+                if dw_state:
+                    self.dynamic_weights.from_state(dw_state)
+                    self.scanner.confluence_engine.update_weights(
+                        self.dynamic_weights.get_weights()
+                    )
+            except Exception as e:
+                logger.warning("dynamic_weights_load_failed", error=str(e))
 
         self._running = True
 
@@ -642,8 +663,12 @@ class TradingEngine:
                         )
 
                         if position and trade_record:
+                            # Store confluence score on position for post-trade analysis
+                            position.confluence_score = signal.score
+
                             # Tag trade with split test metadata
                             trade_record["test_group"] = test_group
+                            trade_record["confluence_components"] = getattr(signal, "components", {})
                             if llm_analysis_data:
                                 trade_record["llm_analysis"] = llm_analysis_data
                             if recent_headlines:
@@ -932,7 +957,7 @@ class TradingEngine:
                             pnl_usd=total_pnl,
                             pnl_percent=pnl_pct,
                             exit_reason=exit_signal.reason,
-                            confluence_score=0,
+                            confluence_score=position.confluence_score,
                             holding_seconds=holding_seconds,
                         )
                     except Exception as e:
@@ -946,6 +971,20 @@ class TradingEngine:
 
                     # --- Adaptive threshold update (Strategy C) ---
                     self.adaptive_threshold.record_outcome(is_win=(total_pnl > 0))
+
+                    # --- Dynamic weight update (Strategy D) ---
+                    if self.dynamic_weights and position.trade_id:
+                        try:
+                            trade_data = await self.repo.get_trades_by_ids([position.trade_id])
+                            if trade_data:
+                                components = trade_data[0].get("confluence_components", {})
+                                if components:
+                                    self.dynamic_weights.record_outcome(components, is_win=(total_pnl > 0))
+                                    self.scanner.confluence_engine.update_weights(
+                                        self.dynamic_weights.get_weights()
+                                    )
+                        except Exception as e:
+                            logger.debug("dynamic_weights_update_failed", error=str(e))
 
                     # Remove from state
                     self.state.open_positions.pop(exit_signal.symbol, None)
@@ -1083,7 +1122,7 @@ class TradingEngine:
                 pnl_usd=total_pnl,
                 pnl_percent=pnl_pct,
                 exit_reason="opposite_signal_reversal",
-                confluence_score=0,
+                confluence_score=existing_position.confluence_score,
                 holding_seconds=holding_seconds,
             )
         except Exception as e:
@@ -1096,6 +1135,20 @@ class TradingEngine:
             )
 
         self.adaptive_threshold.record_outcome(is_win=(total_pnl > 0))
+
+        # Dynamic weight update
+        if self.dynamic_weights and existing_position.trade_id:
+            try:
+                trade_data = await self.repo.get_trades_by_ids([existing_position.trade_id])
+                if trade_data:
+                    components = trade_data[0].get("confluence_components", {})
+                    if components:
+                        self.dynamic_weights.record_outcome(components, is_win=(total_pnl > 0))
+                        self.scanner.confluence_engine.update_weights(
+                            self.dynamic_weights.get_weights()
+                        )
+            except Exception as e:
+                logger.debug("dynamic_weights_reversal_update_failed", error=str(e))
 
         old_trade_id = existing_position.trade_id
         old_direction = existing_position.direction
@@ -1159,13 +1212,14 @@ class TradingEngine:
     async def _persist_state(self) -> None:
         """Save engine state and portfolio snapshot to DB."""
         try:
-            await self.repo.upsert_engine_state(
-                self.portfolio.to_state_dict(
-                    status=self.state.status,
-                    mode=self.state.mode,
-                    cycle_count=self.state.cycle_count,
-                )
+            state_dict = self.portfolio.to_state_dict(
+                status=self.state.status,
+                mode=self.state.mode,
+                cycle_count=self.state.cycle_count,
             )
+            if self.dynamic_weights:
+                state_dict["dynamic_weights"] = self.dynamic_weights.to_state()
+            await self.repo.upsert_engine_state(state_dict)
             await self.repo.insert_snapshot(
                 self.portfolio.to_snapshot_dict(
                     cycle_number=self.state.cycle_count,

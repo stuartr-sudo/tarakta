@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     llm_min_confidence: float = 40.0  # Reject approvals below this confidence (0-100)
     llm_fallback_approve: bool = True  # If API fails, approve trade by default
 
+    # Dynamic strategy weights
+    dynamic_weights_enabled: bool = False  # Adjust confluence weights based on trade outcomes
+
     # Logging
     log_level: str = "INFO"
     log_format: Literal["json", "text"] = "json"

@@ -217,6 +217,7 @@ class PortfolioTracker:
                 "original_quantity": pos.original_quantity,
                 "original_stop_loss": pos.original_stop_loss,
                 "current_tier": pos.current_tier,
+                "confluence_score": pos.confluence_score,
             }
             if pos.tp_tiers:
                 pos_dict["tp_tiers"] = [

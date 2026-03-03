@@ -99,6 +99,7 @@ class EngineState:
                         original_quantity=float(pos_data.get("original_quantity", 0) or 0),
                         original_stop_loss=float(pos_data.get("original_stop_loss", 0) or 0),
                         current_tier=int(pos_data.get("current_tier", 0) or 0),
+                        confluence_score=float(pos_data.get("confluence_score", 0) or 0),
                     )
                 except (ValueError, TypeError, KeyError) as e:
                     logger.warning("position_restore_failed", symbol=sym, error=str(e))

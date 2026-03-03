@@ -53,6 +53,11 @@ class ConfluenceEngine:
 
     def __init__(self, entry_threshold: float = 65.0) -> None:
         self.entry_threshold = entry_threshold
+        self._weights: dict[str, int] = dict(WEIGHTS)
+
+    def update_weights(self, weights: dict[str, int]) -> None:
+        """Update scoring weights (called by DynamicWeightOptimizer)."""
+        self._weights = dict(weights)
 
     def score_signal(
         self,
@@ -83,6 +88,7 @@ class ConfluenceEngine:
                 reasons=["No HTF directional bias"],
                 symbol=symbol,
                 entry_price=current_price,
+                components=components,
             )
 
         # --- Market Structure on 1H (15 pts) ---
@@ -115,7 +121,7 @@ class ConfluenceEngine:
 
         # --- Volume / Displacement (15 pts) ---
         if volume_result is not None:
-            vol_score = min(volume_result.overall_volume_score, WEIGHTS["volume"])
+            vol_score = min(volume_result.overall_volume_score, self._weights["volume"])
             score += vol_score
             components["volume"] = vol_score
             reasons.extend(volume_result.reasons)
@@ -124,7 +130,7 @@ class ConfluenceEngine:
 
         # --- Premium/Discount Zone (10 pts) ---
         if pd_result is not None:
-            pd_score = min(pd_result.score, WEIGHTS["premium_discount"])
+            pd_score = min(pd_result.score, self._weights["premium_discount"])
             score += pd_score
             components["premium_discount"] = pd_score
             reasons.extend(pd_result.reasons)
@@ -156,6 +162,7 @@ class ConfluenceEngine:
             ob_context=ob_context,
             fvg_context=fvg_context,
             key_levels=key_levels,
+            components=components,
         )
 
     def _score_htf_trend(
@@ -172,7 +179,7 @@ class ConfluenceEngine:
 
         if trend_4h == trend_1d and trend_4h != "ranging":
             reasons.append(f"HTF aligned: {trend_4h} (4H + Daily)")
-            return WEIGHTS["htf_trend"], trend_4h, reasons
+            return self._weights["htf_trend"], trend_4h, reasons
 
         if trend_4h != "ranging":
             reasons.append(f"4H trend: {trend_4h}, Daily: {trend_1d}")
@@ -215,7 +222,7 @@ class ConfluenceEngine:
                     score += 8
                     reasons.append(f"1H CHoCH shifting {direction} (structure: {ms_1h.trend})")
 
-        return min(score, WEIGHTS["market_structure"]), reasons
+        return min(score, self._weights["market_structure"]), reasons
 
     def _score_order_blocks(
         self,
@@ -239,7 +246,7 @@ class ConfluenceEngine:
                 ):
                     reasons.append(f"Price in {direction} OB on {tf}")
                     ob_context = ob.price_in_order_block
-                    return WEIGHTS["order_block"], reasons, ob_context
+                    return self._weights["order_block"], reasons, ob_context
 
             # Price is near a bullish OB (for long entries)
             if direction == "bullish" and ob.nearest_bullish_ob:
@@ -288,7 +295,7 @@ class ConfluenceEngine:
                 ):
                     reasons.append(f"Price in {direction} FVG on {tf}")
                     fvg_context = fvg.price_in_fvg
-                    return WEIGHTS["fvg"], reasons, fvg_context
+                    return self._weights["fvg"], reasons, fvg_context
 
             # Near an FVG
             target_fvg = fvg.nearest_bullish_fvg if direction == "bullish" else fvg.nearest_bearish_fvg
@@ -323,6 +330,6 @@ class ConfluenceEngine:
                     direction == "bearish" and sweep.direction == "bearish_sweep"
                 ):
                     reasons.append(f"Liquidity sweep on {tf}: {sweep.direction}")
-                    return WEIGHTS["liquidity_sweep"], reasons
+                    return self._weights["liquidity_sweep"], reasons
 
         return 0, reasons
