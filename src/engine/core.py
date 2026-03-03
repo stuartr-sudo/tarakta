@@ -1459,7 +1459,24 @@ class TradingEngine:
             for task in pending:
                 task.cancel()
 
-        await self._persist_state()
+        # Check if DB was externally reset (e.g. data wipe) before persisting
+        # If cycle_count in DB is 0 but our in-memory state is higher,
+        # someone reset the DB — don't overwrite it.
+        try:
+            db_state = await self.repo.get_engine_state()
+            db_cycle = db_state.get("cycle_count", 0) if db_state else 0
+            if db_cycle == 0 and self.state.cycle_count > 0:
+                logger.info(
+                    "shutdown_skip_persist_db_was_reset",
+                    db_cycle=db_cycle,
+                    mem_cycle=self.state.cycle_count,
+                )
+            else:
+                await self._persist_state()
+        except Exception:
+            # If we can't check, persist anyway to be safe
+            await self._persist_state()
+
         await self.sentiment_filter.close()
         if self.llm_analyst:
             await self.llm_analyst.close()
