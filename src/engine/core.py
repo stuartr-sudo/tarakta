@@ -72,6 +72,10 @@ class TradingEngine:
         self._running = False
         self._reversal_cooldowns: dict[str, datetime] = {}
 
+        # Background task infrastructure (for async post-mortems)
+        self._postmortem_semaphore = asyncio.Semaphore(2)
+        self._background_tasks: set[asyncio.Task] = set()
+
     async def startup(self) -> None:
         """Initialize engine state from DB or create fresh."""
         saved = await self.repo.get_engine_state()
@@ -212,6 +216,72 @@ class TradingEngine:
                 else:
                     await asyncio.sleep(30)
 
+    def _spawn_background(self, coro) -> None:
+        """Fire-and-forget an async task with cleanup on completion."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _run_postmortem(self, trade_id: str, symbol: str) -> None:
+        """Background task: run LLM post-mortem and persist result."""
+        async with self._postmortem_semaphore:
+            try:
+                # Fetch full trade record for rich context
+                trade_records = await self.repo.get_trades_by_ids([trade_id])
+                trade_record = trade_records[0] if trade_records else None
+                if not trade_record:
+                    return
+
+                # Fetch partial exits if applicable
+                partial_exits = None
+                tp_tiers = trade_record.get("tp_tiers")
+                if tp_tiers:
+                    try:
+                        partial_exits = await self.repo.get_partial_exits(trade_id)
+                    except Exception:
+                        pass
+
+                result = await self.llm_analyst.analyze_closed_trade(
+                    trade_data=trade_record,
+                    partial_exits=partial_exits,
+                )
+
+                if not result.error:
+                    await self.repo.update_trade(trade_id, {
+                        "llm_postmortem": {
+                            "summary": result.summary,
+                            "what_worked": result.what_worked,
+                            "what_failed": result.what_failed,
+                            "entry_quality": result.entry_quality,
+                            "exit_quality": result.exit_quality,
+                            "lesson": result.lesson,
+                            "trade_grade": result.trade_grade,
+                            "latency_ms": round(result.latency_ms, 1),
+                            "input_tokens": result.input_tokens,
+                            "output_tokens": result.output_tokens,
+                            "analyzed_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    })
+                    logger.info(
+                        "llm_postmortem_complete",
+                        trade_id=trade_id,
+                        symbol=symbol,
+                        grade=result.trade_grade,
+                        latency_ms=round(result.latency_ms, 1),
+                    )
+                else:
+                    logger.warning(
+                        "llm_postmortem_failed",
+                        trade_id=trade_id,
+                        error=result.error,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "llm_postmortem_error",
+                    trade_id=trade_id,
+                    error=str(e),
+                )
+
     async def _primary_tick(self) -> None:
         """Full scan cycle: scan → analyze → decide → execute → log."""
         self.state.cycle_count += 1
@@ -312,6 +382,7 @@ class TradingEngine:
 
                 # --- Sentiment filter (Strategy A) ---
                 sentiment_score = await self.sentiment_filter.get_sentiment(signal.symbol)
+                recent_headlines = self.sentiment_filter.get_recent_headlines(signal.symbol)
 
                 if signal.direction and self.sentiment_filter.should_block_trade(
                     sentiment_score, signal.direction
@@ -436,6 +507,7 @@ class TradingEngine:
                         "tp_price": pre_tp,
                         "rr_ratio": round(pre_rr, 2) if pre_rr else None,
                         "open_position_count": len(self.portfolio.open_positions),
+                        "recent_headlines": recent_headlines,
                         **llm_perf_context,
                     }
                     llm_result = await self.llm_analyst.analyze_signal(signal, llm_context)
@@ -573,6 +645,8 @@ class TradingEngine:
                             trade_record["test_group"] = test_group
                             if llm_analysis_data:
                                 trade_record["llm_analysis"] = llm_analysis_data
+                            if recent_headlines:
+                                trade_record["entry_headlines"] = recent_headlines
 
                             # Save to DB
                             db_trade = await self.repo.insert_trade(trade_record)
@@ -863,6 +937,12 @@ class TradingEngine:
                     except Exception as e:
                         logger.warning("post_trade_analysis_failed", error=str(e))
 
+                    # --- LLM Post-mortem (non-blocking background task) ---
+                    if self.llm_analyst and position.trade_id:
+                        self._spawn_background(
+                            self._run_postmortem(position.trade_id, exit_signal.symbol)
+                        )
+
                     # --- Adaptive threshold update (Strategy C) ---
                     self.adaptive_threshold.record_outcome(is_win=(total_pnl > 0))
 
@@ -1007,6 +1087,12 @@ class TradingEngine:
             )
         except Exception as e:
             logger.warning("reversal_post_analysis_failed", error=str(e))
+
+        # LLM post-mortem for the reversed trade
+        if self.llm_analyst and existing_position.trade_id:
+            self._spawn_background(
+                self._run_postmortem(existing_position.trade_id, symbol)
+            )
 
         self.adaptive_threshold.record_outcome(is_win=(total_pnl > 0))
 
@@ -1287,6 +1373,14 @@ class TradingEngine:
         """Graceful shutdown."""
         logger.info("engine_shutting_down")
         self._running = False
+
+        # Wait for pending post-mortems to complete
+        if self._background_tasks:
+            logger.info("waiting_for_background_tasks", count=len(self._background_tasks))
+            _, pending = await asyncio.wait(self._background_tasks, timeout=30)
+            for task in pending:
+                task.cancel()
+
         await self._persist_state()
         await self.sentiment_filter.close()
         if self.llm_analyst:

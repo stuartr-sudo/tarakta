@@ -40,6 +40,23 @@ class LLMAnalysis:
     output_tokens: int = 0
 
 
+@dataclass
+class LLMPostmortem:
+    """Result from LLM post-mortem analysis of a closed trade."""
+
+    summary: str = ""
+    what_worked: str = ""
+    what_failed: str = ""
+    entry_quality: str = ""  # excellent/good/fair/poor
+    exit_quality: str = ""  # optimal/acceptable/suboptimal/poor
+    lesson: str = ""
+    trade_grade: str = ""  # A/B/C/D/F
+    latency_ms: float = 0.0
+    error: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
 SYSTEM_PROMPT = """\
 You are a crypto trade analyst specializing in Smart Money Concepts (ICT methodology).
 
@@ -107,6 +124,66 @@ TRADE_DECISION_TOOL = {
     },
 }
 
+POSTMORTEM_SYSTEM_PROMPT = """\
+You are a crypto trade analyst conducting a post-mortem on a completed trade.
+
+Analyze the full trade lifecycle — from entry signal to exit — and identify:
+1. What worked well in the trade setup and execution
+2. What went wrong or could be improved
+3. Whether the entry signal was genuinely high quality or got lucky/unlucky
+4. Whether the stop-loss and take-profit levels were well-placed
+5. Key lesson to apply to future trades of this type
+
+Be specific and actionable. Reference actual price levels and percentages.
+Use the record_postmortem tool to submit your analysis."""
+
+POSTMORTEM_TOOL = {
+    "name": "record_postmortem",
+    "description": "Records the post-mortem analysis of a completed trade.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "summary": {
+                "type": "string",
+                "description": (
+                    "One-sentence summary of the trade outcome and primary cause."
+                ),
+            },
+            "what_worked": {
+                "type": "string",
+                "description": "What went right: entry timing, SL placement, signal quality. 1-2 sentences.",
+            },
+            "what_failed": {
+                "type": "string",
+                "description": (
+                    "What went wrong or could improve: premature exit, bad SL, weak signal. "
+                    "1-2 sentences. Say 'Nothing notable' if the trade was clean."
+                ),
+            },
+            "entry_quality": {
+                "type": "string",
+                "enum": ["excellent", "good", "fair", "poor"],
+                "description": "Quality rating of the entry signal in hindsight.",
+            },
+            "exit_quality": {
+                "type": "string",
+                "enum": ["optimal", "acceptable", "suboptimal", "poor"],
+                "description": "Quality rating of the exit execution.",
+            },
+            "lesson": {
+                "type": "string",
+                "description": "One key actionable lesson for future trades. 1 sentence.",
+            },
+            "trade_grade": {
+                "type": "string",
+                "enum": ["A", "B", "C", "D", "F"],
+                "description": "Overall grade: A=textbook, B=solid, C=marginal, D=poor, F=should not have entered.",
+            },
+        },
+        "required": ["summary", "what_worked", "what_failed", "entry_quality", "exit_quality", "lesson", "trade_grade"],
+    },
+}
+
 
 class LLMTradeAnalyst:
     """Claude-powered trade signal analyst with resilient API handling."""
@@ -128,6 +205,8 @@ class LLMTradeAnalyst:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.total_requests = 0
+        self.total_postmortem_requests = 0
+        self.total_postmortem_tokens = 0
         self.total_approvals = 0
         self.total_rejections = 0
 
@@ -319,6 +398,13 @@ class LLMTradeAnalyst:
                 perf_parts.append(f"Current Winning Streak: {context['winning_streak']}")
             perf_section = ", ".join(perf_parts)
 
+        # Recent headlines context
+        headlines = context.get("recent_headlines", [])
+        if headlines:
+            headlines_section = "\n".join(f"- {h}" for h in headlines[:5])
+        else:
+            headlines_section = "No recent headlines available"
+
         # Open positions context
         open_count = context.get("open_position_count", 0)
 
@@ -348,6 +434,9 @@ class LLMTradeAnalyst:
 
 ### Sentiment Score
 {sentiment:.1f} (range: -10 to +10, positive = bullish)
+
+### Recent News Headlines
+{headlines_section}
 
 ### Recent Bot Performance
 {perf_section}
@@ -427,6 +516,220 @@ Analyze this trade setup and use the record_trade_decision tool to submit your d
             error="no_tool_use",
         )
 
+    # ------------------------------------------------------------------
+    # Post-mortem analysis (runs async after trade closes)
+    # ------------------------------------------------------------------
+
+    async def analyze_closed_trade(
+        self,
+        trade_data: dict[str, Any],
+        partial_exits: list[dict] | None = None,
+    ) -> LLMPostmortem:
+        """Analyze a completed trade using Claude for post-mortem insights.
+
+        Args:
+            trade_data: Full trade record dict from the database.
+            partial_exits: Optional list of partial exit records.
+
+        Returns:
+            LLMPostmortem with structured analysis and grade.
+        """
+        if not self._available:
+            return LLMPostmortem(error="llm_not_configured")
+
+        if not self._should_try():
+            return LLMPostmortem(error="api_backoff")
+
+        try:
+            start = time.monotonic()
+            user_prompt = self._build_postmortem_prompt(trade_data, partial_exits)
+            client = self._get_client()
+            response = await client.messages.create(
+                model=self._model,
+                max_tokens=500,
+                system=POSTMORTEM_SYSTEM_PROMPT,
+                tools=[POSTMORTEM_TOOL],
+                tool_choice={"type": "tool", "name": "record_postmortem"},
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+
+            latency_ms = (time.monotonic() - start) * 1000
+            self._record_success()
+
+            input_tokens = response.usage.input_tokens
+            output_tokens = response.usage.output_tokens
+            self.total_postmortem_requests += 1
+            self.total_postmortem_tokens += input_tokens + output_tokens
+
+            result = self._parse_postmortem_response(response)
+            result.latency_ms = latency_ms
+            result.input_tokens = input_tokens
+            result.output_tokens = output_tokens
+
+            logger.info(
+                "llm_postmortem_analyzed",
+                symbol=trade_data.get("symbol"),
+                grade=result.trade_grade,
+                entry_quality=result.entry_quality,
+                latency_ms=round(latency_ms, 1),
+                tokens=input_tokens + output_tokens,
+            )
+            return result
+
+        except anthropic.APITimeoutError:
+            self._record_failure()
+            return LLMPostmortem(error="timeout")
+        except anthropic.RateLimitError:
+            self._record_failure()
+            return LLMPostmortem(error="rate_limit")
+        except anthropic.APIError as e:
+            self._record_failure()
+            logger.warning("llm_postmortem_api_error", error=str(e))
+            return LLMPostmortem(error=f"api_error:{e.status_code}")
+        except Exception as e:
+            logger.warning("llm_postmortem_unexpected_error", error=str(e))
+            return LLMPostmortem(error="unexpected")
+
+    def _build_postmortem_prompt(
+        self,
+        trade: dict[str, Any],
+        partial_exits: list[dict] | None = None,
+    ) -> str:
+        """Build the prompt for post-mortem analysis of a closed trade."""
+        symbol = trade.get("symbol", "UNKNOWN")
+        direction = trade.get("direction", "unknown")
+        entry_price = float(trade.get("entry_price") or 0)
+        exit_price = float(trade.get("exit_price") or 0)
+        pnl_usd = float(trade.get("pnl_usd") or 0)
+        pnl_pct = float(trade.get("pnl_percent") or 0)
+        exit_reason = trade.get("exit_reason", "unknown")
+        outcome = "WIN" if pnl_usd > 0 else "LOSS"
+
+        # Holding time
+        holding_str = "Unknown"
+        entry_time = trade.get("entry_time")
+        exit_time = trade.get("exit_time")
+        if entry_time and exit_time:
+            try:
+                from datetime import datetime as dt
+                if isinstance(entry_time, str):
+                    et = dt.fromisoformat(entry_time.replace("Z", "+00:00"))
+                else:
+                    et = entry_time
+                if isinstance(exit_time, str):
+                    xt = dt.fromisoformat(exit_time.replace("Z", "+00:00"))
+                else:
+                    xt = exit_time
+                hours = (xt - et).total_seconds() / 3600
+                holding_str = f"{hours:.1f} hours"
+            except (ValueError, TypeError):
+                pass
+
+        # Risk management
+        stop_loss = trade.get("stop_loss")
+        take_profit = trade.get("take_profit")
+        leverage = trade.get("leverage", 1)
+        risk_section = ""
+        if stop_loss is not None:
+            sl_dist = abs(entry_price - float(stop_loss)) / entry_price * 100 if entry_price > 0 else 0
+            risk_section += f"**Stop Loss:** {float(stop_loss):.6g} ({sl_dist:.2f}% from entry)\n"
+        if take_profit is not None:
+            tp_dist = abs(float(take_profit) - entry_price) / entry_price * 100 if entry_price > 0 else 0
+            risk_section += f"**Take Profit:** {float(take_profit):.6g} ({tp_dist:.2f}% from entry)\n"
+        if leverage and leverage > 1:
+            risk_section += f"**Leverage:** {leverage}x\n"
+        # R:R achieved
+        if stop_loss is not None and entry_price > 0:
+            sl_dist_abs = abs(entry_price - float(stop_loss))
+            if sl_dist_abs > 0:
+                rr_achieved = abs(exit_price - entry_price) / sl_dist_abs
+                risk_section += f"**R:R Achieved:** {rr_achieved:.2f}\n"
+        if not risk_section:
+            risk_section = "Not available"
+
+        # Signal reasons
+        signal_reasons = trade.get("signal_reasons") or []
+        reasons_str = "\n".join(f"- {r}" for r in signal_reasons) if signal_reasons else "Not recorded"
+
+        # Confluence score
+        confluence = trade.get("confluence_score")
+        confluence_str = f"{float(confluence):.1f}/100" if confluence else "Not recorded"
+
+        # Partial exits
+        partials_section = "None"
+        if partial_exits:
+            parts = []
+            for pe in partial_exits:
+                tier = pe.get("tier", "?")
+                pe_price = float(pe.get("exit_price") or 0)
+                pe_pnl = float(pe.get("pnl_usd") or 0)
+                pe_qty = float(pe.get("exit_quantity") or 0)
+                parts.append(f"- Tier {tier}: exit at {pe_price:.6g}, qty {pe_qty:.6g}, PnL ${pe_pnl:+.2f}")
+            partials_section = "\n".join(parts)
+
+        # LLM entry assessment (if this was an LLM-group trade)
+        llm_entry = trade.get("llm_analysis")
+        llm_section = "N/A (control group trade)"
+        if llm_entry:
+            approve = llm_entry.get("approve")
+            conf = llm_entry.get("confidence", 0)
+            reasoning = llm_entry.get("reasoning", "")
+            llm_section = f"{'Approved' if approve else 'Rejected'} ({conf:.0f}% confidence): {reasoning[:150]}"
+
+        # Headlines at entry
+        entry_headlines = trade.get("entry_headlines") or []
+        headlines_section = "\n".join(f"- {h}" for h in entry_headlines[:5]) if entry_headlines else "Not recorded"
+
+        return f"""\
+## Trade Post-Mortem Analysis
+
+**Symbol:** {symbol}
+**Direction:** {direction}
+**Outcome:** {outcome} ({pnl_usd:+.2f} USD, {pnl_pct:+.2f}%)
+
+### Entry
+**Price:** {entry_price:.6g}
+**Confluence Score:** {confluence_str}
+**Signal Reasons:**
+{reasons_str}
+
+### Risk Management
+{risk_section}
+### Exit
+**Price:** {exit_price:.6g}
+**Reason:** {exit_reason}
+**Holding Time:** {holding_str}
+
+### Partial Exits
+{partials_section}
+
+### LLM Entry Assessment
+{llm_section}
+
+### Headlines at Entry
+{headlines_section}
+
+Analyze this completed trade and use the record_postmortem tool to submit your analysis.
+"""
+
+    def _parse_postmortem_response(self, response: anthropic.types.Message) -> LLMPostmortem:
+        """Extract structured fields from the postmortem tool use response."""
+        for block in response.content:
+            if block.type == "tool_use" and block.name == "record_postmortem":
+                data = block.input
+                return LLMPostmortem(
+                    summary=str(data.get("summary", "")),
+                    what_worked=str(data.get("what_worked", "")),
+                    what_failed=str(data.get("what_failed", "")),
+                    entry_quality=str(data.get("entry_quality", "")),
+                    exit_quality=str(data.get("exit_quality", "")),
+                    lesson=str(data.get("lesson", "")),
+                    trade_grade=str(data.get("trade_grade", "")),
+                )
+
+        logger.warning("llm_postmortem_no_tool_use", stop_reason=response.stop_reason)
+        return LLMPostmortem(error="no_tool_use")
+
     def get_usage_stats(self) -> dict[str, Any]:
         """Return cumulative usage stats for monitoring."""
         return {
@@ -440,6 +743,8 @@ Analyze this trade setup and use the record_trade_decision tool to submit your d
             "total_output_tokens": self.total_output_tokens,
             "total_tokens": self.total_input_tokens + self.total_output_tokens,
             "fail_count": self._fail_count,
+            "total_postmortem_requests": self.total_postmortem_requests,
+            "total_postmortem_tokens": self.total_postmortem_tokens,
         }
 
     async def close(self) -> None:

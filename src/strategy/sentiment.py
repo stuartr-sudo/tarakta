@@ -78,7 +78,7 @@ class SentimentFilter:
     """CryptoBERT-powered sentiment analysis with keyword fallback."""
 
     def __init__(self, hf_api_token: str = "") -> None:
-        self._cache: dict[str, tuple[float, list[str], float]] = {}  # symbol -> (score, events, timestamp)
+        self._cache: dict[str, tuple[float, list[str], list[str], float]] = {}  # symbol -> (score, events, headlines, timestamp)
         self._session: aiohttp.ClientSession | None = None
         self._hf_token = hf_api_token
         self._hf_available = bool(hf_api_token)
@@ -121,7 +121,7 @@ class SentimentFilter:
     def _evict_stale_cache(self) -> None:
         """Remove expired entries from the sentiment cache."""
         now = time.time()
-        stale = [k for k, (_, _, ts) in self._cache.items() if now - ts >= CACHE_TTL]
+        stale = [k for k, (*_, ts) in self._cache.items() if now - ts >= CACHE_TTL]
         for k in stale:
             del self._cache[k]
 
@@ -140,13 +140,13 @@ class SentimentFilter:
         # Check cache
         cached = self._cache.get(base)
         if cached:
-            score, _events, ts = cached
+            score, _events, _headlines, ts = cached
             if time.time() - ts < CACHE_TTL:
                 return score
 
         try:
-            score, events = await self._fetch_and_score(base)
-            self._cache[base] = (score, events, time.time())
+            score, events, headlines = await self._fetch_and_score(base)
+            self._cache[base] = (score, events, headlines, time.time())
             return score
         except Exception as e:
             logger.warning("sentiment_fetch_failed", symbol=symbol, error=str(e))
@@ -157,13 +157,32 @@ class SentimentFilter:
         base = symbol.split("/")[0].upper()
         cached = self._cache.get(base)
         if cached:
-            _score, events, ts = cached
+            _score, events, _headlines, ts = cached
             if time.time() - ts < CACHE_TTL:
                 return events
         return []
 
-    async def _fetch_and_score(self, asset: str) -> tuple[float, list[str]]:
-        """Fetch news and compute sentiment using CryptoBERT or keyword fallback."""
+    def get_recent_headlines(self, symbol: str, limit: int = 5) -> list[str]:
+        """Get cached headlines for a symbol. Returns title-only strings.
+
+        Headlines are populated during get_sentiment() and cached for 15 minutes.
+        Returns empty list if no cached headlines are available.
+        """
+        base = symbol.split("/")[0].upper()
+        cached = self._cache.get(base)
+        if cached:
+            _score, _events, headlines, ts = cached
+            if time.time() - ts < CACHE_TTL:
+                return headlines[:limit]
+        return []
+
+    async def _fetch_and_score(self, asset: str) -> tuple[float, list[str], list[str]]:
+        """Fetch news and compute sentiment using CryptoBERT or keyword fallback.
+
+        Returns:
+            (score, critical_events, headlines) where headlines are title-only
+            strings from the most recent articles for LLM context.
+        """
         session = await self._get_session()
 
         params: dict[str, Any] = {"categories": asset, "excludeCategories": "Sponsored"}
@@ -171,14 +190,23 @@ class SentimentFilter:
         try:
             async with session.get(NEWS_API_URL, params=params) as resp:
                 if resp.status != 200:
-                    return 0.0, []
+                    return 0.0, [], []
                 data = await resp.json()
         except (aiohttp.ClientError, asyncio.TimeoutError):
-            return 0.0, []
+            return 0.0, [], []
 
         articles = data.get("Data", [])
         if not articles:
-            return 0.0, []
+            return 0.0, [], []
+
+        # Extract title-only headlines for LLM context (top 5)
+        headlines: list[str] = []
+        for article in articles[:5]:
+            title = (article.get("title") or "").strip()
+            source = (article.get("source_info", {}).get("name") or
+                      article.get("source") or "").strip()
+            if title:
+                headlines.append(f"{title} ({source})" if source else title)
 
         # Extract titles and bodies from most recent articles
         texts = []
@@ -189,7 +217,7 @@ class SentimentFilter:
                 texts.append(f"{title}. {body}" if body else title)
 
         if not texts:
-            return 0.0, []
+            return 0.0, [], headlines
 
         # Try CryptoBERT, fall back to keywords
         if self._should_try_hf():
@@ -205,7 +233,7 @@ class SentimentFilter:
                     score=round(score, 2),
                     events=events,
                 )
-                return score, events
+                return score, events, headlines
             except Exception as e:
                 logger.warning("cryptobert_failed_using_keywords", asset=asset, error=str(e))
                 self._record_hf_failure()
@@ -218,7 +246,7 @@ class SentimentFilter:
             articles=len(texts),
             score=round(score, 2),
         )
-        return score, []
+        return score, [], headlines
 
     async def _finbert_score(self, texts: list[str]) -> float:
         """Score texts using CryptoBERT via HF Inference API.
