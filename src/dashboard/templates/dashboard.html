@@ -73,10 +73,15 @@
         </div>
         <div class="stat-sub">circuit break {{ "%.0f" | format(config.circuit_breaker_pct * 100) if config else 15 }}%</div>
     </div>
-    <div class="stat-card" id="unrealized-card">
-        <div class="stat-label">Unrealized P&L</div>
-        <div class="stat-value sm" id="unrealized-value">--</div>
-        <div class="stat-sub" id="unrealized-sub">Loading live prices...</div>
+    <div class="stat-card" id="unrealized-card" style="border-left: 3px solid #22c55e;">
+        <div class="stat-label">Unrealized Profit</div>
+        <div class="stat-value sm positive" id="unrealized-profit-value">--</div>
+        <div class="stat-sub" id="unrealized-profit-sub">Loading...</div>
+    </div>
+    <div class="stat-card" id="unrealized-loss-card" style="border-left: 3px solid #ef4444;">
+        <div class="stat-label">Unrealized Loss</div>
+        <div class="stat-value sm negative" id="unrealized-loss-value">--</div>
+        <div class="stat-sub" id="unrealized-loss-sub">Loading...</div>
     </div>
     <div class="stat-card" id="net-pnl-card" style="border-left: 3px solid #8b5cf6;">
         <div class="stat-label">Net P&L</div>
@@ -356,8 +361,10 @@ async function loadUnrealizedPnl() {
         clearTimeout(timeout);
         const data = await resp.json();
 
-        const el = document.getElementById('unrealized-value');
-        const sub = document.getElementById('unrealized-sub');
+        const profitEl = document.getElementById('unrealized-profit-value');
+        const profitSub = document.getElementById('unrealized-profit-sub');
+        const lossEl = document.getElementById('unrealized-loss-value');
+        const lossSub = document.getElementById('unrealized-loss-sub');
         const ts = document.getElementById('last-updated');
 
         // Update timestamp
@@ -367,23 +374,42 @@ async function loadUnrealizedPnl() {
         }
 
         if (data.error) {
-            sub.textContent = data.error + ' — retrying...';
+            profitSub.textContent = data.error + ' — retrying...';
+            lossSub.textContent = '';
             return;
         }
 
         if (!data.positions || data.positions.length === 0) {
-            el.textContent = '$0.00';
-            el.className = 'stat-value sm';
-            sub.textContent = 'No open positions';
+            profitEl.textContent = '$0.00';
+            profitSub.textContent = 'No open positions';
+            lossEl.textContent = '$0.00';
+            lossSub.textContent = 'No open positions';
             updateNetPnl(0);
             return;
         }
 
-        const total = data.total_unrealized;
-        const sign = total >= 0 ? '+' : '';
-        el.textContent = sign + '$' + total.toFixed(2);
-        el.className = 'stat-value sm ' + (total >= 0 ? 'positive' : 'negative');
+        // Split positions into profit and loss
+        let totalProfit = 0, totalLoss = 0, profitCount = 0, lossCount = 0;
+        data.positions.forEach(p => {
+            if (p.current_price === null) return;
+            if (p.unrealized_pnl >= 0) {
+                totalProfit += p.unrealized_pnl;
+                profitCount++;
+            } else {
+                totalLoss += p.unrealized_pnl;
+                lossCount++;
+            }
+        });
 
+        profitEl.textContent = '+$' + totalProfit.toFixed(2);
+        profitEl.className = 'stat-value sm positive';
+        profitSub.textContent = profitCount + ' winning position' + (profitCount !== 1 ? 's' : '');
+
+        lossEl.textContent = '$' + totalLoss.toFixed(2);
+        lossEl.className = 'stat-value sm negative';
+        lossSub.textContent = lossCount + ' losing position' + (lossCount !== 1 ? 's' : '');
+
+        const total = data.total_unrealized;
         updateNetPnl(total);
 
         // Update allocated total and available cash from live data (margin-based)
@@ -399,10 +425,9 @@ async function loadUnrealizedPnl() {
         if (avEl) avEl.textContent = '$' + (eqVal - totalAllocated).toFixed(2);
 
         const errCount = data.positions.filter(p => p.current_price === null).length;
-        const liveCount = data.positions.length - errCount;
-        let subText = liveCount + ' position' + (liveCount !== 1 ? 's' : '') + ' live';
-        if (errCount > 0) subText += ' (' + errCount + ' fetch errors)';
-        sub.textContent = subText;
+        if (errCount > 0) {
+            profitSub.textContent += ' (' + errCount + ' fetch errors)';
+        }
 
         // Build lookup by trade_id
         const posById = {};
@@ -429,8 +454,8 @@ async function loadUnrealizedPnl() {
         });
     } catch (e) {
         console.error('Unrealized P&L load failed:', e);
-        const sub = document.getElementById('unrealized-sub');
-        if (sub) sub.textContent = 'Retry in 10s...';
+        const ps = document.getElementById('unrealized-profit-sub');
+        if (ps) ps.textContent = 'Retry in 10s...';
     } finally {
         _refreshing = false;
         if (btn) { btn.disabled = false; btn.textContent = 'Refresh Prices'; }
@@ -486,38 +511,47 @@ async function confirmNuke() {
 
 // Soft-refresh stat cards every 30s. Full reload if position count changes.
 let _knownPositionCount = document.querySelectorAll('#positions-tbody tr[data-trade-id]').length;
+const _tradingMode = '{{ config.trading_mode | default("live") }}';
 
 async function softRefreshStats() {
     try {
-        const resp = await fetch('/api/portfolio');
-        const data = await resp.json();
+        // Fetch live stats from DB (ground truth) and portfolio snapshot in parallel
+        const [statsResp, portfolioResp, openResp] = await Promise.all([
+            fetch('/api/stats?mode=' + _tradingMode),
+            fetch('/api/portfolio'),
+            fetch('/api/trades/open'),
+        ]);
+        const stats = await statsResp.json();
+        const data = await portfolioResp.json();
+        const openData = await openResp.json();
+
+        // Use portfolio snapshot for equity/drawdown (these are fine from snapshot)
         if (data.current) {
             const s = data.current;
             const eqEl = document.getElementById('equity-value');
             if (eqEl) eqEl.textContent = '$' + parseFloat(s.balance_usd || 0).toFixed(2);
 
-            const dpEl = document.getElementById('daily-pnl-value');
-            if (dpEl) {
-                const dp = parseFloat(s.daily_pnl_usd || 0);
-                dpEl.textContent = (dp >= 0 ? '+' : '') + '$' + dp.toFixed(2);
-                dpEl.className = 'stat-value ' + (dp >= 0 ? 'positive' : 'negative');
-            }
-
-            const tpEl = document.getElementById('total-pnl-value');
-            if (tpEl) {
-                const tp = parseFloat(s.total_pnl_usd || 0);
-                tpEl.textContent = (tp >= 0 ? '+' : '') + '$' + tp.toFixed(2);
-                tpEl.className = 'stat-value ' + (tp >= 0 ? 'positive' : 'negative');
-                _lastRealizedPnl = tp;
-            }
-
             const ddEl = document.getElementById('drawdown-value');
             if (ddEl) ddEl.textContent = (parseFloat(s.drawdown_pct || 0) * 100).toFixed(1) + '%';
         }
 
-        // Check if positions changed and update available cash
-        const openResp = await fetch('/api/trades/open');
-        const openData = await openResp.json();
+        // Use live DB stats for P&L (not stale snapshot)
+        const dpEl = document.getElementById('daily-pnl-value');
+        if (dpEl) {
+            const dp = parseFloat(stats.daily_pnl || 0);
+            dpEl.textContent = (dp >= 0 ? '+' : '') + '$' + dp.toFixed(2);
+            dpEl.className = 'stat-value ' + (dp >= 0 ? 'positive' : 'negative');
+        }
+
+        const tpEl = document.getElementById('total-pnl-value');
+        if (tpEl) {
+            const tp = parseFloat(stats.total_pnl || 0);
+            tpEl.textContent = (tp >= 0 ? '+' : '') + '$' + tp.toFixed(2);
+            tpEl.className = 'stat-value ' + (tp >= 0 ? 'positive' : 'negative');
+            _lastRealizedPnl = tp;
+        }
+
+        // Check if positions changed
         const openTrades = openData.trades || [];
         const serverCount = openTrades.length;
         if (serverCount !== _knownPositionCount) {

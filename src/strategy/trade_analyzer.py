@@ -1,11 +1,16 @@
-"""Post-trade analysis: structured outcome logging + simple pattern learning.
+"""Post-trade analysis: structured outcome logging + XGBoost pattern recognition.
 
 After every closed trade, logs the full context (entry conditions, market
 state, holding time, exit reason, P&L) and over time builds a lightweight
 classifier that identifies which signal patterns tend to win or lose.
+
+If a pre-trained XGBoost model (model.xgb) is available, it is used for
+scoring instead of the simple pattern lookup. Falls back to pattern memory
+if the model is unavailable.
 """
 from __future__ import annotations
 
+import os
 import statistics
 from datetime import datetime, timezone
 from typing import Any
@@ -18,15 +23,64 @@ logger = get_logger(__name__)
 # Minimum closed trades before the classifier starts producing scores
 MIN_TRADES_FOR_LEARNING = 10
 
+# Known signal reasons for XGBoost feature extraction (must match train_model.py)
+KNOWN_REASONS = [
+    "ob_bullish", "ob_bearish", "fvg_bullish", "fvg_bearish",
+    "bos_bullish", "bos_bearish", "choch_bullish", "choch_bearish",
+    "displacement_bullish", "displacement_bearish",
+    "premium_zone", "discount_zone",
+    "liquidity_sweep_high", "liquidity_sweep_low",
+    "rvol_elevated", "rvol_very_high",
+    "volume_increasing", "sentiment_positive", "sentiment_negative",
+]
+
 
 class TradeAnalyzer:
-    """Analyzes closed trades, logs structured context, builds pattern memory."""
+    """Analyzes closed trades, logs structured context, builds pattern memory.
+
+    Uses XGBoost model if available, otherwise falls back to pattern lookup.
+    """
 
     def __init__(self, repo: Repository) -> None:
         self.repo = repo
         # In-memory pattern cache: maps pattern keys to outcome lists
         self._pattern_outcomes: dict[str, list[float]] = {}
         self._total_analyzed: int = 0
+
+        # XGBoost model (loaded lazily)
+        self._xgb_model = None
+        self._xgb_feature_names: list[str] | None = None
+        self._load_xgb_model()
+
+    def _load_xgb_model(self) -> None:
+        """Try to load a pre-trained XGBoost model from disk."""
+        model_path = os.path.join(os.path.dirname(__file__), "..", "..", "model.xgb")
+        features_path = os.path.join(os.path.dirname(__file__), "..", "..", "model_features.txt")
+
+        if not os.path.exists(model_path):
+            logger.info("xgb_model_not_found", path=model_path)
+            return
+
+        try:
+            import xgboost as xgb
+            self._xgb_model = xgb.Booster()
+            self._xgb_model.load_model(model_path)
+
+            # Load feature names
+            if os.path.exists(features_path):
+                with open(features_path) as f:
+                    self._xgb_feature_names = [line.strip() for line in f if line.strip()]
+            else:
+                # Default feature names matching train_model.py
+                self._xgb_feature_names = (
+                    ["confluence_score", "direction", "hour_of_day"]
+                    + [f"reason_{r}" for r in KNOWN_REASONS]
+                )
+
+            logger.info("xgb_model_loaded", features=len(self._xgb_feature_names))
+        except Exception as e:
+            logger.warning("xgb_model_load_failed", error=str(e))
+            self._xgb_model = None
 
     async def analyze_closed_trade(
         self,
@@ -127,13 +181,62 @@ class TradeAnalyzer:
             self._pattern_outcomes[key] = []
         self._pattern_outcomes[key].append(pnl_pct)
 
-    def get_pattern_score(self, signal_reasons: list[str], direction: str, confluence_score: float) -> float | None:
-        """Score a potential trade based on historical pattern performance.
+    def get_pattern_score(
+        self, signal_reasons: list[str], direction: str, confluence_score: float
+    ) -> float | None:
+        """Score a potential trade using XGBoost or pattern fallback.
 
         Returns a modifier between -1.0 and +1.0 (negative = patterns suggest
         this is a losing setup, positive = winning). Returns None if not
         enough data.
         """
+        # Try XGBoost first
+        if self._xgb_model is not None and self._xgb_feature_names is not None:
+            try:
+                return self._xgb_score(signal_reasons, direction, confluence_score)
+            except Exception as e:
+                logger.debug("xgb_score_failed_using_fallback", error=str(e))
+
+        # Fallback to pattern lookup
+        return self._pattern_score(signal_reasons, direction, confluence_score)
+
+    def _xgb_score(
+        self, signal_reasons: list[str], direction: str, confluence_score: float
+    ) -> float:
+        """Score using pre-trained XGBoost model. Returns modifier in [-1.0, +1.0]."""
+        import xgboost as xgb
+        import numpy as np
+
+        # Build feature vector matching the training schema
+        dir_val = 1.0 if direction in ("long", "bullish") else 0.0
+        hour = float(datetime.now(timezone.utc).hour)
+
+        features: dict[str, float] = {
+            "confluence_score": confluence_score,
+            "direction": dir_val,
+            "hour_of_day": hour,
+        }
+
+        reasons_lower = [r[:40].lower().strip() for r in signal_reasons]
+        for reason_key in KNOWN_REASONS:
+            features[f"reason_{reason_key}"] = 1.0 if any(reason_key in r for r in reasons_lower) else 0.0
+
+        # Build array in feature name order
+        row = [features.get(f, 0.0) for f in self._xgb_feature_names]
+        dmatrix = xgb.DMatrix(np.array([row], dtype=np.float32), feature_names=self._xgb_feature_names)
+
+        # Predict win probability
+        prob = float(self._xgb_model.predict(dmatrix)[0])
+
+        # Map probability [0, 1] to modifier [-1, +1]
+        # 0.5 probability = neutral (0.0), 1.0 = +1.0, 0.0 = -1.0
+        modifier = (prob - 0.5) * 2.0
+        return max(-1.0, min(1.0, modifier))
+
+    def _pattern_score(
+        self, signal_reasons: list[str], direction: str, confluence_score: float
+    ) -> float | None:
+        """Fallback pattern-based scoring."""
         if self._total_analyzed < MIN_TRADES_FOR_LEARNING:
             return None
 
@@ -177,7 +280,11 @@ class TradeAnalyzer:
 
     def get_pattern_report(self) -> dict[str, Any]:
         """Generate a summary report of all pattern performances."""
-        report: dict[str, Any] = {"total_analyzed": self._total_analyzed, "patterns": {}}
+        report: dict[str, Any] = {
+            "total_analyzed": self._total_analyzed,
+            "xgb_model_loaded": self._xgb_model is not None,
+            "patterns": {},
+        }
 
         for key, outcomes in sorted(self._pattern_outcomes.items()):
             if len(outcomes) < 2:
@@ -226,6 +333,7 @@ class TradeAnalyzer:
                     self._total_analyzed += 1
 
             logger.info("trade_analyzer_loaded", trades_loaded=self._total_analyzed,
-                        patterns=len(self._pattern_outcomes))
+                        patterns=len(self._pattern_outcomes),
+                        xgb_model=self._xgb_model is not None)
         except Exception as e:
             logger.warning("trade_analyzer_load_failed", error=str(e))

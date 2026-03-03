@@ -31,20 +31,13 @@ def create_dashboard_app(config: Settings, repo: Repository, exchange=None) -> F
     from src.dashboard.api import create_router as create_api_router
 
     app.include_router(create_page_router(config, repo))
-    if config.exchange_name == "binance":
-        dash_api_key = config.binance_api_key
-        dash_api_secret = config.binance_api_secret
-    else:
-        dash_api_key = config.kraken_api_key
-        dash_api_secret = config.kraken_api_secret
-
     app.include_router(
         create_api_router(
             repo,
             exchange,
             exchange_name=config.exchange_name,
-            api_key=dash_api_key,
-            api_secret=dash_api_secret,
+            api_key=config.binance_api_key,
+            api_secret=config.binance_api_secret,
             account_type=config.account_type,
         ),
         prefix="/api",

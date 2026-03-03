@@ -64,10 +64,17 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
     @login_required
     async def dashboard_home(request: Request):
         ctx = await _base_context(request)
-        ctx["snapshot"] = await repo.get_latest_snapshot()
+        ctx["snapshot"] = await repo.get_latest_snapshot() or {}
         ctx["trades"] = await repo.get_open_trades()
         ctx["signals"] = await repo.get_recent_signals(limit=10)
-        ctx["stats"] = await repo.get_trade_stats()
+        ctx["stats"] = await repo.get_trade_stats(mode=config.trading_mode)
+
+        # Override snapshot P&L with fresh DB-computed values
+        # so the dashboard shows ground truth, not stale in-memory values
+        stats = ctx["stats"]
+        ctx["snapshot"]["daily_pnl_usd"] = stats.get("daily_pnl", 0)
+        ctx["snapshot"]["total_pnl_usd"] = stats.get("total_pnl", 0)
+
         return templates.TemplateResponse("dashboard.html", ctx)
 
     @router.get("/trades", response_class=HTMLResponse)
@@ -76,8 +83,8 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx = await _base_context(request)
         status = request.query_params.get("status", "all")
         page = int(request.query_params.get("page", 1))
-        ctx["trades"] = await repo.get_trades(status=status, page=page, per_page=25)
-        ctx["stats"] = await repo.get_trade_stats()
+        ctx["trades"] = await repo.get_trades(status=status, mode=config.trading_mode, page=page, per_page=25)
+        ctx["stats"] = await repo.get_trade_stats(mode=config.trading_mode)
         ctx["current_status"] = status
         ctx["current_page"] = page
         return templates.TemplateResponse("trades.html", ctx)

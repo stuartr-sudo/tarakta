@@ -1,6 +1,8 @@
 """Sentiment filter for crypto trades using Hugging Face Inference API.
 
-Primary: FinBERT (ProsusAI/finbert) for financial sentiment classification.
+Primary: CryptoBERT (ElKulako/cryptobert) for crypto-native sentiment
+classification. Outputs Bullish/Bearish/Neutral labels trained on 2M
+StockTwits posts.
 Secondary: Zero-shot classification (facebook/bart-large-mnli) for critical
 event detection (hacks, rugs, delistings).
 Fallback: Keyword-based scoring when HF API is unavailable.
@@ -26,7 +28,7 @@ NEWS_API_URL = "https://min-api.cryptocompare.com/data/v2/news/"
 
 # Hugging Face Inference API
 HF_API_BASE = "https://router.huggingface.co/hf-inference/models"
-FINBERT_MODEL = "ProsusAI/finbert"
+CRYPTOBERT_MODEL = "ElKulako/cryptobert"
 ZERO_SHOT_MODEL = "facebook/bart-large-mnli"
 
 # Cache TTL in seconds
@@ -73,7 +75,7 @@ NEGATIVE_KEYWORDS = {
 
 
 class SentimentFilter:
-    """FinBERT-powered sentiment analysis with keyword fallback."""
+    """CryptoBERT-powered sentiment analysis with keyword fallback."""
 
     def __init__(self, hf_api_token: str = "") -> None:
         self._cache: dict[str, tuple[float, list[str], float]] = {}  # symbol -> (score, events, timestamp)
@@ -161,7 +163,7 @@ class SentimentFilter:
         return []
 
     async def _fetch_and_score(self, asset: str) -> tuple[float, list[str]]:
-        """Fetch news and compute sentiment using FinBERT or keyword fallback."""
+        """Fetch news and compute sentiment using CryptoBERT or keyword fallback."""
         session = await self._get_session()
 
         params: dict[str, Any] = {"categories": asset, "excludeCategories": "Sponsored"}
@@ -189,7 +191,7 @@ class SentimentFilter:
         if not texts:
             return 0.0, []
 
-        # Try FinBERT, fall back to keywords
+        # Try CryptoBERT, fall back to keywords
         if self._should_try_hf():
             try:
                 score = await self._finbert_score(texts)
@@ -197,7 +199,7 @@ class SentimentFilter:
                 self._record_hf_success()
 
                 logger.debug(
-                    "sentiment_scored_finbert",
+                    "sentiment_scored_cryptobert",
                     asset=asset,
                     articles=len(texts),
                     score=round(score, 2),
@@ -205,7 +207,7 @@ class SentimentFilter:
                 )
                 return score, events
             except Exception as e:
-                logger.warning("finbert_failed_using_keywords", asset=asset, error=str(e))
+                logger.warning("cryptobert_failed_using_keywords", asset=asset, error=str(e))
                 self._record_hf_failure()
 
         # Keyword fallback
@@ -219,14 +221,14 @@ class SentimentFilter:
         return score, []
 
     async def _finbert_score(self, texts: list[str]) -> float:
-        """Score texts using FinBERT via HF Inference API.
+        """Score texts using CryptoBERT via HF Inference API.
 
-        FinBERT returns: positive, negative, neutral for each text.
-        We convert to a single score: positive contributes +1, negative -1,
+        CryptoBERT returns: Bullish, Bearish, Neutral for each text.
+        We convert to a single score: bullish contributes +1, bearish -1,
         neutral 0, weighted by confidence. Then scale to [-10, +10] range.
         """
         session = await self._get_session()
-        url = f"{HF_API_BASE}/{FINBERT_MODEL}"
+        url = f"{HF_API_BASE}/{CRYPTOBERT_MODEL}"
 
         total_score = 0.0
         scored = 0
@@ -241,12 +243,12 @@ class SentimentFilter:
             ) as resp:
                 if resp.status == 503:
                     # Model loading — raise to trigger fallback
-                    raise RuntimeError("FinBERT model loading (503)")
+                    raise RuntimeError("CryptoBERT model loading (503)")
                 if resp.status != 200:
-                    raise RuntimeError(f"FinBERT API returned {resp.status}")
+                    raise RuntimeError(f"CryptoBERT API returned {resp.status}")
                 results = await resp.json()
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            raise RuntimeError(f"FinBERT request failed: {e}") from e
+            raise RuntimeError(f"CryptoBERT request failed: {e}") from e
 
         # results is list of list of {label, score} for each text
         for article_results in results:
@@ -260,9 +262,9 @@ class SentimentFilter:
             label = best.get("label", "neutral").lower()
             confidence = best.get("score", 0.5)
 
-            if label == "positive":
+            if label == "bullish":
                 total_score += confidence
-            elif label == "negative":
+            elif label == "bearish":
                 total_score -= confidence
             # neutral contributes 0
             scored += 1

@@ -4,6 +4,8 @@ import asyncio
 import traceback
 from datetime import datetime, timedelta, timezone
 
+import pandas as pd
+
 from src.config import Settings
 from src.data.candles import CandleManager
 from src.data.repository import Repository
@@ -542,8 +544,29 @@ class TradingEngine:
                 self.adaptive_threshold.record_outcome(is_win=(liq_pnl > 0))
                 self.state.open_positions.pop(liq_exit.symbol, None)
 
+        # Compute ATR values for open positions (15m candles)
+        atr_values: dict[str, float] = {}
+        for symbol in list(self.portfolio.open_positions.keys()):
+            try:
+                candles = await self.candle_manager.get_candles(symbol, "15m", limit=30)
+                if candles is not None and len(candles) >= 15:
+                    high = candles["high"].astype(float)
+                    low = candles["low"].astype(float)
+                    close = candles["close"].astype(float)
+                    prev_close = close.shift(1)
+                    tr = pd.concat(
+                        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+                        axis=1,
+                    ).max(axis=1)
+                    atr_series = tr.rolling(14).mean()
+                    latest_atr = float(atr_series.iloc[-1]) if pd.notna(atr_series.iloc[-1]) else 0.0
+                    if latest_atr > 0:
+                        atr_values[symbol] = latest_atr
+            except Exception as e:
+                logger.debug("atr_fetch_failed", symbol=symbol, error=str(e))
+
         exits = await self.position_monitor.check_positions(
-            self.portfolio.open_positions, self.exchange
+            self.portfolio.open_positions, self.exchange, atr_values=atr_values
         )
 
         for exit_signal in exits:

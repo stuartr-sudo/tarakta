@@ -28,13 +28,11 @@ async def main() -> None:
     db = Database(config.supabase_url, config.supabase_key)
     repo = Repository(db)
 
-    # Exchange
-    if config.exchange_name == "binance":
-        api_key, api_secret = config.binance_api_key, config.binance_api_secret
-    else:
-        api_key, api_secret = config.kraken_api_key, config.kraken_api_secret
+    # Exchange (Binance)
     live_exchange = create_exchange(
-        config.exchange_name, api_key, api_secret,
+        config.exchange_name,
+        config.binance_api_key,
+        config.binance_api_secret,
         account_type=config.account_type,
         leverage=config.leverage,
         margin_mode=config.margin_mode,

@@ -77,12 +77,21 @@ class OrderExecutor:
             return None, None, None
 
         # Place order — long=buy, short=sell
+        # Use limit orders at best bid/ask for maker fees
         side = "buy" if is_long else "sell"
         try:
-            result = await self.exchange.place_market_order(
+            ob = await self.exchange.fetch_order_book(signal.symbol, limit=5)
+            if is_long:
+                # Buy at best bid to be a maker
+                limit_price = float(ob["bids"][0][0]) if ob.get("bids") else signal.entry_price
+            else:
+                # Sell at best ask to be a maker
+                limit_price = float(ob["asks"][0][0]) if ob.get("asks") else signal.entry_price
+            result = await self.exchange.place_limit_order(
                 symbol=signal.symbol,
                 side=side,
                 quantity=pos_size.quantity,
+                price=limit_price,
             )
         except Exception as e:
             logger.error("order_failed", symbol=signal.symbol, error=str(e))
@@ -223,13 +232,21 @@ class OrderExecutor:
         quantity: float,
         tier: int,
     ) -> tuple[OrderResult | None, float]:
-        """Execute a partial close (TP tier hit). Returns (OrderResult, pnl_usd)."""
+        """Execute a partial close (TP tier hit) using limit order. Returns (OrderResult, pnl_usd)."""
         side = "sell" if position.direction == "long" else "buy"
         try:
-            result = await self.exchange.place_market_order(
+            ob = await self.exchange.fetch_order_book(symbol, limit=5)
+            if side == "sell":
+                # Selling: place at best ask to be a maker
+                limit_price = float(ob["asks"][0][0]) if ob.get("asks") else current_price
+            else:
+                # Buying (closing short): place at best bid
+                limit_price = float(ob["bids"][0][0]) if ob.get("bids") else current_price
+            result = await self.exchange.place_limit_order(
                 symbol=symbol,
                 side=side,
                 quantity=quantity,
+                price=limit_price,
             )
         except Exception as e:
             logger.error("partial_exit_failed", symbol=symbol, reason=reason,

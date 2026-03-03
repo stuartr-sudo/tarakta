@@ -6,7 +6,7 @@
     <h1>Live Chart</h1>
     <div class="chart-symbol-picker">
         <label for="symbolInput">Symbol:</label>
-        <input type="text" id="symbolInput" value="KRAKEN:BTCUSD" placeholder="e.g. KRAKEN:SKYUSD" spellcheck="false">
+        <input type="text" id="symbolInput" value="BINANCE:BTCUSDT" placeholder="e.g. BINANCE:ETHUSDT" spellcheck="false">
         <button class="btn" onclick="loadChart()">Load</button>
     </div>
 </div>
@@ -32,9 +32,9 @@
 <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
 <script>
 function getTVSymbol(raw) {
-    // Convert "BTC/USD" → "KRAKEN:BTCUSD", or pass through if already formatted
+    // Convert "BTC/USDT" → "BINANCE:BTCUSDT", or pass through if already formatted
     if (raw.includes(':')) return raw;
-    return 'KRAKEN:' + raw.replace('/', '');
+    return 'BINANCE:' + raw.replace('/', '');
 }
 
 function loadChart() {

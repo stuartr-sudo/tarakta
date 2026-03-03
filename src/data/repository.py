@@ -195,17 +195,72 @@ class Repository:
         )
         return result.data or []
 
-    async def get_daily_realized_pnl(self) -> float:
-        """Sum pnl_usd of trades closed today (UTC)."""
+    async def get_daily_realized_pnl(self, mode: str | None = None) -> float:
+        """Sum pnl_usd of trades closed today + partial exits from today (UTC)."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00+00:00")
-        result = await asyncio.to_thread(
-            _exec,
+
+        # Closed trades today
+        query = (
             self.db.table("trades")
             .select("pnl_usd")
             .eq("status", "closed")
-            .gte("exit_time", today),
+            .gte("exit_time", today)
         )
-        return sum(float(t.get("pnl_usd", 0)) for t in (result.data or []))
+        if mode:
+            query = query.eq("mode", mode)
+        result = await asyncio.to_thread(_exec, query)
+        closed_pnl = sum(float(t.get("pnl_usd", 0)) for t in (result.data or []))
+
+        # Partial exits from today on still-open trades
+        partial_pnl = await self._get_todays_partial_exit_pnl(today, mode)
+
+        return closed_pnl + partial_pnl
+
+    async def _get_todays_partial_exit_pnl(self, today: str, mode: str | None = None) -> float:
+        """Sum partial_exits.pnl_usd created today for still-open trades."""
+        try:
+            # Get open trade IDs (optionally filtered by mode)
+            open_query = self.db.table("trades").select("id").eq("status", "open")
+            if mode:
+                open_query = open_query.eq("mode", mode)
+            open_result = await asyncio.to_thread(_exec, open_query)
+            open_ids = [t["id"] for t in (open_result.data or [])]
+            if not open_ids:
+                return 0.0
+
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("partial_exits")
+                .select("pnl_usd")
+                .in_("trade_id", open_ids)
+                .gte("created_at", today),
+            )
+            return sum(float(pe.get("pnl_usd", 0)) for pe in (result.data or []))
+        except Exception as e:
+            logger.error("todays_partial_exit_pnl_failed", error=str(e))
+            return 0.0
+
+    async def get_open_trade_partial_pnl(self, mode: str | None = None) -> float:
+        """Sum all partial_exits.pnl_usd for currently open trades."""
+        try:
+            open_query = self.db.table("trades").select("id").eq("status", "open")
+            if mode:
+                open_query = open_query.eq("mode", mode)
+            open_result = await asyncio.to_thread(_exec, open_query)
+            open_ids = [t["id"] for t in (open_result.data or [])]
+            if not open_ids:
+                return 0.0
+
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("partial_exits")
+                .select("pnl_usd")
+                .in_("trade_id", open_ids),
+            )
+            return sum(float(pe.get("pnl_usd", 0)) for pe in (result.data or []))
+        except Exception as e:
+            logger.error("open_trade_partial_pnl_failed", error=str(e))
+            return 0.0
 
     async def get_trade_stats(self, mode: str | None = None) -> dict:
         query = self.db.table("trades").select("*").eq("status", "closed")
@@ -213,13 +268,22 @@ class Repository:
             query = query.eq("mode", mode)
         result = await asyncio.to_thread(_exec, query)
         trades = result.data or []
+
+        # Include partial exit PnL from still-open trades
+        partial_pnl = await self.get_open_trade_partial_pnl(mode)
+        daily_pnl = await self.get_daily_realized_pnl(mode)
+
         if not trades:
             return {
                 "total": 0, "wins": 0, "losses": 0, "win_rate": 0,
-                "total_pnl": 0, "avg_pnl": 0,
+                "total_pnl": partial_pnl, "avg_pnl": 0,
+                "daily_pnl": daily_pnl,
             }
-        wins = [t for t in trades if float(t.get("pnl_usd", 0)) > 0]
-        total_pnl = sum(float(t.get("pnl_usd", 0)) for t in trades)
+
+        # Break-even (pnl=0) counts as a win, not a loss
+        wins = [t for t in trades if float(t.get("pnl_usd", 0)) >= 0]
+        closed_pnl = sum(float(t.get("pnl_usd", 0)) for t in trades)
+        total_pnl = closed_pnl + partial_pnl
 
         # Best and worst trades
         best_trade = max(trades, key=lambda t: float(t.get("pnl_usd", 0)))
@@ -237,7 +301,8 @@ class Repository:
             "losses": len(trades) - len(wins),
             "win_rate": len(wins) / len(trades) if trades else 0,
             "total_pnl": total_pnl,
-            "avg_pnl": total_pnl / len(trades) if trades else 0,
+            "avg_pnl": closed_pnl / len(trades) if trades else 0,
+            "daily_pnl": daily_pnl,
             "best_pnl": float(best_trade.get("pnl_usd", 0)),
             "best_symbol": best_trade.get("symbol", ""),
             "worst_pnl": float(worst_trade.get("pnl_usd", 0)),

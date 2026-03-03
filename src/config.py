@@ -7,10 +7,8 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # Exchange
-    exchange_name: str = "kraken"  # "kraken" or "binance"
-    kraken_api_key: str = ""
-    kraken_api_secret: str = ""
+    # Exchange (Binance only)
+    exchange_name: str = "binance"
     binance_api_key: str = ""
     binance_api_secret: str = ""
 
@@ -74,7 +72,7 @@ class Settings(BaseSettings):
     # Server
     port: int = 8080
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

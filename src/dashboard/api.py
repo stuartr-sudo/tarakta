@@ -33,22 +33,17 @@ class _DashboardExchange:
 
     def _ensure_client(self):
         if self._exchange is None:
-            ccxt_cls = ccxt.binance if self._exchange_name in ("binance", "binance_futures", "binance_margin") else ccxt.kraken
-            # Map account type to ccxt defaultType
             if self._account_type == "futures":
                 default_type = "future"
             elif self._account_type == "margin":
                 default_type = "margin"
             else:
                 default_type = "spot"
-            opts = {"defaultType": default_type}
-            if self._exchange_name in ("binance", "binance_futures", "binance_margin"):
-                opts["fetchCurrencies"] = False
-            self._exchange = ccxt_cls({
+            self._exchange = ccxt.binance({
                 "apiKey": self._api_key,
                 "secret": self._api_secret,
                 "enableRateLimit": True,
-                "options": opts,
+                "options": {"defaultType": default_type, "fetchCurrencies": False},
             })
         return self._exchange
 
@@ -80,7 +75,7 @@ class _DashboardExchange:
             self._exchange = None
 
 
-def create_router(repo: Repository, exchange=None, exchange_name: str = "kraken", api_key: str = "", api_secret: str = "", account_type: str = "spot") -> APIRouter:
+def create_router(repo: Repository, exchange=None, exchange_name: str = "binance", api_key: str = "", api_secret: str = "", account_type: str = "spot") -> APIRouter:
     router = APIRouter()
     _dash_exchange: _DashboardExchange | None = None
     if api_key and api_secret:
@@ -105,7 +100,8 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "kraken"
     @router.get("/stats")
     @login_required
     async def get_stats(request: Request):
-        return await repo.get_trade_stats()
+        mode = request.query_params.get("mode")
+        return await repo.get_trade_stats(mode=mode)
 
     @router.get("/signals/recent")
     @login_required
