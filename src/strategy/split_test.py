@@ -43,11 +43,12 @@ class SplitTestManager:
 
         group = "llm" if hash_value < self._ratio else "control"
 
-        logger.debug(
+        logger.info(
             "split_test_assigned",
             symbol=signal.symbol,
             group=group,
             hash_value=round(hash_value, 4),
+            ratio=self._ratio,
         )
         return group
 
