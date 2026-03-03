@@ -137,6 +137,35 @@ class Repository:
             logger.error("get_partial_exits_failed", error=str(e), trade_id=trade_id)
             return []
 
+    async def log_reversal(
+        self,
+        old_trade_id: str,
+        new_trade_id: str,
+        symbol: str,
+        old_direction: str,
+        new_direction: str,
+        close_pnl: float,
+        signal_score: float,
+    ) -> dict:
+        """Record a position reversal event for analytics."""
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("reversals").insert({
+                    "old_trade_id": old_trade_id,
+                    "new_trade_id": new_trade_id,
+                    "symbol": symbol,
+                    "old_direction": old_direction,
+                    "new_direction": new_direction,
+                    "close_pnl": close_pnl,
+                    "signal_score": signal_score,
+                }),
+            )
+            return result.data[0] if result.data else {}
+        except Exception as e:
+            logger.error("log_reversal_failed", error=str(e), symbol=symbol)
+            return {}
+
     async def get_trades_by_ids(self, trade_ids: list[str]) -> list[dict]:
         if not trade_ids:
             return []

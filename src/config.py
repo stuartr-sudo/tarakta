@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     tp3_pct: float = 0.34   # remaining 34% via trailing stop
     move_sl_to_be_after_tp1: bool = True  # move SL to breakeven after TP1
 
+    # Signal reversal — close & flip on strong opposite signal
+    reversal_enabled: bool = True
+    reversal_min_score: float = 70.0       # Higher bar than entry_threshold (65)
+    reversal_min_hold_minutes: int = 60    # Don't reverse within first hour
+    reversal_cooldown_minutes: int = 120   # After a reversal, wait 2h before another on same symbol
+
     # Scanning
     scan_interval_minutes: int = 15
     min_volume_usd: float = 1_000_000

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from src.config import Settings
 from src.data.candles import CandleManager
@@ -58,6 +58,7 @@ class TradingEngine:
         self.state: EngineState | None = None
         self.portfolio: PortfolioTracker | None = None
         self._running = False
+        self._reversal_cooldowns: dict[str, datetime] = {}
 
     async def startup(self) -> None:
         """Initialize engine state from DB or create fresh."""
@@ -354,6 +355,39 @@ class TradingEngine:
                     )
                     signals_saved += 1
                     continue
+
+                # --- Opposite signal reversal check ---
+                existing_pos = self.portfolio.open_positions.get(signal.symbol)
+                if existing_pos:
+                    is_opposite = (
+                        (existing_pos.direction == "long" and signal.direction == "bearish")
+                        or (existing_pos.direction == "short" and signal.direction == "bullish")
+                    )
+                    if is_opposite:
+                        reversed_ok = await self._attempt_reversal(signal, existing_pos, cycle)
+                        if reversed_ok:
+                            trades_entered += 1
+                            vol_24h = self.exchange.get_24h_volume(signal.symbol)
+                            await self.repo.insert_signal(
+                                {
+                                    "symbol": signal.symbol,
+                                    "direction": signal.direction or "none",
+                                    "score": signal.score,
+                                    "reasons": signal.reasons + ["reversal"],
+                                    "components": {
+                                        "volume_24h": vol_24h,
+                                        "sentiment": sentiment_score,
+                                        "adjusted_score": round(adjusted_score, 2),
+                                    },
+                                    "current_price": signal.entry_price,
+                                    "acted_on": True,
+                                    "scan_cycle": cycle,
+                                }
+                            )
+                            signals_saved += 1
+                            continue
+                        # Reversal guards failed — fall through to normal validation
+                        # which will reject with "Already in position"
 
                 # Validate trade
                 # Calculate total exposure across open positions
@@ -654,6 +688,200 @@ class TradingEngine:
         self.state.peak_balance = self.portfolio.peak_balance
         self.state.daily_pnl = self.portfolio.daily_pnl
         self.state.total_pnl = self.portfolio.total_pnl
+
+    async def _attempt_reversal(
+        self,
+        signal,
+        existing_position: Position,
+        cycle: int,
+    ) -> bool:
+        """
+        Attempt to close an existing position and open one in the opposite direction.
+
+        Returns True if reversal succeeded (caller should skip normal entry flow).
+        Returns False if reversal was blocked by guards (caller falls through to normal validation).
+        """
+        symbol = signal.symbol
+
+        # Guard 1: Feature disabled
+        if not self.config.reversal_enabled:
+            return False
+
+        # Guard 2: Score too low
+        if signal.score < self.config.reversal_min_score:
+            logger.info(
+                "reversal_score_too_low", symbol=symbol,
+                score=signal.score, min_score=self.config.reversal_min_score,
+            )
+            return False
+
+        # Guard 3: Position held too briefly
+        if existing_position.entry_time:
+            held_minutes = (datetime.now(timezone.utc) - existing_position.entry_time).total_seconds() / 60
+            if held_minutes < self.config.reversal_min_hold_minutes:
+                logger.info(
+                    "reversal_too_early", symbol=symbol,
+                    held_minutes=round(held_minutes, 1),
+                    min_minutes=self.config.reversal_min_hold_minutes,
+                )
+                return False
+
+        # Guard 4: Reversal cooldown (separate from SL cooldown)
+        cooldown_until = self._reversal_cooldowns.get(symbol)
+        if cooldown_until and datetime.now(timezone.utc) < cooldown_until:
+            remaining = (cooldown_until - datetime.now(timezone.utc)).total_seconds() / 60
+            logger.info(
+                "reversal_on_cooldown", symbol=symbol,
+                remaining_minutes=round(remaining, 1),
+            )
+            return False
+
+        # --- CLOSE EXISTING POSITION ---
+        logger.info(
+            "reversal_closing_position", symbol=symbol,
+            old_direction=existing_position.direction,
+            new_direction=signal.direction,
+            signal_score=signal.score,
+        )
+
+        try:
+            ticker = await asyncio.wait_for(
+                self.exchange.fetch_ticker(symbol), timeout=45,
+            )
+            current_price = float(ticker["last"])
+        except Exception as e:
+            logger.error("reversal_ticker_failed", symbol=symbol, error=str(e))
+            return False
+
+        # Execute exit order
+        order_result, pnl = await self.order_executor.execute_exit(
+            symbol=symbol,
+            position=existing_position,
+            reason="opposite_signal_reversal",
+            current_price=current_price,
+        )
+
+        if not order_result:
+            logger.error("reversal_exit_failed", symbol=symbol)
+            return False
+
+        # Accumulate partial exit PnLs for total trade PnL
+        total_pnl = pnl
+        total_fees = order_result.fee
+        if existing_position.tp_tiers and existing_position.current_tier > 0:
+            try:
+                partial_exits = await self.repo.get_partial_exits(existing_position.trade_id)
+                total_pnl += sum(float(pe.get("pnl_usd", 0)) for pe in partial_exits)
+                total_fees += sum(float(pe.get("fees_usd", 0)) for pe in partial_exits)
+            except Exception as e:
+                logger.warning("reversal_partial_sum_failed", error=str(e))
+
+        orig_cost = (
+            (existing_position.original_quantity * existing_position.entry_price)
+            if existing_position.original_quantity
+            else existing_position.cost_usd
+        )
+        pnl_pct = (total_pnl / orig_cost * 100) if orig_cost > 0 else 0
+
+        # Close trade in DB
+        await self.repo.close_trade(
+            trade_id=existing_position.trade_id,
+            exit_price=order_result.avg_price or current_price,
+            exit_quantity=order_result.filled_quantity or existing_position.quantity,
+            exit_order_id=order_result.order_id,
+            exit_reason="opposite_signal_reversal",
+            pnl_usd=round(total_pnl, 4),
+            pnl_percent=round(pnl_pct, 2),
+            fees_usd=round(total_fees, 4),
+        )
+
+        # Update portfolio & state
+        self.portfolio.record_exit(symbol, current_price, order_result.fee)
+        self.state.open_positions.pop(symbol, None)
+
+        # Clear SL cooldown so the new entry isn't blocked
+        self.risk_manager.clear_cooldown(symbol)
+
+        # Post-trade analysis
+        holding_seconds = 0.0
+        if existing_position.entry_time:
+            holding_seconds = (datetime.now(timezone.utc) - existing_position.entry_time).total_seconds()
+        try:
+            await self.trade_analyzer.analyze_closed_trade(
+                trade_id=existing_position.trade_id,
+                symbol=symbol,
+                direction=existing_position.direction,
+                entry_price=existing_position.entry_price,
+                exit_price=order_result.avg_price or current_price,
+                pnl_usd=total_pnl,
+                pnl_percent=pnl_pct,
+                exit_reason="opposite_signal_reversal",
+                confluence_score=0,
+                holding_seconds=holding_seconds,
+            )
+        except Exception as e:
+            logger.warning("reversal_post_analysis_failed", error=str(e))
+
+        self.adaptive_threshold.record_outcome(is_win=(total_pnl > 0))
+
+        old_trade_id = existing_position.trade_id
+        old_direction = existing_position.direction
+
+        logger.info(
+            "reversal_position_closed", symbol=symbol,
+            old_direction=old_direction,
+            pnl=round(total_pnl, 4),
+        )
+
+        # --- ENTER NEW POSITION ---
+        new_position, new_order_result, new_trade_record = await self.order_executor.execute_entry(
+            signal=signal,
+            current_balance=self.portfolio.current_balance,
+            mode=self.state.mode,
+        )
+
+        new_trade_id = ""
+        if new_position and new_trade_record:
+            db_trade = await self.repo.insert_trade(new_trade_record)
+            if db_trade:
+                new_position.trade_id = db_trade.get("id", "")
+                new_trade_id = new_position.trade_id
+
+            self.portfolio.record_entry(new_position)
+            self.state.open_positions[symbol] = new_position
+
+            logger.info(
+                "reversal_new_position_opened", symbol=symbol,
+                new_direction=new_position.direction,
+                entry_price=new_position.entry_price,
+                quantity=new_position.quantity,
+            )
+        else:
+            logger.warning(
+                "reversal_new_entry_failed", symbol=symbol,
+                note="Old position closed but new entry failed — will retry on next scan",
+            )
+
+        # Record reversal event for analytics
+        try:
+            await self.repo.log_reversal(
+                old_trade_id=old_trade_id,
+                new_trade_id=new_trade_id,
+                symbol=symbol,
+                old_direction=old_direction,
+                new_direction=signal.direction or "unknown",
+                close_pnl=round(total_pnl, 4),
+                signal_score=signal.score,
+            )
+        except Exception as e:
+            logger.warning("log_reversal_failed", error=str(e))
+
+        # Set reversal cooldown
+        self._reversal_cooldowns[symbol] = datetime.now(timezone.utc) + timedelta(
+            minutes=self.config.reversal_cooldown_minutes
+        )
+
+        return True
 
     async def _persist_state(self) -> None:
         """Save engine state and portfolio snapshot to DB."""

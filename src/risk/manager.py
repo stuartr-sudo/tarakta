@@ -32,6 +32,10 @@ class RiskManager:
         self._symbol_cooldowns[symbol] = until
         logger.info("symbol_cooldown_set", symbol=symbol, until=until.isoformat(), hours=self.cooldown_hours)
 
+    def clear_cooldown(self, symbol: str) -> None:
+        """Remove stop-out cooldown for a symbol (used on reversal)."""
+        self._symbol_cooldowns.pop(symbol, None)
+
     def _check_cooldown(self, symbol: str) -> str | None:
         """Return rejection reason if symbol is on cooldown, else None."""
         until = self._symbol_cooldowns.get(symbol)
