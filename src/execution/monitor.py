@@ -56,18 +56,40 @@ class PositionMonitor:
         if current_price > pos.high_water_mark:
             pos.high_water_mark = current_price
 
-        # Check stop loss (price drops below SL)
+        # 1. Check stop loss (price drops below SL) — full exit of remaining quantity
         if current_price <= pos.stop_loss:
-            logger.info("sl_hit", symbol=symbol, direction="long", price=current_price, sl=pos.stop_loss)
+            logger.info("sl_hit", symbol=symbol, direction="long",
+                        price=current_price, sl=pos.stop_loss)
             return ExitSignal(symbol=symbol, reason="sl_hit", price=current_price)
 
-        # Check take profit (price rises above TP)
-        if pos.take_profit and current_price >= pos.take_profit:
-            logger.info("tp_hit", symbol=symbol, direction="long", price=current_price, tp=pos.take_profit)
+        # 2. Progressive TP tiers (if enabled)
+        if pos.tp_tiers:
+            for tier in pos.tp_tiers:
+                if tier.filled or tier.price is None:
+                    continue
+                if current_price >= tier.price:
+                    logger.info(
+                        f"tp{tier.level}_hit", symbol=symbol, direction="long",
+                        price=current_price, tp=tier.price, quantity=tier.quantity,
+                    )
+                    return ExitSignal(
+                        symbol=symbol,
+                        reason=f"tp{tier.level}_hit",
+                        price=current_price,
+                        is_partial=True,
+                        partial_quantity=tier.quantity,
+                        tier=tier.level,
+                    )
+            # All priced tiers checked; fall through to trailing stop
+        elif pos.take_profit and current_price >= pos.take_profit:
+            # Legacy single TP mode
+            logger.info("tp_hit", symbol=symbol, direction="long",
+                        price=current_price, tp=pos.take_profit)
             return ExitSignal(symbol=symbol, reason="tp_hit", price=current_price)
 
-        # Trailing stop
-        sl_distance = pos.entry_price - pos.stop_loss
+        # 3. Trailing stop — use original SL distance for R:R calculation
+        original_sl_dist = (pos.entry_price - pos.original_stop_loss) if pos.original_stop_loss else 0
+        sl_distance = original_sl_dist if original_sl_dist > 0 else (pos.entry_price - pos.stop_loss)
         if sl_distance > 0:
             unrealized_rr = (current_price - pos.entry_price) / sl_distance
             if unrealized_rr >= TRAILING_STOP_ACTIVATION_RR:
@@ -75,7 +97,8 @@ class PositionMonitor:
                 if trailing_sl > pos.stop_loss:
                     pos.stop_loss = trailing_sl
                 if current_price <= trailing_sl:
-                    return ExitSignal(symbol=symbol, reason="trailing_stop", price=current_price)
+                    return ExitSignal(symbol=symbol, reason="trailing_stop",
+                                      price=current_price)
 
         return None
 
@@ -86,18 +109,39 @@ class PositionMonitor:
         if current_price < pos.high_water_mark:
             pos.high_water_mark = current_price
 
-        # Check stop loss (price rises above SL)
+        # 1. Check stop loss (price rises above SL) — full exit of remaining quantity
         if current_price >= pos.stop_loss:
-            logger.info("sl_hit", symbol=symbol, direction="short", price=current_price, sl=pos.stop_loss)
+            logger.info("sl_hit", symbol=symbol, direction="short",
+                        price=current_price, sl=pos.stop_loss)
             return ExitSignal(symbol=symbol, reason="sl_hit", price=current_price)
 
-        # Check take profit (price drops below TP)
-        if pos.take_profit and current_price <= pos.take_profit:
-            logger.info("tp_hit", symbol=symbol, direction="short", price=current_price, tp=pos.take_profit)
+        # 2. Progressive TP tiers (if enabled)
+        if pos.tp_tiers:
+            for tier in pos.tp_tiers:
+                if tier.filled or tier.price is None:
+                    continue
+                if current_price <= tier.price:
+                    logger.info(
+                        f"tp{tier.level}_hit", symbol=symbol, direction="short",
+                        price=current_price, tp=tier.price, quantity=tier.quantity,
+                    )
+                    return ExitSignal(
+                        symbol=symbol,
+                        reason=f"tp{tier.level}_hit",
+                        price=current_price,
+                        is_partial=True,
+                        partial_quantity=tier.quantity,
+                        tier=tier.level,
+                    )
+        elif pos.take_profit and current_price <= pos.take_profit:
+            # Legacy single TP mode
+            logger.info("tp_hit", symbol=symbol, direction="short",
+                        price=current_price, tp=pos.take_profit)
             return ExitSignal(symbol=symbol, reason="tp_hit", price=current_price)
 
-        # Trailing stop for shorts
-        sl_distance = pos.stop_loss - pos.entry_price
+        # 3. Trailing stop for shorts — use original SL distance for R:R calculation
+        original_sl_dist = (pos.original_stop_loss - pos.entry_price) if pos.original_stop_loss else 0
+        sl_distance = original_sl_dist if original_sl_dist > 0 else (pos.stop_loss - pos.entry_price)
         if sl_distance > 0:
             unrealized_rr = (pos.entry_price - current_price) / sl_distance
             if unrealized_rr >= TRAILING_STOP_ACTIVATION_RR:
@@ -105,6 +149,7 @@ class PositionMonitor:
                 if trailing_sl < pos.stop_loss:
                     pos.stop_loss = trailing_sl
                 if current_price >= trailing_sl:
-                    return ExitSignal(symbol=symbol, reason="trailing_stop", price=current_price)
+                    return ExitSignal(symbol=symbol, reason="trailing_stop",
+                                      price=current_price)
 
         return None

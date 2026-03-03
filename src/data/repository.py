@@ -83,6 +83,60 @@ class Repository:
             },
         )
 
+    # --- Partial Exits (Progressive TP) ---
+
+    async def log_partial_exit(
+        self,
+        trade_id: str,
+        tier: int,
+        exit_price: float,
+        exit_quantity: float,
+        exit_order_id: str,
+        exit_reason: str,
+        pnl_usd: float,
+        pnl_percent: float,
+        fees_usd: float,
+        remaining_quantity: float,
+        new_stop_loss: float | None = None,
+    ) -> dict:
+        """Log a partial exit (TP tier hit)."""
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("partial_exits").insert({
+                    "trade_id": trade_id,
+                    "tier": tier,
+                    "exit_price": exit_price,
+                    "exit_quantity": exit_quantity,
+                    "exit_order_id": exit_order_id,
+                    "exit_reason": exit_reason,
+                    "pnl_usd": pnl_usd,
+                    "pnl_percent": pnl_percent,
+                    "fees_usd": fees_usd,
+                    "remaining_quantity": remaining_quantity,
+                    "new_stop_loss": new_stop_loss,
+                }),
+            )
+            return result.data[0] if result.data else {}
+        except Exception as e:
+            logger.error("log_partial_exit_failed", error=str(e), trade_id=trade_id, tier=tier)
+            return {}
+
+    async def get_partial_exits(self, trade_id: str) -> list[dict]:
+        """Get all partial exits for a trade."""
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("partial_exits")
+                .select("*")
+                .eq("trade_id", trade_id)
+                .order("created_at"),
+            )
+            return result.data or []
+        except Exception as e:
+            logger.error("get_partial_exits_failed", error=str(e), trade_id=trade_id)
+            return []
+
     async def get_trades_by_ids(self, trade_ids: list[str]) -> list[dict]:
         if not trade_ids:
             return []

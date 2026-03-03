@@ -16,6 +16,18 @@ class OrderResult:
 
 
 @dataclass
+class TakeProfitTier:
+    """One tier of a progressive take-profit plan."""
+    level: int              # 1, 2, or 3
+    price: float | None     # TP target price (None for tier 3 = trailing-only)
+    pct: float              # fraction of original quantity (0.33, 0.33, 0.34)
+    quantity: float          # actual quantity for this tier (computed at entry)
+    filled: bool = False
+    fill_price: float = 0.0
+    fill_time: datetime | None = None
+
+
+@dataclass
 class Position:
     trade_id: str
     symbol: str
@@ -30,6 +42,11 @@ class Position:
     leverage: int = 1
     margin_used: float = 0.0  # actual margin locked (cost_usd / leverage)
     liquidation_price: float = 0.0
+    # Progressive TP fields
+    tp_tiers: list[TakeProfitTier] | None = None  # None = legacy single-TP mode
+    original_quantity: float = 0.0   # quantity at entry (before partial closes)
+    original_stop_loss: float = 0.0  # original SL before breakeven move
+    current_tier: int = 0            # 0=no tiers hit, 1=TP1 hit, 2=TP2 hit
 
 
 @dataclass
@@ -51,8 +68,11 @@ class TradeValidation:
 @dataclass
 class ExitSignal:
     symbol: str
-    reason: str  # "sl_hit", "tp_hit", "trailing_stop", "circuit_breaker"
+    reason: str  # "sl_hit", "tp_hit", "tp1_hit", "tp2_hit", "trailing_stop", "circuit_breaker"
     price: float
+    is_partial: bool = False       # True for TP1/TP2 partial exits
+    partial_quantity: float = 0.0  # exact quantity to close for partial exits
+    tier: int = 0                  # which TP tier (1, 2, or 0 for full exit)
 
 
 @dataclass

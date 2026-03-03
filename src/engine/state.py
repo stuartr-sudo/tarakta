@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from src.exchange.models import Position
+from src.exchange.models import Position, TakeProfitTier
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -59,6 +59,28 @@ class EngineState:
                     if pos_data.get("entry_time"):
                         entry_time = datetime.fromisoformat(str(pos_data["entry_time"]))
 
+                    # Restore TP tiers if present
+                    tp_tiers = None
+                    tp_tiers_data = pos_data.get("tp_tiers")
+                    if tp_tiers_data and isinstance(tp_tiers_data, list):
+                        tp_tiers = []
+                        for td in tp_tiers_data:
+                            fill_time = None
+                            if td.get("fill_time"):
+                                try:
+                                    fill_time = datetime.fromisoformat(str(td["fill_time"]))
+                                except (ValueError, TypeError):
+                                    pass
+                            tp_tiers.append(TakeProfitTier(
+                                level=int(td["level"]),
+                                price=float(td["price"]) if td.get("price") is not None else None,
+                                pct=float(td.get("pct", 0.33)),
+                                quantity=float(td.get("quantity", 0)),
+                                filled=bool(td.get("filled", False)),
+                                fill_price=float(td.get("fill_price", 0)),
+                                fill_time=fill_time,
+                            ))
+
                     state.open_positions[sym] = Position(
                         trade_id=pos_data.get("trade_id", ""),
                         symbol=sym,
@@ -73,6 +95,10 @@ class EngineState:
                         leverage=int(pos_data.get("leverage", 1) or 1),
                         margin_used=float(pos_data.get("margin_used", 0) or 0),
                         liquidation_price=float(pos_data.get("liquidation_price", 0) or 0),
+                        tp_tiers=tp_tiers,
+                        original_quantity=float(pos_data.get("original_quantity", 0) or 0),
+                        original_stop_loss=float(pos_data.get("original_stop_loss", 0) or 0),
+                        current_tier=int(pos_data.get("current_tier", 0) or 0),
                     )
                 except (ValueError, TypeError, KeyError) as e:
                     logger.warning("position_restore_failed", symbol=sym, error=str(e))

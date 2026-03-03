@@ -9,7 +9,7 @@ from src.data.candles import CandleManager
 from src.data.repository import Repository
 from src.engine.scheduler import Scheduler, TickType
 from src.engine.state import EngineState
-from src.exchange.models import Position
+from src.exchange.models import Position, TakeProfitTier
 from src.execution.monitor import PositionMonitor
 from src.execution.orders import OrderExecutor
 from src.risk.circuit_breaker import CircuitBreaker
@@ -46,7 +46,7 @@ class TradingEngine:
         )
         self.risk_manager = RiskManager(config, exchange=exchange)
         self.circuit_breaker = CircuitBreaker(config)
-        self.order_executor = OrderExecutor(exchange, self.risk_manager, config.min_rr_ratio)
+        self.order_executor = OrderExecutor(exchange, self.risk_manager, config)
         self.position_monitor = PositionMonitor()
         self.scanner = AltcoinScanner(candle_manager, config)
 
@@ -517,60 +517,137 @@ class TradingEngine:
             if not position:
                 continue
 
-            order_result, pnl = await self.order_executor.execute_exit(
-                symbol=exit_signal.symbol,
-                position=position,
-                reason=exit_signal.reason,
-                current_price=exit_signal.price,
-            )
-
-            if order_result:
-                # Update DB
-                pnl_pct = (pnl / position.cost_usd * 100) if position.cost_usd > 0 else 0
-                await self.repo.close_trade(
-                    trade_id=position.trade_id,
-                    exit_price=order_result.avg_price or exit_signal.price,
-                    exit_quantity=order_result.filled_quantity or position.quantity,
-                    exit_order_id=order_result.order_id,
-                    exit_reason=exit_signal.reason,
-                    pnl_usd=pnl,
-                    pnl_percent=pnl_pct,
-                    fees_usd=order_result.fee,
+            if exit_signal.is_partial and exit_signal.partial_quantity > 0:
+                # --- PARTIAL EXIT (TP tier hit) ---
+                order_result, pnl = await self.order_executor.execute_partial_exit(
+                    symbol=exit_signal.symbol,
+                    position=position,
+                    reason=exit_signal.reason,
+                    current_price=exit_signal.price,
+                    quantity=exit_signal.partial_quantity,
+                    tier=exit_signal.tier,
                 )
 
-                # Update portfolio
-                self.portfolio.record_exit(exit_signal.symbol, exit_signal.price, order_result.fee)
+                if order_result:
+                    # Mark tier as filled
+                    if position.tp_tiers:
+                        for tier in position.tp_tiers:
+                            if tier.level == exit_signal.tier and not tier.filled:
+                                tier.filled = True
+                                tier.fill_price = order_result.avg_price or exit_signal.price
+                                tier.fill_time = datetime.now(timezone.utc)
+                                break
 
-                # Record cooldown on stop-loss exits
-                if exit_signal.reason == "sl_hit":
-                    self.risk_manager.record_stop_out(exit_signal.symbol)
+                    position.current_tier = exit_signal.tier
 
-                # --- Post-trade analysis (Strategy B) ---
-                holding_seconds = 0.0
-                if position.entry_time:
-                    holding_seconds = (datetime.now(timezone.utc) - position.entry_time).total_seconds()
+                    # TP1: move SL to breakeven
+                    if exit_signal.tier == 1 and self.config.move_sl_to_be_after_tp1:
+                        position.stop_loss = position.entry_price
+                        logger.info("sl_moved_to_breakeven", symbol=exit_signal.symbol,
+                                    new_sl=position.entry_price)
 
-                try:
-                    await self.trade_analyzer.analyze_closed_trade(
-                        trade_id=position.trade_id,
+                    # Record partial exit in portfolio (updates quantity, returns capital)
+                    self.portfolio.record_partial_exit(
                         symbol=exit_signal.symbol,
-                        direction=position.direction,
-                        entry_price=position.entry_price,
                         exit_price=order_result.avg_price or exit_signal.price,
-                        pnl_usd=pnl,
-                        pnl_percent=pnl_pct,
-                        exit_reason=exit_signal.reason,
-                        confluence_score=0,  # Not stored on position; will be enriched from signal
-                        holding_seconds=holding_seconds,
+                        quantity=order_result.filled_quantity or exit_signal.partial_quantity,
+                        fee=order_result.fee,
                     )
-                except Exception as e:
-                    logger.warning("post_trade_analysis_failed", error=str(e))
 
-                # --- Adaptive threshold update (Strategy C) ---
-                self.adaptive_threshold.record_outcome(is_win=(pnl > 0))
+                    # Log partial exit to DB
+                    cost_basis = exit_signal.partial_quantity * position.entry_price
+                    pnl_pct = (pnl / cost_basis * 100) if cost_basis > 0 else 0
+                    await self.repo.log_partial_exit(
+                        trade_id=position.trade_id,
+                        tier=exit_signal.tier,
+                        exit_price=order_result.avg_price or exit_signal.price,
+                        exit_quantity=order_result.filled_quantity or exit_signal.partial_quantity,
+                        exit_order_id=order_result.order_id,
+                        exit_reason=exit_signal.reason,
+                        pnl_usd=round(pnl, 4),
+                        pnl_percent=round(pnl_pct, 2),
+                        fees_usd=order_result.fee,
+                        remaining_quantity=position.quantity,
+                        new_stop_loss=position.stop_loss,
+                    )
 
-                # Remove from state
-                self.state.open_positions.pop(exit_signal.symbol, None)
+                    # Update trade record with current tier state
+                    await self.repo.update_trade(position.trade_id, {
+                        "current_tier": position.current_tier,
+                        "remaining_quantity": position.quantity,
+                        "stop_loss": position.stop_loss,
+                    })
+
+                    # Position stays in state — NOT removed
+
+            else:
+                # --- FULL EXIT (SL, trailing stop, legacy TP, circuit breaker) ---
+                order_result, pnl = await self.order_executor.execute_exit(
+                    symbol=exit_signal.symbol,
+                    position=position,
+                    reason=exit_signal.reason,
+                    current_price=exit_signal.price,
+                )
+
+                if order_result:
+                    # Accumulate PnL from partial exits for total trade PnL
+                    total_pnl = pnl
+                    total_fees = order_result.fee
+                    if position.tp_tiers and position.current_tier > 0:
+                        try:
+                            partial_exits = await self.repo.get_partial_exits(position.trade_id)
+                            total_pnl += sum(float(pe.get("pnl_usd", 0)) for pe in partial_exits)
+                            total_fees += sum(float(pe.get("fees_usd", 0)) for pe in partial_exits)
+                        except Exception as e:
+                            logger.warning("partial_exit_sum_failed", error=str(e))
+
+                    orig_cost = (position.original_quantity * position.entry_price) if position.original_quantity else position.cost_usd
+                    pnl_pct = (total_pnl / orig_cost * 100) if orig_cost > 0 else 0
+
+                    await self.repo.close_trade(
+                        trade_id=position.trade_id,
+                        exit_price=order_result.avg_price or exit_signal.price,
+                        exit_quantity=order_result.filled_quantity or position.quantity,
+                        exit_order_id=order_result.order_id,
+                        exit_reason=exit_signal.reason,
+                        pnl_usd=round(total_pnl, 4),
+                        pnl_percent=round(pnl_pct, 2),
+                        fees_usd=round(total_fees, 4),
+                    )
+
+                    # Update portfolio
+                    self.portfolio.record_exit(exit_signal.symbol, exit_signal.price, order_result.fee)
+
+                    # Record cooldown on stop-loss exits
+                    if exit_signal.reason == "sl_hit":
+                        self.risk_manager.record_stop_out(exit_signal.symbol)
+
+                    # --- Post-trade analysis (Strategy B) ---
+                    holding_seconds = 0.0
+                    if position.entry_time:
+                        holding_seconds = (datetime.now(timezone.utc) - position.entry_time).total_seconds()
+
+                    try:
+                        await self.trade_analyzer.analyze_closed_trade(
+                            trade_id=position.trade_id,
+                            symbol=exit_signal.symbol,
+                            direction=position.direction,
+                            entry_price=position.entry_price,
+                            exit_price=order_result.avg_price or exit_signal.price,
+                            pnl_usd=total_pnl,
+                            pnl_percent=pnl_pct,
+                            exit_reason=exit_signal.reason,
+                            confluence_score=0,
+                            holding_seconds=holding_seconds,
+                        )
+                    except Exception as e:
+                        logger.warning("post_trade_analysis_failed", error=str(e))
+
+                    # --- Adaptive threshold update (Strategy C) ---
+                    self.adaptive_threshold.record_outcome(is_win=(total_pnl > 0))
+
+                    # Remove from state
+                    self.state.open_positions.pop(exit_signal.symbol, None)
 
         # Sync state
         self.state.current_balance = self.portfolio.current_balance
@@ -717,12 +794,37 @@ class TradingEngine:
             cost_usd = float(t.get("entry_cost_usd", 0))
             margin_used = float(t.get("margin_used") or 0) or (cost_usd / leverage if leverage > 1 else 0.0)
 
+            # Restore TP tiers if present
+            tp_tiers = None
+            tp_tiers_data = t.get("tp_tiers")
+            if tp_tiers_data and isinstance(tp_tiers_data, list):
+                tp_tiers = []
+                for td in tp_tiers_data:
+                    fill_time = None
+                    if td.get("fill_time"):
+                        try:
+                            fill_time = datetime.fromisoformat(str(td["fill_time"]))
+                        except (ValueError, TypeError):
+                            pass
+                    tp_tiers.append(TakeProfitTier(
+                        level=int(td["level"]),
+                        price=float(td["price"]) if td.get("price") is not None else None,
+                        pct=float(td.get("pct", 0.33)),
+                        quantity=float(td.get("quantity", 0)),
+                        filled=bool(td.get("filled", False)),
+                        fill_price=float(td.get("fill_price", 0)),
+                        fill_time=fill_time,
+                    ))
+
+            # Use remaining_quantity if partial exits have occurred
+            qty = float(t.get("remaining_quantity") or t.get("entry_quantity", 0))
+
             position = Position(
                 trade_id=t["id"],
                 symbol=symbol,
                 direction=t.get("direction", "long"),
                 entry_price=float(t.get("entry_price", 0)),
-                quantity=float(t.get("entry_quantity", 0)),
+                quantity=qty,
                 stop_loss=float(t.get("stop_loss", 0)),
                 take_profit=float(t.get("take_profit")) if t.get("take_profit") else None,
                 high_water_mark=float(t.get("entry_price", 0)),
@@ -731,6 +833,10 @@ class TradingEngine:
                 leverage=leverage,
                 margin_used=margin_used,
                 liquidation_price=float(t.get("liquidation_price", 0) or 0),
+                tp_tiers=tp_tiers,
+                original_quantity=float(t.get("original_quantity") or t.get("entry_quantity", 0)),
+                original_stop_loss=float(t.get("stop_loss", 0)),
+                current_tier=int(t.get("current_tier", 0) or 0),
             )
 
             self.state.open_positions[symbol] = position

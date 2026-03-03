@@ -155,7 +155,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "kraken"
             symbol = trade["symbol"]
             current_price = price_map.get(symbol)
             entry_price = float(trade.get("entry_price", 0))
-            quantity = float(trade.get("entry_quantity", 0))
+            quantity = float(trade.get("remaining_quantity") or trade.get("entry_quantity", 0))
             direction = trade.get("direction", "long")
             cost_usd = float(trade.get("entry_cost_usd", 0))
 
@@ -213,7 +213,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "kraken"
             symbol = trade["symbol"]
             try:
                 direction = trade.get("direction", "long")
-                quantity = float(trade.get("entry_quantity", 0))
+                quantity = float(trade.get("remaining_quantity") or trade.get("entry_quantity", 0))
 
                 # Opposite side to close
                 close_side = "sell" if direction == "long" else "buy"
@@ -233,8 +233,18 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "kraken"
                 else:
                     pnl = (exit_price - entry_price) * quantity - result.fee
 
+                # Accumulate partial exit PnLs for total
+                total_trade_pnl = pnl
+                total_fees = result.fee
+                try:
+                    partial_exits = await repo.get_partial_exits(trade["id"])
+                    total_trade_pnl += sum(float(pe.get("pnl_usd", 0)) for pe in partial_exits)
+                    total_fees += sum(float(pe.get("fees_usd", 0)) for pe in partial_exits)
+                except Exception:
+                    pass
+
                 cost = float(trade.get("entry_cost_usd", 0))
-                pnl_pct = (pnl / cost * 100) if cost > 0 else 0
+                pnl_pct = (total_trade_pnl / cost * 100) if cost > 0 else 0
 
                 # Update DB
                 await repo.close_trade(
@@ -243,9 +253,9 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "kraken"
                     exit_quantity=result.filled_quantity or quantity,
                     exit_order_id=result.order_id,
                     exit_reason="nuke",
-                    pnl_usd=round(pnl, 4),
+                    pnl_usd=round(total_trade_pnl, 4),
                     pnl_percent=round(pnl_pct, 2),
-                    fees_usd=result.fee,
+                    fees_usd=round(total_fees, 4),
                 )
 
                 closed.append({

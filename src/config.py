@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     min_rr_ratio: float = 2.0
     cooldown_hours: float = 4.0  # Hours to wait before re-entering a symbol after SL hit
 
+    # Progressive take-profit tiers
+    tp_tiers_enabled: bool = True
+    tp1_rr: float = 1.0     # TP1 at 1R
+    tp2_rr: float = 2.0     # TP2 at 2R
+    tp1_pct: float = 0.33   # close 33% at TP1
+    tp2_pct: float = 0.33   # close 33% at TP2
+    tp3_pct: float = 0.34   # remaining 34% via trailing stop
+    move_sl_to_be_after_tp1: bool = True  # move SL to breakeven after TP1
+
     # Scanning
     scan_interval_minutes: int = 15
     min_volume_usd: float = 1_000_000

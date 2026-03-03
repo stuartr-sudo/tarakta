@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from src.exchange.models import OrderResult, Position, SignalCandidate
+from src.config import Settings
+from src.exchange.models import OrderResult, Position, SignalCandidate, TakeProfitTier
 from src.risk.manager import RiskManager
 from src.utils.logging import get_logger
 
@@ -12,10 +13,11 @@ logger = get_logger(__name__)
 class OrderExecutor:
     """Handles entry and exit order placement with SL/TP calculation."""
 
-    def __init__(self, exchange, risk_manager: RiskManager, min_rr: float = 2.0) -> None:
+    def __init__(self, exchange, risk_manager: RiskManager, config: Settings) -> None:
         self.exchange = exchange
         self.risk_manager = risk_manager
-        self.min_rr = min_rr
+        self.min_rr = config.min_rr_ratio
+        self.config = config
 
     async def execute_entry(
         self,
@@ -100,12 +102,14 @@ class OrderExecutor:
         else:
             liq_price = 0.0
 
+        qty = result.filled_quantity if result.filled_quantity > 0 else pos_size.quantity
+
         position = Position(
             trade_id="",
             symbol=signal.symbol,
             direction=direction,
             entry_price=entry_px,
-            quantity=result.filled_quantity if result.filled_quantity > 0 else pos_size.quantity,
+            quantity=qty,
             stop_loss=sl_price,
             take_profit=tp_price,
             high_water_mark=entry_px,
@@ -115,6 +119,23 @@ class OrderExecutor:
             margin_used=margin_used,
             liquidation_price=liq_price,
         )
+
+        # Progressive TP tiers
+        tp_tiers_data = None
+        if self.config.tp_tiers_enabled:
+            position.tp_tiers = self._calculate_tp_tiers(
+                entry_price=entry_px,
+                sl_price=sl_price,
+                quantity=qty,
+                direction=direction,
+            )
+            position.original_quantity = qty
+            position.original_stop_loss = sl_price
+            position.take_profit = position.tp_tiers[0].price  # TP1 for dashboard display
+            tp_tiers_data = [
+                {"level": t.level, "price": t.price, "pct": t.pct, "quantity": t.quantity}
+                for t in position.tp_tiers
+            ]
 
         trade_record = {
             "symbol": signal.symbol,
@@ -127,7 +148,7 @@ class OrderExecutor:
             "entry_order_id": result.order_id,
             "entry_time": position.entry_time.isoformat(),
             "stop_loss": sl_price,
-            "take_profit": tp_price,
+            "take_profit": position.take_profit,
             "risk_usd": pos_size.risk_usd,
             "risk_reward": round(rr_ratio, 2),
             "confluence_score": signal.score,
@@ -137,6 +158,9 @@ class OrderExecutor:
             "leverage": leverage,
             "margin_used": margin_used,
             "liquidation_price": liq_price,
+            "tp_tiers": tp_tiers_data,
+            "original_quantity": qty,
+            "remaining_quantity": qty,
         }
 
         logger.info(
@@ -189,6 +213,77 @@ class OrderExecutor:
             fee=result.fee,
         )
         return result, pnl
+
+    async def execute_partial_exit(
+        self,
+        symbol: str,
+        position: Position,
+        reason: str,
+        current_price: float,
+        quantity: float,
+        tier: int,
+    ) -> tuple[OrderResult | None, float]:
+        """Execute a partial close (TP tier hit). Returns (OrderResult, pnl_usd)."""
+        side = "sell" if position.direction == "long" else "buy"
+        try:
+            result = await self.exchange.place_market_order(
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+            )
+        except Exception as e:
+            logger.error("partial_exit_failed", symbol=symbol, reason=reason,
+                         tier=tier, quantity=quantity, error=str(e))
+            return None, 0.0
+
+        exit_price = result.avg_price if result.avg_price > 0 else current_price
+
+        if position.direction == "long":
+            pnl = (exit_price - position.entry_price) * quantity - result.fee
+        else:
+            pnl = (position.entry_price - exit_price) * quantity - result.fee
+
+        logger.info(
+            "partial_exit_executed",
+            symbol=symbol,
+            direction=position.direction,
+            reason=reason,
+            tier=tier,
+            exit_price=exit_price,
+            quantity=quantity,
+            remaining=position.quantity - quantity,
+            pnl=round(pnl, 4),
+            fee=result.fee,
+        )
+        return result, pnl
+
+    def _calculate_tp_tiers(
+        self,
+        entry_price: float,
+        sl_price: float,
+        quantity: float,
+        direction: str,
+    ) -> list[TakeProfitTier]:
+        """Build 3-tier TP plan based on R multiples from SL distance."""
+        sl_distance = abs(entry_price - sl_price)
+        is_long = direction == "long"
+
+        if is_long:
+            tp1_price = entry_price + sl_distance * self.config.tp1_rr
+            tp2_price = entry_price + sl_distance * self.config.tp2_rr
+        else:
+            tp1_price = entry_price - sl_distance * self.config.tp1_rr
+            tp2_price = entry_price - sl_distance * self.config.tp2_rr
+
+        tp1_qty = round(quantity * self.config.tp1_pct, 8)
+        tp2_qty = round(quantity * self.config.tp2_pct, 8)
+        tp3_qty = round(quantity - tp1_qty - tp2_qty, 8)  # remainder avoids dust
+
+        return [
+            TakeProfitTier(level=1, price=tp1_price, pct=self.config.tp1_pct, quantity=tp1_qty),
+            TakeProfitTier(level=2, price=tp2_price, pct=self.config.tp2_pct, quantity=tp2_qty),
+            TakeProfitTier(level=3, price=None, pct=self.config.tp3_pct, quantity=tp3_qty),
+        ]
 
     def _calculate_stop_loss(self, signal: SignalCandidate) -> float | None:
         """Calculate SL based on direction and signal context."""

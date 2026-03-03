@@ -90,6 +90,61 @@ class PortfolioTracker:
         )
         return pnl
 
+    def record_partial_exit(
+        self, symbol: str, exit_price: float, quantity: float, fee: float = 0.0
+    ) -> float:
+        """Record a partial exit (TP tier hit) — reduce position, return proportional capital."""
+        position = self.open_positions.get(symbol)
+        if not position:
+            logger.warning("partial_exit_no_position", symbol=symbol)
+            return 0.0
+
+        # Fraction of current remaining quantity being closed
+        fraction = quantity / position.quantity if position.quantity > 0 else 0
+
+        # Calculate PnL for the closed slice
+        if position.direction == "long":
+            pnl = (exit_price - position.entry_price) * quantity - fee
+        else:
+            pnl = (position.entry_price - exit_price) * quantity - fee
+
+        # Return proportional margin/cost to balance
+        if position.leverage > 1:
+            margin_return = (position.margin_used or 0) * fraction
+            self.current_balance += margin_return + pnl
+            position.margin_used -= margin_return
+        elif position.direction == "short":
+            cost_return = position.cost_usd * fraction
+            self.current_balance += cost_return + pnl
+            position.cost_usd -= cost_return
+        else:
+            # Spot long: return revenue for this slice
+            revenue = quantity * exit_price
+            self.current_balance += revenue - fee
+            position.cost_usd -= quantity * position.entry_price
+
+        # Reduce position quantity (position stays in open_positions)
+        position.quantity -= quantity
+
+        self.daily_pnl += pnl
+        self.total_pnl += pnl
+
+        # Update peak using equity
+        equity = self.get_equity()
+        if equity > self.peak_balance:
+            self.peak_balance = equity
+
+        logger.info(
+            "partial_exit_recorded",
+            symbol=symbol,
+            exit_price=exit_price,
+            quantity_closed=quantity,
+            quantity_remaining=position.quantity,
+            pnl=round(pnl, 4),
+            balance=round(self.current_balance, 2),
+        )
+        return pnl
+
     def reset_daily(self) -> None:
         """Reset daily tracking at midnight UTC."""
         self.daily_start_balance = self.current_balance
@@ -145,7 +200,7 @@ class PortfolioTracker:
     def to_state_dict(self, status: str, mode: str, cycle_count: int) -> dict:
         positions_data = {}
         for sym, pos in self.open_positions.items():
-            positions_data[sym] = {
+            pos_dict = {
                 "trade_id": pos.trade_id,
                 "symbol": pos.symbol,
                 "entry_price": pos.entry_price,
@@ -159,7 +214,24 @@ class PortfolioTracker:
                 "leverage": pos.leverage,
                 "margin_used": pos.margin_used,
                 "liquidation_price": pos.liquidation_price,
+                "original_quantity": pos.original_quantity,
+                "original_stop_loss": pos.original_stop_loss,
+                "current_tier": pos.current_tier,
             }
+            if pos.tp_tiers:
+                pos_dict["tp_tiers"] = [
+                    {
+                        "level": t.level,
+                        "price": t.price,
+                        "pct": t.pct,
+                        "quantity": t.quantity,
+                        "filled": t.filled,
+                        "fill_price": t.fill_price,
+                        "fill_time": t.fill_time.isoformat() if t.fill_time else None,
+                    }
+                    for t in pos.tp_tiers
+                ]
+            positions_data[sym] = pos_dict
         equity = self.get_equity()
         # Update peak if equity has grown
         if equity > self.peak_balance:
