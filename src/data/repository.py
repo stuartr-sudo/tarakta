@@ -32,7 +32,7 @@ class Repository:
             err_str = str(e)
             if "PGRST204" in err_str or "column" in err_str.lower():
                 # Column doesn't exist in DB — retry without extra columns
-                _extra = {"leverage", "margin_used", "liquidation_price", "confluence_components"}
+                _extra = {"leverage", "margin_used", "liquidation_price", "confluence_components", "entry_headlines"}
                 stripped = {k: v for k, v in trade.items() if k not in _extra}
                 try:
                     result = await asyncio.to_thread(
@@ -384,24 +384,30 @@ class Repository:
 
     async def wipe_all_data(self) -> None:
         """Nuclear reset — delete ALL data from every table. Used by FORCE_RESET."""
-        tables = [
-            "portfolio_snapshots",
-            "signals",
-            "partial_exits",
-            "reversals",
-            "trades",
-            "engine_state",
-            "error_log",
-        ]
-        for table in tables:
+        # Tables with integer PK (use neq id 0)
+        int_pk_tables = ["engine_state", "portfolio_snapshots", "error_log"]
+        # Tables with UUID PK (use gte created_at)
+        uuid_pk_tables = ["signals", "partial_exits", "reversals", "trades"]
+
+        for table in int_pk_tables:
             try:
-                # Delete all rows (neq id 0 matches everything)
                 await asyncio.to_thread(
                     _exec, self.db.table(table).delete().neq("id", 0)
                 )
                 logger.info("wipe_table_ok", table=table)
             except Exception as e:
                 logger.warning("wipe_table_failed", table=table, error=str(e))
+
+        for table in uuid_pk_tables:
+            try:
+                await asyncio.to_thread(
+                    _exec,
+                    self.db.table(table).delete().gte("created_at", "1970-01-01"),
+                )
+                logger.info("wipe_table_ok", table=table)
+            except Exception as e:
+                logger.warning("wipe_table_failed", table=table, error=str(e))
+
         logger.info("wipe_all_data_complete")
 
     # --- Error Log ---
