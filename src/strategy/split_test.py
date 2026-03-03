@@ -32,8 +32,8 @@ class SplitTestManager:
         Returns:
             "control" or "llm"
         """
-        if not self._enabled:
-            return "control"
+        # Note: caller (engine core) gates on runtime DB toggle,
+        # so we always hash here — _enabled only reflects startup config.
 
         # Deterministic hash based on symbol + entry time
         seed = f"{signal.symbol}:{signal.timestamp.isoformat()}"
