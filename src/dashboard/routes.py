@@ -114,6 +114,8 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
     @login_required
     async def settings_page(request: Request):
         ctx = await _base_context(request)
+        state = ctx.get("state") or {}
+        ctx["llm_enabled"] = state.get("llm_enabled", config.llm_enabled)
         return templates.TemplateResponse("settings.html", ctx)
 
     @router.post("/settings/toggle-mode")
@@ -123,6 +125,17 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         if state:
             new_mode = "paper" if state.get("mode") == "live" else "live"
             await repo.upsert_engine_state({"mode": new_mode})
+        return RedirectResponse(url="/settings", status_code=303)
+
+    @router.post("/settings/toggle-llm")
+    @admin_required
+    async def toggle_llm(request: Request):
+        state = await repo.get_engine_state()
+        if state:
+            current = state.get("llm_enabled", config.llm_enabled)
+            await repo.upsert_engine_state({"llm_enabled": not current})
+        else:
+            await repo.upsert_engine_state({"llm_enabled": True})
         return RedirectResponse(url="/settings", status_code=303)
 
     return router

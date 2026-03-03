@@ -104,6 +104,43 @@
     </div>
 </div>
 
+<!-- LLM Split Test -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>LLM Trade Analyst</h2>
+        <span class="status-badge {{ 'open' if llm_enabled else 'paper' }}">
+            {{ 'ON' if llm_enabled else 'OFF' }}
+        </span>
+    </div>
+    <div class="panel-body">
+        <p class="text-muted mode-description">
+            {% if llm_enabled %}
+            Claude Haiku evaluates each signal and can approve/reject trades with optional SL/TP adjustments.
+            50% of signals go through the LLM (A/B split test).
+            {% else %}
+            When enabled, Claude Haiku acts as a trade analyst — reviewing each signal's confluence,
+            key levels, and market structure before approving or rejecting. Runs as a 50/50 A/B test
+            against the existing system.
+            {% endif %}
+        </p>
+        {% if not config.llm_api_key %}
+        <p class="text-muted" style="color: var(--orange);">
+            Set LLM_API_KEY in environment to use this feature.
+        </p>
+        {% elif role == 'admin' %}
+        <form method="post" action="/settings/toggle-llm">
+            {% if llm_enabled %}
+            <button type="submit" class="btn primary">Disable LLM Analyst</button>
+            {% else %}
+            <button type="submit" class="btn danger">Enable LLM Analyst</button>
+            {% endif %}
+        </form>
+        {% else %}
+        <p class="text-muted">View-only access. LLM toggle requires admin login.</p>
+        {% endif %}
+    </div>
+</div>
+
 <!-- Configuration -->
 <div class="panel">
     <div class="panel-header">

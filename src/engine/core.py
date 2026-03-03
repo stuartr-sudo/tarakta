@@ -62,9 +62,9 @@ class TradingEngine:
         # LLM split test components
         self.split_test = SplitTestManager(config)
         self.llm_analyst: LLMTradeAnalyst | None = None
-        if config.llm_enabled:
+        if config.llm_api_key:
             self.llm_analyst = LLMTradeAnalyst(config)
-            logger.info("llm_split_test_enabled", model=config.llm_model, ratio=config.llm_split_ratio)
+            logger.info("llm_analyst_ready", model=config.llm_model, ratio=config.llm_split_ratio)
 
         self.state: EngineState | None = None
         self.portfolio: PortfolioTracker | None = None
@@ -373,7 +373,14 @@ class TradingEngine:
                     continue
 
                 # --- LLM Split Test: assign group and optionally analyze ---
-                test_group = self.split_test.assign_group(signal)
+                # Check runtime toggle from engine state (dashboard toggle)
+                state_dict = await self.repo.get_engine_state() or {}
+                llm_runtime_enabled = state_dict.get("llm_enabled", self.config.llm_enabled)
+
+                if llm_runtime_enabled:
+                    test_group = self.split_test.assign_group(signal)
+                else:
+                    test_group = "control"
                 llm_analysis_data = None
                 sl_override = None
                 tp_override = None
