@@ -412,29 +412,6 @@ class TradingEngine:
             except Exception as e:
                 logger.debug("llm_perf_context_failed", error=str(e))
 
-        # Pre-assign split test groups and interleave so both groups
-        # get equal access to position slots (prevents control from
-        # eating all budget before LLM signals are processed).
-        if llm_runtime_enabled and signals:
-            for sig in signals:
-                sig._pre_group = self.split_test.assign_group(sig)
-            llm_sigs = [s for s in signals if s._pre_group == "llm"]
-            ctrl_sigs = [s for s in signals if s._pre_group == "control"]
-            interleaved: list = []
-            li, ci = 0, 0
-            while li < len(llm_sigs) or ci < len(ctrl_sigs):
-                if li < len(llm_sigs):
-                    interleaved.append(llm_sigs[li]); li += 1
-                if ci < len(ctrl_sigs):
-                    interleaved.append(ctrl_sigs[ci]); ci += 1
-            signals = interleaved
-            logger.info(
-                "signals_interleaved",
-                llm_count=len(llm_sigs),
-                control_count=len(ctrl_sigs),
-                total=len(signals),
-            )
-
         # Execute entries for top signals
         signals_saved = 0
         trades_entered = 0
@@ -543,8 +520,7 @@ class TradingEngine:
 
                 # --- LLM Split Test: assign group and optionally analyze ---
                 if llm_runtime_enabled:
-                    # Use pre-assigned group from interleaving (avoid double hash)
-                    test_group = getattr(signal, "_pre_group", None) or self.split_test.assign_group(signal)
+                    test_group = self.split_test.assign_group(signal)
                 else:
                     test_group = "control"
                 llm_analysis_data = None
