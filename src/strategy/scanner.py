@@ -9,18 +9,20 @@ from src.config import Settings
 from src.data.candles import CandleManager
 from src.exchange.models import SignalCandidate
 from src.strategy.confluence import ConfluenceEngine
+from src.strategy.crt import CRTAnalyzer
 from src.strategy.fair_value_gaps import FairValueGapAnalyzer
 from src.strategy.liquidity import LiquidityAnalyzer
 from src.strategy.market_structure import MarketStructureAnalyzer
 from src.strategy.order_blocks import OrderBlockAnalyzer
 from src.strategy.premium_discount import PremiumDiscountAnalyzer
 from src.strategy.regime import MarketRegimeAnalyzer
+from src.strategy.sessions import SessionAnalyzer
 from src.strategy.volume import VolumeAnalyzer
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-TIMEFRAMES = ["15m", "1h", "4h", "1d"]
+TIMEFRAMES = ["1h", "4h", "1d"]
 BATCH_SIZE = 8
 BATCH_DELAY = 1.5  # seconds between batches
 
@@ -38,6 +40,8 @@ class AltcoinScanner:
         self.vol_analyzer = VolumeAnalyzer()
         self.pd_analyzer = PremiumDiscountAnalyzer()
         self.regime_analyzer = MarketRegimeAnalyzer()
+        self.crt_analyzer = CRTAnalyzer()
+        self.session_analyzer = SessionAnalyzer()
         self.confluence = ConfluenceEngine(entry_threshold=config.entry_threshold)
 
     async def scan(self, pairs: list[str]) -> list[SignalCandidate]:
@@ -89,7 +93,7 @@ class AltcoinScanner:
 
     async def _analyze_pair(self, symbol: str) -> SignalCandidate:
         """Full strategy pipeline for a single pair."""
-        # Fetch candles for all timeframes
+        # Fetch candles for all timeframes (1H, 4H, 1D — no 15m)
         candles: dict[str, pd.DataFrame] = {}
         for tf in TIMEFRAMES:
             candles[tf] = await self.candles.get_candles(symbol, tf, limit=200)
@@ -105,31 +109,31 @@ class AltcoinScanner:
             swing_hl = ms_results[tf].swing_highs_lows
             liq_results[tf] = self.liq_analyzer.analyze(df, swing_hl)
 
-        # --- Order Blocks on entry timeframes ---
+        # --- Order Blocks on 1H (entry timeframe) ---
         ob_results = {}
-        for tf in ["15m", "1h"]:
+        for tf in ["1h"]:
             swing_hl = ms_results[tf].swing_highs_lows
             ob_results[tf] = self.ob_analyzer.analyze(candles[tf], swing_hl)
 
-        # --- Fair Value Gaps on entry timeframes ---
+        # --- Fair Value Gaps on 1H (entry timeframe) ---
         fvg_results = {}
-        for tf in ["15m", "1h"]:
+        for tf in ["1h"]:
             fvg_results[tf] = self.fvg_analyzer.analyze(candles[tf])
 
         # --- Determine HTF directional bias (pre-pass for volume/PD scoring) ---
         direction = self._resolve_htf_direction(ms_results)
 
-        # --- Volume / Displacement analysis on key timeframes ---
+        # --- Volume / Displacement analysis on 1H + 4H ---
         volume_profiles = {}
-        for tf in ["15m", "1h", "4h"]:
+        for tf in ["1h", "4h"]:
             df = candles.get(tf)
             if df is not None and not df.empty:
                 volume_profiles[tf] = self.vol_analyzer.analyze(df)
         volume_result = self.vol_analyzer.score_volume(volume_profiles, direction)
 
-        # --- Premium / Discount zone analysis ---
+        # --- Premium / Discount zone analysis on 1H + 4H ---
         pd_results = {}
-        for tf in ["15m", "1h", "4h"]:
+        for tf in ["1h", "4h"]:
             df = candles.get(tf)
             if df is not None and not df.empty:
                 swing_hl = ms_results.get(tf, None)
@@ -143,16 +147,25 @@ class AltcoinScanner:
             ohlc_1d=candles.get("1d"),
         )
 
-        # Get current price from most recent 15m close
-        current_price = float(candles["15m"]["close"].iloc[-1]) if not candles["15m"].empty else 0
+        # --- CRT (Candle Range Theory) on 4H ---
+        crt_result = self.crt_analyzer.analyze(
+            candles["4h"],
+            ms_results["4h"].swing_highs_lows if ms_results.get("4h") else None,
+        )
 
-        # --- Compute 14-period ATR on 15m candles for SL floor ---
-        atr_15m = 0.0
-        df_15m = candles.get("15m")
-        if df_15m is not None and len(df_15m) >= 15:
-            _high = df_15m["high"].astype(float)
-            _low = df_15m["low"].astype(float)
-            _close = df_15m["close"].astype(float)
+        # --- Session / Kill Zone analysis ---
+        session_result = self.session_analyzer.analyze(candles["1h"])
+
+        # Get current price from most recent 1H close
+        current_price = float(candles["1h"]["close"].iloc[-1]) if not candles["1h"].empty else 0
+
+        # --- Compute 14-period ATR on 1H candles for SL floor ---
+        atr_1h = 0.0
+        df_1h = candles.get("1h")
+        if df_1h is not None and len(df_1h) >= 15:
+            _high = df_1h["high"].astype(float)
+            _low = df_1h["low"].astype(float)
+            _close = df_1h["close"].astype(float)
             _prev = _close.shift(1)
             _tr = pd.concat(
                 [_high - _low, (_high - _prev).abs(), (_low - _prev).abs()],
@@ -160,7 +173,7 @@ class AltcoinScanner:
             ).max(axis=1)
             _atr_series = _tr.rolling(14).mean()
             if pd.notna(_atr_series.iloc[-1]):
-                atr_15m = float(_atr_series.iloc[-1])
+                atr_1h = float(_atr_series.iloc[-1])
 
         # --- Score the full signal ---
         signal = self.confluence.score_signal(
@@ -173,8 +186,12 @@ class AltcoinScanner:
             volume_result=volume_result,
             pd_result=pd_score,
             regime=regime,
+            crt_result=crt_result,
+            session_result=session_result,
         )
-        signal.atr_15m = atr_15m
+        signal.atr_1h = atr_1h
+        signal.crt_result = crt_result
+        signal.session_result = session_result
 
         if signal.score >= self.config.entry_threshold:
             logger.info(

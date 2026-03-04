@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     reversal_cooldown_minutes: int = 120   # After a reversal, wait 2h before another on same symbol
 
     # Scanning
-    scan_interval_minutes: int = 15
+    scan_interval_minutes: int = 60
     min_volume_usd: float = 1_000_000
     max_position_volume_pct: float = 0.001  # Position size must be < 0.1% of 24h volume
     max_spread_pct: float = 0.003  # Max 0.3% bid-ask spread — skip illiquid pairs

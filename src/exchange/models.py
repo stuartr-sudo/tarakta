@@ -150,7 +150,9 @@ class SignalCandidate:
     fvg_context: FairValueGap | None = None
     key_levels: dict = field(default_factory=dict)
     components: dict[str, float] = field(default_factory=dict)
-    atr_15m: float = 0.0  # 14-period ATR on 15m candles for SL floor
+    atr_1h: float = 0.0  # 14-period ATR on 1H candles for SL floor
+    crt_result: object | None = None     # CRTResult from strategy.crt
+    session_result: object | None = None  # SessionResult from strategy.sessions
 
 
 @dataclass

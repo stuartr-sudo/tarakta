@@ -30,7 +30,7 @@ class VolumeResult:
     """Aggregated volume analysis across timeframes."""
 
     profiles: dict[str, VolumeProfile]  # keyed by timeframe
-    overall_volume_score: float  # 0-15 score for confluence
+    overall_volume_score: float  # 0-10 score for confluence
     reasons: list[str] = field(default_factory=list)
 
 
@@ -133,10 +133,10 @@ class VolumeAnalyzer:
     ) -> VolumeResult:
         """Score volume analysis across multiple timeframes.
 
-        Returns up to 15 points for the confluence engine:
-        - Displacement confirmation: 0-7 pts
-        - Relative volume confirmation: 0-4 pts
-        - Volume trend alignment: 0-4 pts
+        Returns up to 10 points for the confluence engine:
+        - Displacement confirmation: 0-5 pts
+        - Relative volume confirmation: 0-3 pts
+        - Volume trend alignment: 0-2 pts
         """
         if direction is None:
             return VolumeResult(profiles=profiles, overall_volume_score=0)
@@ -145,7 +145,7 @@ class VolumeAnalyzer:
         reasons: list[str] = []
 
         # --- Displacement (0-7 pts) ---
-        for tf in ["15m", "1h"]:
+        for tf in ["1h"]:
             p = profiles.get(tf)
             if not p or not p.displacement_detected:
                 continue
@@ -159,7 +159,7 @@ class VolumeAnalyzer:
         # Check entry timeframes for elevated volume
         best_rvol = 0.0
         best_rvol_tf = ""
-        for tf in ["15m", "1h"]:
+        for tf in ["1h"]:
             p = profiles.get(tf)
             if p and p.relative_volume > best_rvol:
                 best_rvol = p.relative_volume
@@ -185,7 +185,7 @@ class VolumeAnalyzer:
                 score += 2
                 reasons.append(f"Volume increasing on {tf}")
 
-        score = min(score, 15)  # cap at weight allocation
+        score = min(score, 10)  # cap at weight allocation
 
         return VolumeResult(
             profiles=profiles,

@@ -24,7 +24,7 @@ class PositionMonitor:
         Args:
             positions: Map of symbol -> Position
             exchange: Exchange client for ticker fetches
-            atr_values: Map of symbol -> current ATR value (from 15m candles)
+            atr_values: Map of symbol -> current ATR value (from 1H candles)
         """
         if atr_values is None:
             atr_values = {}

@@ -50,10 +50,10 @@ def _empty_fvg():
 
 class TestConfluenceEngine:
     def test_no_htf_trend_returns_zero(self, engine):
-        ms = {tf: _empty_ms("ranging") for tf in ["15m", "1h", "4h", "1d"]}
-        liq = {tf: _empty_liq() for tf in ["15m", "1h"]}
-        ob = {tf: _empty_ob() for tf in ["15m", "1h"]}
-        fvg = {tf: _empty_fvg() for tf in ["15m", "1h"]}
+        ms = {tf: _empty_ms("ranging") for tf in ["1h", "4h", "1d"]}
+        liq = {"1h": _empty_liq()}
+        ob = {"1h": _empty_ob()}
+        fvg = {"1h": _empty_fvg()}
 
         signal = engine.score_signal("BTC/USD", 100.0, ms, liq, ob, fvg)
         assert signal.score == 0
@@ -62,7 +62,6 @@ class TestConfluenceEngine:
     def test_full_bullish_confluence(self, engine):
         """All signals aligned bullish — should get high score."""
         ms = {
-            "15m": _empty_ms("bullish"),
             "1h": _empty_ms("bullish"),
             "4h": _empty_ms("bullish"),
             "1d": _empty_ms("bullish"),
@@ -71,65 +70,60 @@ class TestConfluenceEngine:
 
         ob_in = OrderBlock(direction="bullish", top=101, bottom=99, volume=1000, strength=0.8, candle_idx=190)
         ob = {
-            "15m": OrderBlockResult(
+            "1h": OrderBlockResult(
                 active_order_blocks=[ob_in], price_in_order_block=ob_in,
                 nearest_bullish_ob=ob_in, nearest_bearish_ob=None,
             ),
-            "1h": _empty_ob(),
         }
 
         fvg_in = FairValueGap(direction="bullish", top=101, bottom=99, candle_idx=185, midpoint=100)
         fvg = {
-            "15m": FVGResult(
+            "1h": FVGResult(
                 active_fvgs=[fvg_in], price_in_fvg=fvg_in,
                 nearest_bullish_fvg=fvg_in, nearest_bearish_fvg=None,
             ),
-            "1h": _empty_fvg(),
         }
 
         sweep = SweepEvent(level=98, direction="bullish_sweep", candle_idx=195)
         liq = {
-            "15m": LiquidityResult(
+            "1h": LiquidityResult(
                 active_pools=[], recent_sweeps=[sweep],
                 nearest_buy_liquidity=98, nearest_sell_liquidity=105,
                 sweep_detected_recently=True,
             ),
-            "1h": _empty_liq(),
         }
 
         signal = engine.score_signal("BTC/USD", 100.0, ms, liq, ob, fvg)
-        assert signal.score >= 65  # should be well above threshold
+        assert signal.score >= 55  # HTF(15) + MS(15) + OB(12) + FVG(8) + Liq(10) = 60
         assert signal.direction == "bullish"
         assert len(signal.reasons) > 3
 
     def test_partial_confluence(self, engine):
         """Only HTF trend + market structure, no OB/FVG/liquidity."""
         ms = {
-            "15m": _empty_ms("bullish"),
             "1h": _empty_ms("bullish"),
             "4h": _empty_ms("bullish"),
             "1d": _empty_ms("bullish"),
         }
-        liq = {tf: _empty_liq() for tf in ["15m", "1h"]}
-        ob = {tf: _empty_ob() for tf in ["15m", "1h"]}
-        fvg = {tf: _empty_fvg() for tf in ["15m", "1h"]}
+        liq = {"1h": _empty_liq()}
+        ob = {"1h": _empty_ob()}
+        fvg = {"1h": _empty_fvg()}
 
         signal = engine.score_signal("BTC/USD", 100.0, ms, liq, ob, fvg)
-        # HTF (25) + MS (15) = 40, below threshold
+        # HTF (15) + MS (15) = 30, below threshold
         assert signal.score < 65
         assert signal.direction == "bullish"
 
     def test_mixed_htf(self, engine):
         """4H bullish, Daily ranging — should still get partial HTF score."""
         ms = {
-            "15m": _empty_ms("bullish"),
             "1h": _empty_ms("bullish"),
             "4h": _empty_ms("bullish"),
             "1d": _empty_ms("ranging"),
         }
-        liq = {tf: _empty_liq() for tf in ["15m", "1h"]}
-        ob = {tf: _empty_ob() for tf in ["15m", "1h"]}
-        fvg = {tf: _empty_fvg() for tf in ["15m", "1h"]}
+        liq = {"1h": _empty_liq()}
+        ob = {"1h": _empty_ob()}
+        fvg = {"1h": _empty_fvg()}
 
         signal = engine.score_signal("BTC/USD", 100.0, ms, liq, ob, fvg)
         assert signal.score > 0

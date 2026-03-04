@@ -807,11 +807,11 @@ class TradingEngine:
                 self.adaptive_threshold.record_outcome(is_win=(liq_pnl > 0))
                 self.state.open_positions.pop(liq_exit.symbol, None)
 
-        # Compute ATR values for open positions (15m candles)
+        # Compute ATR values for open positions (1H candles)
         atr_values: dict[str, float] = {}
         for symbol in list(self.portfolio.open_positions.keys()):
             try:
-                candles = await self.candle_manager.get_candles(symbol, "15m", limit=30)
+                candles = await self.candle_manager.get_candles(symbol, "1h", limit=30)
                 if candles is not None and len(candles) >= 15:
                     high = candles["high"].astype(float)
                     low = candles["low"].astype(float)

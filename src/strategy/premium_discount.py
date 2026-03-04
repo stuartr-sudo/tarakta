@@ -185,7 +185,7 @@ class PremiumDiscountAnalyzer:
                 break
 
         # --- Entry TF zone (0-3 pts) ---
-        for tf in ["15m", "1h"]:
+        for tf in ["1h"]:
             r = results.get(tf)
             if not r or r.range_high <= r.range_low:
                 continue
@@ -197,7 +197,7 @@ class PremiumDiscountAnalyzer:
                 break
 
         # --- OTE bonus (0-3 pts) ---
-        for tf in ["15m", "1h"]:
+        for tf in ["1h"]:
             r = results.get(tf)
             if not r:
                 continue
