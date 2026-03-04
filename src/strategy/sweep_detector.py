@@ -43,7 +43,8 @@ class SweepDetector:
         asian_low: float,
         swing_high: float | None = None,
         swing_low: float | None = None,
-        lookback: int = 5,
+        lookback: int = 8,
+        prefer_direction: str | None = None,
     ) -> SweepResult:
         """Check last `lookback` completed 1H candles for sweep completion.
 
@@ -58,6 +59,9 @@ class SweepDetector:
             swing_high: Recent 1H swing high level.
             swing_low: Recent 1H swing low level.
             lookback: Number of completed candles to check.
+            prefer_direction: If set ("bullish"/"bearish"), prefer sweeps
+                matching this direction.  Falls back to any sweep if no
+                match is found in the window.
 
         Returns:
             SweepResult with detection details. sweep_level is the wick
@@ -90,6 +94,8 @@ class SweepDetector:
         close = candles_1h["close"].astype(float)
 
         # Check last `lookback` completed candles (skip -1 which may be incomplete)
+        first_any: SweepResult | None = None
+
         for offset in range(-2, -2 - lookback, -1):
             if abs(offset) >= len(candles_1h):
                 continue
@@ -101,16 +107,49 @@ class SweepDetector:
             for level, level_type, target in levels:
                 result = self._check_sweep(h, l, c, level, level_type, target)
                 if result is not None:
-                    logger.info(
-                        "sweep_detected",
-                        type=result.sweep_type,
-                        direction=result.sweep_direction,
-                        level=level,
-                        sweep_level=result.sweep_level,
-                        target=result.target_level,
-                        depth=f"{result.sweep_depth:.4f}",
-                    )
-                    return result
+                    # No preference → return first found (original behavior)
+                    if prefer_direction is None:
+                        logger.info(
+                            "sweep_detected",
+                            type=result.sweep_type,
+                            direction=result.sweep_direction,
+                            level=level,
+                            sweep_level=result.sweep_level,
+                            target=result.target_level,
+                            depth=f"{result.sweep_depth:.4f}",
+                        )
+                        return result
+
+                    # Preferred direction match → return immediately
+                    if result.sweep_direction == prefer_direction:
+                        logger.info(
+                            "sweep_detected",
+                            type=result.sweep_type,
+                            direction=result.sweep_direction,
+                            level=level,
+                            sweep_level=result.sweep_level,
+                            target=result.target_level,
+                            depth=f"{result.sweep_depth:.4f}",
+                        )
+                        return result
+
+                    # Non-matching direction → stash as fallback
+                    if first_any is None:
+                        first_any = result
+
+        # No preferred-direction match; return any sweep found as fallback
+        if first_any is not None:
+            logger.info(
+                "sweep_detected",
+                type=first_any.sweep_type,
+                direction=first_any.sweep_direction,
+                level=first_any.sweep_level,
+                sweep_level=first_any.sweep_level,
+                target=first_any.target_level,
+                depth=f"{first_any.sweep_depth:.4f}",
+                note="fallback (preferred direction not found)",
+            )
+            return first_any
 
         return _empty_result()
 

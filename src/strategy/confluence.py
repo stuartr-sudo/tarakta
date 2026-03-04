@@ -1,23 +1,25 @@
 """Post-Sweep Displacement scoring engine (Trade Travel Chill strategy).
 
 Replaces the old 8-component weighted SMC/ICT confluence system with a
-simple 4-component binary checklist. The core insight: retail SMC signals
+5-component binary checklist. The core insight: retail SMC signals
 (CRT, OBs, FVGs) are too well-known and get hunted by market makers. Instead
-of entering at those levels, we wait for the sweep to COMPLETE and enter on
-the displacement that follows.
+of entering at those levels, we wait for the sweep to COMPLETE, confirm with
+displacement, then enter on the PULLBACK.
 
 Scoring System (0-100):
-  Completed Sweep Detection:      40 points (REQUIRED)
-  Post-Sweep Displacement:        30 points (REQUIRED)
+  Completed Sweep Detection:      35 points (REQUIRED)
+  Post-Sweep Displacement:        25 points (REQUIRED)
+  Pullback Confirmed:             10 points (REQUIRED)
   HTF Trend Alignment (4H/1D):    15 points (bonus)
   Post-Kill Zone Timing:          15 points (bonus)
 
-Minimum threshold: 70 (requires both sweep + displacement).
+Minimum threshold: 70 (requires sweep + displacement + pullback).
 """
 from __future__ import annotations
 
 from src.exchange.models import (
     MarketStructureResult,
+    PullbackResult,
     SignalCandidate,
     SweepResult,
 )
@@ -26,10 +28,11 @@ from src.utils.logging import get_logger
 logger = get_logger(__name__)
 
 # Weight allocation (total = 100)
-# Trade Travel Chill: sweep + displacement are the only required components.
+# Trade Travel Chill: sweep + displacement + pullback are required components.
 WEIGHTS = {
-    "sweep_detected": 40,
-    "displacement_confirmed": 30,
+    "sweep_detected": 35,
+    "displacement_confirmed": 25,
+    "pullback_confirmed": 10,
     "htf_aligned": 15,
     "timing_optimal": 15,
 }
@@ -42,10 +45,10 @@ class PostSweepEngine:
     """Post-sweep displacement scoring engine.
 
     Binary checklist approach:
-    - sweep_detected (40 pts) + displacement_confirmed (30 pts) = 70 minimum
-    - htf_aligned (15 pts) + timing_optimal (15 pts) = bonus probability
+    - sweep_detected (35) + displacement_confirmed (25) + pullback_confirmed (10) = 70 minimum
+    - htf_aligned (15) + timing_optimal (15) = bonus probability
 
-    Threshold = 70 (requires both sweep AND displacement at minimum).
+    Threshold = 70 (requires sweep AND displacement AND pullback at minimum).
     """
 
     def __init__(self, entry_threshold: float = 70.0) -> None:
@@ -66,8 +69,9 @@ class PostSweepEngine:
         htf_direction: str | None,
         in_post_kill_zone: bool,
         ms_results: dict[str, MarketStructureResult],
+        pullback_result: PullbackResult | None = None,
     ) -> SignalCandidate:
-        """Score a signal using the post-sweep displacement checklist.
+        """Score a signal using the post-sweep displacement + pullback checklist.
 
         Args:
             symbol: Trading pair.
@@ -78,6 +82,7 @@ class PostSweepEngine:
             htf_direction: HTF trend direction from 4H/1D structure.
             in_post_kill_zone: Whether we're in a post-kill-zone window.
             ms_results: Market structure results for key levels.
+            pullback_result: Output from PullbackAnalyzer.analyze().
 
         Returns:
             SignalCandidate with score, direction, and reasons.
@@ -87,15 +92,15 @@ class PostSweepEngine:
         reasons: list[str] = []
         components: dict[str, float] = {}
 
-        # --- Sweep Detection (40 pts) --- REQUIRED
+        # --- Sweep Detection (35 pts) --- REQUIRED
         if sweep_result.sweep_detected:
-            score += self._weights.get("sweep_detected", 40)
+            score += self._weights.get("sweep_detected", 35)
             direction = sweep_result.sweep_direction
             reasons.append(
                 f"Sweep completed: {sweep_result.sweep_type} "
                 f"(depth={sweep_result.sweep_depth:.4f})"
             )
-            components["sweep_detected"] = self._weights.get("sweep_detected", 40)
+            components["sweep_detected"] = self._weights.get("sweep_detected", 35)
         else:
             # No sweep = no trade
             return SignalCandidate(
@@ -107,13 +112,12 @@ class PostSweepEngine:
                 components={"sweep_detected": 0},
             )
 
-        # --- Post-Sweep Displacement (30 pts) --- REQUIRED
+        # --- Post-Sweep Displacement (25 pts) --- REQUIRED
         if displacement_confirmed and displacement_direction == direction:
-            score += self._weights.get("displacement_confirmed", 30)
+            score += self._weights.get("displacement_confirmed", 25)
             reasons.append(f"Post-sweep displacement confirmed: {direction}")
-            components["displacement_confirmed"] = self._weights.get("displacement_confirmed", 30)
+            components["displacement_confirmed"] = self._weights.get("displacement_confirmed", 25)
         else:
-            # Sweep without displacement = not confirmed, score stays at 40
             if displacement_confirmed and displacement_direction != direction:
                 reasons.append(
                     f"Displacement direction mismatch: "
@@ -123,7 +127,39 @@ class PostSweepEngine:
                 reasons.append("No displacement after sweep")
             components["displacement_confirmed"] = 0
 
-            # Collect key levels even for rejected signals
+            key_levels = self._collect_key_levels(ms_results)
+            return SignalCandidate(
+                score=score,
+                direction=direction,
+                reasons=reasons,
+                symbol=symbol,
+                entry_price=current_price,
+                components=components,
+                key_levels=key_levels,
+            )
+
+        # --- Pullback Confirmation (10 pts) --- REQUIRED
+        if pullback_result is not None and pullback_result.pullback_detected:
+            score += self._weights.get("pullback_confirmed", 10)
+            reasons.append(
+                f"Pullback confirmed: {pullback_result.retracement_pct:.0%} "
+                f"retracement ({pullback_result.pullback_status})"
+            )
+            components["pullback_confirmed"] = self._weights.get("pullback_confirmed", 10)
+            # Use the pullback price as entry (better than displacement close)
+            current_price = pullback_result.current_price
+        else:
+            # No pullback = no trade (hard gate)
+            if pullback_result and pullback_result.pullback_status == "waiting":
+                reasons.append("Pullback pending (too shallow, will re-check next scan)")
+            elif pullback_result and pullback_result.pullback_status == "failed":
+                reasons.append(
+                    f"Pullback too deep ({pullback_result.retracement_pct:.0%}) — setup failing"
+                )
+            else:
+                reasons.append("No pullback detected after displacement")
+            components["pullback_confirmed"] = 0
+
             key_levels = self._collect_key_levels(ms_results)
             return SignalCandidate(
                 score=score,

@@ -99,6 +99,18 @@ class SweepResult:
 
 
 @dataclass
+class PullbackResult:
+    """Result of pullback detection after a displacement move."""
+    pullback_detected: bool
+    retracement_pct: float          # 0.0-1.0: how far price has retraced
+    displacement_open: float        # origin of the displacement candle
+    thrust_extreme: float           # highest high (bullish) or lowest low (bearish) after displacement
+    current_price: float
+    optimal_entry: float            # suggested entry price
+    pullback_status: str            # "waiting", "optimal", "failed"
+
+
+@dataclass
 class OrderBlock:
     direction: str  # "bullish" or "bearish"
     top: float

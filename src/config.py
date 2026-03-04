@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     tp3_pct: float = 0.34   # remaining 34% via trailing stop (legacy, inactive)
     move_sl_to_be_after_tp1: bool = True  # move SL to breakeven after TP1 (legacy, inactive)
 
+    # Pullback entry timing
+    pullback_min_retracement: float = 0.20  # Min retracement to consider pullback valid
+    pullback_max_retracement: float = 0.78  # Max retracement before setup is invalid
+
     # Trailing stop (Travel phase)
     trailing_activation_rr: float = 2.0  # Activate trailing after 2R profit
     trailing_atr_multiplier: float = 1.5  # Trail at 1.5x ATR from high water mark

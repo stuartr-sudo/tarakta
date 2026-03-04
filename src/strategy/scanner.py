@@ -24,6 +24,7 @@ from src.data.candles import CandleManager
 from src.exchange.models import SignalCandidate
 from src.strategy.confluence import PostSweepEngine
 from src.strategy.market_structure import MarketStructureAnalyzer
+from src.strategy.pullback import PullbackAnalyzer
 from src.strategy.sessions import SessionAnalyzer
 from src.strategy.sweep_detector import SweepDetector
 from src.strategy.volume import VolumeAnalyzer
@@ -46,6 +47,10 @@ class AltcoinScanner:
         self.vol_analyzer = VolumeAnalyzer()
         self.session_analyzer = SessionAnalyzer()
         self.sweep_detector = SweepDetector()
+        self.pullback_analyzer = PullbackAnalyzer(
+            min_retracement=config.pullback_min_retracement,
+            max_retracement=config.pullback_max_retracement,
+        )
         self.confluence = PostSweepEngine(entry_threshold=config.entry_threshold)
 
     async def scan(self, pairs: list[str]) -> list[SignalCandidate]:
@@ -114,19 +119,31 @@ class AltcoinScanner:
         swing_high = ms_results["1h"].key_levels.get("swing_high")
         swing_low = ms_results["1h"].key_levels.get("swing_low")
 
-        # 5. Sweep detection on 1H
+        # 5. Displacement check on 1H (detect first to get direction filter)
+        vol_profile = self.vol_analyzer.analyze(candles["1h"])
+        displacement_confirmed = vol_profile.displacement_detected
+        displacement_direction = vol_profile.displacement_direction
+
+        # 6. Sweep detection on 1H (prefer sweeps matching displacement direction
+        #    to avoid pullback candles being misread as new conflicting sweeps)
         sweep_result = self.sweep_detector.detect(
             candles_1h=candles["1h"],
             asian_high=session_result.asian_high,
             asian_low=session_result.asian_low,
             swing_high=swing_high,
             swing_low=swing_low,
+            lookback=8,
+            prefer_direction=displacement_direction,
         )
 
-        # 6. Displacement check on 1H (VolumeAnalyzer already has this)
-        vol_profile = self.vol_analyzer.analyze(candles["1h"])
-        displacement_confirmed = vol_profile.displacement_detected
-        displacement_direction = vol_profile.displacement_direction
+        # 6.5 Pullback detection (requires displacement)
+        pullback_result = None
+        if displacement_confirmed and vol_profile.displacement_candle_idx is not None:
+            pullback_result = self.pullback_analyzer.analyze(
+                candles_1h=candles["1h"],
+                displacement_candle_idx=vol_profile.displacement_candle_idx,
+                direction=displacement_direction,
+            )
 
         # Get current price
         current_price = float(candles["1h"]["close"].iloc[-1]) if not candles["1h"].empty else 0
@@ -160,6 +177,7 @@ class AltcoinScanner:
             htf_direction=htf_direction,
             in_post_kill_zone=session_result.in_post_kill_zone,
             ms_results=ms_results,
+            pullback_result=pullback_result,
         )
 
         # Attach sweep data and ATR for order execution

@@ -21,6 +21,7 @@ class VolumeProfile:
     displacement_detected: bool  # large candle + high volume = institutional move
     displacement_direction: str | None  # "bullish" or "bearish"
     displacement_strength: float  # 0-1 scale
+    displacement_candle_idx: int | None  # absolute index in DataFrame of the displacement candle
     volume_at_ob: float  # volume ratio at the nearest order block (if any)
     high_volume_nodes: list[float]  # price levels with concentrated volume
 
@@ -90,10 +91,11 @@ class VolumeAnalyzer:
         displacement = False
         disp_direction = None
         disp_strength = 0.0
+        disp_candle_idx: int | None = None
 
         if len(ohlc) >= 5 and atr is not None:
-            # Check last 5 candles for displacement (matches sweep lookback)
-            for i in range(-5, 0):
+            # Check last 8 candles for displacement (extended for pullback detection)
+            for i in range(-8, 0):
                 idx = len(ohlc) + i
                 if idx < 0:
                     continue
@@ -111,6 +113,7 @@ class VolumeAnalyzer:
                         disp_direction = "bullish" if float(close.iloc[idx]) > float(open_.iloc[idx]) else "bearish"
                         # Strength: how extreme the move was (0-1 scale)
                         disp_strength = min(1.0, (body_ratio - 1.0) * 0.3 + (vol_ratio - 1.0) * 0.3)
+                        disp_candle_idx = idx
                         break  # Use most recent displacement
 
         # --- High Volume Nodes (simple: find price levels with volume spikes) ---
@@ -122,6 +125,7 @@ class VolumeAnalyzer:
             displacement_detected=displacement,
             displacement_direction=disp_direction,
             displacement_strength=round(disp_strength, 3),
+            displacement_candle_idx=disp_candle_idx,
             volume_at_ob=0.0,  # filled externally when OB data is available
             high_volume_nodes=hvn,
         )
@@ -247,6 +251,7 @@ class VolumeAnalyzer:
             displacement_detected=False,
             displacement_direction=None,
             displacement_strength=0.0,
+            displacement_candle_idx=None,
             volume_at_ob=0.0,
             high_volume_nodes=[],
         )

@@ -1,7 +1,7 @@
 """Tests for the PostSweepEngine (Trade Travel Chill confluence scoring)."""
 import pytest
 
-from src.exchange.models import MarketStructureResult, SweepResult
+from src.exchange.models import MarketStructureResult, PullbackResult, SweepResult
 from src.strategy.confluence import PostSweepEngine
 
 
@@ -43,6 +43,42 @@ def _bearish_sweep():
     )
 
 
+def _valid_pullback(direction="bullish"):
+    return PullbackResult(
+        pullback_detected=True,
+        retracement_pct=0.45,
+        displacement_open=90.0 if direction == "bullish" else 110.0,
+        thrust_extreme=115.0 if direction == "bullish" else 85.0,
+        current_price=100.0,
+        optimal_entry=100.0,
+        pullback_status="optimal",
+    )
+
+
+def _waiting_pullback():
+    return PullbackResult(
+        pullback_detected=False,
+        retracement_pct=0.10,
+        displacement_open=90.0,
+        thrust_extreme=115.0,
+        current_price=112.0,
+        optimal_entry=112.0,
+        pullback_status="waiting",
+    )
+
+
+def _failed_pullback():
+    return PullbackResult(
+        pullback_detected=False,
+        retracement_pct=0.85,
+        displacement_open=90.0,
+        thrust_extreme=115.0,
+        current_price=93.75,
+        optimal_entry=93.75,
+        pullback_status="failed",
+    )
+
+
 class TestPostSweepEngine:
     def test_no_sweep_returns_zero(self, engine):
         """No sweep detected -> score=0, direction=None."""
@@ -55,13 +91,14 @@ class TestPostSweepEngine:
             htf_direction="bullish",
             in_post_kill_zone=True,
             ms_results=ms,
+            pullback_result=_valid_pullback(),
         )
         assert signal.score == 0
         assert signal.direction is None
         assert "No completed sweep detected" in signal.reasons
 
-    def test_sweep_no_displacement_returns_40(self, engine):
-        """Sweep detected but no displacement -> score=40, below threshold."""
+    def test_sweep_no_displacement_returns_35(self, engine):
+        """Sweep detected but no displacement -> score=35, below threshold."""
         ms = {"4h": _ms("bullish"), "1d": _ms("bullish"), "1h": _ms("bullish")}
         signal = engine.score_signal(
             symbol="BTC/USD", current_price=100.0,
@@ -71,13 +108,14 @@ class TestPostSweepEngine:
             htf_direction="bullish",
             in_post_kill_zone=True,
             ms_results=ms,
+            pullback_result=_valid_pullback(),
         )
-        assert signal.score == 40
+        assert signal.score == 35
         assert signal.direction == "bullish"
         assert signal.score < engine.entry_threshold
 
-    def test_sweep_plus_displacement_hits_threshold(self, engine):
-        """Sweep + displacement = 70 points, meets threshold."""
+    def test_sweep_displacement_no_pullback_returns_60(self, engine):
+        """Sweep + displacement but no pullback -> score=60, below threshold."""
         ms = {"4h": _ms("ranging"), "1d": _ms("ranging"), "1h": _ms("ranging")}
         signal = engine.score_signal(
             symbol="BTC/USD", current_price=100.0,
@@ -87,22 +125,74 @@ class TestPostSweepEngine:
             htf_direction=None,
             in_post_kill_zone=False,
             ms_results=ms,
+            pullback_result=None,
+        )
+        assert signal.score == 60
+        assert signal.score < engine.entry_threshold
+
+    def test_pullback_waiting_returns_60(self, engine):
+        """Sweep + displacement + waiting pullback -> score=60, below threshold."""
+        ms = {"4h": _ms("ranging"), "1d": _ms("ranging"), "1h": _ms("ranging")}
+        signal = engine.score_signal(
+            symbol="BTC/USD", current_price=100.0,
+            sweep_result=_bullish_sweep(),
+            displacement_confirmed=True,
+            displacement_direction="bullish",
+            htf_direction=None,
+            in_post_kill_zone=False,
+            ms_results=ms,
+            pullback_result=_waiting_pullback(),
+        )
+        assert signal.score == 60
+        assert "Pullback pending" in " ".join(signal.reasons)
+
+    def test_pullback_failed_returns_60(self, engine):
+        """Sweep + displacement + failed pullback -> score=60, below threshold."""
+        ms = {"4h": _ms("ranging"), "1d": _ms("ranging"), "1h": _ms("ranging")}
+        signal = engine.score_signal(
+            symbol="BTC/USD", current_price=100.0,
+            sweep_result=_bullish_sweep(),
+            displacement_confirmed=True,
+            displacement_direction="bullish",
+            htf_direction=None,
+            in_post_kill_zone=False,
+            ms_results=ms,
+            pullback_result=_failed_pullback(),
+        )
+        assert signal.score == 60
+        assert "too deep" in " ".join(signal.reasons).lower()
+
+    def test_sweep_displacement_pullback_hits_threshold(self, engine):
+        """Sweep + displacement + pullback = 70 points, meets threshold."""
+        ms = {"4h": _ms("ranging"), "1d": _ms("ranging"), "1h": _ms("ranging")}
+        signal = engine.score_signal(
+            symbol="BTC/USD", current_price=105.0,
+            sweep_result=_bullish_sweep(),
+            displacement_confirmed=True,
+            displacement_direction="bullish",
+            htf_direction=None,
+            in_post_kill_zone=False,
+            ms_results=ms,
+            pullback_result=_valid_pullback(),
         )
         assert signal.score == 70
         assert signal.direction == "bullish"
         assert signal.score >= engine.entry_threshold
+        # Entry price should be from pullback, not original
+        assert signal.entry_price == 100.0
 
     def test_full_setup_all_bonuses(self, engine):
-        """Sweep + displacement + HTF + post-KZ = 100 points."""
+        """Sweep + displacement + pullback + HTF + post-KZ = 100 points."""
         ms = {"4h": _ms("bullish"), "1d": _ms("bullish"), "1h": _ms("bullish")}
         signal = engine.score_signal(
-            symbol="BTC/USD", current_price=100.0,
+            symbol="BTC/USD", current_price=105.0,
             sweep_result=_bullish_sweep(),
             displacement_confirmed=True,
             displacement_direction="bullish",
             htf_direction="bullish",
             in_post_kill_zone=True,
             ms_results=ms,
+            pullback_result=_valid_pullback(),
         )
         assert signal.score == 100
         assert signal.direction == "bullish"
@@ -114,13 +204,13 @@ class TestPostSweepEngine:
             symbol="BTC/USD", current_price=100.0,
             sweep_result=_bullish_sweep(),
             displacement_confirmed=True,
-            displacement_direction="bearish",  # Wrong direction!
+            displacement_direction="bearish",
             htf_direction="bullish",
             in_post_kill_zone=True,
             ms_results=ms,
+            pullback_result=_valid_pullback(),
         )
-        # Only gets sweep points (40), not displacement (30)
-        assert signal.score == 40
+        assert signal.score == 35
         assert "mismatch" in " ".join(signal.reasons).lower()
 
     def test_bearish_full_setup(self, engine):
@@ -134,6 +224,7 @@ class TestPostSweepEngine:
             htf_direction="bearish",
             in_post_kill_zone=True,
             ms_results=ms,
+            pullback_result=_valid_pullback(direction="bearish"),
         )
         assert signal.score == 100
         assert signal.direction == "bearish"
@@ -142,15 +233,16 @@ class TestPostSweepEngine:
         """Only 4H aligned, not Daily -> partial HTF bonus."""
         ms = {"4h": _ms("bullish"), "1d": _ms("ranging"), "1h": _ms("bullish")}
         signal = engine.score_signal(
-            symbol="BTC/USD", current_price=100.0,
+            symbol="BTC/USD", current_price=105.0,
             sweep_result=_bullish_sweep(),
             displacement_confirmed=True,
             displacement_direction="bullish",
             htf_direction="bullish",
             in_post_kill_zone=False,
             ms_results=ms,
+            pullback_result=_valid_pullback(),
         )
-        # Sweep(40) + Displacement(30) + partial HTF(~10) = ~80
+        # Sweep(35) + Displacement(25) + Pullback(10) + partial HTF(~10) = ~80
         assert 70 < signal.score < 100
         assert signal.direction == "bullish"
 
@@ -158,13 +250,14 @@ class TestPostSweepEngine:
         """Key levels from market structure are collected for SL/TP."""
         ms = {"4h": _ms("bullish"), "1d": _ms("bullish"), "1h": _ms("bullish")}
         signal = engine.score_signal(
-            symbol="BTC/USD", current_price=100.0,
+            symbol="BTC/USD", current_price=105.0,
             sweep_result=_bullish_sweep(),
             displacement_confirmed=True,
             displacement_direction="bullish",
             htf_direction="bullish",
             in_post_kill_zone=True,
             ms_results=ms,
+            pullback_result=_valid_pullback(),
         )
         assert "4h_swing_high" in signal.key_levels
         assert "1h_swing_low" in signal.key_levels
