@@ -1411,7 +1411,7 @@ class TradingEngine:
                 liquidation_price=float(t.get("liquidation_price", 0) or 0),
                 tp_tiers=tp_tiers,
                 original_quantity=float(t.get("original_quantity") or t.get("entry_quantity", 0)),
-                original_stop_loss=float(t.get("stop_loss", 0)),
+                original_stop_loss=float(t.get("original_stop_loss") or t.get("stop_loss", 0)),
                 current_tier=int(t.get("current_tier", 0) or 0),
             )
 

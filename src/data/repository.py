@@ -34,6 +34,8 @@ class Repository:
         "confluence_score", "signal_reasons", "timeframes_used",
         "leverage", "margin_used", "liquidation_price",
         "test_group",
+        "tp_tiers", "current_tier", "original_quantity", "remaining_quantity",
+        "original_stop_loss",
         "created_at", "updated_at",
     }
 

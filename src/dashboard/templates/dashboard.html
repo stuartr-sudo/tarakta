@@ -364,6 +364,113 @@ updateNetPnl(0);
 
 // --- Unrealized P&L + position price refresh ---
 let _refreshing = false;
+let _lastPnlData = null;  // Last successful API response — single source of truth
+let _lastPnlTime = 0;     // Timestamp of last successful fetch
+
+function renderPnlData(data) {
+    /**
+     * Single render function that updates BOTH summary cards AND table
+     * atomically from the same data. Guarantees cards always match table.
+     */
+    const profitEl = document.getElementById('unrealized-profit-value');
+    const profitSub = document.getElementById('unrealized-profit-sub');
+    const lossEl = document.getElementById('unrealized-loss-value');
+    const lossSub = document.getElementById('unrealized-loss-sub');
+    const ts = document.getElementById('last-updated');
+
+    if (!data || !data.positions || data.positions.length === 0) {
+        if (profitEl) profitEl.textContent = '$0.00';
+        if (profitSub) profitSub.textContent = 'No open positions';
+        if (lossEl) lossEl.textContent = '$0.00';
+        if (lossSub) lossSub.textContent = 'No open positions';
+        updateNetPnl(0);
+        return;
+    }
+
+    // 1. Update the position table FIRST
+    const posById = {};
+    data.positions.forEach(p => { posById[p.trade_id] = p; });
+
+    const rows = document.querySelectorAll('#positions-tbody tr[data-trade-id]');
+    rows.forEach(row => {
+        const tradeId = row.getAttribute('data-trade-id');
+        const pos = posById[tradeId];
+        if (!pos) return;
+
+        const priceCell = row.querySelector('.pos-current-price');
+        const pnlCell = row.querySelector('.pos-pnl');
+
+        if (pos.current_price !== null) {
+            priceCell.textContent = '$' + pos.current_price.toFixed(4);
+            const pnlSign = pos.unrealized_pnl >= 0 ? '+' : '';
+            pnlCell.textContent = pnlSign + '$' + pos.unrealized_pnl.toFixed(2) + ' (' + (pos.unrealized_pnl >= 0 ? '+' : '') + pos.unrealized_pct.toFixed(1) + '%)';
+            pnlCell.className = 'mono pos-pnl ' + (pos.unrealized_pnl >= 0 ? 'positive' : 'negative');
+        } else {
+            priceCell.textContent = 'err';
+            pnlCell.textContent = '--';
+            pnlCell.className = 'mono pos-pnl';
+        }
+    });
+
+    // 2. Compute card totals from the SAME data used for the table
+    let totalProfit = 0, totalLoss = 0, profitCount = 0, lossCount = 0;
+    data.positions.forEach(p => {
+        if (p.current_price === null) return;
+        if (p.unrealized_pnl >= 0) {
+            totalProfit += p.unrealized_pnl;
+            profitCount++;
+        } else {
+            totalLoss += p.unrealized_pnl;
+            lossCount++;
+        }
+    });
+
+    if (profitEl) {
+        profitEl.textContent = '+$' + totalProfit.toFixed(2);
+        profitEl.className = 'stat-value sm positive';
+    }
+    if (profitSub) profitSub.textContent = profitCount + ' winning position' + (profitCount !== 1 ? 's' : '');
+
+    if (lossEl) {
+        lossEl.textContent = '$' + totalLoss.toFixed(2);
+        lossEl.className = 'stat-value sm negative';
+    }
+    if (lossSub) lossSub.textContent = lossCount + ' losing position' + (lossCount !== 1 ? 's' : '');
+
+    // 3. Net P&L
+    updateNetPnl(totalProfit + totalLoss);
+
+    // 4. Allocated / available
+    let totalAllocated = 0;
+    data.positions.forEach(p => { totalAllocated += (p.margin_used || p.cost_usd || 0); });
+    const allocEl = document.getElementById('allocated-value');
+    if (allocEl) allocEl.textContent = '$' + totalAllocated.toFixed(2);
+
+    const eqText = (document.getElementById('equity-value') || {}).textContent || '';
+    const eqVal = parseFloat(eqText.replace(/[^0-9.\-]/g, '')) || 0;
+    const avEl = document.getElementById('available-value');
+    if (avEl) avEl.textContent = '$' + (eqVal - totalAllocated).toFixed(2);
+
+    // 5. Price error indicator
+    const errCount = data.positions.filter(p => p.current_price === null).length;
+    if (errCount > 0) {
+        const errMsg = ' (' + errCount + ' price err)';
+        if (profitSub) profitSub.textContent += errMsg;
+        if (lossSub) lossSub.textContent += errMsg;
+    }
+
+    // 6. Timestamp
+    if (ts) {
+        const age = Math.round((Date.now() - _lastPnlTime) / 1000);
+        if (age <= 15) {
+            ts.textContent = 'Updated ' + new Date(_lastPnlTime).toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+            ts.className = 'text-muted';
+        } else {
+            ts.textContent = 'Stale (' + age + 's ago)';
+            ts.className = 'text-muted text-warn';
+        }
+    }
+}
 
 async function loadUnrealizedPnl() {
     if (_refreshing) return;
@@ -373,111 +480,35 @@ async function loadUnrealizedPnl() {
 
     try {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 15000);
+        const timeout = setTimeout(() => controller.abort(), 25000);
         const resp = await fetch('/api/unrealized-pnl', { signal: controller.signal });
         clearTimeout(timeout);
         const data = await resp.json();
 
-        const profitEl = document.getElementById('unrealized-profit-value');
-        const profitSub = document.getElementById('unrealized-profit-sub');
-        const lossEl = document.getElementById('unrealized-loss-value');
-        const lossSub = document.getElementById('unrealized-loss-sub');
-        const ts = document.getElementById('last-updated');
-
-        // Update timestamp
-        if (ts) {
-            const now = new Date();
-            ts.textContent = 'Updated ' + now.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
-        }
-
         if (data.error) {
-            profitSub.textContent = data.error + ' — retrying...';
-            lossSub.textContent = '';
+            const profitSub = document.getElementById('unrealized-profit-sub');
+            if (profitSub) profitSub.textContent = data.error + ' — retrying...';
+            // Re-render last known data so cards and table stay in sync
+            if (_lastPnlData) renderPnlData(_lastPnlData);
             return;
         }
 
-        if (!data.positions || data.positions.length === 0) {
-            profitEl.textContent = '$0.00';
-            profitSub.textContent = 'No open positions';
-            lossEl.textContent = '$0.00';
-            lossSub.textContent = 'No open positions';
-            updateNetPnl(0);
-            return;
-        }
+        // Store as single source of truth and render everything atomically
+        _lastPnlData = data;
+        _lastPnlTime = Date.now();
+        renderPnlData(data);
 
-        // Split positions into profit and loss
-        let totalProfit = 0, totalLoss = 0, profitCount = 0, lossCount = 0;
-        data.positions.forEach(p => {
-            if (p.current_price === null) return;
-            if (p.unrealized_pnl >= 0) {
-                totalProfit += p.unrealized_pnl;
-                profitCount++;
-            } else {
-                totalLoss += p.unrealized_pnl;
-                lossCount++;
-            }
-        });
-
-        profitEl.textContent = '+$' + totalProfit.toFixed(2);
-        profitEl.className = 'stat-value sm positive';
-        profitSub.textContent = profitCount + ' winning position' + (profitCount !== 1 ? 's' : '');
-
-        lossEl.textContent = '$' + totalLoss.toFixed(2);
-        lossEl.className = 'stat-value sm negative';
-        lossSub.textContent = lossCount + ' losing position' + (lossCount !== 1 ? 's' : '');
-
-        // Use client-computed total (consistent with summary cards)
-        const total = totalProfit + totalLoss;
-        updateNetPnl(total);
-
-        // Update allocated total and available cash from live data (margin-based)
-        let totalAllocated = 0;
-        data.positions.forEach(p => { totalAllocated += (p.margin_used || p.cost_usd || 0); });
-        const allocEl = document.getElementById('allocated-value');
-        if (allocEl) allocEl.textContent = '$' + totalAllocated.toFixed(2);
-
-        // Available = equity - allocated
-        const eqText = (document.getElementById('equity-value') || {}).textContent || '';
-        const eqVal = parseFloat(eqText.replace(/[^0-9.\-]/g, '')) || 0;
-        const avEl = document.getElementById('available-value');
-        if (avEl) avEl.textContent = '$' + (eqVal - totalAllocated).toFixed(2);
-
-        const errCount = data.positions.filter(p => p.current_price === null).length;
-        if (errCount > 0) {
-            const errMsg = ' (' + errCount + ' price err)';
-            profitSub.textContent += errMsg;
-            lossSub.textContent += errMsg;
-        }
-
-        // Build lookup by trade_id
-        const posById = {};
-        data.positions.forEach(p => { posById[p.trade_id] = p; });
-
-        const rows = document.querySelectorAll('#positions-tbody tr[data-trade-id]');
-        rows.forEach(row => {
-            const tradeId = row.getAttribute('data-trade-id');
-            const pos = posById[tradeId];
-            if (!pos) return;
-
-            const priceCell = row.querySelector('.pos-current-price');
-            const pnlCell = row.querySelector('.pos-pnl');
-
-            if (pos.current_price !== null) {
-                priceCell.textContent = '$' + pos.current_price.toFixed(4);
-                const pnlSign = pos.unrealized_pnl >= 0 ? '+' : '';
-                pnlCell.textContent = pnlSign + '$' + pos.unrealized_pnl.toFixed(2) + ' (' + (pos.unrealized_pnl >= 0 ? '+' : '') + pos.unrealized_pct.toFixed(1) + '%)';
-                pnlCell.className = 'mono ' + (pos.unrealized_pnl >= 0 ? 'positive' : 'negative');
-            } else {
-                priceCell.textContent = 'err';
-                pnlCell.textContent = '--';
-            }
-        });
     } catch (e) {
         console.error('Unrealized P&L load failed:', e);
-        const ps = document.getElementById('unrealized-profit-sub');
-        const ls = document.getElementById('unrealized-loss-sub');
-        if (ps) ps.textContent = 'Retry in 10s...';
-        if (ls) ls.textContent = 'Retry in 10s...';
+        // On failure, re-render from last known data so cards+table stay in sync
+        if (_lastPnlData) {
+            renderPnlData(_lastPnlData);
+        } else {
+            const ps = document.getElementById('unrealized-profit-sub');
+            const ls = document.getElementById('unrealized-loss-sub');
+            if (ps) ps.textContent = 'Connecting...';
+            if (ls) ls.textContent = '';
+        }
     } finally {
         _refreshing = false;
         if (btn) { btn.disabled = false; btn.textContent = 'Refresh Prices'; }

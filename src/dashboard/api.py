@@ -52,6 +52,11 @@ class _DashboardExchange:
         client = self._ensure_client()
         return await client.fetch_ticker(symbol)
 
+    async def fetch_tickers(self, symbols: list[str]) -> dict:
+        """Batch-fetch tickers in a single API call (much less rate-limit pressure)."""
+        client = self._ensure_client()
+        return await client.fetch_tickers(symbols)
+
     async def place_market_order(self, symbol: str, side: str, quantity: float) -> OrderResult:
         client = self._ensure_client()
         result = await client.create_order(
@@ -132,31 +137,34 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         # Deduplicate ticker fetches — multiple trades may share a symbol
         unique_symbols = list({t["symbol"] for t in trades})
 
-        async def fetch_ticker(symbol: str) -> float | None:
-            for attempt in range(2):
+        # Use batch fetchTickers (single API call) to avoid rate-limit pressure
+        price_map: dict[str, float | None] = {}
+        try:
+            tickers = await asyncio.wait_for(
+                _dash_exchange.fetch_tickers(unique_symbols), timeout=20,
+            )
+            for sym in unique_symbols:
+                t = tickers.get(sym)
+                price_map[sym] = float(t["last"]) if t and t.get("last") else None
+        except Exception as e:
+            logger.warning("batch_fetch_tickers_failed", error=str(e), fallback="individual")
+            # Fallback: fetch individually (slower but more resilient to partial failures)
+            async def _fetch_one(symbol: str) -> float | None:
                 try:
                     ticker = await _dash_exchange.fetch_ticker(symbol)
                     return float(ticker["last"])
-                except Exception as e:
-                    if attempt == 0:
-                        await asyncio.sleep(0.5)
-                    else:
-                        logger.error("unrealized_pnl_fetch_failed", symbol=symbol, error=str(e))
-                        return None
-
-        try:
-            ticker_results = await asyncio.gather(*[fetch_ticker(s) for s in unique_symbols])
-        except Exception as e:
-            logger.error("unrealized_pnl_gather_failed", error=str(e))
-            ticker_results = [None] * len(unique_symbols)
-
-        price_map = dict(zip(unique_symbols, ticker_results))
+                except Exception:
+                    return None
+            results = await asyncio.gather(*[_fetch_one(s) for s in unique_symbols])
+            price_map = dict(zip(unique_symbols, results))
 
         for trade in trades:
             symbol = trade["symbol"]
             current_price = price_map.get(symbol)
             entry_price = float(trade.get("entry_price", 0))
-            quantity = float(trade.get("remaining_quantity") or trade.get("entry_quantity", 0))
+            raw_remaining = trade.get("remaining_quantity")
+            raw_entry_qty = trade.get("entry_quantity", 0)
+            quantity = float(raw_remaining or raw_entry_qty or 0)
             direction = trade.get("direction", "long")
             cost_usd = float(trade.get("entry_cost_usd", 0))
 
@@ -175,6 +183,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 effective_cost = current_notional / leverage
             else:
                 effective_cost = current_notional
+
             positions.append({
                 "symbol": symbol,
                 "direction": direction,
