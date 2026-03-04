@@ -371,60 +371,97 @@ class OrderExecutor:
         ]
 
     def _calculate_stop_loss(self, signal: SignalCandidate) -> float | None:
-        """Calculate SL based on direction and signal context."""
+        """Calculate SL based on direction and signal context.
+
+        Three layers of protection against tight stops:
+        1. Prefer 1H structural levels over 15m (less noise)
+        2. 1% buffer beyond structure (was 0.2%)
+        3. ATR floor: SL must be at least 1.5x ATR(15m) from entry
+        """
         entry = signal.entry_price
         is_long = signal.direction == "bullish"
 
         if is_long:
-            return self._sl_for_long(signal, entry)
+            sl = self._sl_for_long(signal, entry)
         else:
-            return self._sl_for_short(signal, entry)
+            sl = self._sl_for_short(signal, entry)
+
+        # --- ATR floor: ensure SL is at least 1.5x ATR away from entry ---
+        atr = getattr(signal, "atr_15m", 0.0) or 0.0
+        if atr > 0:
+            min_sl_distance = atr * 1.5
+            actual_distance = abs(entry - sl)
+            if actual_distance < min_sl_distance:
+                old_sl = sl
+                if is_long:
+                    sl = entry - min_sl_distance
+                else:
+                    sl = entry + min_sl_distance
+                logger.info(
+                    "sl_widened_by_atr",
+                    symbol=signal.symbol,
+                    old_sl=old_sl,
+                    new_sl=sl,
+                    atr=atr,
+                    old_dist_pct=f"{actual_distance / entry:.3%}",
+                    new_dist_pct=f"{min_sl_distance / entry:.3%}",
+                )
+
+        return sl
 
     def _sl_for_long(self, signal: SignalCandidate, entry: float) -> float:
-        """SL below entry for long trades."""
-        # Priority 1: Below order block
+        """SL below entry for long trades. Prefer 1H levels, 1% buffer."""
+        # Priority 1: Below 1H order block (institutional level)
         if signal.ob_context and signal.ob_context.direction == "bullish":
-            sl = signal.ob_context.bottom * 0.998
+            sl = signal.ob_context.bottom * 0.99  # 1% buffer
             if sl < entry:
                 return sl
 
-        # Priority 2: Below FVG
+        # Priority 2: Below 1H swing low (stronger than 15m)
+        level_1h = signal.key_levels.get("1h_swing_low")
+        if level_1h and level_1h < entry:
+            return level_1h * 0.99
+
+        # Priority 3: Below FVG
         if signal.fvg_context and signal.fvg_context.direction == "bullish":
-            sl = signal.fvg_context.bottom * 0.998
+            sl = signal.fvg_context.bottom * 0.99
             if sl < entry:
                 return sl
 
-        # Priority 3: Below swing lows
-        for tf in ["1h_swing_low", "15m_swing_low"]:
-            level = signal.key_levels.get(tf)
-            if level and level < entry:
-                return level * 0.998
+        # Priority 4: Below 15m swing low (last resort structural)
+        level_15m = signal.key_levels.get("15m_swing_low")
+        if level_15m and level_15m < entry:
+            return level_15m * 0.99
 
-        # Fallback: 9% below entry
-        return entry * 0.91
+        # Fallback: 5% below entry (was 9% — tighter fallback since ATR floor catches noise)
+        return entry * 0.95
 
     def _sl_for_short(self, signal: SignalCandidate, entry: float) -> float:
-        """SL above entry for short trades."""
-        # Priority 1: Above bearish order block top
+        """SL above entry for short trades. Prefer 1H levels, 1% buffer."""
+        # Priority 1: Above 1H bearish order block top (institutional level)
         if signal.ob_context and signal.ob_context.direction == "bearish":
-            sl = signal.ob_context.top * 1.002
+            sl = signal.ob_context.top * 1.01  # 1% buffer
             if sl > entry:
                 return sl
 
-        # Priority 2: Above FVG
+        # Priority 2: Above 1H swing high (stronger than 15m)
+        level_1h = signal.key_levels.get("1h_swing_high")
+        if level_1h and level_1h > entry:
+            return level_1h * 1.01
+
+        # Priority 3: Above FVG
         if signal.fvg_context and signal.fvg_context.direction == "bearish":
-            sl = signal.fvg_context.top * 1.002
+            sl = signal.fvg_context.top * 1.01
             if sl > entry:
                 return sl
 
-        # Priority 3: Above swing highs
-        for tf in ["1h_swing_high", "15m_swing_high"]:
-            level = signal.key_levels.get(tf)
-            if level and level > entry:
-                return level * 1.002
+        # Priority 4: Above 15m swing high (last resort structural)
+        level_15m = signal.key_levels.get("15m_swing_high")
+        if level_15m and level_15m > entry:
+            return level_15m * 1.01
 
-        # Fallback: 9% above entry
-        return entry * 1.09
+        # Fallback: 5% above entry (was 9% — tighter fallback since ATR floor catches noise)
+        return entry * 1.05
 
     def _calculate_take_profit(self, signal: SignalCandidate, sl_price: float) -> float | None:
         """Calculate TP based on direction."""

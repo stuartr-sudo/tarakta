@@ -146,6 +146,22 @@ class AltcoinScanner:
         # Get current price from most recent 15m close
         current_price = float(candles["15m"]["close"].iloc[-1]) if not candles["15m"].empty else 0
 
+        # --- Compute 14-period ATR on 15m candles for SL floor ---
+        atr_15m = 0.0
+        df_15m = candles.get("15m")
+        if df_15m is not None and len(df_15m) >= 15:
+            _high = df_15m["high"].astype(float)
+            _low = df_15m["low"].astype(float)
+            _close = df_15m["close"].astype(float)
+            _prev = _close.shift(1)
+            _tr = pd.concat(
+                [_high - _low, (_high - _prev).abs(), (_low - _prev).abs()],
+                axis=1,
+            ).max(axis=1)
+            _atr_series = _tr.rolling(14).mean()
+            if pd.notna(_atr_series.iloc[-1]):
+                atr_15m = float(_atr_series.iloc[-1])
+
         # --- Score the full signal ---
         signal = self.confluence.score_signal(
             symbol=symbol,
@@ -158,6 +174,7 @@ class AltcoinScanner:
             pd_result=pd_score,
             regime=regime,
         )
+        signal.atr_15m = atr_15m
 
         if signal.score >= self.config.entry_threshold:
             logger.info(
