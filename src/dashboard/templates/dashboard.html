@@ -426,7 +426,8 @@ async function loadUnrealizedPnl() {
         lossEl.className = 'stat-value sm negative';
         lossSub.textContent = lossCount + ' losing position' + (lossCount !== 1 ? 's' : '');
 
-        const total = data.total_unrealized;
+        // Use client-computed total (consistent with summary cards)
+        const total = totalProfit + totalLoss;
         updateNetPnl(total);
 
         // Update allocated total and available cash from live data (margin-based)
@@ -443,7 +444,9 @@ async function loadUnrealizedPnl() {
 
         const errCount = data.positions.filter(p => p.current_price === null).length;
         if (errCount > 0) {
-            profitSub.textContent += ' (' + errCount + ' fetch errors)';
+            const errMsg = ' (' + errCount + ' price err)';
+            profitSub.textContent += errMsg;
+            lossSub.textContent += errMsg;
         }
 
         // Build lookup by trade_id
@@ -472,7 +475,9 @@ async function loadUnrealizedPnl() {
     } catch (e) {
         console.error('Unrealized P&L load failed:', e);
         const ps = document.getElementById('unrealized-profit-sub');
+        const ls = document.getElementById('unrealized-loss-sub');
         if (ps) ps.textContent = 'Retry in 10s...';
+        if (ls) ls.textContent = 'Retry in 10s...';
     } finally {
         _refreshing = false;
         if (btn) { btn.disabled = false; btn.textContent = 'Refresh Prices'; }

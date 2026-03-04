@@ -133,12 +133,16 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         unique_symbols = list({t["symbol"] for t in trades})
 
         async def fetch_ticker(symbol: str) -> float | None:
-            try:
-                ticker = await _dash_exchange.fetch_ticker(symbol)
-                return float(ticker["last"])
-            except Exception as e:
-                logger.error("unrealized_pnl_fetch_failed", symbol=symbol, error=str(e))
-                return None
+            for attempt in range(2):
+                try:
+                    ticker = await _dash_exchange.fetch_ticker(symbol)
+                    return float(ticker["last"])
+                except Exception as e:
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        logger.error("unrealized_pnl_fetch_failed", symbol=symbol, error=str(e))
+                        return None
 
         try:
             ticker_results = await asyncio.gather(*[fetch_ticker(s) for s in unique_symbols])
