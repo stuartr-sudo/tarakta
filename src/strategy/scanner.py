@@ -1,3 +1,17 @@
+"""Trade Travel Chill scanner — simplified post-sweep displacement pipeline.
+
+Scans all tradeable pairs through a streamlined pipeline:
+1. Fetch candles (1H, 4H, 1D)
+2. Market structure on all TFs (for HTF trend + swing levels)
+3. Session analysis (for Asian range + post-KZ timing)
+4. Sweep detection on 1H (completed sweep = entry signal)
+5. Displacement check on 1H (confirms institutional commitment)
+6. Score with PostSweepEngine
+
+Removed from pipeline: CRT, Order Blocks, FVGs, Premium/Discount,
+LiquidityAnalyzer, MarketRegimeAnalyzer — these are the retail signals
+that market makers hunt.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -8,15 +22,10 @@ import pandas as pd
 from src.config import Settings
 from src.data.candles import CandleManager
 from src.exchange.models import SignalCandidate
-from src.strategy.confluence import ConfluenceEngine
-from src.strategy.crt import CRTAnalyzer
-from src.strategy.fair_value_gaps import FairValueGapAnalyzer
-from src.strategy.liquidity import LiquidityAnalyzer
+from src.strategy.confluence import PostSweepEngine
 from src.strategy.market_structure import MarketStructureAnalyzer
-from src.strategy.order_blocks import OrderBlockAnalyzer
-from src.strategy.premium_discount import PremiumDiscountAnalyzer
-from src.strategy.regime import MarketRegimeAnalyzer
 from src.strategy.sessions import SessionAnalyzer
+from src.strategy.sweep_detector import SweepDetector
 from src.strategy.volume import VolumeAnalyzer
 from src.utils.logging import get_logger
 
@@ -34,18 +43,13 @@ class AltcoinScanner:
         self.candles = candle_manager
         self.config = config
         self.ms_analyzer = MarketStructureAnalyzer()
-        self.liq_analyzer = LiquidityAnalyzer()
-        self.ob_analyzer = OrderBlockAnalyzer()
-        self.fvg_analyzer = FairValueGapAnalyzer()
         self.vol_analyzer = VolumeAnalyzer()
-        self.pd_analyzer = PremiumDiscountAnalyzer()
-        self.regime_analyzer = MarketRegimeAnalyzer()
-        self.crt_analyzer = CRTAnalyzer()
         self.session_analyzer = SessionAnalyzer()
-        self.confluence = ConfluenceEngine(entry_threshold=config.entry_threshold)
+        self.sweep_detector = SweepDetector()
+        self.confluence = PostSweepEngine(entry_threshold=config.entry_threshold)
 
     async def scan(self, pairs: list[str]) -> list[SignalCandidate]:
-        """Scan all pairs through the full strategy pipeline."""
+        """Scan all pairs through the post-sweep displacement pipeline."""
         all_signals: list[SignalCandidate] = []
         total = len(pairs)
 
@@ -92,74 +96,42 @@ class AltcoinScanner:
         return all_signals
 
     async def _analyze_pair(self, symbol: str) -> SignalCandidate:
-        """Full strategy pipeline for a single pair."""
-        # Fetch candles for all timeframes (1H, 4H, 1D — no 15m)
+        """Simplified post-sweep pipeline for a single pair."""
+        # 1. Fetch candles for all timeframes
         candles: dict[str, pd.DataFrame] = {}
         for tf in TIMEFRAMES:
             candles[tf] = await self.candles.get_candles(symbol, tf, limit=200)
 
-        # --- Market Structure on all timeframes ---
+        # 2. Market structure on all TFs (for HTF trend + swing levels)
         ms_results = {}
         for tf, df in candles.items():
             ms_results[tf] = self.ms_analyzer.analyze(df, timeframe=tf)
 
-        # --- Liquidity on all timeframes ---
-        liq_results = {}
-        for tf, df in candles.items():
-            swing_hl = ms_results[tf].swing_highs_lows
-            liq_results[tf] = self.liq_analyzer.analyze(df, swing_hl)
-
-        # --- Order Blocks on 1H (entry timeframe) ---
-        ob_results = {}
-        for tf in ["1h"]:
-            swing_hl = ms_results[tf].swing_highs_lows
-            ob_results[tf] = self.ob_analyzer.analyze(candles[tf], swing_hl)
-
-        # --- Fair Value Gaps on 1H (entry timeframe) ---
-        fvg_results = {}
-        for tf in ["1h"]:
-            fvg_results[tf] = self.fvg_analyzer.analyze(candles[tf])
-
-        # --- Determine HTF directional bias (pre-pass for volume/PD scoring) ---
-        direction = self._resolve_htf_direction(ms_results)
-
-        # --- Volume / Displacement analysis on 1H + 4H ---
-        volume_profiles = {}
-        for tf in ["1h", "4h"]:
-            df = candles.get(tf)
-            if df is not None and not df.empty:
-                volume_profiles[tf] = self.vol_analyzer.analyze(df)
-        volume_result = self.vol_analyzer.score_volume(volume_profiles, direction)
-
-        # --- Premium / Discount zone analysis on 1H + 4H ---
-        pd_results = {}
-        for tf in ["1h", "4h"]:
-            df = candles.get(tf)
-            if df is not None and not df.empty:
-                swing_hl = ms_results.get(tf, None)
-                swing_hl_data = swing_hl.swing_highs_lows if swing_hl else None
-                pd_results[tf] = self.pd_analyzer.analyze(df, swing_hl_data)
-        pd_score = self.pd_analyzer.score(pd_results, direction)
-
-        # --- Market Regime (ADX + Choppiness) ---
-        regime = self.regime_analyzer.analyze(
-            ohlc_4h=candles.get("4h", pd.DataFrame()),
-            ohlc_1d=candles.get("1d"),
-        )
-
-        # --- CRT (Candle Range Theory) on 4H ---
-        crt_result = self.crt_analyzer.analyze(
-            candles["4h"],
-            ms_results["4h"].swing_highs_lows if ms_results.get("4h") else None,
-        )
-
-        # --- Session / Kill Zone analysis ---
+        # 3. Session analysis (Asian range + post-KZ timing)
         session_result = self.session_analyzer.analyze(candles["1h"])
 
-        # Get current price from most recent 1H close
+        # 4. Extract swing levels from 1H market structure
+        swing_high = ms_results["1h"].key_levels.get("swing_high")
+        swing_low = ms_results["1h"].key_levels.get("swing_low")
+
+        # 5. Sweep detection on 1H
+        sweep_result = self.sweep_detector.detect(
+            candles_1h=candles["1h"],
+            asian_high=session_result.asian_high,
+            asian_low=session_result.asian_low,
+            swing_high=swing_high,
+            swing_low=swing_low,
+        )
+
+        # 6. Displacement check on 1H (VolumeAnalyzer already has this)
+        vol_profile = self.vol_analyzer.analyze(candles["1h"])
+        displacement_confirmed = vol_profile.displacement_detected
+        displacement_direction = vol_profile.displacement_direction
+
+        # Get current price
         current_price = float(candles["1h"]["close"].iloc[-1]) if not candles["1h"].empty else 0
 
-        # --- Compute 14-period ATR on 1H candles for SL floor ---
+        # Compute 14-period ATR on 1H candles for SL floor
         atr_1h = 0.0
         df_1h = candles.get("1h")
         if df_1h is not None and len(df_1h) >= 15:
@@ -175,22 +147,24 @@ class AltcoinScanner:
             if pd.notna(_atr_series.iloc[-1]):
                 atr_1h = float(_atr_series.iloc[-1])
 
-        # --- Score the full signal ---
+        # Resolve HTF direction
+        htf_direction = self._resolve_htf_direction(ms_results)
+
+        # 7. Score with PostSweepEngine
         signal = self.confluence.score_signal(
             symbol=symbol,
             current_price=current_price,
+            sweep_result=sweep_result,
+            displacement_confirmed=displacement_confirmed,
+            displacement_direction=displacement_direction,
+            htf_direction=htf_direction,
+            in_post_kill_zone=session_result.in_post_kill_zone,
             ms_results=ms_results,
-            liq_results=liq_results,
-            ob_results=ob_results,
-            fvg_results=fvg_results,
-            volume_result=volume_result,
-            pd_result=pd_score,
-            regime=regime,
-            crt_result=crt_result,
-            session_result=session_result,
         )
+
+        # Attach sweep data and ATR for order execution
+        signal.sweep_result = sweep_result
         signal.atr_1h = atr_1h
-        signal.crt_result = crt_result
         signal.session_result = session_result
 
         if signal.score >= self.config.entry_threshold:
@@ -205,12 +179,7 @@ class AltcoinScanner:
         return signal
 
     def _resolve_htf_direction(self, ms_results: dict) -> str | None:
-        """Quick pre-pass to determine HTF directional bias.
-
-        Uses the same logic as ConfluenceEngine._score_htf_trend but only
-        returns the direction (needed for volume and P/D scoring before
-        the full confluence pass).
-        """
+        """Quick pre-pass to determine HTF directional bias."""
         htf_4h = ms_results.get("4h")
         htf_1d = ms_results.get("1d")
 

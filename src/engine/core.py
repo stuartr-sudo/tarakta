@@ -54,7 +54,10 @@ class TradingEngine:
         self.risk_manager = RiskManager(config, exchange=exchange)
         self.circuit_breaker = CircuitBreaker(config)
         self.order_executor = OrderExecutor(exchange, self.risk_manager, config)
-        self.position_monitor = PositionMonitor()
+        self.position_monitor = PositionMonitor(
+            trailing_activation_rr=config.trailing_activation_rr,
+            trailing_atr_multiplier=config.trailing_atr_multiplier,
+        )
         self.scanner = AltcoinScanner(candle_manager, config)
 
         # Self-improving components
@@ -211,6 +214,7 @@ class TradingEngine:
                     self.portfolio.daily_start_balance = equity
                     self.state.daily_start_balance = equity
                     self.state.daily_pnl = 0.0
+                    self.state.daily_trade_count = 0
                     self.state.last_scan_time = datetime.now(timezone.utc)
                     logger.info(
                         "daily_reset",
@@ -418,6 +422,16 @@ class TradingEngine:
         for signal in signals:
             try:
                 position = None
+
+                # --- Daily trade limit (Chill phase) ---
+                if self.state.daily_trade_count >= self.config.max_daily_trades:
+                    logger.info(
+                        "daily_trade_limit_reached",
+                        symbol=signal.symbol,
+                        daily_trades=self.state.daily_trade_count,
+                        max_daily=self.config.max_daily_trades,
+                    )
+                    break  # Stop processing more signals today
 
                 # --- Sentiment filter (Strategy A) ---
                 sentiment_score = await self.sentiment_filter.get_sentiment(signal.symbol)
@@ -698,6 +712,7 @@ class TradingEngine:
                             self.portfolio.record_entry(position)
                             self.state.open_positions[signal.symbol] = position
                             trades_entered += 1
+                            self.state.daily_trade_count += 1
 
                 # Log the signal regardless of whether trade was executed
                 vol_24h = self.exchange.get_24h_volume(signal.symbol)

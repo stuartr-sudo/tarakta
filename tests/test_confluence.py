@@ -1,23 +1,16 @@
+"""Tests for the PostSweepEngine (Trade Travel Chill confluence scoring)."""
 import pytest
 
-from src.exchange.models import (
-    FVGResult,
-    FairValueGap,
-    LiquidityResult,
-    MarketStructureResult,
-    OrderBlock,
-    OrderBlockResult,
-    SweepEvent,
-)
-from src.strategy.confluence import ConfluenceEngine
+from src.exchange.models import MarketStructureResult, SweepResult
+from src.strategy.confluence import PostSweepEngine
 
 
 @pytest.fixture
 def engine():
-    return ConfluenceEngine(entry_threshold=65.0)
+    return PostSweepEngine(entry_threshold=70.0)
 
 
-def _empty_ms(trend="ranging"):
+def _ms(trend="ranging"):
     return MarketStructureResult(
         trend=trend,
         key_levels={"swing_high": 110, "swing_low": 90},
@@ -27,104 +20,151 @@ def _empty_ms(trend="ranging"):
     )
 
 
-def _empty_liq():
-    return LiquidityResult(
-        active_pools=[], recent_sweeps=[], nearest_buy_liquidity=None,
-        nearest_sell_liquidity=None, sweep_detected_recently=False,
+def _no_sweep():
+    return SweepResult(
+        sweep_detected=False, sweep_direction=None, sweep_level=0.0,
+        sweep_type=None, target_level=0.0, sweep_depth=0.0,
     )
 
 
-def _empty_ob():
-    return OrderBlockResult(
-        active_order_blocks=[], price_in_order_block=None,
-        nearest_bullish_ob=None, nearest_bearish_ob=None,
+def _bullish_sweep():
+    return SweepResult(
+        sweep_detected=True, sweep_direction="bullish",
+        sweep_level=89.5, sweep_type="asian_low",
+        target_level=110.0, sweep_depth=0.5,
     )
 
 
-def _empty_fvg():
-    return FVGResult(
-        active_fvgs=[], price_in_fvg=None,
-        nearest_bullish_fvg=None, nearest_bearish_fvg=None,
+def _bearish_sweep():
+    return SweepResult(
+        sweep_detected=True, sweep_direction="bearish",
+        sweep_level=110.5, sweep_type="asian_high",
+        target_level=90.0, sweep_depth=0.5,
     )
 
 
-class TestConfluenceEngine:
-    def test_no_htf_trend_returns_zero(self, engine):
-        ms = {tf: _empty_ms("ranging") for tf in ["1h", "4h", "1d"]}
-        liq = {"1h": _empty_liq()}
-        ob = {"1h": _empty_ob()}
-        fvg = {"1h": _empty_fvg()}
-
-        signal = engine.score_signal("BTC/USD", 100.0, ms, liq, ob, fvg)
+class TestPostSweepEngine:
+    def test_no_sweep_returns_zero(self, engine):
+        """No sweep detected -> score=0, direction=None."""
+        ms = {"4h": _ms("bullish"), "1d": _ms("bullish"), "1h": _ms("bullish")}
+        signal = engine.score_signal(
+            symbol="BTC/USD", current_price=100.0,
+            sweep_result=_no_sweep(),
+            displacement_confirmed=True,
+            displacement_direction="bullish",
+            htf_direction="bullish",
+            in_post_kill_zone=True,
+            ms_results=ms,
+        )
         assert signal.score == 0
         assert signal.direction is None
+        assert "No completed sweep detected" in signal.reasons
 
-    def test_full_bullish_confluence(self, engine):
-        """All signals aligned bullish — should get high score."""
-        ms = {
-            "1h": _empty_ms("bullish"),
-            "4h": _empty_ms("bullish"),
-            "1d": _empty_ms("bullish"),
-        }
-        ms["1h"].last_choch_direction = 1  # CHoCH confirms
-
-        ob_in = OrderBlock(direction="bullish", top=101, bottom=99, volume=1000, strength=0.8, candle_idx=190)
-        ob = {
-            "1h": OrderBlockResult(
-                active_order_blocks=[ob_in], price_in_order_block=ob_in,
-                nearest_bullish_ob=ob_in, nearest_bearish_ob=None,
-            ),
-        }
-
-        fvg_in = FairValueGap(direction="bullish", top=101, bottom=99, candle_idx=185, midpoint=100)
-        fvg = {
-            "1h": FVGResult(
-                active_fvgs=[fvg_in], price_in_fvg=fvg_in,
-                nearest_bullish_fvg=fvg_in, nearest_bearish_fvg=None,
-            ),
-        }
-
-        sweep = SweepEvent(level=98, direction="bullish_sweep", candle_idx=195)
-        liq = {
-            "1h": LiquidityResult(
-                active_pools=[], recent_sweeps=[sweep],
-                nearest_buy_liquidity=98, nearest_sell_liquidity=105,
-                sweep_detected_recently=True,
-            ),
-        }
-
-        signal = engine.score_signal("BTC/USD", 100.0, ms, liq, ob, fvg)
-        assert signal.score >= 55  # HTF(15) + MS(15) + OB(12) + FVG(8) + Liq(10) = 60
+    def test_sweep_no_displacement_returns_40(self, engine):
+        """Sweep detected but no displacement -> score=40, below threshold."""
+        ms = {"4h": _ms("bullish"), "1d": _ms("bullish"), "1h": _ms("bullish")}
+        signal = engine.score_signal(
+            symbol="BTC/USD", current_price=100.0,
+            sweep_result=_bullish_sweep(),
+            displacement_confirmed=False,
+            displacement_direction=None,
+            htf_direction="bullish",
+            in_post_kill_zone=True,
+            ms_results=ms,
+        )
+        assert signal.score == 40
         assert signal.direction == "bullish"
-        assert len(signal.reasons) > 3
+        assert signal.score < engine.entry_threshold
 
-    def test_partial_confluence(self, engine):
-        """Only HTF trend + market structure, no OB/FVG/liquidity."""
-        ms = {
-            "1h": _empty_ms("bullish"),
-            "4h": _empty_ms("bullish"),
-            "1d": _empty_ms("bullish"),
-        }
-        liq = {"1h": _empty_liq()}
-        ob = {"1h": _empty_ob()}
-        fvg = {"1h": _empty_fvg()}
+    def test_sweep_plus_displacement_hits_threshold(self, engine):
+        """Sweep + displacement = 70 points, meets threshold."""
+        ms = {"4h": _ms("ranging"), "1d": _ms("ranging"), "1h": _ms("ranging")}
+        signal = engine.score_signal(
+            symbol="BTC/USD", current_price=100.0,
+            sweep_result=_bullish_sweep(),
+            displacement_confirmed=True,
+            displacement_direction="bullish",
+            htf_direction=None,
+            in_post_kill_zone=False,
+            ms_results=ms,
+        )
+        assert signal.score == 70
+        assert signal.direction == "bullish"
+        assert signal.score >= engine.entry_threshold
 
-        signal = engine.score_signal("BTC/USD", 100.0, ms, liq, ob, fvg)
-        # HTF (15) + MS (15) = 30, below threshold
-        assert signal.score < 65
+    def test_full_setup_all_bonuses(self, engine):
+        """Sweep + displacement + HTF + post-KZ = 100 points."""
+        ms = {"4h": _ms("bullish"), "1d": _ms("bullish"), "1h": _ms("bullish")}
+        signal = engine.score_signal(
+            symbol="BTC/USD", current_price=100.0,
+            sweep_result=_bullish_sweep(),
+            displacement_confirmed=True,
+            displacement_direction="bullish",
+            htf_direction="bullish",
+            in_post_kill_zone=True,
+            ms_results=ms,
+        )
+        assert signal.score == 100
         assert signal.direction == "bullish"
 
-    def test_mixed_htf(self, engine):
-        """4H bullish, Daily ranging — should still get partial HTF score."""
-        ms = {
-            "1h": _empty_ms("bullish"),
-            "4h": _empty_ms("bullish"),
-            "1d": _empty_ms("ranging"),
-        }
-        liq = {"1h": _empty_liq()}
-        ob = {"1h": _empty_ob()}
-        fvg = {"1h": _empty_fvg()}
+    def test_displacement_wrong_direction_rejected(self, engine):
+        """Displacement exists but opposite to sweep direction -> below threshold."""
+        ms = {"4h": _ms("bullish"), "1d": _ms("bullish"), "1h": _ms("bullish")}
+        signal = engine.score_signal(
+            symbol="BTC/USD", current_price=100.0,
+            sweep_result=_bullish_sweep(),
+            displacement_confirmed=True,
+            displacement_direction="bearish",  # Wrong direction!
+            htf_direction="bullish",
+            in_post_kill_zone=True,
+            ms_results=ms,
+        )
+        # Only gets sweep points (40), not displacement (30)
+        assert signal.score == 40
+        assert "mismatch" in " ".join(signal.reasons).lower()
 
-        signal = engine.score_signal("BTC/USD", 100.0, ms, liq, ob, fvg)
-        assert signal.score > 0
+    def test_bearish_full_setup(self, engine):
+        """Full bearish setup works correctly."""
+        ms = {"4h": _ms("bearish"), "1d": _ms("bearish"), "1h": _ms("bearish")}
+        signal = engine.score_signal(
+            symbol="ETH/USD", current_price=100.0,
+            sweep_result=_bearish_sweep(),
+            displacement_confirmed=True,
+            displacement_direction="bearish",
+            htf_direction="bearish",
+            in_post_kill_zone=True,
+            ms_results=ms,
+        )
+        assert signal.score == 100
+        assert signal.direction == "bearish"
+
+    def test_partial_htf_alignment(self, engine):
+        """Only 4H aligned, not Daily -> partial HTF bonus."""
+        ms = {"4h": _ms("bullish"), "1d": _ms("ranging"), "1h": _ms("bullish")}
+        signal = engine.score_signal(
+            symbol="BTC/USD", current_price=100.0,
+            sweep_result=_bullish_sweep(),
+            displacement_confirmed=True,
+            displacement_direction="bullish",
+            htf_direction="bullish",
+            in_post_kill_zone=False,
+            ms_results=ms,
+        )
+        # Sweep(40) + Displacement(30) + partial HTF(~10) = ~80
+        assert 70 < signal.score < 100
         assert signal.direction == "bullish"
+
+    def test_key_levels_collected(self, engine):
+        """Key levels from market structure are collected for SL/TP."""
+        ms = {"4h": _ms("bullish"), "1d": _ms("bullish"), "1h": _ms("bullish")}
+        signal = engine.score_signal(
+            symbol="BTC/USD", current_price=100.0,
+            sweep_result=_bullish_sweep(),
+            displacement_confirmed=True,
+            displacement_direction="bullish",
+            htf_direction="bullish",
+            in_post_kill_zone=True,
+            ms_results=ms,
+        )
+        assert "4h_swing_high" in signal.key_levels
+        assert "1h_swing_low" in signal.key_levels

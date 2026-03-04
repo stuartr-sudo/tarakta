@@ -84,6 +84,21 @@ class SweepEvent:
 
 
 @dataclass
+class SweepResult:
+    """Result of completed liquidity sweep detection.
+
+    A completed sweep = price wicked through a level and closed back
+    on the other side, meaning MMs grabbed the liquidity.
+    """
+    sweep_detected: bool
+    sweep_direction: str | None    # "bullish" (swept lows) or "bearish" (swept highs)
+    sweep_level: float             # Wick extreme (for SL placement)
+    sweep_type: str | None         # "asian_low", "asian_high", "swing_low", "swing_high"
+    target_level: float            # Opposite side liquidity (for TP)
+    sweep_depth: float             # How far past the level
+
+
+@dataclass
 class OrderBlock:
     direction: str  # "bullish" or "bearish"
     top: float
@@ -153,6 +168,7 @@ class SignalCandidate:
     atr_1h: float = 0.0  # 14-period ATR on 1H candles for SL floor
     crt_result: object | None = None     # CRTResult from strategy.crt
     session_result: object | None = None  # SessionResult from strategy.sessions
+    sweep_result: object | None = None   # SweepResult from strategy.sweep_detector
 
 
 @dataclass

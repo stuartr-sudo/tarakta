@@ -31,33 +31,38 @@ class Settings(BaseSettings):
     # Trading
     trading_mode: Literal["paper", "live"] = "paper"
     initial_balance: float = 2000.0
-    entry_threshold: float = 65.0
+    entry_threshold: float = 70.0  # Requires sweep + displacement at minimum
     max_risk_pct: float = 0.10  # Max 10% of balance lost per trade (SL distance)
     max_position_pct: float = 0.10  # Max 10% of balance allocated per trade
     max_exposure_pct: float = 1.0  # Allow full budget deployment across positions
     max_concurrent: int = 100
     max_daily_drawdown: float = 0.10
     circuit_breaker_pct: float = 0.15
-    min_rr_ratio: float = 2.0
-    cooldown_hours: float = 4.0  # Hours to wait before re-entering a symbol after SL hit
+    min_rr_ratio: float = 3.0  # More selective = need bigger payoff
+    cooldown_hours: float = 8.0  # Chill: longer cooldown between trades
+    max_daily_trades: int = 3  # Chill: hard cap on trades per day
 
-    # Progressive take-profit tiers
-    tp_tiers_enabled: bool = True
-    tp1_rr: float = 1.0     # TP1 at 1R
-    tp2_rr: float = 2.0     # TP2 at 2R
-    tp1_pct: float = 0.33   # close 33% at TP1
-    tp2_pct: float = 0.33   # close 33% at TP2
-    tp3_pct: float = 0.34   # remaining 34% via trailing stop
-    move_sl_to_be_after_tp1: bool = True  # move SL to breakeven after TP1
+    # Progressive take-profit tiers (disabled for Trade Travel Chill)
+    tp_tiers_enabled: bool = False  # Travel: single exit via trailing stop
+    tp1_rr: float = 1.0     # TP1 at 1R (legacy, inactive)
+    tp2_rr: float = 2.0     # TP2 at 2R (legacy, inactive)
+    tp1_pct: float = 0.33   # close 33% at TP1 (legacy, inactive)
+    tp2_pct: float = 0.33   # close 33% at TP2 (legacy, inactive)
+    tp3_pct: float = 0.34   # remaining 34% via trailing stop (legacy, inactive)
+    move_sl_to_be_after_tp1: bool = True  # move SL to breakeven after TP1 (legacy, inactive)
 
-    # Signal reversal — close & flip on strong opposite signal
-    reversal_enabled: bool = True
-    reversal_min_score: float = 70.0       # Higher bar than entry_threshold (65)
-    reversal_min_hold_minutes: int = 60    # Don't reverse within first hour
-    reversal_cooldown_minutes: int = 120   # After a reversal, wait 2h before another on same symbol
+    # Trailing stop (Travel phase)
+    trailing_activation_rr: float = 2.0  # Activate trailing after 2R profit
+    trailing_atr_multiplier: float = 1.5  # Trail at 1.5x ATR from high water mark
+
+    # Signal reversal — disabled for Trade Travel Chill (no reversals, accept the loss)
+    reversal_enabled: bool = False
+    reversal_min_score: float = 70.0       # Legacy, inactive
+    reversal_min_hold_minutes: int = 60    # Legacy, inactive
+    reversal_cooldown_minutes: int = 120   # Legacy, inactive
 
     # Scanning
-    scan_interval_minutes: int = 60
+    scan_interval_minutes: int = 120  # Chill: scan every 2 hours
     min_volume_usd: float = 1_000_000
     max_position_volume_pct: float = 0.001  # Position size must be < 0.1% of 24h volume
     max_spread_pct: float = 0.003  # Max 0.3% bid-ask spread — skip illiquid pairs

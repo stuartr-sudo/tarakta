@@ -28,6 +28,7 @@ class EngineState:
         self.last_scan_time: datetime | None = None
         self.cycle_count: int = 0
         self.errors_consecutive: int = 0
+        self.daily_trade_count: int = 0
 
     @classmethod
     def from_db(cls, data: dict, mode: str = "paper") -> EngineState:

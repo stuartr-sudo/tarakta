@@ -35,6 +35,13 @@ LONDON_KZ_END = time(10, 0)
 NY_KZ_START = time(12, 0)
 NY_KZ_END = time(15, 0)
 
+# Post-kill zone windows — manipulation is DONE, real move begins
+POST_LONDON_KZ_START = time(10, 0)
+POST_LONDON_KZ_END = time(12, 0)
+
+POST_NY_KZ_START = time(15, 0)
+POST_NY_KZ_END = time(17, 0)
+
 
 @dataclass
 class SessionResult:
@@ -42,10 +49,12 @@ class SessionResult:
     current_session: str        # "asian", "london", "ny", "overlap", "off_hours"
     in_kill_zone: bool
     kill_zone_name: str | None  # "london_kz", "ny_kz", or None
-    asian_high: float
-    asian_low: float
-    asian_range_swept: str | None  # "above" (bearish signal) or "below" (bullish) or None
-    minutes_into_session: int
+    in_post_kill_zone: bool = False
+    post_kill_zone_name: str | None = None  # "post_london_kz", "post_ny_kz"
+    asian_high: float = 0.0
+    asian_low: float = 0.0
+    asian_range_swept: str | None = None  # "above" (bearish signal) or "below" (bullish) or None
+    minutes_into_session: int = 0
 
 
 def _in_range(t: time, start: time, end: time) -> bool:
@@ -84,6 +93,9 @@ class SessionAnalyzer:
         # --- Kill zone check ---
         in_kz, kz_name = self._check_kill_zone(current_time)
 
+        # --- Post-kill zone check (manipulation done, real move begins) ---
+        in_post_kz, post_kz_name = self._check_post_kill_zone(current_time)
+
         # --- Minutes into current session ---
         mins = self._minutes_into_session(now, session)
 
@@ -101,6 +113,8 @@ class SessionAnalyzer:
             current_session=session,
             in_kill_zone=in_kz,
             kill_zone_name=kz_name,
+            in_post_kill_zone=in_post_kz,
+            post_kill_zone_name=post_kz_name,
             asian_high=asian_high,
             asian_low=asian_low,
             asian_range_swept=sweep,
@@ -129,6 +143,20 @@ class SessionAnalyzer:
             return True, "london_kz"
         if _in_range(t, NY_KZ_START, NY_KZ_END):
             return True, "ny_kz"
+        return False, None
+
+    def _check_post_kill_zone(self, t: time) -> tuple[bool, str | None]:
+        """Check if current time is in a post-kill-zone window.
+
+        Post-kill zones are when the manipulation phase is complete and
+        the distribution (real) move begins:
+        - Post-London: 10:00-12:00 UTC
+        - Post-NY: 15:00-17:00 UTC
+        """
+        if _in_range(t, POST_LONDON_KZ_START, POST_LONDON_KZ_END):
+            return True, "post_london_kz"
+        if _in_range(t, POST_NY_KZ_START, POST_NY_KZ_END):
+            return True, "post_ny_kz"
         return False, None
 
     def _minutes_into_session(self, now: datetime, session: str) -> int:

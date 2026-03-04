@@ -91,9 +91,9 @@ class VolumeAnalyzer:
         disp_direction = None
         disp_strength = 0.0
 
-        if len(ohlc) >= 3 and atr is not None:
-            # Check last 3 candles for displacement
-            for i in range(-3, 0):
+        if len(ohlc) >= 5 and atr is not None:
+            # Check last 5 candles for displacement (matches sweep lookback)
+            for i in range(-5, 0):
                 idx = len(ohlc) + i
                 if idx < 0:
                     continue

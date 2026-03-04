@@ -1,3 +1,14 @@
+"""Order execution with Trade Travel Chill SL/TP logic.
+
+SL: Behind the sweep extreme (wick tip) + 0.5% buffer. This is the
+safest SL because MMs already grabbed that liquidity and have no
+reason to revisit it.
+
+TP: At the opposite liquidity pool (where stops exist on the other
+side). Minimum 3:1 R:R since we're being more selective.
+
+No progressive TP tiers — single exit via trailing stop.
+"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -11,7 +22,7 @@ logger = get_logger(__name__)
 
 
 class OrderExecutor:
-    """Handles entry and exit order placement with SL/TP calculation."""
+    """Handles entry and exit order placement with post-sweep SL/TP."""
 
     def __init__(self, exchange, risk_manager: RiskManager, config: Settings) -> None:
         self.exchange = exchange
@@ -29,10 +40,6 @@ class OrderExecutor:
     ) -> tuple[Position | None, OrderResult | None, dict | None]:
         """
         Calculate SL/TP, validate R:R, size position, place order.
-
-        Args:
-            sl_override: Optional SL price from LLM analyst (still validated).
-            tp_override: Optional TP price from LLM analyst (still validated).
 
         Returns (Position, OrderResult, trade_record) or (None, None, None) if skipped.
         """
@@ -91,7 +98,6 @@ class OrderExecutor:
             return None, None, None
 
         # Place order — long=buy, short=sell
-        # Use limit orders at best bid/ask for maker fees
         side = "buy" if is_long else "sell"
         try:
             ob = await self.exchange.fetch_order_book(signal.symbol, limit=10)
@@ -119,7 +125,7 @@ class OrderExecutor:
                 )
                 return None, None, None
 
-            # Check depth at best level (price * qty = USD value available)
+            # Check depth at best level
             bid_depth_usd = best_bid * float(bids[0][1])
             ask_depth_usd = best_ask * float(asks[0][1])
             relevant_depth = bid_depth_usd if is_long else ask_depth_usd
@@ -162,7 +168,6 @@ class OrderExecutor:
         entry_px = result.avg_price if result.avg_price > 0 else signal.entry_price
         leverage = getattr(self.exchange, "leverage", 1) or 1
         margin_used = pos_size.cost_usd / leverage if leverage > 1 else 0.0
-        # Calculate liquidation price
         if leverage > 1:
             if is_long:
                 liq_price = entry_px * (1 - 1 / leverage * 0.95)
@@ -187,9 +192,11 @@ class OrderExecutor:
             leverage=leverage,
             margin_used=margin_used,
             liquidation_price=liq_price,
+            original_quantity=qty,
+            original_stop_loss=sl_price,
         )
 
-        # Progressive TP tiers
+        # Progressive TP tiers (disabled by default in Trade Travel Chill)
         tp_tiers_data = None
         if self.config.tp_tiers_enabled:
             position.tp_tiers = self._calculate_tp_tiers(
@@ -198,9 +205,7 @@ class OrderExecutor:
                 quantity=qty,
                 direction=direction,
             )
-            position.original_quantity = qty
-            position.original_stop_loss = sl_price
-            position.take_profit = position.tp_tiers[0].price  # TP1 for dashboard display
+            position.take_profit = position.tp_tiers[0].price
             tp_tiers_data = [
                 {"level": t.level, "price": t.price, "pct": t.pct, "quantity": t.quantity}
                 for t in position.tp_tiers
@@ -251,16 +256,13 @@ class OrderExecutor:
     async def execute_exit(
         self, symbol: str, position: Position, reason: str, current_price: float
     ) -> tuple[OrderResult | None, float]:
-        """Execute an order to close a position using limit order. Returns (OrderResult, pnl_usd)."""
-        # Long exit = sell, short exit = buy
+        """Execute an order to close a position using limit order."""
         side = "sell" if position.direction == "long" else "buy"
         try:
             ob = await self.exchange.fetch_order_book(symbol, limit=5)
             if side == "sell":
-                # Selling: place at best ask to be maker
                 limit_price = float(ob["asks"][0][0]) if ob.get("asks") else current_price
             else:
-                # Buying (closing short): place at best bid to be maker
                 limit_price = float(ob["bids"][0][0]) if ob.get("bids") else current_price
             result = await self.exchange.place_limit_order(
                 symbol=symbol,
@@ -274,7 +276,6 @@ class OrderExecutor:
 
         exit_price = result.avg_price if result.avg_price > 0 else current_price
 
-        # PnL: long = (exit - entry) * qty, short = (entry - exit) * qty
         if position.direction == "long":
             pnl = (exit_price - position.entry_price) * position.quantity - result.fee
         else:
@@ -300,15 +301,13 @@ class OrderExecutor:
         quantity: float,
         tier: int,
     ) -> tuple[OrderResult | None, float]:
-        """Execute a partial close (TP tier hit) using limit order. Returns (OrderResult, pnl_usd)."""
+        """Execute a partial close (TP tier hit). Legacy — kept for backward compat."""
         side = "sell" if position.direction == "long" else "buy"
         try:
             ob = await self.exchange.fetch_order_book(symbol, limit=5)
             if side == "sell":
-                # Selling: place at best ask to be a maker
                 limit_price = float(ob["asks"][0][0]) if ob.get("asks") else current_price
             else:
-                # Buying (closing short): place at best bid
                 limit_price = float(ob["bids"][0][0]) if ob.get("bids") else current_price
             result = await self.exchange.place_limit_order(
                 symbol=symbol,
@@ -349,7 +348,7 @@ class OrderExecutor:
         quantity: float,
         direction: str,
     ) -> list[TakeProfitTier]:
-        """Build 3-tier TP plan based on R multiples from SL distance."""
+        """Build 3-tier TP plan. Legacy — only used if tp_tiers_enabled=True."""
         sl_distance = abs(entry_price - sl_price)
         is_long = direction == "long"
 
@@ -362,7 +361,7 @@ class OrderExecutor:
 
         tp1_qty = round(quantity * self.config.tp1_pct, 8)
         tp2_qty = round(quantity * self.config.tp2_pct, 8)
-        tp3_qty = round(quantity - tp1_qty - tp2_qty, 8)  # remainder avoids dust
+        tp3_qty = round(quantity - tp1_qty - tp2_qty, 8)
 
         return [
             TakeProfitTier(level=1, price=tp1_price, pct=self.config.tp1_pct, quantity=tp1_qty),
@@ -371,125 +370,88 @@ class OrderExecutor:
         ]
 
     def _calculate_stop_loss(self, signal: SignalCandidate) -> float | None:
-        """Calculate SL based on direction and signal context.
+        """SL behind the sweep extreme + 0.5% buffer.
 
-        Three layers of protection against tight stops:
-        1. Prefer 1H structural levels, with 4H swing as backup
-        2. 1% buffer beyond structure
-        3. ATR floor: SL must be at least 1.5x ATR(1H) from entry
+        The sweep wick tip is the safest SL because MMs already grabbed
+        that liquidity and have no reason to revisit it.
+
+        Falls back to ATR-based SL if no sweep data available.
         """
         entry = signal.entry_price
         is_long = signal.direction == "bullish"
+        sweep = getattr(signal, "sweep_result", None)
 
-        if is_long:
-            sl = self._sl_for_long(signal, entry)
-        else:
-            sl = self._sl_for_short(signal, entry)
+        if sweep is not None and sweep.sweep_detected and sweep.sweep_level > 0:
+            if is_long:
+                # SL below the sweep low (bearish sweep wick tip)
+                sl = sweep.sweep_level * 0.995  # 0.5% buffer below
+                if sl >= entry:
+                    # Sweep level too close to or above entry — use ATR fallback
+                    return self._atr_fallback_sl(signal, entry, is_long)
+                return sl
+            else:
+                # SL above the sweep high (bullish sweep wick tip)
+                sl = sweep.sweep_level * 1.005  # 0.5% buffer above
+                if sl <= entry:
+                    return self._atr_fallback_sl(signal, entry, is_long)
+                return sl
 
-        # --- ATR floor: ensure SL is at least 1.5x ATR away from entry ---
+        # No sweep data — ATR fallback
+        return self._atr_fallback_sl(signal, entry, is_long)
+
+    def _atr_fallback_sl(self, signal: SignalCandidate, entry: float, is_long: bool) -> float:
+        """ATR-based SL fallback when sweep data is unavailable."""
         atr = getattr(signal, "atr_1h", 0.0) or 0.0
         if atr > 0:
-            min_sl_distance = atr * 1.5
-            actual_distance = abs(entry - sl)
-            if actual_distance < min_sl_distance:
-                old_sl = sl
-                if is_long:
-                    sl = entry - min_sl_distance
-                else:
-                    sl = entry + min_sl_distance
-                logger.info(
-                    "sl_widened_by_atr",
-                    symbol=signal.symbol,
-                    old_sl=old_sl,
-                    new_sl=sl,
-                    atr=atr,
-                    old_dist_pct=f"{actual_distance / entry:.3%}",
-                    new_dist_pct=f"{min_sl_distance / entry:.3%}",
-                )
+            distance = atr * 2.0
+        else:
+            distance = entry * 0.03  # 3% fallback
 
-        return sl
-
-    def _sl_for_long(self, signal: SignalCandidate, entry: float) -> float:
-        """SL below entry for long trades. Prefer 1H levels, 4H backup, 1% buffer."""
-        # Priority 1: Below 1H order block (institutional level)
-        if signal.ob_context and signal.ob_context.direction == "bullish":
-            sl = signal.ob_context.bottom * 0.99  # 1% buffer
-            if sl < entry:
-                return sl
-
-        # Priority 2: Below 1H swing low
-        level_1h = signal.key_levels.get("1h_swing_low")
-        if level_1h and level_1h < entry:
-            return level_1h * 0.99
-
-        # Priority 3: Below 4H swing low (HTF structural support)
-        level_4h = signal.key_levels.get("4h_swing_low")
-        if level_4h and level_4h < entry:
-            return level_4h * 0.99
-
-        # Priority 4: Below FVG
-        if signal.fvg_context and signal.fvg_context.direction == "bullish":
-            sl = signal.fvg_context.bottom * 0.99
-            if sl < entry:
-                return sl
-
-        # Fallback: 5% below entry (ATR floor catches noise)
-        return entry * 0.95
-
-    def _sl_for_short(self, signal: SignalCandidate, entry: float) -> float:
-        """SL above entry for short trades. Prefer 1H levels, 4H backup, 1% buffer."""
-        # Priority 1: Above 1H bearish order block top (institutional level)
-        if signal.ob_context and signal.ob_context.direction == "bearish":
-            sl = signal.ob_context.top * 1.01  # 1% buffer
-            if sl > entry:
-                return sl
-
-        # Priority 2: Above 1H swing high
-        level_1h = signal.key_levels.get("1h_swing_high")
-        if level_1h and level_1h > entry:
-            return level_1h * 1.01
-
-        # Priority 3: Above 4H swing high (HTF structural resistance)
-        level_4h = signal.key_levels.get("4h_swing_high")
-        if level_4h and level_4h > entry:
-            return level_4h * 1.01
-
-        # Priority 4: Above FVG
-        if signal.fvg_context and signal.fvg_context.direction == "bearish":
-            sl = signal.fvg_context.top * 1.01
-            if sl > entry:
-                return sl
-
-        # Fallback: 5% above entry (ATR floor catches noise)
-        return entry * 1.05
+        if is_long:
+            return entry - distance
+        else:
+            return entry + distance
 
     def _calculate_take_profit(self, signal: SignalCandidate, sl_price: float) -> float | None:
-        """Calculate TP based on direction."""
+        """TP at the opposite liquidity pool with minimum R:R.
+
+        For longs (after bearish sweep): TP at swing high / Asian high
+        For shorts (after bullish sweep): TP at swing low / Asian low
+        """
         entry = signal.entry_price
         sl_distance = abs(entry - sl_price)
         is_long = signal.direction == "bullish"
+        sweep = getattr(signal, "sweep_result", None)
+
+        min_tp_distance = sl_distance * self.min_rr
 
         if is_long:
-            min_tp = entry + (sl_distance * self.min_rr)
-            candidates = []
+            min_tp = entry + min_tp_distance
+
+            # Use sweep target_level (opposite side liquidity)
+            if sweep and sweep.target_level and sweep.target_level > entry:
+                tp = sweep.target_level
+                if tp >= min_tp:
+                    return tp
+
+            # Fallback to structural levels
             for tf in ["1h_swing_high", "4h_swing_high", "1d_swing_high"]:
                 level = signal.key_levels.get(tf)
-                if level and level > entry:
-                    candidates.append(level)
-            if candidates:
-                for tp in sorted(candidates):
-                    if tp >= min_tp:
-                        return tp
+                if level and level >= min_tp:
+                    return level
+
             return min_tp
         else:
-            min_tp = entry - (sl_distance * self.min_rr)
-            candidates = []
+            min_tp = entry - min_tp_distance
+
+            if sweep and sweep.target_level and sweep.target_level < entry:
+                tp = sweep.target_level
+                if tp <= min_tp:
+                    return tp
+
             for tf in ["1h_swing_low", "4h_swing_low", "1d_swing_low"]:
                 level = signal.key_levels.get(tf)
-                if level and level < entry:
-                    candidates.append(level)
-            if candidates:
-                for tp in sorted(candidates, reverse=True):
-                    if tp <= min_tp:
-                        return tp
+                if level and level <= min_tp:
+                    return level
+
             return min_tp

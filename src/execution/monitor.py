@@ -7,14 +7,20 @@ from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-TRAILING_STOP_ACTIVATION_RR = 1.5
-ATR_TRAILING_MULTIPLIER = 2.5  # Trail at 2.5x ATR from high water mark
 TRAILING_STOP_PCT_FALLBACK = 0.02  # Fallback if ATR not available
 TICKER_FETCH_TIMEOUT = 45  # seconds — safety net above ccxt's 30s timeout
 
 
 class PositionMonitor:
     """Monitors open positions for SL/TP hits and ATR-based trailing stop updates."""
+
+    def __init__(
+        self,
+        trailing_activation_rr: float = 2.0,
+        trailing_atr_multiplier: float = 1.5,
+    ) -> None:
+        self.trailing_activation_rr = trailing_activation_rr
+        self.trailing_atr_multiplier = trailing_atr_multiplier
 
     async def check_positions(
         self, positions: dict[str, Position], exchange, atr_values: dict[str, float] | None = None,
@@ -102,10 +108,10 @@ class PositionMonitor:
         sl_distance = original_sl_dist if original_sl_dist > 0 else (pos.entry_price - pos.stop_loss)
         if sl_distance > 0:
             unrealized_rr = (current_price - pos.entry_price) / sl_distance
-            if unrealized_rr >= TRAILING_STOP_ACTIVATION_RR:
+            if unrealized_rr >= self.trailing_activation_rr:
                 # ATR-dynamic trailing: high_water_mark - ATR * multiplier
                 if atr > 0:
-                    trailing_sl = pos.high_water_mark - (atr * ATR_TRAILING_MULTIPLIER)
+                    trailing_sl = pos.high_water_mark - (atr * self.trailing_atr_multiplier)
                 else:
                     # Fallback to percentage if ATR unavailable
                     trailing_sl = pos.high_water_mark * (1 - TRAILING_STOP_PCT_FALLBACK)
@@ -159,10 +165,10 @@ class PositionMonitor:
         sl_distance = original_sl_dist if original_sl_dist > 0 else (pos.stop_loss - pos.entry_price)
         if sl_distance > 0:
             unrealized_rr = (pos.entry_price - current_price) / sl_distance
-            if unrealized_rr >= TRAILING_STOP_ACTIVATION_RR:
+            if unrealized_rr >= self.trailing_activation_rr:
                 # ATR-dynamic trailing: low_water_mark + ATR * multiplier
                 if atr > 0:
-                    trailing_sl = pos.high_water_mark + (atr * ATR_TRAILING_MULTIPLIER)
+                    trailing_sl = pos.high_water_mark + (atr * self.trailing_atr_multiplier)
                 else:
                     trailing_sl = pos.high_water_mark * (1 + TRAILING_STOP_PCT_FALLBACK)
                 if trailing_sl < pos.stop_loss:
