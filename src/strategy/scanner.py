@@ -23,6 +23,7 @@ from src.config import Settings
 from src.data.candles import CandleManager
 from src.exchange.models import SignalCandidate
 from src.strategy.confluence import PostSweepEngine
+from src.strategy.leverage import LeverageAnalyzer
 from src.strategy.market_structure import MarketStructureAnalyzer
 from src.strategy.pullback import PullbackAnalyzer
 from src.strategy.sessions import SessionAnalyzer
@@ -52,6 +53,7 @@ class AltcoinScanner:
             max_retracement=config.pullback_max_retracement,
         )
         self.confluence = PostSweepEngine(entry_threshold=config.entry_threshold)
+        self.leverage_analyzer = LeverageAnalyzer()
 
     async def scan(self, pairs: list[str]) -> list[SignalCandidate]:
         """Scan all pairs through the post-sweep displacement pipeline."""
@@ -87,7 +89,11 @@ class AltcoinScanner:
             if batch_idx + BATCH_SIZE < total:
                 await asyncio.sleep(BATCH_DELAY)
 
-        # Sort by score descending
+        # Leverage enrichment pass — only for qualifying signals (minimal API calls)
+        if all_signals and hasattr(self.candles.exchange, "fetch_open_interest"):
+            await self._enrich_with_leverage(all_signals)
+
+        # Sort by score descending (re-sort after leverage bonus)
         all_signals.sort(key=lambda s: s.score, reverse=True)
 
         logger.info(
@@ -195,6 +201,88 @@ class AltcoinScanner:
             )
 
         return signal
+
+    async def _enrich_with_leverage(self, signals: list[SignalCandidate]) -> None:
+        """Fetch leverage data and apply bonus scoring for qualifying signals.
+
+        Only called for signals that already passed sweep + displacement + pullback
+        (typically 1-5 per scan). This keeps API calls to 3 per signal.
+        """
+        exchange = self.candles.exchange
+        for signal in signals:
+            try:
+                oi_data = await exchange.fetch_open_interest(signal.symbol)
+                fr_data = await exchange.fetch_funding_rate(signal.symbol)
+                ls_data = await exchange.fetch_long_short_ratio(signal.symbol)
+
+                sweep_direction = None
+                if signal.sweep_result and signal.sweep_result.sweep_detected:
+                    sweep_direction = signal.sweep_result.sweep_direction
+
+                session = signal.session_result
+
+                profile = self.leverage_analyzer.analyze(
+                    current_price=signal.entry_price,
+                    open_interest_usd=oi_data["open_interest_usd"],
+                    funding_rate=fr_data["funding_rate"],
+                    long_short_ratio=ls_data["long_short_ratio"],
+                    sweep_direction=sweep_direction,
+                    in_kill_zone=session.in_kill_zone if session else False,
+                    in_post_kill_zone=session.in_post_kill_zone if session else False,
+                )
+
+                signal.leverage_profile = profile
+
+                # Apply leverage bonus scoring
+                bonus = self._score_leverage(profile)
+                if bonus > 0:
+                    signal.score += bonus
+                    signal.components["leverage_aligned"] = bonus
+                    signal.reasons.append(
+                        f"Leverage aligned: {profile.crowded_side}s crowded "
+                        f"(funding={profile.funding_rate:.4%}, "
+                        f"intensity={profile.crowding_intensity:.0%}) +{bonus:.0f}pts"
+                    )
+
+                logger.info(
+                    "leverage_enriched",
+                    symbol=signal.symbol,
+                    funding=f"{fr_data['funding_rate']:.6f}",
+                    oi_usd=f"{oi_data['open_interest_usd']:,.0f}",
+                    ls_ratio=ls_data["long_short_ratio"],
+                    crowded=profile.crowded_side,
+                    intensity=f"{profile.crowding_intensity:.2f}",
+                    sweep_aligns=profile.sweep_aligns_with_crowding,
+                    bonus=bonus,
+                )
+
+            except Exception as e:
+                logger.warning("leverage_enrichment_failed", symbol=signal.symbol, error=str(e))
+
+    @staticmethod
+    def _score_leverage(profile) -> float:
+        """Score leverage alignment (0-10 bonus points).
+
+        - Sweep aligns with crowded side: +5 base
+        - High crowding intensity (>0.5): +2
+        - Extreme crowding intensity (>0.8): +3 instead
+        - Judas swing probability > 0.6: +2
+        Max: 10 points.
+        """
+        if not profile.sweep_aligns_with_crowding:
+            return 0.0
+
+        bonus = 5.0  # Base: sweep grabbed the crowded side's liquidity
+
+        if profile.crowding_intensity > 0.8:
+            bonus += 3.0
+        elif profile.crowding_intensity > 0.5:
+            bonus += 2.0
+
+        if profile.judas_swing_probability > 0.6:
+            bonus += 2.0
+
+        return min(bonus, 10.0)
 
     def _resolve_htf_direction(self, ms_results: dict) -> str | None:
         """Quick pre-pass to determine HTF directional bias."""

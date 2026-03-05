@@ -166,6 +166,22 @@ class FVGResult:
 
 
 @dataclass
+class LeverageProfile:
+    """Leverage intelligence for a futures symbol."""
+    open_interest_usd: float          # Total OI in USD
+    funding_rate: float               # Current 8h funding rate (e.g. 0.0001 = 0.01%)
+    long_short_ratio: float | None    # Top traders L/S ratio (>1 = more longs)
+    crowded_side: str | None          # "long" or "short" or None
+    crowding_intensity: float         # 0.0-1.0 how extreme the crowding is
+    funding_bias: str | None          # "long_pay" or "short_pay" or None
+    liquidation_clusters: list[dict] = field(default_factory=list)
+    nearest_long_liq: float = 0.0     # Closest long liquidation level below price
+    nearest_short_liq: float = 0.0    # Closest short liquidation level above price
+    sweep_aligns_with_crowding: bool = False
+    judas_swing_probability: float = 0.0
+
+
+@dataclass
 class SignalCandidate:
     score: float
     direction: str | None
@@ -181,6 +197,7 @@ class SignalCandidate:
     crt_result: object | None = None     # CRTResult from strategy.crt
     session_result: object | None = None  # SessionResult from strategy.sessions
     sweep_result: object | None = None   # SweepResult from strategy.sweep_detector
+    leverage_profile: object | None = None  # LeverageProfile from strategy.leverage
 
 
 @dataclass

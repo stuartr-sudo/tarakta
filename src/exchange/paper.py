@@ -421,6 +421,18 @@ class PaperExchange:
         """Delegate to live exchange."""
         return self.live.get_24h_volume(symbol)
 
+    async def fetch_open_interest(self, symbol: str) -> dict:
+        """Delegate to live exchange."""
+        return await self.live.fetch_open_interest(symbol)
+
+    async def fetch_funding_rate(self, symbol: str) -> dict:
+        """Delegate to live exchange."""
+        return await self.live.fetch_funding_rate(symbol)
+
+    async def fetch_long_short_ratio(self, symbol: str) -> dict:
+        """Delegate to live exchange."""
+        return await self.live.fetch_long_short_ratio(symbol)
+
     @property
     def exchange_name(self) -> str:
         return getattr(self.live, "exchange_name", "unknown")

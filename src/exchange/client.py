@@ -379,6 +379,73 @@ class BinanceFuturesClient:
                 }
         return {}
 
+    @async_retry(max_attempts=3, base_delay=5.0, exceptions=(ccxt.NetworkError, ccxt.ExchangeNotAvailable))
+    async def fetch_open_interest(self, symbol: str) -> dict:
+        """Fetch current open interest for a futures symbol."""
+        async with self._semaphore:
+            await self._rate_limit_wait()
+            oi = await self.exchange.fetch_open_interest(symbol)
+            self._last_request_time = time.time()
+
+        oi_value = float(oi.get("openInterestValue", 0) or 0)
+        if oi_value == 0:
+            # Fallback: contracts * price
+            oi_contracts = float(oi.get("openInterest", 0) or 0)
+            info = oi.get("info", {})
+            mark_price = float(info.get("markPrice", 0) or 0)
+            if mark_price > 0:
+                oi_value = oi_contracts * mark_price
+
+        return {
+            "open_interest_usd": oi_value,
+            "symbol": symbol,
+        }
+
+    @async_retry(max_attempts=3, base_delay=5.0, exceptions=(ccxt.NetworkError, ccxt.ExchangeNotAvailable))
+    async def fetch_funding_rate(self, symbol: str) -> dict:
+        """Fetch current funding rate for a futures symbol.
+
+        Positive = longs pay shorts (long-biased market).
+        Negative = shorts pay longs (short-biased market).
+        """
+        async with self._semaphore:
+            await self._rate_limit_wait()
+            fr = await self.exchange.fetch_funding_rate(symbol)
+            self._last_request_time = time.time()
+
+        return {
+            "funding_rate": float(fr.get("fundingRate", 0) or 0),
+            "next_funding_time": fr.get("fundingTimestamp", 0),
+            "symbol": symbol,
+        }
+
+    async def fetch_long_short_ratio(self, symbol: str) -> dict:
+        """Fetch top trader long/short ratio for a futures symbol.
+
+        Ratio > 1.0 = more longs among top traders.
+        Returns None ratio if endpoint unavailable.
+        """
+        try:
+            async with self._semaphore:
+                await self._rate_limit_wait()
+                data = await self.exchange.fetch_long_short_ratio_history(
+                    symbol, timeframe="1h", limit=1,
+                )
+                self._last_request_time = time.time()
+
+            if not data:
+                return {"long_short_ratio": None, "long_account": 0.0, "short_account": 0.0}
+
+            latest = data[0]
+            return {
+                "long_short_ratio": float(latest.get("longShortRatio", 1.0) or 1.0),
+                "long_account": float(latest.get("longAccount", 0.5) or 0.5),
+                "short_account": float(latest.get("shortAccount", 0.5) or 0.5),
+            }
+        except Exception as e:
+            logger.warning("long_short_ratio_failed", symbol=symbol, error=str(e))
+            return {"long_short_ratio": None, "long_account": 0.0, "short_account": 0.0}
+
     FIAT_BASES = frozenset({
         "USD", "EUR", "GBP", "AUD", "CAD", "CHF", "JPY", "NZD",
         "USDT", "USDC", "DAI", "PYUSD", "TUSD", "BUSD", "UST",
