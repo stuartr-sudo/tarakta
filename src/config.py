@@ -98,6 +98,7 @@ class Settings(BaseSettings):
     flipped_scan_interval_minutes: int = 15  # Independent scan cycle (not tied to main bot)
     flipped_max_position_pct: float = 0.15  # 15% of balance as margin per trade (bigger than main)
     flipped_max_risk_pct: float = 0.15  # 15% of balance at risk per trade (bigger than main)
+    flipped_min_rr_ratio: float = 2.0  # Looser R:R for flipped (main uses 3.0)
 
     # One-time force reset — set FORCE_RESET=true to wipe all data on next startup
     force_reset: bool = False

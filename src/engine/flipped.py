@@ -57,7 +57,7 @@ class FlippedTrader:
         self.leverage = config.flipped_leverage
         self.sl_buffer = config.flipped_sl_buffer
         self.min_sl_pct = config.flipped_min_sl_pct
-        self.min_rr = config.min_rr_ratio
+        self.min_rr = config.flipped_min_rr_ratio
         self.max_risk_pct = config.flipped_max_risk_pct
         self.max_position_pct = config.flipped_max_position_pct
         self.trailing_activation_rr = config.trailing_activation_rr
