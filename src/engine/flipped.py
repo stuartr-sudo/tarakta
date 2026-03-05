@@ -38,9 +38,9 @@ SIM_FEE_RATE = 0.0004
 # HTF (15) + Timing (15) = bonus
 FLIPPED_THRESHOLD = 60.0
 FLIPPED_MAX_CONCURRENT = 0  # 0 = no cap; position sizing handles risk naturally
-BATCH_SIZE = 8
-BATCH_DELAY = 1.5
-SCAN_TIMEFRAMES = ["1h", "4h", "1d"]
+BATCH_SIZE = 16  # Larger batches for faster scans (475 pairs is a lot)
+BATCH_DELAY = 0.5  # Shorter delay between batches
+SCAN_TIMEFRAMES = ["1h", "4h"]  # Drop 1d — not worth extra API calls for 5pts HTF bonus
 
 
 class FlippedTrader:
