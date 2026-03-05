@@ -56,9 +56,10 @@ class FlippedTrader:
         self.enabled = config.flipped_enabled
         self.leverage = config.flipped_leverage
         self.sl_buffer = config.flipped_sl_buffer
+        self.min_sl_pct = config.flipped_min_sl_pct
         self.min_rr = config.min_rr_ratio
-        self.max_risk_pct = config.max_risk_pct
-        self.max_position_pct = config.max_position_pct
+        self.max_risk_pct = config.flipped_max_risk_pct
+        self.max_position_pct = config.flipped_max_position_pct
         self.trailing_activation_rr = config.trailing_activation_rr
         self.trailing_atr_multiplier = config.trailing_atr_multiplier
         self.scan_interval = config.flipped_scan_interval_minutes
@@ -765,26 +766,37 @@ class FlippedTrader:
     # ------------------------------------------------------------------
 
     def _calculate_sl(self, signal: SignalCandidate, is_long: bool) -> float | None:
-        """Calculate SL for flipped trade with wider buffer."""
+        """Calculate SL for flipped trade with wider buffer + minimum distance floor."""
         entry = signal.entry_price
+        min_distance = entry * self.min_sl_pct  # Minimum SL distance (1.5% of entry)
         sweep = getattr(signal, "sweep_result", None)
 
+        sl = None
         if sweep is not None and sweep.sweep_detected and sweep.target_level > 0:
             if is_long:
                 sl = sweep.target_level * (1 - self.sl_buffer)
-                if sl < entry:
-                    return sl
+                if sl >= entry:
+                    sl = None  # Invalid — SL must be below entry for long
             else:
                 sl = sweep.target_level * (1 + self.sl_buffer)
-                if sl > entry:
-                    return sl
+                if sl <= entry:
+                    sl = None  # Invalid — SL must be above entry for short
+
+        # Enforce minimum SL distance
+        if sl is not None:
+            actual_distance = abs(entry - sl)
+            if actual_distance < min_distance:
+                sl = entry - min_distance if is_long else entry + min_distance
+
+        if sl is not None:
+            return sl
 
         # ATR fallback with wider buffer
         atr = getattr(signal, "atr_1h", 0.0) or 0.0
         if atr > 0:
-            distance = atr * 2.5
+            distance = max(atr * 2.5, min_distance)
         else:
-            distance = entry * 0.04
+            distance = max(entry * 0.04, min_distance)
 
         return entry - distance if is_long else entry + distance
 

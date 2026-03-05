@@ -92,9 +92,12 @@ class Settings(BaseSettings):
     # Flipped shadow bot — paper trades with inverted direction
     flipped_enabled: bool = True
     flipped_leverage: int = 5  # Higher leverage for flipped trades
-    flipped_sl_buffer: float = 0.01  # 1% SL buffer (wider than main 0.5%)
+    flipped_sl_buffer: float = 0.02  # 2% SL buffer (wider than main 0.5%)
+    flipped_min_sl_pct: float = 0.015  # Minimum SL distance = 1.5% of entry price
     flipped_initial_balance: float = 2000.0  # Separate paper balance
     flipped_scan_interval_minutes: int = 15  # Independent scan cycle (not tied to main bot)
+    flipped_max_position_pct: float = 0.15  # 15% of balance as margin per trade (bigger than main)
+    flipped_max_risk_pct: float = 0.15  # 15% of balance at risk per trade (bigger than main)
 
     # One-time force reset — set FORCE_RESET=true to wipe all data on next startup
     force_reset: bool = False
