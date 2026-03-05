@@ -374,7 +374,7 @@
 })();
 
 // --- Net P&L (realized + unrealized) ---
-let _lastRealizedPnl = {{ fs.total_pnl|default(0)|float }};
+let _lastRealizedPnl = {{ flipped_stats.total_pnl|default(0)|float }};
 
 function updateNetPnl(unrealized) {
     const net = _lastRealizedPnl + unrealized;
