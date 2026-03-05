@@ -412,9 +412,10 @@ class PaperExchange:
         min_volume_usd: float = 50_000,
         quote_currencies: list[str] | None = None,
         exclude: list[str] | None = None,
+        quality_filter: bool = True,
     ) -> list[str]:
         """Delegate to live exchange."""
-        return await self.live.get_tradeable_pairs(min_volume_usd, quote_currencies, exclude)
+        return await self.live.get_tradeable_pairs(min_volume_usd, quote_currencies, exclude, quality_filter)
 
     def get_24h_volume(self, symbol: str) -> float:
         """Delegate to live exchange."""

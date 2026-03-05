@@ -385,11 +385,45 @@ class BinanceFuturesClient:
         "FDUSD", "USDP",
     })
 
+    # Top coins by market cap — established projects only, no meme coins
+    QUALITY_BASES = frozenset({
+        # Layer 1s
+        "BTC", "ETH", "SOL", "ADA", "AVAX", "DOT", "ATOM", "NEAR",
+        "SUI", "APT", "SEI", "TIA", "INJ", "FTM", "ALGO", "EGLD",
+        "HBAR", "ICP", "FIL", "TON", "TRX", "XLM", "XRP", "EOS",
+        "FLOW", "MINA", "CELO", "ONE", "KAVA", "VET", "THETA",
+        # Layer 2s / Scaling
+        "MATIC", "POL", "ARB", "OP", "IMX", "STRK", "MNT", "METIS",
+        "ZK", "MANTA", "BLAST",
+        # DeFi
+        "UNI", "AAVE", "MKR", "SNX", "COMP", "CRV", "SUSHI", "YFI",
+        "DYDX", "GMX", "PENDLE", "JUP", "RAY", "JTO", "PYTH",
+        "LDO", "RPL", "FXS", "LQTY", "BAL", "1INCH",
+        # Infrastructure / Oracles
+        "LINK", "GRT", "API3", "BAND", "REN",
+        # Storage / Compute
+        "AR", "RENDER", "AKT", "TAO", "FET", "AGIX",
+        # Gaming / Metaverse
+        "AXS", "SAND", "MANA", "GALA", "ENJ", "RONIN", "PIXEL",
+        # Exchange tokens
+        "BNB", "OKB", "CRO",
+        # Privacy
+        "XMR", "ZEC",
+        # Interoperability
+        "RUNE", "ZRO", "W", "WOO", "STX",
+        # Other established
+        "LTC", "BCH", "ETC", "DOGE", "SHIB", "PEPE",
+        "BONK", "WIF", "FLOKI",  # Top memes only (high liquidity)
+        "ONDO", "ENS", "SSV", "EIGEN", "ETHFI",
+        "WLD", "JASMY", "CHZ", "MASK", "BLUR",
+    })
+
     async def get_tradeable_pairs(
         self,
         min_volume_usd: float = 50_000,
         quote_currencies: list[str] | None = None,
         exclude: list[str] | None = None,
+        quality_filter: bool = True,
     ) -> list[str]:
         if quote_currencies is None:
             quote_currencies = ["USDT"]
@@ -414,6 +448,8 @@ class BinanceFuturesClient:
             base = market.get("base", "")
             if base in self.FIAT_BASES:
                 continue
+            if quality_filter and base not in self.QUALITY_BASES:
+                continue
             candidates.append(symbol)
 
         if not candidates:
@@ -432,7 +468,7 @@ class BinanceFuturesClient:
                 filtered.append(symbol)
                 volume_map[symbol] = quote_vol
 
-        logger.info("futures_pairs_scanned", total_candidates=len(candidates), filtered=len(filtered), min_volume=min_volume_usd)
+        logger.info("futures_pairs_scanned", total_candidates=len(candidates), filtered=len(filtered), min_volume=min_volume_usd, quality_filter=quality_filter)
         self._last_volume_map = volume_map
         return sorted(filtered)
 

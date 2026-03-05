@@ -363,6 +363,7 @@ class TradingEngine:
             pairs = await self.exchange.get_tradeable_pairs(
                 min_volume_usd=self.config.min_volume_usd,
                 quote_currencies=self.config.quote_currencies,
+                quality_filter=self.config.quality_filter,
             )
         except Exception as e:
             logger.error("pair_scan_failed", error=str(e))

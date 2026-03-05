@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     # Scanning
     scan_interval_minutes: int = 15  # Scan every 15 min to catch pullback entries
     min_volume_usd: float = 20_000_000  # $20M min 24h volume — filters to top ~100 coins
+    quality_filter: bool = True  # Only scan established coins (QUALITY_BASES whitelist)
     max_position_volume_pct: float = 0.001  # Position size must be < 0.1% of 24h volume
     max_spread_pct: float = 0.003  # Max 0.3% bid-ask spread — skip illiquid pairs
     min_ob_depth_usd: float = 100.0  # Min $100 depth at best bid/ask level
