@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import logging
 import traceback
 from datetime import datetime, timezone
 
@@ -170,6 +171,11 @@ class FlippedTrader:
         all_signals: list[SignalCandidate] = []
         total = len(pairs)
 
+        # Suppress noisy sweep_detected logs during flipped scans (floods log buffer)
+        sweep_logger = logging.getLogger("src.strategy.sweep_detector")
+        prev_level = sweep_logger.level
+        sweep_logger.setLevel(logging.WARNING)
+
         for batch_idx in range(0, total, BATCH_SIZE):
             batch = pairs[batch_idx : batch_idx + BATCH_SIZE]
 
@@ -185,6 +191,9 @@ class FlippedTrader:
             gc.collect()
             if batch_idx + BATCH_SIZE < total:
                 await asyncio.sleep(BATCH_DELAY)
+
+        # Restore sweep detector logging
+        sweep_logger.setLevel(prev_level)
 
         # Sort by score descending
         all_signals.sort(key=lambda s: s.score, reverse=True)
