@@ -2,11 +2,13 @@
 {% block title %}Tarakta - Flipped Trader{% endblock %}
 
 {% block content %}
+<!-- Page Header -->
 <div class="page-header" style="display:flex; justify-content:space-between; align-items:flex-start;">
     <div>
         <h1>Flipped Shadow Trader</h1>
         <p style="color:var(--text-muted); font-size:0.85rem; margin-top:0.25rem;">
-            Same signals, inverted direction. Paper trading with {{ config.flipped_leverage }}x leverage.
+            Inverted direction &bull; {{ flipped_leverage }}x leverage &bull;
+            Sweep + displacement only (simplified strategy)
         </p>
     </div>
     <div class="scan-timer" id="flippedScanTimer" style="min-width:120px;">
@@ -67,175 +69,272 @@
     </div>
 </div>
 
-<!-- Flipped Stats -->
+<!-- Stat Cards -->
+{% set balance = flipped_balance|float %}
+{% set ns = namespace(allocated=0.0) %}
+{% if flipped_open %}
+{% for t in flipped_open %}
+    {% set lev = t.leverage|default(1)|int %}
+    {% set qty = (t.entry_quantity or 0)|float %}
+    {% set ep = (t.entry_price or 0)|float %}
+    {% set notional = qty * ep %}
+    {% if lev > 1 %}
+        {% set ns.allocated = ns.allocated + notional / lev %}
+    {% else %}
+        {% set ns.allocated = ns.allocated + notional %}
+    {% endif %}
+{% endfor %}
+{% endif %}
+{% set allocated = ns.allocated %}
+{% set drawdown = ((flipped_peak - balance) / flipped_peak * 100) if flipped_peak > 0 else 0 %}
+
 <div class="stats-grid">
     <div class="stat-card">
         <div class="stat-label">Balance</div>
-        <div class="stat-value sm">${{ flipped_balance|round(2) }}</div>
+        <div class="stat-value" id="equity-value">${{ "%.2f"|format(balance) }}</div>
+        <div class="stat-sub">of ${{ "%.2f"|format(flipped_initial_balance|float) }} initial</div>
     </div>
-    <div class="stat-card">
-        <div class="stat-label">Peak</div>
-        <div class="stat-value sm">${{ flipped_peak|round(2) }}</div>
+    <div class="stat-card" style="border-left: 3px solid #22c55e;">
+        <div class="stat-label">Available Cash</div>
+        <div class="stat-value sm" id="available-value">${{ "%.2f"|format(balance - allocated) }}</div>
+        <div class="stat-sub">free to trade</div>
+    </div>
+    <div class="stat-card" style="border-left: 3px solid #f59e0b;">
+        <div class="stat-label">Allocated</div>
+        <div class="stat-value sm" id="allocated-value">${{ "%.2f"|format(allocated) }}</div>
+        <div class="stat-sub">across {{ flipped_open|length }} position{{ 's' if (flipped_open|length) != 1 else '' }}</div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Daily P&L</div>
-        <div class="stat-value sm {% if fs.daily_pnl >= 0 %}positive{% else %}negative{% endif %}">
+        <div class="stat-value sm {{ 'positive' if fs.daily_pnl >= 0 else 'negative' }}" id="daily-pnl-value">
             {% if fs.daily_pnl >= 0 %}+{% endif %}${{ fs.daily_pnl|round(2) }}
         </div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">Wins / Losses</div>
-        <div class="stat-value sm">
-            <span class="positive">{{ fs.wins }}</span> / <span class="negative">{{ fs.losses }}</span>
+        <div class="stat-label">Total P&L</div>
+        <div class="stat-value sm {{ 'positive' if fs.total_pnl >= 0 else 'negative' }}" id="total-pnl-value">
+            {% if fs.total_pnl >= 0 %}+{% endif %}${{ fs.total_pnl|round(2) }}
         </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Drawdown</div>
+        <div class="stat-value sm {{ 'negative' if drawdown > 5 else '' }}">
+            {{ "%.1f"|format(drawdown) }}%
+        </div>
+        <div class="stat-sub">peak ${{ "%.2f"|format(flipped_peak|float) }}</div>
+    </div>
+    <div class="stat-card" id="unrealized-card" style="border-left: 3px solid #22c55e;">
+        <div class="stat-label">Unrealized Profit</div>
+        <div class="stat-value sm positive" id="unrealized-profit-value">--</div>
+        <div class="stat-sub" id="unrealized-profit-sub">Loading...</div>
+    </div>
+    <div class="stat-card" id="unrealized-loss-card" style="border-left: 3px solid #ef4444;">
+        <div class="stat-label">Unrealized Loss</div>
+        <div class="stat-value sm negative" id="unrealized-loss-value">--</div>
+        <div class="stat-sub" id="unrealized-loss-sub">Loading...</div>
+    </div>
+    <div class="stat-card" id="net-pnl-card" style="border-left: 3px solid #8b5cf6;">
+        <div class="stat-label">Net P&L</div>
+        <div class="stat-value sm" id="net-pnl-value">--</div>
+        <div class="stat-sub" id="net-pnl-sub">realized + unrealized</div>
+    </div>
+    {% if fs.total > 0 %}
+    <div class="stat-card">
+        <div class="stat-label">Win Rate</div>
+        <div class="stat-value sm">{{ "%.0f"|format(fs.win_rate * 100) }}%</div>
+        <div class="stat-sub">{{ fs.wins }}W / {{ fs.losses }}L ({{ fs.total }} trades)</div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Avg P&L</div>
-        <div class="stat-value sm {% if fs.avg_pnl >= 0 %}positive{% else %}negative{% endif %}">
-            {% if fs.avg_pnl >= 0 %}+{% endif %}${{ fs.avg_pnl|round(2) }}
+        <div class="stat-value sm {{ 'positive' if fs.avg_pnl >= 0 else 'negative' }}">
+            {{ "+" if fs.avg_pnl >= 0 else "" }}${{ "%.2f"|format(fs.avg_pnl) }}
         </div>
     </div>
-    <div class="stat-card">
-        <div class="stat-label">Open Positions</div>
-        <div class="stat-value sm">{{ flipped_open|length }}</div>
-    </div>
+    {% endif %}
 </div>
 
 <!-- Open Positions -->
-{% if flipped_open %}
-<h3 style="margin:1.5rem 0 0.75rem; color:var(--text-secondary);">Open Positions</h3>
-<div class="table-wrapper">
-    <table class="data-table">
-        <thead>
-            <tr>
-                <th>Symbol</th>
-                <th>Dir</th>
-                <th>Entry</th>
-                <th>SL</th>
-                <th>TP</th>
-                <th>Size</th>
-                <th>Margin</th>
-                <th>Score</th>
-                <th>Opened</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for t in flipped_open %}
-            <tr>
-                <td><strong>{{ t.symbol|replace(':USDT', '') }}</strong></td>
-                <td>
-                    {% if t.direction == 'long' %}
-                        <span class="positive">LONG</span>
-                    {% else %}
-                        <span class="negative">SHORT</span>
-                    {% endif %}
-                </td>
-                <td>{{ t.entry_price }}</td>
-                <td>{{ t.stop_loss }}</td>
-                <td>{{ t.take_profit or '---' }}</td>
-                <td>${{ (t.entry_cost_usd or 0)|round(2) }}</td>
-                <td>${{ (t.margin_used or 0)|round(2) }}</td>
-                <td>{{ t.confluence_score or '---' }}</td>
-                <td>{{ t.entry_time[:16] if t.entry_time else '---' }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+<div class="panel">
+    <div class="panel-header">
+        <h2>Open Positions
+            <span class="account-badge">FLIPPED {{ flipped_leverage }}x</span>
+        </h2>
+        <div style="display:flex; align-items:center; gap:8px;">
+            <span class="badge text-blue">{{ flipped_open|length }}</span>
+            <button id="refresh-btn" class="btn" onclick="manualRefresh()" style="font-size:0.8rem; padding:4px 10px;">Refresh Prices</button>
+            <span id="last-updated" class="text-muted" style="font-size:0.7rem;"></span>
+        </div>
+    </div>
+    {% if flipped_open %}
+    <div class="panel-body no-pad">
+        <div class="overflow-x">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Dir</th>
+                        <th>Entry</th>
+                        <th>Current</th>
+                        <th>P&L</th>
+                        <th>SL</th>
+                        <th>TP</th>
+                        <th>Size</th>
+                        <th>Score</th>
+                    </tr>
+                </thead>
+                <tbody id="positions-tbody">
+                    {% for t in flipped_open %}
+                    <tr data-symbol="{{ t.symbol }}" data-trade-id="{{ t.id }}">
+                        <td><strong>{{ t.symbol|replace(':USDT', '') }}</strong></td>
+                        <td>
+                            <span class="dir-badge {{ t.direction|default('long') }}">
+                                {{ t.direction|default('long') }}{% if (t.leverage|default(1)|int) > 1 %} {{ t.leverage }}x{% endif %}
+                            </span>
+                        </td>
+                        <td class="mono">${{ "%.4f"|format(t.entry_price|float) }}</td>
+                        <td class="mono pos-current-price">--</td>
+                        <td class="mono pos-pnl">--</td>
+                        <td class="mono negative">${{ "%.4f"|format(t.stop_loss|float) }}</td>
+                        <td class="mono">
+                            <span class="positive">{{ ("$%.4f"|format(t.take_profit|float)) if t.take_profit else '-' }}</span>
+                        </td>
+                        <td class="mono">${{ "%.2f"|format(t.entry_cost_usd|default(0)|float) }}</td>
+                        <td>
+                            <div class="score-bar">
+                                <span class="score-num {{ 'positive' if (t.confluence_score|int) >= 65 else ('text-orange' if (t.confluence_score|int) >= 50 else 'negative') }}">{{ t.confluence_score }}</span>
+                                <div class="bar-track">
+                                    <div class="bar-fill {{ 'high' if (t.confluence_score|int) >= 65 else ('medium' if (t.confluence_score|int) >= 50 else 'low') }}"
+                                         style="width: {{ t.confluence_score|int }}%"></div>
+                                </div>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <div class="empty-icon">---</div>
+        <p>No open flipped positions. The shadow bot will scan and enter trades on the next cycle.</p>
+    </div>
+    {% endif %}
 </div>
-{% endif %}
 
 <!-- Tab navigation for trade history -->
-<div class="filter-tabs" style="margin-top:1.5rem;">
-    <a href="/flipped?status=all" class="{{ 'active' if current_status == 'all' else '' }}">All Trades</a>
-    <a href="/flipped?status=closed" class="{{ 'active' if current_status == 'closed' else '' }}">Closed</a>
-    <a href="/flipped?status=open" class="{{ 'active' if current_status == 'open' else '' }}">Open</a>
-</div>
-
-<!-- Trade History -->
-<div class="table-wrapper">
-    <table class="data-table">
-        <thead>
-            <tr>
-                <th>Symbol</th>
-                <th>Dir</th>
-                <th>Status</th>
-                <th>Entry</th>
-                <th>Exit</th>
-                <th>P&L</th>
-                <th>R:R</th>
-                <th>Reason</th>
-                <th>Time</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% if flipped_trades %}
-                {% for t in flipped_trades %}
-                <tr>
-                    <td><strong>{{ t.symbol|replace(':USDT', '') }}</strong></td>
-                    <td>
-                        {% if t.direction == 'long' %}
-                            <span class="positive">L</span>
-                        {% else %}
-                            <span class="negative">S</span>
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if t.status == 'open' %}
-                            <span style="color:var(--accent);">OPEN</span>
-                        {% else %}
-                            CLOSED
-                        {% endif %}
-                    </td>
-                    <td>{{ t.entry_price }}</td>
-                    <td>{{ t.exit_price or '---' }}</td>
-                    <td class="{% if (t.pnl_usd or 0) >= 0 %}positive{% else %}negative{% endif %}">
-                        {% if t.pnl_usd is not none %}
-                            {% if t.pnl_usd >= 0 %}+{% endif %}${{ t.pnl_usd|round(2) }}
-                        {% else %}
-                            ---
-                        {% endif %}
-                    </td>
-                    <td>{{ t.risk_reward or '---' }}</td>
-                    <td>{{ t.exit_reason or '---' }}</td>
-                    <td>{{ t.entry_time[:16] if t.entry_time else '---' }}</td>
-                </tr>
-                {% endfor %}
-            {% else %}
-                <tr>
-                    <td colspan="9" style="text-align:center; color:var(--text-muted); padding:2rem;">
-                        No flipped trades yet. The shadow bot will start placing paper trades on the next scan cycle.
-                    </td>
-                </tr>
-            {% endif %}
-        </tbody>
-    </table>
+<div class="panel">
+    <div class="panel-header">
+        <h2>Trade History</h2>
+        <div class="filter-tabs" style="margin:0;">
+            <a href="/flipped?status=all" class="{{ 'active' if current_status == 'all' else '' }}">All</a>
+            <a href="/flipped?status=closed" class="{{ 'active' if current_status == 'closed' else '' }}">Closed</a>
+            <a href="/flipped?status=open" class="{{ 'active' if current_status == 'open' else '' }}">Open</a>
+        </div>
+    </div>
+    {% if flipped_trades %}
+    <div class="panel-body no-pad">
+        <div class="overflow-x">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Dir</th>
+                        <th>Status</th>
+                        <th>Entry</th>
+                        <th>Exit</th>
+                        <th>P&L</th>
+                        <th>R:R</th>
+                        <th>Reason</th>
+                        <th>Time</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for t in flipped_trades %}
+                    <tr>
+                        <td><strong>{{ t.symbol|replace(':USDT', '') }}</strong></td>
+                        <td>
+                            <span class="dir-badge {{ t.direction|default('long') }}">
+                                {{ t.direction|default('long') }}
+                            </span>
+                        </td>
+                        <td>
+                            {% if t.status == 'open' %}
+                                <span style="color:var(--accent);">OPEN</span>
+                            {% else %}
+                                CLOSED
+                            {% endif %}
+                        </td>
+                        <td class="mono">${{ "%.4f"|format(t.entry_price|float) }}</td>
+                        <td class="mono">{{ ("$%.4f"|format(t.exit_price|float)) if t.exit_price else '---' }}</td>
+                        <td class="mono {% if (t.pnl_usd or 0)|float >= 0 %}positive{% else %}negative{% endif %}">
+                            {% if t.pnl_usd is not none %}
+                                {% if t.pnl_usd >= 0 %}+{% endif %}${{ t.pnl_usd|round(2) }}
+                            {% else %}
+                                ---
+                            {% endif %}
+                        </td>
+                        <td>{{ t.risk_reward or '---' }}</td>
+                        <td>{{ t.exit_reason or '---' }}</td>
+                        <td class="text-muted">{{ t.entry_time[:16] if t.entry_time else '---' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <p>No flipped trades yet. The shadow bot will start placing paper trades on the next scan cycle.</p>
+    </div>
+    {% endif %}
 </div>
 
 {% if fs.exit_reasons %}
-<h3 style="margin:1.5rem 0 0.75rem; color:var(--text-secondary);">Exit Reasons</h3>
-<div class="table-wrapper">
-    <table class="data-table" style="max-width:400px;">
-        <thead><tr><th>Reason</th><th>Count</th></tr></thead>
-        <tbody>
-            {% for reason, count in fs.exit_reasons.items() %}
-            <tr>
-                <td>{{ reason }}</td>
-                <td>{{ count }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+<div class="panel">
+    <div class="panel-header">
+        <h2>Exit Reasons</h2>
+    </div>
+    <div class="panel-body no-pad">
+        <table class="data-table" style="max-width:400px;">
+            <thead><tr><th>Reason</th><th>Count</th></tr></thead>
+            <tbody>
+                {% for reason, count in fs.exit_reasons.items() %}
+                <tr>
+                    <td>{{ reason }}</td>
+                    <td>{{ count }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
 </div>
 {% endif %}
 
+<!-- Strategy Info -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>Strategy Info</h2>
+    </div>
+    <div class="panel-body" style="font-size:0.85rem; color:var(--text-secondary);">
+        <p><strong>Flipped bot uses a DIFFERENT, SIMPLER strategy than the main bot:</strong></p>
+        <ul style="margin:0.5rem 0; padding-left:1.5rem;">
+            <li><strong>Signals:</strong> Sweep + Displacement only (threshold 60) &mdash; no pullback gate</li>
+            <li><strong>No leverage intelligence:</strong> Does not use funding rate data</li>
+            <li><strong>No quality whitelist:</strong> Scans ALL tradeable pairs</li>
+            <li><strong>Direction flip:</strong> Bullish signals traded as SHORT, bearish as LONG</li>
+            <li><strong>Independent scan:</strong> Runs its own 15-minute cycle, separate from main bot</li>
+        </ul>
+        <p style="color:var(--text-muted); margin-top:0.5rem;">
+            Main bot: TTC strategy (sweep + displacement + pullback, threshold 70, quality whitelist, leverage intelligence)
+        </p>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-// Auto-refresh every 60 seconds
-setTimeout(function() { window.location.reload(); }, 60000);
-
-// Flipped scan timer
+// --- Flipped scan timer ---
 (function() {
     const INTERVAL = {{ flipped_scan_interval }};
     const lastScan = "{{ flipped_last_scan or '' }}";
@@ -251,7 +350,6 @@ setTimeout(function() { window.location.reload(); }, 60000);
         if (lastScan) {
             const lastMs = new Date(lastScan).getTime();
             nextScanMs = lastMs + intervalMs;
-            // If next scan is in the past, show "scanning..."
             if (nextScanMs < now.getTime()) {
                 timerEl.textContent = 'scanning...';
                 timerEl.style.color = '#e040fb';
@@ -259,7 +357,6 @@ setTimeout(function() { window.location.reload(); }, 60000);
                 return;
             }
         } else {
-            // No scan yet — estimate from interval alignment
             nextScanMs = Math.ceil(now.getTime() / intervalMs) * intervalMs;
         }
 
@@ -275,5 +372,217 @@ setTimeout(function() { window.location.reload(); }, 60000);
     update();
     setInterval(update, 1000);
 })();
+
+// --- Net P&L (realized + unrealized) ---
+let _lastRealizedPnl = {{ fs.total_pnl|default(0)|float }};
+
+function updateNetPnl(unrealized) {
+    const net = _lastRealizedPnl + unrealized;
+    const netEl = document.getElementById('net-pnl-value');
+    const netSub = document.getElementById('net-pnl-sub');
+    if (!netEl) return;
+    const s = net >= 0 ? '+' : '';
+    netEl.textContent = s + '$' + net.toFixed(2);
+    netEl.className = 'stat-value sm ' + (net >= 0 ? 'positive' : 'negative');
+    const rSign = _lastRealizedPnl >= 0 ? '+' : '';
+    const uSign = unrealized >= 0 ? '+' : '';
+    netSub.textContent = rSign + '$' + _lastRealizedPnl.toFixed(2) + ' realized, ' + uSign + '$' + unrealized.toFixed(2) + ' unrealized';
+}
+updateNetPnl(0);
+
+// --- Unrealized P&L + position price refresh ---
+let _refreshing = false;
+let _lastPnlData = null;
+let _lastPnlTime = 0;
+
+function renderPnlData(data) {
+    const profitEl = document.getElementById('unrealized-profit-value');
+    const profitSub = document.getElementById('unrealized-profit-sub');
+    const lossEl = document.getElementById('unrealized-loss-value');
+    const lossSub = document.getElementById('unrealized-loss-sub');
+    const ts = document.getElementById('last-updated');
+
+    if (!data || !data.positions || data.positions.length === 0) {
+        if (profitEl) profitEl.textContent = '$0.00';
+        if (profitSub) profitSub.textContent = 'No open positions';
+        if (lossEl) lossEl.textContent = '$0.00';
+        if (lossSub) lossSub.textContent = 'No open positions';
+        updateNetPnl(0);
+        return;
+    }
+
+    // 1. Update the position table
+    const posById = {};
+    data.positions.forEach(p => { posById[p.trade_id] = p; });
+
+    const rows = document.querySelectorAll('#positions-tbody tr[data-trade-id]');
+    rows.forEach(row => {
+        const tradeId = row.getAttribute('data-trade-id');
+        const pos = posById[tradeId];
+        if (!pos) return;
+
+        const priceCell = row.querySelector('.pos-current-price');
+        const pnlCell = row.querySelector('.pos-pnl');
+
+        if (pos.current_price !== null) {
+            priceCell.textContent = '$' + pos.current_price.toFixed(4);
+            const pnlSign = pos.unrealized_pnl >= 0 ? '+' : '';
+            pnlCell.textContent = pnlSign + '$' + pos.unrealized_pnl.toFixed(2) + ' (' + (pos.unrealized_pnl >= 0 ? '+' : '') + pos.unrealized_pct.toFixed(1) + '%)';
+            pnlCell.className = 'mono pos-pnl ' + (pos.unrealized_pnl >= 0 ? 'positive' : 'negative');
+        } else {
+            priceCell.textContent = 'err';
+            pnlCell.textContent = '--';
+            pnlCell.className = 'mono pos-pnl';
+        }
+    });
+
+    // 2. Compute card totals
+    let totalProfit = 0, totalLoss = 0, profitCount = 0, lossCount = 0;
+    data.positions.forEach(p => {
+        if (p.current_price === null) return;
+        if (p.unrealized_pnl >= 0) {
+            totalProfit += p.unrealized_pnl;
+            profitCount++;
+        } else {
+            totalLoss += p.unrealized_pnl;
+            lossCount++;
+        }
+    });
+
+    if (profitEl) {
+        profitEl.textContent = '+$' + totalProfit.toFixed(2);
+        profitEl.className = 'stat-value sm positive';
+    }
+    if (profitSub) profitSub.textContent = profitCount + ' winning position' + (profitCount !== 1 ? 's' : '');
+
+    if (lossEl) {
+        lossEl.textContent = '$' + totalLoss.toFixed(2);
+        lossEl.className = 'stat-value sm negative';
+    }
+    if (lossSub) lossSub.textContent = lossCount + ' losing position' + (lossCount !== 1 ? 's' : '');
+
+    // 3. Net P&L
+    updateNetPnl(totalProfit + totalLoss);
+
+    // 4. Allocated / available
+    let totalAllocated = 0;
+    data.positions.forEach(p => { totalAllocated += (p.margin_used || p.cost_usd || 0); });
+    const allocEl = document.getElementById('allocated-value');
+    if (allocEl) allocEl.textContent = '$' + totalAllocated.toFixed(2);
+
+    const eqText = (document.getElementById('equity-value') || {}).textContent || '';
+    const eqVal = parseFloat(eqText.replace(/[^0-9.\-]/g, '')) || 0;
+    const avEl = document.getElementById('available-value');
+    if (avEl) avEl.textContent = '$' + (eqVal - totalAllocated).toFixed(2);
+
+    // 5. Price error indicator
+    const errCount = data.positions.filter(p => p.current_price === null).length;
+    if (errCount > 0) {
+        const errMsg = ' (' + errCount + ' price err)';
+        if (profitSub) profitSub.textContent += errMsg;
+        if (lossSub) lossSub.textContent += errMsg;
+    }
+
+    // 6. Timestamp
+    if (ts) {
+        const age = Math.round((Date.now() - _lastPnlTime) / 1000);
+        if (age <= 15) {
+            ts.textContent = 'Updated ' + new Date(_lastPnlTime).toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+            ts.className = 'text-muted';
+        } else {
+            ts.textContent = 'Stale (' + age + 's ago)';
+            ts.className = 'text-muted text-warn';
+        }
+    }
+}
+
+async function loadUnrealizedPnl() {
+    if (_refreshing) return;
+    _refreshing = true;
+    const btn = document.getElementById('refresh-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Refreshing...'; }
+
+    try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 25000);
+        const resp = await fetch('/api/flipped/unrealized-pnl', { signal: controller.signal });
+        clearTimeout(timeout);
+        const data = await resp.json();
+
+        if (data.error) {
+            const profitSub = document.getElementById('unrealized-profit-sub');
+            if (profitSub) profitSub.textContent = data.error + ' - retrying...';
+            if (_lastPnlData) renderPnlData(_lastPnlData);
+            return;
+        }
+
+        _lastPnlData = data;
+        _lastPnlTime = Date.now();
+        renderPnlData(data);
+
+    } catch (e) {
+        console.error('Flipped unrealized P&L load failed:', e);
+        if (_lastPnlData) {
+            renderPnlData(_lastPnlData);
+        } else {
+            const ps = document.getElementById('unrealized-profit-sub');
+            const ls = document.getElementById('unrealized-loss-sub');
+            if (ps) ps.textContent = 'Connecting...';
+            if (ls) ls.textContent = '';
+        }
+    } finally {
+        _refreshing = false;
+        if (btn) { btn.disabled = false; btn.textContent = 'Refresh Prices'; }
+    }
+}
+
+function manualRefresh() {
+    loadUnrealizedPnl();
+}
+
+loadUnrealizedPnl();
+// Auto-refresh prices every 10s
+setInterval(loadUnrealizedPnl, 10000);
+
+// Soft-refresh stat cards every 30s. Full reload if position count changes.
+let _knownPositionCount = document.querySelectorAll('#positions-tbody tr[data-trade-id]').length;
+
+async function softRefreshStats() {
+    try {
+        const [statsResp, openResp] = await Promise.all([
+            fetch('/api/flipped/stats'),
+            fetch('/api/flipped/trades/open'),
+        ]);
+        const stats = await statsResp.json();
+        const openData = await openResp.json();
+
+        // Update P&L stat cards from DB
+        const dpEl = document.getElementById('daily-pnl-value');
+        if (dpEl) {
+            const dp = parseFloat(stats.daily_pnl || 0);
+            dpEl.textContent = (dp >= 0 ? '+' : '') + '$' + dp.toFixed(2);
+            dpEl.className = 'stat-value sm ' + (dp >= 0 ? 'positive' : 'negative');
+        }
+
+        const tpEl = document.getElementById('total-pnl-value');
+        if (tpEl) {
+            const tp = parseFloat(stats.total_pnl || 0);
+            tpEl.textContent = (tp >= 0 ? '+' : '') + '$' + tp.toFixed(2);
+            tpEl.className = 'stat-value sm ' + (tp >= 0 ? 'positive' : 'negative');
+            _lastRealizedPnl = tp;
+        }
+
+        // Check if positions changed — full reload
+        const openTrades = openData.trades || [];
+        const serverCount = openTrades.length;
+        if (serverCount !== _knownPositionCount) {
+            location.reload();
+            return;
+        }
+    } catch (e) {
+        console.error('Soft refresh failed:', e);
+    }
+}
+setInterval(softRefreshStats, 30000);
 </script>
 {% endblock %}

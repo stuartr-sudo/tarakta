@@ -103,6 +103,12 @@ class FlippedTrader:
             threshold=FLIPPED_THRESHOLD,
         )
 
+        # Reconcile in-memory positions with DB (handles restarts)
+        await self._reconcile_from_db()
+
+        # Start independent position monitor (every 60s)
+        monitor_task = asyncio.create_task(self._monitor_loop())
+
         # Run an immediate scan on startup
         try:
             await self._run_scan()
@@ -115,6 +121,7 @@ class FlippedTrader:
                 await self._run_scan()
             except asyncio.CancelledError:
                 logger.info("flipped_loop_cancelled")
+                monitor_task.cancel()
                 break
             except Exception as e:
                 logger.error(
@@ -123,6 +130,83 @@ class FlippedTrader:
                     stack=traceback.format_exc()[:500],
                 )
                 await asyncio.sleep(60)  # Back off on error
+
+    async def _monitor_loop(self) -> None:
+        """Independent position monitor — checks SL/TP every 60 seconds.
+
+        This runs alongside the main engine's _monitor_tick as a safety net.
+        Positions are checked here regardless of the main engine's state.
+        """
+        logger.info("flipped_monitor_loop_started")
+        while True:
+            try:
+                await asyncio.sleep(60)
+                if self.positions:
+                    await self.monitor_positions()
+                    # Persist state after monitoring (in case positions were closed)
+                    await self._save_state()
+            except asyncio.CancelledError:
+                logger.info("flipped_monitor_loop_cancelled")
+                break
+            except Exception as e:
+                logger.error("flipped_monitor_loop_error", error=str(e))
+
+    async def _reconcile_from_db(self) -> None:
+        """Ensure in-memory positions match DB open trades.
+
+        On restart, config_overrides might be stale. This queries the DB for
+        open flipped_paper trades and adds any missing positions to memory.
+        """
+        try:
+            open_trades = await self.repo.get_open_trades(mode="flipped_paper")
+            if not open_trades:
+                logger.info("flipped_reconcile_no_open_trades")
+                return
+
+            added = 0
+            for trade in open_trades:
+                symbol = trade["symbol"]
+                if symbol in self.positions:
+                    continue  # Already tracked
+
+                # Reconstruct Position from DB record
+                try:
+                    entry_time = datetime.now(timezone.utc)
+                    if trade.get("entry_time"):
+                        entry_time = datetime.fromisoformat(str(trade["entry_time"]))
+
+                    pos = Position(
+                        trade_id=trade.get("id", ""),
+                        symbol=symbol,
+                        entry_price=float(trade.get("entry_price", 0)),
+                        quantity=float(trade.get("entry_quantity", 0)),
+                        stop_loss=float(trade.get("stop_loss", 0)),
+                        take_profit=float(trade.get("take_profit")) if trade.get("take_profit") else None,
+                        high_water_mark=float(trade.get("entry_price", 0)),
+                        entry_time=entry_time,
+                        cost_usd=float(trade.get("entry_cost_usd", 0)),
+                        direction=trade.get("direction", "long"),
+                        leverage=int(trade.get("leverage", 1) or 1),
+                        margin_used=float(trade.get("margin_used", 0) or 0),
+                        liquidation_price=float(trade.get("liquidation_price", 0) or 0),
+                        original_quantity=float(trade.get("original_quantity") or trade.get("entry_quantity", 0)),
+                        original_stop_loss=float(trade.get("original_stop_loss") or trade.get("stop_loss", 0)),
+                        confluence_score=float(trade.get("confluence_score", 0) or 0),
+                    )
+                    self.positions[symbol] = pos
+                    added += 1
+                except (ValueError, TypeError, KeyError) as e:
+                    logger.warning("flipped_reconcile_failed", symbol=symbol, error=str(e))
+
+            if added > 0:
+                logger.info(
+                    "flipped_reconcile_added",
+                    added=added,
+                    total_open=len(self.positions),
+                    db_open=len(open_trades),
+                )
+        except Exception as e:
+            logger.error("flipped_reconcile_error", error=str(e))
 
     async def _run_scan(self) -> None:
         """Run a full scan with simplified strategy, then enter flipped trades."""
@@ -505,6 +589,9 @@ class FlippedTrader:
             return
 
         atr_values = atr_values or {}
+        checked = 0
+        closed = 0
+        ticker_errors = 0
 
         # Compute ATR for open positions if not provided
         if self.candle_manager:
@@ -523,7 +610,10 @@ class FlippedTrader:
             try:
                 ticker = await exchange.fetch_ticker(symbol)
                 current_price = float(ticker["last"])
-            except Exception:
+                checked += 1
+            except Exception as e:
+                ticker_errors += 1
+                logger.warning("flipped_ticker_failed", symbol=symbol, error=str(e)[:100])
                 continue
 
             # Update high water mark
@@ -576,7 +666,26 @@ class FlippedTrader:
                                 exit_reason = "trailing_stop"
 
             if exit_reason:
+                logger.info(
+                    "flipped_exit_triggered",
+                    symbol=symbol,
+                    reason=exit_reason,
+                    direction=pos.direction,
+                    price=current_price,
+                    sl=pos.stop_loss,
+                    tp=pos.take_profit,
+                )
                 await self._close_position(symbol, current_price, exit_reason)
+                closed += 1
+
+        if checked > 0 or ticker_errors > 0:
+            logger.info(
+                "flipped_monitor_tick",
+                checked=checked,
+                closed=closed,
+                errors=ticker_errors,
+                open=len(self.positions),
+            )
 
     async def _close_position(self, symbol: str, exit_price: float, reason: str) -> None:
         """Simulate closing a flipped position."""
@@ -627,6 +736,29 @@ class FlippedTrader:
             pnl=round(pnl, 2),
             balance=round(self.balance, 2),
         )
+
+    # ------------------------------------------------------------------
+    # State persistence (independent of main engine)
+    # ------------------------------------------------------------------
+
+    async def _save_state(self) -> None:
+        """Persist flipped state to DB (config_overrides JSONB).
+
+        Called after the independent monitor loop closes positions, so state
+        is saved even if the main engine's _persist_state hasn't run yet.
+        """
+        try:
+            state = await self.repo.get_engine_state()
+            if not state:
+                return
+            overrides = state.get("config_overrides") or {}
+            if not isinstance(overrides, dict):
+                overrides = {}
+            overrides["flipped_trader"] = self.to_state_dict()
+            state["config_overrides"] = overrides
+            await self.repo.upsert_engine_state(state)
+        except Exception as e:
+            logger.warning("flipped_save_state_failed", error=str(e))
 
     # ------------------------------------------------------------------
     # SL / TP calculation

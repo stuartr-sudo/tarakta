@@ -331,6 +331,103 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             "details": closed,
         }
 
+    # --- Flipped Trader API ---
+
+    @router.get("/flipped/unrealized-pnl")
+    @login_required
+    async def get_flipped_unrealized_pnl(request: Request):
+        """Fetch live prices for open flipped positions and compute unrealized P&L."""
+        if not _dash_exchange:
+            return {"positions": [], "total_unrealized": 0, "error": "No exchange configured"}
+
+        try:
+            trades = await repo.get_open_trades(mode="flipped_paper")
+        except Exception as e:
+            logger.error("flipped_unrealized_pnl_db_failed", error=str(e))
+            return {"positions": [], "total_unrealized": 0, "error": "DB error"}
+
+        if not trades:
+            return {"positions": [], "total_unrealized": 0}
+
+        positions = []
+        total_unrealized = 0.0
+        unique_symbols = list({t["symbol"] for t in trades})
+
+        price_map: dict[str, float | None] = {}
+        try:
+            tickers = await asyncio.wait_for(
+                _dash_exchange.fetch_tickers(unique_symbols), timeout=20,
+            )
+            for sym in unique_symbols:
+                t = tickers.get(sym)
+                price_map[sym] = float(t["last"]) if t and t.get("last") else None
+        except Exception as e:
+            logger.warning("flipped_batch_tickers_failed", error=str(e))
+            async def _fetch_one(symbol: str) -> float | None:
+                try:
+                    ticker = await _dash_exchange.fetch_ticker(symbol)
+                    return float(ticker["last"])
+                except Exception:
+                    return None
+            results = await asyncio.gather(*[_fetch_one(s) for s in unique_symbols])
+            price_map = dict(zip(unique_symbols, results))
+
+        for trade in trades:
+            symbol = trade["symbol"]
+            current_price = price_map.get(symbol)
+            entry_price = float(trade.get("entry_price", 0))
+            quantity = float(trade.get("entry_quantity", 0))
+            direction = trade.get("direction", "long")
+            cost_usd = float(trade.get("entry_cost_usd", 0))
+
+            if current_price is not None:
+                if direction == "short":
+                    unrealized = (entry_price - current_price) * quantity
+                else:
+                    unrealized = (current_price - entry_price) * quantity
+            else:
+                unrealized = 0
+
+            leverage = int(trade.get("leverage", 1) or 1)
+            current_notional = quantity * entry_price
+            effective_cost = current_notional / leverage if leverage > 1 else current_notional
+
+            positions.append({
+                "symbol": symbol,
+                "direction": direction,
+                "entry_price": entry_price,
+                "current_price": current_price,
+                "quantity": quantity,
+                "cost_usd": cost_usd,
+                "stop_loss": float(trade.get("stop_loss", 0)),
+                "take_profit": float(trade.get("take_profit", 0)) if trade.get("take_profit") else None,
+                "margin_used": round(effective_cost, 4),
+                "unrealized_pnl": round(unrealized, 4),
+                "unrealized_pct": round(unrealized / effective_cost * 100, 2) if effective_cost > 0 else 0,
+                "leverage": leverage,
+                "trade_id": trade.get("id"),
+                "confluence_score": float(trade.get("confluence_score", 0) or 0),
+                "entry_time": trade.get("entry_time"),
+                "signal_reasons": trade.get("signal_reasons", []),
+            })
+            total_unrealized += unrealized
+
+        return {
+            "positions": positions,
+            "total_unrealized": round(total_unrealized, 4),
+        }
+
+    @router.get("/flipped/trades/open")
+    @login_required
+    async def get_flipped_open_trades(request: Request):
+        trades = await repo.get_open_trades(mode="flipped_paper")
+        return {"trades": trades}
+
+    @router.get("/flipped/stats")
+    @login_required
+    async def get_flipped_stats(request: Request):
+        return await repo.get_trade_stats(mode="flipped_paper")
+
     @router.get("/backtests")
     @login_required
     async def list_backtests(request: Request):
