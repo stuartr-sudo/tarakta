@@ -33,14 +33,14 @@ class Settings(BaseSettings):
     initial_balance: float = 2000.0
     entry_threshold: float = 70.0  # Requires sweep + displacement at minimum
     max_risk_pct: float = 0.10  # Max 10% of balance lost per trade (SL distance)
-    max_position_pct: float = 0.10  # Max 10% of balance allocated per trade
+    max_position_pct: float = 0.25  # Max 25% of balance allocated per trade (margin)
     max_exposure_pct: float = 1.0  # Allow full budget deployment across positions
     max_concurrent: int = 100
     max_daily_drawdown: float = 0.10
     circuit_breaker_pct: float = 0.15
-    min_rr_ratio: float = 3.0  # More selective = need bigger payoff
-    cooldown_hours: float = 8.0  # Chill: longer cooldown between trades
-    max_daily_trades: int = 3  # Chill: hard cap on trades per day
+    min_rr_ratio: float = 2.0  # Minimum 2:1 reward-to-risk
+    cooldown_hours: float = 2.0  # Cooldown after stop-loss before re-entering same symbol
+    max_daily_trades: int = 15  # Allow more trades to deploy full balance
 
     # Progressive take-profit tiers (disabled for Trade Travel Chill)
     tp_tiers_enabled: bool = False  # Travel: single exit via trailing stop
@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     reversal_cooldown_minutes: int = 120   # Legacy, inactive
 
     # Scanning
-    scan_interval_minutes: int = 120  # Chill: scan every 2 hours
+    scan_interval_minutes: int = 15  # Scan every 15 min to catch pullback entries
     min_volume_usd: float = 1_000_000
     max_position_volume_pct: float = 0.001  # Position size must be < 0.1% of 24h volume
     max_spread_pct: float = 0.003  # Max 0.3% bid-ask spread — skip illiquid pairs

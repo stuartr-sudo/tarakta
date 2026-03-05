@@ -202,9 +202,17 @@ class TradingEngine:
             positions=len(self.state.open_positions),
         )
 
-        # Run an immediate scan on startup so we don't wait 2h for the first one
-        if self.state.cycle_count == 0 and not self.state.open_positions:
-            logger.info("startup_scan", reason="fresh start, running immediate scan")
+        # Run an immediate scan on startup if no recent scan
+        should_startup_scan = False
+        if self.state.last_scan_time is None:
+            should_startup_scan = True
+        else:
+            elapsed = (datetime.now(timezone.utc) - self.state.last_scan_time).total_seconds()
+            if elapsed > self.config.scan_interval_minutes * 60:
+                should_startup_scan = True
+
+        if should_startup_scan:
+            logger.info("startup_scan", reason="no recent scan, running immediately")
             try:
                 await self._primary_tick()
             except Exception as e:

@@ -5,7 +5,7 @@ safest SL because MMs already grabbed that liquidity and have no
 reason to revisit it.
 
 TP: At the opposite liquidity pool (where stops exist on the other
-side). Minimum 3:1 R:R since we're being more selective.
+side). Minimum 2:1 R:R.
 
 No progressive TP tiers — single exit via trailing stop.
 """

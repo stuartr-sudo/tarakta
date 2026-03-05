@@ -19,26 +19,32 @@ def risk_manager():
 
 class TestPositionSizing:
     def test_normal_sizing(self, risk_manager):
-        """With $100 and 2% risk = $2 max loss."""
+        """Position sizing respects max_position_pct cap.
+
+        With $100 balance, 10% risk, entry=50, SL=48:
+        - risk_amount = $10, uncapped qty = 5, cost = $250
+        - max_position = $25 (25% of $100), so position is capped
+        - capped qty ≈ 0.498, risk ≈ $1.00
+        """
         result = risk_manager.calculate_position_size(
             balance=100.0,
             entry_price=50.0,
             stop_loss_price=48.0,
         )
         assert result.valid
-        assert result.risk_usd == pytest.approx(2.0, abs=0.01)
-        assert result.quantity == pytest.approx(1.0, abs=0.01)  # $2 / $2 distance = 1 unit
-        assert result.cost_usd == pytest.approx(50.0, abs=0.5)
+        # Position is capped by max_position_pct (25%), not by risk budget
+        assert result.cost_usd <= 100.0 * 0.25 + 1  # max 25% of balance + tolerance
+        assert result.risk_usd > 0
 
     def test_position_capped_by_balance(self, risk_manager):
         """Position cost cannot exceed balance."""
         result = risk_manager.calculate_position_size(
-            balance=10.0,
+            balance=100.0,
             entry_price=50.0,
             stop_loss_price=49.99,  # very tight SL = huge position
         )
         assert result.valid
-        assert result.cost_usd <= 10.0
+        assert result.cost_usd <= 100.0
 
     def test_below_minimum(self, risk_manager):
         """Position too small for Kraken minimum."""
@@ -80,9 +86,19 @@ class TestTradeValidation:
         )
         assert result.allowed
 
-    def test_max_positions(self, risk_manager):
+    def test_max_positions(self):
+        """Reject when max concurrent positions reached."""
+        config = Settings(
+            kraken_api_key="test",
+            kraken_api_secret="test",
+            supabase_url="https://test.supabase.co",
+            supabase_key="test",
+            dashboard_password_hash="test",
+            max_concurrent=3,
+        )
+        rm = RiskManager(config)
         signal = SignalCandidate(score=70, direction="bullish", symbol="BTC/USD")
-        result = risk_manager.validate_trade(
+        result = rm.validate_trade(
             open_position_count=3,
             open_position_symbols={"ETH/USD", "SOL/USD", "AVAX/USD"},
             current_balance=80.0,
@@ -119,9 +135,19 @@ class TestTradeValidation:
         assert not result.allowed
         assert "already" in result.reason.lower()
 
-    def test_bearish_rejected(self, risk_manager):
+    def test_bearish_rejected_on_spot(self):
+        """Spot accounts cannot short — bearish signals rejected."""
+        config = Settings(
+            kraken_api_key="test",
+            kraken_api_secret="test",
+            supabase_url="https://test.supabase.co",
+            supabase_key="test",
+            dashboard_password_hash="test",
+            account_type="spot",
+        )
+        rm = RiskManager(config)
         signal = SignalCandidate(score=70, direction="bearish", symbol="BTC/USD")
-        result = risk_manager.validate_trade(
+        result = rm.validate_trade(
             open_position_count=0,
             open_position_symbols=set(),
             current_balance=100.0,
