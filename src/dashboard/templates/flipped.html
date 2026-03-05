@@ -70,7 +70,7 @@
 </div>
 
 <!-- Stat Cards -->
-{% set balance = flipped_balance|float %}
+{% set cash_balance = flipped_balance|float %}
 {% set ns = namespace(allocated=0.0) %}
 {% if flipped_open %}
 {% for t in flipped_open %}
@@ -86,21 +86,22 @@
 {% endfor %}
 {% endif %}
 {% set allocated = ns.allocated %}
-{% set drawdown = ((flipped_peak - balance) / flipped_peak * 100) if flipped_peak > 0 else 0 %}
+{% set equity = cash_balance + allocated %}
+{% set drawdown = ((flipped_peak - cash_balance) / flipped_peak * 100) if flipped_peak > 0 else 0 %}
 
 <div class="stats-grid">
     <div class="stat-card">
-        <div class="stat-label">Balance</div>
-        <div class="stat-value" id="equity-value">${{ "%.2f"|format(balance) }}</div>
-        <div class="stat-sub">of ${{ "%.2f"|format(flipped_initial_balance|float) }} initial</div>
+        <div class="stat-label">Equity</div>
+        <div class="stat-value" id="equity-value">${{ "%.2f"|format(equity) }}</div>
+        <div class="stat-sub">of ${{ "%.2f"|format(flipped_initial_balance|float) }} initial (cash + margin)</div>
     </div>
     <div class="stat-card" style="border-left: 3px solid #22c55e;">
-        <div class="stat-label">Available Cash</div>
-        <div class="stat-value sm" id="available-value">${{ "%.2f"|format(balance - allocated) }}</div>
+        <div class="stat-label">Cash Balance</div>
+        <div class="stat-value sm" id="available-value">${{ "%.2f"|format(cash_balance) }}</div>
         <div class="stat-sub">free to trade</div>
     </div>
     <div class="stat-card" style="border-left: 3px solid #f59e0b;">
-        <div class="stat-label">Allocated</div>
+        <div class="stat-label">Margin Deployed</div>
         <div class="stat-value sm" id="allocated-value">${{ "%.2f"|format(allocated) }}</div>
         <div class="stat-sub">across {{ flipped_open|length }} position{{ 's' if (flipped_open|length) != 1 else '' }}</div>
     </div>
@@ -324,6 +325,7 @@
             <li><strong>No quality whitelist:</strong> Scans ALL tradeable pairs</li>
             <li><strong>Direction flip:</strong> Bullish signals traded as SHORT, bearish as LONG</li>
             <li><strong>Independent scan:</strong> Runs its own 15-minute cycle, separate from main bot</li>
+            <li><strong>Trailing exits:</strong> TP acts as milestone &mdash; SL moves to breakeven, then trails via ATR. No fixed TP exits.</li>
         </ul>
         <p style="color:var(--text-muted); margin-top:0.5rem;">
             Main bot: TTC strategy (sweep + displacement + pullback, threshold 70, quality whitelist, leverage intelligence)

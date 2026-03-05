@@ -633,14 +633,40 @@ class FlippedTrader:
             elif pos.direction == "short" and current_price >= pos.stop_loss:
                 exit_reason = "sl_hit"
 
-            # TP check
-            if not exit_reason and pos.take_profit:
+            # TP milestone — when price reaches TP, DON'T close.
+            # Instead, move SL to breakeven and activate trailing stop.
+            # This is the "Travel" phase: let winners run with a trailing stop.
+            if not exit_reason and pos.take_profit and pos.current_tier == 0:
+                tp_reached = False
                 if pos.direction == "long" and current_price >= pos.take_profit:
-                    exit_reason = "tp_hit"
+                    tp_reached = True
                 elif pos.direction == "short" and current_price <= pos.take_profit:
-                    exit_reason = "tp_hit"
+                    tp_reached = True
 
-            # Trailing stop
+                if tp_reached:
+                    # Mark TP as reached (tier 1 = TP milestone hit)
+                    pos.current_tier = 1
+                    # Move SL to breakeven (entry price + small buffer for fees)
+                    fee_buffer = pos.entry_price * 0.001  # 0.1% buffer
+                    if pos.direction == "long":
+                        be_sl = pos.entry_price + fee_buffer
+                        if be_sl > pos.stop_loss:
+                            pos.stop_loss = be_sl
+                    else:
+                        be_sl = pos.entry_price - fee_buffer
+                        if be_sl < pos.stop_loss:
+                            pos.stop_loss = be_sl
+                    logger.info(
+                        "flipped_tp_milestone",
+                        symbol=symbol,
+                        direction=pos.direction,
+                        price=current_price,
+                        tp=pos.take_profit,
+                        new_sl=pos.stop_loss,
+                        msg="TP reached — SL moved to breakeven, trailing activated",
+                    )
+
+            # Trailing stop — activates after TP milestone OR after 2R profit
             if not exit_reason:
                 sl_dist = abs(pos.entry_price - pos.original_stop_loss)
                 if sl_dist > 0:
@@ -649,7 +675,10 @@ class FlippedTrader:
                     else:
                         r_multiple = (pos.entry_price - pos.high_water_mark) / sl_dist
 
-                    if r_multiple >= self.trailing_activation_rr:
+                    # Trailing activates if: TP milestone hit OR profit >= 2R
+                    trailing_active = pos.current_tier >= 1 or r_multiple >= self.trailing_activation_rr
+
+                    if trailing_active:
                         atr = atr_values.get(symbol, 0)
                         trail_dist = atr * self.trailing_atr_multiplier if atr > 0 else sl_dist * 0.75
 
