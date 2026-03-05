@@ -85,6 +85,9 @@ class FlippedTrader:
         self.daily_trade_count: int = 0
         self._scan_count: int = 0
         self.last_scan_time: str | None = None
+        # Cooldown: don't re-enter a symbol within 4 hours of closing
+        self._closed_symbols: dict[str, datetime] = {}  # symbol → close time
+        self.REENTRY_COOLDOWN_HOURS = 4
 
     # ------------------------------------------------------------------
     # Independent scan loop
@@ -232,14 +235,26 @@ class FlippedTrader:
         # Scan with simplified pipeline
         signals = await self._scan_pairs(pairs)
 
+        # Clean up expired cooldowns
+        now = datetime.now(timezone.utc)
+        expired = [s for s, t in self._closed_symbols.items()
+                   if (now - t).total_seconds() > self.REENTRY_COOLDOWN_HOURS * 3600]
+        for s in expired:
+            del self._closed_symbols[s]
+
         # Enter flipped trades (limited by available balance)
         entered = 0
+        skipped_cooldown = 0
         for signal in signals:
             if FLIPPED_MAX_CONCURRENT > 0 and len(self.positions) >= FLIPPED_MAX_CONCURRENT:
                 break
             if self.balance < 5.0:
                 break  # No margin left
             if signal.symbol in self.positions:
+                continue
+            # Cooldown: don't re-enter a symbol too soon after closing
+            if signal.symbol in self._closed_symbols:
+                skipped_cooldown += 1
                 continue
             try:
                 if await self._try_enter(signal):
@@ -255,6 +270,7 @@ class FlippedTrader:
             pairs_scanned=len(pairs),
             signals_found=len(signals),
             trades_entered=entered,
+            skipped_cooldown=skipped_cooldown,
             open_positions=len(self.positions),
             balance=round(self.balance, 2),
         )
@@ -706,6 +722,8 @@ class FlippedTrader:
                     tp=pos.take_profit,
                 )
                 await self._close_position(symbol, current_price, exit_reason)
+                # Add cooldown to prevent re-entry on same stale signal
+                self._closed_symbols[symbol] = datetime.now(timezone.utc)
                 closed += 1
 
         if checked > 0 or ticker_errors > 0:
