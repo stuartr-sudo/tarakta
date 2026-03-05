@@ -202,6 +202,14 @@ class TradingEngine:
             positions=len(self.state.open_positions),
         )
 
+        # Run an immediate scan on startup so we don't wait 2h for the first one
+        if self.state.cycle_count == 0 and not self.state.open_positions:
+            logger.info("startup_scan", reason="fresh start, running immediate scan")
+            try:
+                await self._primary_tick()
+            except Exception as e:
+                logger.error("startup_scan_failed", error=str(e))
+
         while self._running:
             try:
                 tick_type = await self.scheduler.wait_for_next_tick()
