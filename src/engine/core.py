@@ -84,10 +84,17 @@ class TradingEngine:
             self.dynamic_weights = DynamicWeightOptimizer(WEIGHTS)
             logger.info("dynamic_weights_enabled")
 
-        # Flipped shadow trader
-        self.flipped_trader = FlippedTrader(config, repo)
+        # Flipped shadow trader (independent scanner + loop)
+        self.flipped_trader = FlippedTrader(
+            config, repo, candle_manager=candle_manager, exchange=exchange,
+        )
         if self.flipped_trader.enabled:
-            logger.info("flipped_trader_enabled", leverage=config.flipped_leverage, sl_buffer=config.flipped_sl_buffer)
+            logger.info(
+                "flipped_trader_enabled",
+                leverage=config.flipped_leverage,
+                sl_buffer=config.flipped_sl_buffer,
+                scan_interval=config.flipped_scan_interval_minutes,
+            )
 
         # Background task infrastructure (for async post-mortems)
         self._postmortem_semaphore = asyncio.Semaphore(2)
@@ -226,6 +233,13 @@ class TradingEngine:
             balance=self.state.current_balance,
             positions=len(self.state.open_positions),
         )
+
+        # Start flipped trader's independent scan loop (runs every 15 min)
+        if self.flipped_trader.enabled:
+            self._flipped_task = asyncio.create_task(self.flipped_trader.run_loop())
+            self._background_tasks.add(self._flipped_task)
+            self._flipped_task.add_done_callback(self._background_tasks.discard)
+            logger.info("flipped_loop_spawned")
 
         # Run an immediate scan on startup if no recent scan
         should_startup_scan = False
@@ -798,15 +812,6 @@ class TradingEngine:
                     stack_trace=traceback.format_exc(),
                 )
 
-        # --- Flipped shadow trader: pass all qualifying signals ---
-        if self.flipped_trader.enabled and signals:
-            try:
-                flipped_entered = await self.flipped_trader.process_signals(signals)
-                if flipped_entered:
-                    logger.info("flipped_entries", count=flipped_entered)
-            except Exception as e:
-                logger.warning("flipped_signal_processing_failed", error=str(e))
-
         # Update state
         self.state.last_scan_time = datetime.now(timezone.utc)
         self.state.current_balance = self.portfolio.current_balance
@@ -1081,27 +1086,7 @@ class TradingEngine:
         # --- Flipped shadow trader: monitor positions ---
         if self.flipped_trader.enabled and self.flipped_trader.positions:
             try:
-                # Compute ATR for flipped positions (reuse if already computed)
-                for symbol in list(self.flipped_trader.positions.keys()):
-                    if symbol not in atr_values:
-                        try:
-                            candles = await self.candle_manager.get_candles(symbol, "1h", limit=30)
-                            if candles is not None and len(candles) >= 15:
-                                high = candles["high"].astype(float)
-                                low = candles["low"].astype(float)
-                                close = candles["close"].astype(float)
-                                prev_close = close.shift(1)
-                                tr = pd.concat(
-                                    [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
-                                    axis=1,
-                                ).max(axis=1)
-                                atr_series = tr.rolling(14).mean()
-                                latest_atr = float(atr_series.iloc[-1]) if pd.notna(atr_series.iloc[-1]) else 0.0
-                                if latest_atr > 0:
-                                    atr_values[symbol] = latest_atr
-                        except Exception:
-                            pass
-                await self.flipped_trader.monitor_positions(self.exchange, atr_values)
+                await self.flipped_trader.monitor_positions()
             except Exception as e:
                 logger.warning("flipped_monitor_failed", error=str(e))
 

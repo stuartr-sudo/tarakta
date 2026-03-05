@@ -94,6 +94,7 @@ class Settings(BaseSettings):
     flipped_leverage: int = 5  # Higher leverage for flipped trades
     flipped_sl_buffer: float = 0.01  # 1% SL buffer (wider than main 0.5%)
     flipped_initial_balance: float = 2000.0  # Separate paper balance
+    flipped_scan_interval_minutes: int = 15  # Independent scan cycle (not tied to main bot)
 
     # One-time force reset — set FORCE_RESET=true to wipe all data on next startup
     force_reset: bool = False
