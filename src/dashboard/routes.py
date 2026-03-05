@@ -113,6 +113,8 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         flipped_data = overrides.get("flipped_trader", {}) if isinstance(overrides, dict) else {}
         ctx["flipped_balance"] = flipped_data.get("balance", config.flipped_initial_balance)
         ctx["flipped_peak"] = flipped_data.get("peak_balance", config.flipped_initial_balance)
+        ctx["flipped_last_scan"] = flipped_data.get("last_scan_time")
+        ctx["flipped_scan_interval"] = config.flipped_scan_interval_minutes
         ctx["current_status"] = status
         return templates.TemplateResponse("flipped.html", ctx)
 

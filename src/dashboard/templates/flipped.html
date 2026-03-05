@@ -2,12 +2,20 @@
 {% block title %}Tarakta - Flipped Trader{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <h1>Flipped Shadow Trader</h1>
-    <p style="color:var(--text-muted); font-size:0.85rem; margin-top:0.25rem;">
-        Same signals, inverted direction. Paper trading with {{ config.flipped_leverage }}x leverage.
-        Scans every <strong>{{ config.flipped_scan_interval_minutes }} min</strong> (independent of main bot).
-    </p>
+<div class="page-header" style="display:flex; justify-content:space-between; align-items:flex-start;">
+    <div>
+        <h1>Flipped Shadow Trader</h1>
+        <p style="color:var(--text-muted); font-size:0.85rem; margin-top:0.25rem;">
+            Same signals, inverted direction. Paper trading with {{ config.flipped_leverage }}x leverage.
+        </p>
+    </div>
+    <div class="scan-timer" id="flippedScanTimer" style="min-width:120px;">
+        <div class="timer-label">Flipped Scan</div>
+        <div class="timer-countdown" id="flippedTimerCountdown">--:--</div>
+        <div class="timer-bar">
+            <div class="timer-bar-fill" id="flippedTimerBarFill"></div>
+        </div>
+    </div>
 </div>
 
 {% set fs = flipped_stats %}
@@ -226,5 +234,46 @@
 <script>
 // Auto-refresh every 60 seconds
 setTimeout(function() { window.location.reload(); }, 60000);
+
+// Flipped scan timer
+(function() {
+    const INTERVAL = {{ flipped_scan_interval }};
+    const lastScan = "{{ flipped_last_scan or '' }}";
+    const timerEl = document.getElementById('flippedTimerCountdown');
+    const barEl = document.getElementById('flippedTimerBarFill');
+    if (!timerEl) return;
+
+    function update() {
+        const now = new Date();
+        const intervalMs = INTERVAL * 60 * 1000;
+        let nextScanMs;
+
+        if (lastScan) {
+            const lastMs = new Date(lastScan).getTime();
+            nextScanMs = lastMs + intervalMs;
+            // If next scan is in the past, show "scanning..."
+            if (nextScanMs < now.getTime()) {
+                timerEl.textContent = 'scanning...';
+                timerEl.style.color = '#e040fb';
+                barEl.style.width = '100%';
+                return;
+            }
+        } else {
+            // No scan yet — estimate from interval alignment
+            nextScanMs = Math.ceil(now.getTime() / intervalMs) * intervalMs;
+        }
+
+        const remainMs = nextScanMs - now.getTime();
+        const remainSec = Math.max(0, Math.floor(remainMs / 1000));
+        const m = Math.floor(remainSec / 60);
+        const s = remainSec % 60;
+        timerEl.textContent = m + ':' + String(s).padStart(2, '0');
+        timerEl.style.color = remainSec < 60 ? '#e040fb' : '';
+        barEl.style.width = Math.max(0, (1 - remainMs / intervalMs)) * 100 + '%';
+    }
+
+    update();
+    setInterval(update, 1000);
+})();
 </script>
 {% endblock %}

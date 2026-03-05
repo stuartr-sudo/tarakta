@@ -83,6 +83,7 @@ class FlippedTrader:
         self.positions: dict[str, Position] = {}
         self.daily_trade_count: int = 0
         self._scan_count: int = 0
+        self.last_scan_time: str | None = None
 
     # ------------------------------------------------------------------
     # Independent scan loop
@@ -158,6 +159,8 @@ class FlippedTrader:
                     entered += 1
             except Exception as e:
                 logger.warning("flipped_entry_error", symbol=signal.symbol, error=str(e))
+
+        self.last_scan_time = datetime.now(timezone.utc).isoformat()
 
         logger.info(
             "flipped_scan_complete",
@@ -718,6 +721,7 @@ class FlippedTrader:
             "daily_pnl": self.daily_pnl,
             "total_pnl": self.total_pnl,
             "daily_trade_count": self.daily_trade_count,
+            "last_scan_time": self.last_scan_time,
             "positions": positions_data,
         }
 
@@ -730,6 +734,7 @@ class FlippedTrader:
         self.daily_pnl = float(data.get("daily_pnl", 0))
         self.total_pnl = float(data.get("total_pnl", 0))
         self.daily_trade_count = int(data.get("daily_trade_count", 0))
+        self.last_scan_time = data.get("last_scan_time")
 
         positions_data = data.get("positions", {})
         for sym, pd_ in positions_data.items():
