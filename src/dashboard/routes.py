@@ -107,9 +107,10 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx["flipped_open"] = await repo.get_open_trades(mode="flipped_paper")
         ctx["flipped_stats"] = await repo.get_trade_stats(mode="flipped_paper")
         ctx["main_stats"] = await repo.get_trade_stats(mode=config.trading_mode)
-        # Flipped balance from engine state
+        # Flipped balance from engine state (stored in config_overrides JSONB)
         state = ctx.get("state") or {}
-        flipped_data = state.get("flipped_trader", {})
+        overrides = state.get("config_overrides") or {}
+        flipped_data = overrides.get("flipped_trader", {}) if isinstance(overrides, dict) else {}
         ctx["flipped_balance"] = flipped_data.get("balance", config.flipped_initial_balance)
         ctx["flipped_peak"] = flipped_data.get("peak_balance", config.flipped_initial_balance)
         ctx["current_status"] = status

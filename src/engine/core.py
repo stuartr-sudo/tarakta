@@ -160,10 +160,11 @@ class TradingEngine:
         if hasattr(self.exchange, "restore_positions"):
             self.exchange.restore_positions(self.state.open_positions)
 
-        # Restore flipped trader state
+        # Restore flipped trader state (stored in config_overrides JSONB)
         if self.flipped_trader.enabled:
             saved_state = await self.repo.get_engine_state() or {}
-            flipped_data = saved_state.get("flipped_trader")
+            overrides = saved_state.get("config_overrides") or {}
+            flipped_data = overrides.get("flipped_trader") if isinstance(overrides, dict) else None
             if flipped_data:
                 self.flipped_trader.restore_state(flipped_data)
             else:
@@ -194,11 +195,12 @@ class TradingEngine:
         except Exception as e:
             logger.warning("adaptive_threshold_load_failed", error=str(e))
 
-        # Bootstrap dynamic weights from saved state
+        # Bootstrap dynamic weights from saved state (in config_overrides)
         if self.dynamic_weights:
             try:
                 raw_state = await self.repo.get_engine_state() or {}
-                dw_state = raw_state.get("dynamic_weights")
+                overrides = raw_state.get("config_overrides") or {}
+                dw_state = overrides.get("dynamic_weights") if isinstance(overrides, dict) else None
                 if dw_state:
                     self.dynamic_weights.from_state(dw_state)
                     self.scanner.confluence_engine.update_weights(
@@ -1325,10 +1327,13 @@ class TradingEngine:
                 mode=self.state.mode,
                 cycle_count=self.state.cycle_count,
             )
+            # Store extra data in config_overrides JSONB (no schema changes needed)
+            overrides = {}
             if self.dynamic_weights:
-                state_dict["dynamic_weights"] = self.dynamic_weights.to_state()
+                overrides["dynamic_weights"] = self.dynamic_weights.to_state()
             if self.flipped_trader.enabled:
-                state_dict["flipped_trader"] = self.flipped_trader.to_state_dict()
+                overrides["flipped_trader"] = self.flipped_trader.to_state_dict()
+            state_dict["config_overrides"] = overrides
             # Preserve dashboard-toggled fields that aren't in portfolio state
             existing = await self.repo.get_engine_state()
             if existing:
