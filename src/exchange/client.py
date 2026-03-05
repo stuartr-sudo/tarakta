@@ -389,10 +389,17 @@ class BinanceFuturesClient:
 
         oi_value = float(oi.get("openInterestValue", 0) or 0)
         if oi_value == 0:
-            # Fallback: contracts * price
-            oi_contracts = float(oi.get("openInterest", 0) or 0)
-            info = oi.get("info", {})
+            # Fallback: contracts * mark price from nested info
+            oi_contracts = float(oi.get("openInterest", 0) or oi.get("openInterestAmount", 0) or 0)
+            info = oi.get("info", {}) or {}
             mark_price = float(info.get("markPrice", 0) or 0)
+            if oi_contracts > 0 and mark_price == 0:
+                # Try fetching ticker for current price
+                try:
+                    ticker = await self.exchange.fetch_ticker(symbol)
+                    mark_price = float(ticker.get("last", 0) or 0)
+                except Exception:
+                    pass
             if mark_price > 0:
                 oi_value = oi_contracts * mark_price
 

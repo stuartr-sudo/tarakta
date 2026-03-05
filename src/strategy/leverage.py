@@ -131,14 +131,17 @@ class LeverageAnalyzer:
             funding_bias = "short_pay"
 
         # Determine crowded side — need at least moderate signal
+        # Extreme funding (>5x moderate) overrides mildly contradictory L/S ratio
+        # because funding is the actual market-wide cost being paid.
+        extreme_funding = abs_funding > FUNDING_EXTREME * 2
         crowded_side = None
         if funding_rate > FUNDING_MODERATE:
             # Longs are paying — market is long-biased
-            if long_short_ratio is None or long_short_ratio >= 1.0:
+            if long_short_ratio is None or long_short_ratio >= 1.0 or extreme_funding:
                 crowded_side = "long"
         elif funding_rate < -FUNDING_MODERATE:
             # Shorts are paying — market is short-biased
-            if long_short_ratio is None or long_short_ratio <= 1.0:
+            if long_short_ratio is None or long_short_ratio <= 1.0 or extreme_funding:
                 crowded_side = "short"
         elif long_short_ratio is not None:
             # Neutral funding but skewed ratio
