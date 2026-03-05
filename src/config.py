@@ -89,6 +89,12 @@ class Settings(BaseSettings):
     # Dynamic strategy weights
     dynamic_weights_enabled: bool = False  # Adjust confluence weights based on trade outcomes
 
+    # Flipped shadow bot — paper trades with inverted direction
+    flipped_enabled: bool = True
+    flipped_leverage: int = 5  # Higher leverage for flipped trades
+    flipped_sl_buffer: float = 0.01  # 1% SL buffer (wider than main 0.5%)
+    flipped_initial_balance: float = 2000.0  # Separate paper balance
+
     # One-time force reset — set FORCE_RESET=true to wipe all data on next startup
     force_reset: bool = False
 

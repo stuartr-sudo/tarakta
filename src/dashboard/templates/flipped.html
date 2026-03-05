@@ -1,0 +1,229 @@
+{% extends "base.html" %}
+{% block title %}Tarakta - Flipped Trader{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Flipped Shadow Trader</h1>
+    <p style="color:var(--text-muted); font-size:0.85rem; margin-top:0.25rem;">
+        Same signals, inverted direction. Paper trading with {{ config.flipped_leverage }}x leverage.
+    </p>
+</div>
+
+{% set fs = flipped_stats %}
+{% set ms = main_stats %}
+
+<!-- Comparison Banner -->
+<div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-bottom:1.5rem;">
+    <div class="stat-card" style="border-left:3px solid var(--accent);">
+        <div class="stat-label">Main Bot</div>
+        <div style="display:flex; justify-content:space-between; margin-top:0.5rem;">
+            <div>
+                <div style="font-size:0.7rem; color:var(--text-muted);">Win Rate</div>
+                <div class="stat-value sm {% if ms.win_rate >= 0.5 %}positive{% else %}negative{% endif %}">
+                    {{ (ms.win_rate * 100)|round(1) }}%
+                </div>
+            </div>
+            <div>
+                <div style="font-size:0.7rem; color:var(--text-muted);">Total P&L</div>
+                <div class="stat-value sm {% if ms.total_pnl >= 0 %}positive{% else %}negative{% endif %}">
+                    {% if ms.total_pnl >= 0 %}+{% endif %}${{ ms.total_pnl|round(2) }}
+                </div>
+            </div>
+            <div>
+                <div style="font-size:0.7rem; color:var(--text-muted);">Trades</div>
+                <div class="stat-value sm">{{ ms.total }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="stat-card" style="border-left:3px solid #e040fb;">
+        <div class="stat-label">Flipped Bot</div>
+        <div style="display:flex; justify-content:space-between; margin-top:0.5rem;">
+            <div>
+                <div style="font-size:0.7rem; color:var(--text-muted);">Win Rate</div>
+                <div class="stat-value sm {% if fs.win_rate >= 0.5 %}positive{% else %}negative{% endif %}">
+                    {{ (fs.win_rate * 100)|round(1) }}%
+                </div>
+            </div>
+            <div>
+                <div style="font-size:0.7rem; color:var(--text-muted);">Total P&L</div>
+                <div class="stat-value sm {% if fs.total_pnl >= 0 %}positive{% else %}negative{% endif %}">
+                    {% if fs.total_pnl >= 0 %}+{% endif %}${{ fs.total_pnl|round(2) }}
+                </div>
+            </div>
+            <div>
+                <div style="font-size:0.7rem; color:var(--text-muted);">Trades</div>
+                <div class="stat-value sm">{{ fs.total }}</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Flipped Stats -->
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-label">Balance</div>
+        <div class="stat-value sm">${{ flipped_balance|round(2) }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Peak</div>
+        <div class="stat-value sm">${{ flipped_peak|round(2) }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Daily P&L</div>
+        <div class="stat-value sm {% if fs.daily_pnl >= 0 %}positive{% else %}negative{% endif %}">
+            {% if fs.daily_pnl >= 0 %}+{% endif %}${{ fs.daily_pnl|round(2) }}
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Wins / Losses</div>
+        <div class="stat-value sm">
+            <span class="positive">{{ fs.wins }}</span> / <span class="negative">{{ fs.losses }}</span>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Avg P&L</div>
+        <div class="stat-value sm {% if fs.avg_pnl >= 0 %}positive{% else %}negative{% endif %}">
+            {% if fs.avg_pnl >= 0 %}+{% endif %}${{ fs.avg_pnl|round(2) }}
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Open Positions</div>
+        <div class="stat-value sm">{{ flipped_open|length }}</div>
+    </div>
+</div>
+
+<!-- Open Positions -->
+{% if flipped_open %}
+<h3 style="margin:1.5rem 0 0.75rem; color:var(--text-secondary);">Open Positions</h3>
+<div class="table-wrapper">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Symbol</th>
+                <th>Dir</th>
+                <th>Entry</th>
+                <th>SL</th>
+                <th>TP</th>
+                <th>Size</th>
+                <th>Margin</th>
+                <th>Score</th>
+                <th>Opened</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in flipped_open %}
+            <tr>
+                <td><strong>{{ t.symbol|replace('/USDT:USDT', '')|replace('/USDT', '') }}</strong></td>
+                <td>
+                    {% if t.direction == 'long' %}
+                        <span class="positive">LONG</span>
+                    {% else %}
+                        <span class="negative">SHORT</span>
+                    {% endif %}
+                </td>
+                <td>{{ t.entry_price }}</td>
+                <td>{{ t.stop_loss }}</td>
+                <td>{{ t.take_profit or '---' }}</td>
+                <td>${{ (t.entry_cost_usd or 0)|round(2) }}</td>
+                <td>${{ (t.margin_used or 0)|round(2) }}</td>
+                <td>{{ t.confluence_score or '---' }}</td>
+                <td>{{ t.entry_time[:16] if t.entry_time else '---' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<!-- Tab navigation for trade history -->
+<div class="filter-tabs" style="margin-top:1.5rem;">
+    <a href="/flipped?status=all" class="{{ 'active' if current_status == 'all' else '' }}">All Trades</a>
+    <a href="/flipped?status=closed" class="{{ 'active' if current_status == 'closed' else '' }}">Closed</a>
+    <a href="/flipped?status=open" class="{{ 'active' if current_status == 'open' else '' }}">Open</a>
+</div>
+
+<!-- Trade History -->
+<div class="table-wrapper">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Symbol</th>
+                <th>Dir</th>
+                <th>Status</th>
+                <th>Entry</th>
+                <th>Exit</th>
+                <th>P&L</th>
+                <th>R:R</th>
+                <th>Reason</th>
+                <th>Time</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% if flipped_trades %}
+                {% for t in flipped_trades %}
+                <tr>
+                    <td><strong>{{ t.symbol|replace('/USDT:USDT', '')|replace('/USDT', '') }}</strong></td>
+                    <td>
+                        {% if t.direction == 'long' %}
+                            <span class="positive">L</span>
+                        {% else %}
+                            <span class="negative">S</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if t.status == 'open' %}
+                            <span style="color:var(--accent);">OPEN</span>
+                        {% else %}
+                            CLOSED
+                        {% endif %}
+                    </td>
+                    <td>{{ t.entry_price }}</td>
+                    <td>{{ t.exit_price or '---' }}</td>
+                    <td class="{% if (t.pnl_usd or 0) >= 0 %}positive{% else %}negative{% endif %}">
+                        {% if t.pnl_usd is not none %}
+                            {% if t.pnl_usd >= 0 %}+{% endif %}${{ t.pnl_usd|round(2) }}
+                        {% else %}
+                            ---
+                        {% endif %}
+                    </td>
+                    <td>{{ t.risk_reward or '---' }}</td>
+                    <td>{{ t.exit_reason or '---' }}</td>
+                    <td>{{ t.entry_time[:16] if t.entry_time else '---' }}</td>
+                </tr>
+                {% endfor %}
+            {% else %}
+                <tr>
+                    <td colspan="9" style="text-align:center; color:var(--text-muted); padding:2rem;">
+                        No flipped trades yet. The shadow bot will start placing paper trades on the next scan cycle.
+                    </td>
+                </tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+
+{% if fs.exit_reasons %}
+<h3 style="margin:1.5rem 0 0.75rem; color:var(--text-secondary);">Exit Reasons</h3>
+<div class="table-wrapper">
+    <table class="data-table" style="max-width:400px;">
+        <thead><tr><th>Reason</th><th>Count</th></tr></thead>
+        <tbody>
+            {% for reason, count in fs.exit_reasons.items() %}
+            <tr>
+                <td>{{ reason }}</td>
+                <td>{{ count }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Auto-refresh every 60 seconds
+setTimeout(function() { window.location.reload(); }, 60000);
+</script>
+{% endblock %}

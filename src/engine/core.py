@@ -10,6 +10,7 @@ import pandas as pd
 from src.config import Settings
 from src.data.candles import CandleManager
 from src.data.repository import Repository
+from src.engine.flipped import FlippedTrader
 from src.engine.scheduler import Scheduler, TickType
 from src.engine.state import EngineState
 from src.exchange.models import Position, TakeProfitTier
@@ -83,6 +84,11 @@ class TradingEngine:
             self.dynamic_weights = DynamicWeightOptimizer(WEIGHTS)
             logger.info("dynamic_weights_enabled")
 
+        # Flipped shadow trader
+        self.flipped_trader = FlippedTrader(config, repo)
+        if self.flipped_trader.enabled:
+            logger.info("flipped_trader_enabled", leverage=config.flipped_leverage, sl_buffer=config.flipped_sl_buffer)
+
         # Background task infrastructure (for async post-mortems)
         self._postmortem_semaphore = asyncio.Semaphore(2)
         self._background_tasks: set[asyncio.Task] = set()
@@ -153,6 +159,23 @@ class TradingEngine:
         # Without this, partial exits would create phantom positions instead of closing
         if hasattr(self.exchange, "restore_positions"):
             self.exchange.restore_positions(self.state.open_positions)
+
+        # Restore flipped trader state
+        if self.flipped_trader.enabled:
+            saved_state = await self.repo.get_engine_state() or {}
+            flipped_data = saved_state.get("flipped_trader")
+            if flipped_data:
+                self.flipped_trader.restore_state(flipped_data)
+            else:
+                # First run or after reset — reconcile from DB
+                flipped_stats = await self.repo.get_trade_stats(mode="flipped_paper")
+                self.flipped_trader.total_pnl = flipped_stats.get("total_pnl", 0)
+            logger.info(
+                "flipped_trader_restored",
+                balance=self.flipped_trader.balance,
+                positions=len(self.flipped_trader.positions),
+                total_pnl=self.flipped_trader.total_pnl,
+            )
 
         # Load historical trade data for self-improving components
         await self.trade_analyzer.load_history()
@@ -232,6 +255,8 @@ class TradingEngine:
                     self.state.daily_pnl = 0.0
                     self.state.daily_trade_count = 0
                     self.state.last_scan_time = datetime.now(timezone.utc)
+                    if self.flipped_trader.enabled:
+                        self.flipped_trader.reset_daily()
                     logger.info(
                         "daily_reset",
                         daily_start_balance=self.state.daily_start_balance,
@@ -771,6 +796,15 @@ class TradingEngine:
                     stack_trace=traceback.format_exc(),
                 )
 
+        # --- Flipped shadow trader: pass all qualifying signals ---
+        if self.flipped_trader.enabled and signals:
+            try:
+                flipped_entered = await self.flipped_trader.process_signals(signals)
+                if flipped_entered:
+                    logger.info("flipped_entries", count=flipped_entered)
+            except Exception as e:
+                logger.warning("flipped_signal_processing_failed", error=str(e))
+
         # Update state
         self.state.last_scan_time = datetime.now(timezone.utc)
         self.state.current_balance = self.portfolio.current_balance
@@ -1042,6 +1076,33 @@ class TradingEngine:
         self.state.daily_pnl = self.portfolio.daily_pnl
         self.state.total_pnl = self.portfolio.total_pnl
 
+        # --- Flipped shadow trader: monitor positions ---
+        if self.flipped_trader.enabled and self.flipped_trader.positions:
+            try:
+                # Compute ATR for flipped positions (reuse if already computed)
+                for symbol in list(self.flipped_trader.positions.keys()):
+                    if symbol not in atr_values:
+                        try:
+                            candles = await self.candle_manager.get_candles(symbol, "1h", limit=30)
+                            if candles is not None and len(candles) >= 15:
+                                high = candles["high"].astype(float)
+                                low = candles["low"].astype(float)
+                                close = candles["close"].astype(float)
+                                prev_close = close.shift(1)
+                                tr = pd.concat(
+                                    [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+                                    axis=1,
+                                ).max(axis=1)
+                                atr_series = tr.rolling(14).mean()
+                                latest_atr = float(atr_series.iloc[-1]) if pd.notna(atr_series.iloc[-1]) else 0.0
+                                if latest_atr > 0:
+                                    atr_values[symbol] = latest_atr
+                        except Exception:
+                            pass
+                await self.flipped_trader.monitor_positions(self.exchange, atr_values)
+            except Exception as e:
+                logger.warning("flipped_monitor_failed", error=str(e))
+
     async def _attempt_reversal(
         self,
         signal,
@@ -1266,6 +1327,8 @@ class TradingEngine:
             )
             if self.dynamic_weights:
                 state_dict["dynamic_weights"] = self.dynamic_weights.to_state()
+            if self.flipped_trader.enabled:
+                state_dict["flipped_trader"] = self.flipped_trader.to_state_dict()
             # Preserve dashboard-toggled fields that aren't in portfolio state
             existing = await self.repo.get_engine_state()
             if existing:

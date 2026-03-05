@@ -98,6 +98,23 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx["current_page"] = page
         return templates.TemplateResponse("signals.html", ctx)
 
+    @router.get("/flipped", response_class=HTMLResponse)
+    @login_required
+    async def flipped_page(request: Request):
+        ctx = await _base_context(request)
+        status = request.query_params.get("status", "all")
+        ctx["flipped_trades"] = await repo.get_trades(status=status, mode="flipped_paper", per_page=50)
+        ctx["flipped_open"] = await repo.get_open_trades(mode="flipped_paper")
+        ctx["flipped_stats"] = await repo.get_trade_stats(mode="flipped_paper")
+        ctx["main_stats"] = await repo.get_trade_stats(mode=config.trading_mode)
+        # Flipped balance from engine state
+        state = ctx.get("state") or {}
+        flipped_data = state.get("flipped_trader", {})
+        ctx["flipped_balance"] = flipped_data.get("balance", config.flipped_initial_balance)
+        ctx["flipped_peak"] = flipped_data.get("peak_balance", config.flipped_initial_balance)
+        ctx["current_status"] = status
+        return templates.TemplateResponse("flipped.html", ctx)
+
     @router.get("/chart", response_class=HTMLResponse)
     @login_required
     async def chart_page(request: Request):
