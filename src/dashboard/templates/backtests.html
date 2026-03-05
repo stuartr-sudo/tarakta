@@ -1,0 +1,331 @@
+{% extends "base.html" %}
+{% block title %}Tarakta - Backtests{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Backtest Comparison</h1>
+</div>
+
+<div id="backtestApp">
+    <!-- Tab navigation -->
+    <div class="filter-tabs" id="backtestTabs">
+        <a href="#" class="active" data-tab="comparison">Comparison</a>
+        <a href="#" data-tab="original">Original</a>
+        <a href="#" data-tab="flipped">Flipped</a>
+    </div>
+
+    <div id="loadingState" style="text-align:center; padding:2rem; color:var(--text-muted);">
+        Loading backtest results...
+    </div>
+
+    <div id="noDataState" style="display:none; text-align:center; padding:2rem;">
+        <p style="color:var(--text-muted);">No backtest results found.</p>
+        <p style="color:var(--text-muted); font-size:0.85rem;">
+            Run <code>python3 backtest.py</code> and <code>python3 backtest_flipped.py</code> to generate results.
+        </p>
+    </div>
+
+    <!-- Comparison Tab -->
+    <div id="tab-comparison" class="tab-content" style="display:none;">
+        <div class="stats-grid" id="comparisonStats"></div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:1.5rem; margin-top:1.5rem;">
+            <div>
+                <h3 style="margin-bottom:0.75rem; color:var(--text-secondary);">Original — Exit Reasons</h3>
+                <table class="data-table" id="originalReasons">
+                    <thead><tr><th>Reason</th><th>Count</th><th>P&L</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <div>
+                <h3 style="margin-bottom:0.75rem; color:var(--text-secondary);">Flipped — Exit Reasons</h3>
+                <table class="data-table" id="flippedReasons">
+                    <thead><tr><th>Reason</th><th>Count</th><th>P&L</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Original Tab -->
+    <div id="tab-original" class="tab-content" style="display:none;">
+        <div class="stats-grid" id="originalStats"></div>
+        <h3 style="margin:1.5rem 0 0.75rem; color:var(--text-secondary);">Trades</h3>
+        <div class="table-wrapper">
+            <table class="data-table" id="originalTrades">
+                <thead>
+                    <tr>
+                        <th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th>
+                        <th>TP</th><th>Exit</th><th>P&L</th><th>Score</th><th>Reason</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Flipped Tab -->
+    <div id="tab-flipped" class="tab-content" style="display:none;">
+        <div class="stats-grid" id="flippedStats"></div>
+        <h3 style="margin:1.5rem 0 0.75rem; color:var(--text-secondary);">Trades</h3>
+        <div class="table-wrapper">
+            <table class="data-table" id="flippedTrades">
+                <thead>
+                    <tr>
+                        <th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th>
+                        <th>TP</th><th>Exit</th><th>P&L</th><th>Score</th><th>Reason</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    let originalData = null;
+    let flippedData = null;
+
+    // Tab switching
+    document.querySelectorAll('#backtestTabs a').forEach(tab => {
+        tab.addEventListener('click', function(e) {
+            e.preventDefault();
+            document.querySelectorAll('#backtestTabs a').forEach(t => t.classList.remove('active'));
+            this.classList.add('active');
+            document.querySelectorAll('.tab-content').forEach(c => c.style.display = 'none');
+            const target = this.dataset.tab;
+            const el = document.getElementById('tab-' + target);
+            if (el) el.style.display = 'block';
+        });
+    });
+
+    function pnlClass(val) {
+        return parseFloat(val) >= 0 ? 'positive' : 'negative';
+    }
+
+    function pnlStr(val) {
+        const v = parseFloat(val);
+        return (v >= 0 ? '+' : '') + '$' + v.toFixed(2);
+    }
+
+    function pctStr(val) {
+        const v = parseFloat(val) * 100;
+        return v.toFixed(1) + '%';
+    }
+
+    function shortSym(s) {
+        return s.replace(':USDT', '');
+    }
+
+    function renderStatCards(containerId, data) {
+        const s = data.summary;
+        const container = document.getElementById(containerId);
+        container.innerHTML = `
+            <div class="stat-card">
+                <div class="stat-label">Trades</div>
+                <div class="stat-value sm">${s.trades_closed}</div>
+                <div class="stat-sub">${s.unique_symbols} coins</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Win Rate</div>
+                <div class="stat-value sm ${s.win_rate >= 0.5 ? 'positive' : 'negative'}">
+                    ${(s.win_rate * 100).toFixed(1)}%
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Total P&L</div>
+                <div class="stat-value sm ${pnlClass(s.total_pnl)}">
+                    ${pnlStr(s.total_pnl)}
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Final Balance</div>
+                <div class="stat-value sm">$${s.final_balance.toFixed(2)}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Max Drawdown</div>
+                <div class="stat-value sm negative">${(s.max_drawdown * 100).toFixed(1)}%</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Avg Win</div>
+                <div class="stat-value sm positive">${s.avg_win ? pnlStr(s.avg_win) : '---'}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Avg Loss</div>
+                <div class="stat-value sm negative">${s.avg_loss ? pnlStr(s.avg_loss) : '---'}</div>
+            </div>
+            ${s.best_trade ? `
+            <div class="stat-card">
+                <div class="stat-label">Best Trade</div>
+                <div class="stat-value sm positive">${s.best_trade.symbol}</div>
+                <div class="stat-sub">${pnlStr(s.best_trade.pnl)}</div>
+            </div>` : ''}
+        `;
+    }
+
+    function renderComparison() {
+        const container = document.getElementById('comparisonStats');
+        const o = originalData ? originalData.summary : null;
+        const f = flippedData ? flippedData.summary : null;
+
+        let html = '';
+
+        function compCard(label, oVal, fVal, format, higherBetter) {
+            const oStr = oVal != null ? format(oVal) : '---';
+            const fStr = fVal != null ? format(fVal) : '---';
+            let oClass = '', fClass = '';
+            if (oVal != null && fVal != null) {
+                if (higherBetter) {
+                    oClass = oVal > fVal ? 'positive' : oVal < fVal ? 'negative' : '';
+                    fClass = fVal > oVal ? 'positive' : fVal < oVal ? 'negative' : '';
+                } else {
+                    oClass = oVal < fVal ? 'positive' : oVal > fVal ? 'negative' : '';
+                    fClass = fVal < oVal ? 'positive' : fVal > oVal ? 'negative' : '';
+                }
+            }
+            return `
+                <div class="stat-card">
+                    <div class="stat-label">${label}</div>
+                    <div style="display:flex; justify-content:space-between; gap:1rem; margin-top:0.5rem;">
+                        <div style="text-align:center; flex:1;">
+                            <div style="font-size:0.7rem; color:var(--text-muted); margin-bottom:0.25rem;">Original</div>
+                            <div class="stat-value sm ${oClass}">${oStr}</div>
+                        </div>
+                        <div style="text-align:center; flex:1;">
+                            <div style="font-size:0.7rem; color:var(--text-muted); margin-bottom:0.25rem;">Flipped</div>
+                            <div class="stat-value sm ${fClass}">${fStr}</div>
+                        </div>
+                    </div>
+                </div>`;
+        }
+
+        html += compCard('Win Rate',
+            o ? o.win_rate : null, f ? f.win_rate : null,
+            v => (v * 100).toFixed(1) + '%', true);
+        html += compCard('Total P&L',
+            o ? o.total_pnl : null, f ? f.total_pnl : null,
+            v => pnlStr(v), true);
+        html += compCard('Trades Closed',
+            o ? o.trades_closed : null, f ? f.trades_closed : null,
+            v => v.toString(), true);
+        html += compCard('Final Balance',
+            o ? o.final_balance : null, f ? f.final_balance : null,
+            v => '$' + v.toFixed(2), true);
+        html += compCard('Max Drawdown',
+            o ? o.max_drawdown : null, f ? f.max_drawdown : null,
+            v => (v * 100).toFixed(1) + '%', false);
+        html += compCard('Avg Win',
+            o ? o.avg_win : null, f ? f.avg_win : null,
+            v => pnlStr(v), true);
+        html += compCard('Avg Loss',
+            o ? o.avg_loss : null, f ? f.avg_loss : null,
+            v => pnlStr(v), true);
+
+        container.innerHTML = html;
+
+        // Exit reasons tables
+        function renderReasonTable(tableId, data) {
+            const tbody = document.querySelector('#' + tableId + ' tbody');
+            if (!data || !data.by_exit_reason) { tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; color:var(--text-muted);">No data</td></tr>'; return; }
+            let rows = '';
+            for (const [reason, info] of Object.entries(data.by_exit_reason).sort((a,b) => b[1].count - a[1].count)) {
+                rows += `<tr>
+                    <td>${reason}</td>
+                    <td>${info.count}</td>
+                    <td class="${pnlClass(info.pnl)}">${pnlStr(info.pnl)}</td>
+                </tr>`;
+            }
+            tbody.innerHTML = rows || '<tr><td colspan="3" style="text-align:center; color:var(--text-muted);">No data</td></tr>';
+        }
+        renderReasonTable('originalReasons', originalData);
+        renderReasonTable('flippedReasons', flippedData);
+    }
+
+    function renderTradeTable(tableId, data) {
+        const tbody = document.querySelector('#' + tableId + ' tbody');
+        if (!data || !data.trades || data.trades.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; color:var(--text-muted);">No trades</td></tr>';
+            return;
+        }
+        let rows = '';
+        for (const t of data.trades) {
+            const sym = shortSym(t.symbol);
+            const exitStr = t.exit_price ? parseFloat(t.exit_price).toPrecision(6) : 'OPEN';
+            const pnl = t.exit_price ? pnlStr(t.pnl) : '---';
+            const cls = t.exit_price ? pnlClass(t.pnl) : '';
+            rows += `<tr>
+                <td><strong>${sym}</strong></td>
+                <td>${t.direction}</td>
+                <td>${parseFloat(t.entry_price).toPrecision(6)}</td>
+                <td>${parseFloat(t.sl).toPrecision(6)}</td>
+                <td>${parseFloat(t.tp).toPrecision(6)}</td>
+                <td>${exitStr}</td>
+                <td class="${cls}">${pnl}</td>
+                <td>${t.score}</td>
+                <td>${t.exit_reason || 'open'}</td>
+            </tr>`;
+        }
+        tbody.innerHTML = rows;
+    }
+
+    async function loadData() {
+        try {
+            const resp = await fetch('/api/backtests');
+            const data = await resp.json();
+            const backtests = data.backtests || [];
+
+            if (backtests.length === 0) {
+                document.getElementById('loadingState').style.display = 'none';
+                document.getElementById('noDataState').style.display = 'block';
+                return;
+            }
+
+            // Find latest original and flipped
+            const origFile = backtests.find(b => b.type === 'original');
+            const flipFile = backtests.find(b => b.type === 'flipped');
+
+            const promises = [];
+            if (origFile) {
+                promises.push(
+                    fetch('/api/backtests/' + origFile.filename)
+                        .then(r => r.json())
+                        .then(d => { originalData = d; })
+                );
+            }
+            if (flipFile) {
+                promises.push(
+                    fetch('/api/backtests/' + flipFile.filename)
+                        .then(r => r.json())
+                        .then(d => { flippedData = d; })
+                );
+            }
+            await Promise.all(promises);
+
+            document.getElementById('loadingState').style.display = 'none';
+
+            // Render all views
+            if (originalData) {
+                renderStatCards('originalStats', originalData);
+                renderTradeTable('originalTrades', originalData);
+            }
+            if (flippedData) {
+                renderStatCards('flippedStats', flippedData);
+                renderTradeTable('flippedTrades', flippedData);
+            }
+            renderComparison();
+
+            // Show comparison tab by default
+            document.getElementById('tab-comparison').style.display = 'block';
+
+        } catch (e) {
+            document.getElementById('loadingState').textContent = 'Error loading backtest data: ' + e.message;
+        }
+    }
+
+    loadData();
+})();
+</script>
+{% endblock %}

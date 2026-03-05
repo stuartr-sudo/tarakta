@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+from pathlib import Path
 
 import ccxt.async_support as ccxt
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 from src.dashboard.auth import admin_required, login_required
 from src.data.repository import Repository
@@ -326,6 +330,45 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             "total_pnl": round(total_pnl, 4),
             "details": closed,
         }
+
+    @router.get("/backtests")
+    @login_required
+    async def list_backtests(request: Request):
+        """List available backtest result files."""
+        results_dir = Path("backtest_results")
+        if not results_dir.exists():
+            return {"backtests": []}
+
+        files = []
+        for f in sorted(results_dir.glob("*.json"), reverse=True):
+            try:
+                with open(f) as fh:
+                    data = json.load(fh)
+                files.append({
+                    "filename": f.name,
+                    "type": data.get("type", "unknown"),
+                    "run_time": data.get("run_time"),
+                    "period": data.get("period"),
+                    "summary": data.get("summary"),
+                })
+            except Exception:
+                continue
+        return {"backtests": files}
+
+    @router.get("/backtests/{filename}")
+    @login_required
+    async def get_backtest(request: Request, filename: str):
+        """Get a specific backtest result."""
+        # Sanitize filename to prevent path traversal
+        safe_name = os.path.basename(filename)
+        filepath = Path("backtest_results") / safe_name
+        if not filepath.exists() or not filepath.suffix == ".json":
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        try:
+            with open(filepath) as f:
+                return json.load(f)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
 
     @router.get("/split-test")
     @login_required

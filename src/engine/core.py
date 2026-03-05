@@ -833,7 +833,20 @@ class TradingEngine:
 
     async def _monitor_tick(self) -> None:
         """Check open positions for SL/TP/trailing stop + liquidation proximity."""
-        if not self.portfolio.open_positions:
+        has_main_positions = bool(self.portfolio.open_positions)
+        has_flipped_positions = self.flipped_trader.enabled and bool(self.flipped_trader.positions)
+
+        if not has_main_positions and not has_flipped_positions:
+            return
+
+        # --- Flipped shadow trader: monitor positions every tick (60s) ---
+        if has_flipped_positions:
+            try:
+                await self.flipped_trader.monitor_positions()
+            except Exception as e:
+                logger.warning("flipped_monitor_failed", error=str(e))
+
+        if not has_main_positions:
             return
 
         # Liquidation proximity check for leveraged positions
@@ -1083,12 +1096,7 @@ class TradingEngine:
         self.state.daily_pnl = self.portfolio.daily_pnl
         self.state.total_pnl = self.portfolio.total_pnl
 
-        # --- Flipped shadow trader: monitor positions ---
-        if self.flipped_trader.enabled and self.flipped_trader.positions:
-            try:
-                await self.flipped_trader.monitor_positions()
-            except Exception as e:
-                logger.warning("flipped_monitor_failed", error=str(e))
+        # Flipped monitoring now handled in _monitor_tick (every 60s)
 
     async def _attempt_reversal(
         self,

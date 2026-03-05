@@ -122,7 +122,7 @@
         <tbody>
             {% for t in flipped_open %}
             <tr>
-                <td><strong>{{ t.symbol|replace('/USDT:USDT', '')|replace('/USDT', '') }}</strong></td>
+                <td><strong>{{ t.symbol|replace(':USDT', '') }}</strong></td>
                 <td>
                     {% if t.direction == 'long' %}
                         <span class="positive">LONG</span>
@@ -171,7 +171,7 @@
             {% if flipped_trades %}
                 {% for t in flipped_trades %}
                 <tr>
-                    <td><strong>{{ t.symbol|replace('/USDT:USDT', '')|replace('/USDT', '') }}</strong></td>
+                    <td><strong>{{ t.symbol|replace(':USDT', '') }}</strong></td>
                     <td>
                         {% if t.direction == 'long' %}
                             <span class="positive">L</span>

@@ -37,7 +37,7 @@ SIM_FEE_RATE = 0.0004
 # Sweep (35) + Displacement (25) = 60 minimum
 # HTF (15) + Timing (15) = bonus
 FLIPPED_THRESHOLD = 60.0
-FLIPPED_MAX_CONCURRENT = 10  # Cap concurrent positions to avoid over-deployment
+FLIPPED_MAX_CONCURRENT = 0  # 0 = no cap; position sizing handles risk naturally
 BATCH_SIZE = 8
 BATCH_DELAY = 1.5
 SCAN_TIMEFRAMES = ["1h", "4h", "1d"]
@@ -147,11 +147,13 @@ class FlippedTrader:
         # Scan with simplified pipeline
         signals = await self._scan_pairs(pairs)
 
-        # Enter flipped trades (respect max concurrent)
+        # Enter flipped trades (limited by available balance)
         entered = 0
         for signal in signals:
-            if len(self.positions) >= FLIPPED_MAX_CONCURRENT:
+            if FLIPPED_MAX_CONCURRENT > 0 and len(self.positions) >= FLIPPED_MAX_CONCURRENT:
                 break
+            if self.balance < 5.0:
+                break  # No margin left
             if signal.symbol in self.positions:
                 continue
             try:
