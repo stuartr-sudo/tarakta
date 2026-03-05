@@ -37,6 +37,7 @@ SIM_FEE_RATE = 0.0004
 # Sweep (35) + Displacement (25) = 60 minimum
 # HTF (15) + Timing (15) = bonus
 FLIPPED_THRESHOLD = 60.0
+FLIPPED_MAX_CONCURRENT = 10  # Cap concurrent positions to avoid over-deployment
 BATCH_SIZE = 8
 BATCH_DELAY = 1.5
 SCAN_TIMEFRAMES = ["1h", "4h", "1d"]
@@ -145,9 +146,11 @@ class FlippedTrader:
         # Scan with simplified pipeline
         signals = await self._scan_pairs(pairs)
 
-        # Enter flipped trades
+        # Enter flipped trades (respect max concurrent)
         entered = 0
         for signal in signals:
+            if len(self.positions) >= FLIPPED_MAX_CONCURRENT:
+                break
             if signal.symbol in self.positions:
                 continue
             try:
@@ -462,9 +465,11 @@ class FlippedTrader:
         }
 
         db_trade = await self.repo.insert_trade(trade_record)
-        if db_trade:
-            position.trade_id = db_trade.get("id", "")
+        if not db_trade:
+            logger.warning("flipped_db_insert_failed", symbol=signal.symbol)
+            return False
 
+        position.trade_id = db_trade.get("id", "")
         self.positions[signal.symbol] = position
         self.balance -= margin_used
         self.daily_trade_count += 1

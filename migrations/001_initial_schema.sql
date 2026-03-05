@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS trades (
     direction       TEXT NOT NULL CHECK (direction IN ('long', 'short')),
     status          TEXT NOT NULL DEFAULT 'open'
                     CHECK (status IN ('open', 'closed', 'cancelled')),
-    mode            TEXT NOT NULL CHECK (mode IN ('live', 'paper')),
+    mode            TEXT NOT NULL CHECK (mode IN ('live', 'paper', 'flipped_paper')),
 
     -- Entry
     entry_price     DECIMAL(20, 8) NOT NULL,
