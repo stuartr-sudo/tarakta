@@ -7,6 +7,7 @@ import ccxt.async_support as ccxt
 import pandas as pd
 
 from src.exchange.models import OrderResult
+from src.exchange.protocol import CRYPTO_FUTURES_MARKET_INFO, CRYPTO_MARKET_INFO, MarketInfo
 from src.utils.logging import get_logger
 from src.utils.retry import async_retry
 
@@ -201,6 +202,10 @@ class BinanceClient:
     @property
     def min_order_usd(self) -> float:
         return 10.0
+
+    @property
+    def market_info(self) -> MarketInfo:
+        return CRYPTO_MARKET_INFO
 
     async def close(self) -> None:
         await self.exchange.close()
@@ -561,6 +566,10 @@ class BinanceFuturesClient:
     def min_order_usd(self) -> float:
         return 5.0
 
+    @property
+    def market_info(self) -> MarketInfo:
+        return CRYPTO_FUTURES_MARKET_INFO
+
     async def close(self) -> None:
         await self.exchange.close()
 
@@ -791,14 +800,30 @@ class BinanceMarginClient:
     def min_order_usd(self) -> float:
         return 10.0
 
+    @property
+    def market_info(self) -> MarketInfo:
+        return CRYPTO_MARKET_INFO
+
     async def close(self) -> None:
         await self.exchange.close()
 
 
 def create_exchange(name: str, api_key: str, api_secret: str, account_type: str = "spot", leverage: int = 1, margin_mode: str = "isolated"):
-    """Factory: create Binance exchange client by account type."""
+    """Factory: create Binance exchange client by account type.
+
+    Legacy factory — kept for backward compatibility.
+    New code should use src.exchange.factory.create_exchange() instead.
+    """
     if account_type == "futures":
         return BinanceFuturesClient(api_key, api_secret, leverage=leverage, margin_mode=margin_mode)
     elif account_type == "margin":
         return BinanceMarginClient(api_key, api_secret)
     return BinanceClient(api_key, api_secret)
+
+
+# Register connectors in the global factory registry
+from src.exchange.factory import register_connector  # noqa: E402
+
+register_connector("binance_spot", BinanceClient)
+register_connector("binance_futures", BinanceFuturesClient)
+register_connector("binance_margin", BinanceMarginClient)

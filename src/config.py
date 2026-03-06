@@ -1,13 +1,32 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
 
+class MarketConfig(BaseModel):
+    """Configuration for one market connector (crypto, stocks, commodities, etc.)."""
+    connector: str = ""                 # "binance_futures", "yfinance_stocks", "yfinance_commodities", "alpaca"
+    enabled: bool = True
+    api_key: str = ""
+    api_secret: str = ""
+    account_type: str = "spot"          # connector-specific
+    leverage: int = 1
+    margin_mode: str = "isolated"
+    # Market-specific overrides
+    min_volume_usd: float = 20_000_000
+    scan_interval_minutes: int = 15
+    quality_filter: bool = True
+    quote_currencies: list[str] = Field(default_factory=lambda: ["USDT"])
+    initial_balance: float = 2000.0
+    # Symbol universe (for stocks/commodities — the equivalent of QUALITY_BASES)
+    symbol_universe: list[str] = Field(default_factory=list)
+
+
 class Settings(BaseSettings):
-    # Exchange (Binance only)
+    # Exchange (Binance — legacy flat fields, still work for single-market crypto)
     exchange_name: str = "binance"
     binance_api_key: str = ""
     binance_api_secret: str = ""
@@ -25,13 +44,13 @@ class Settings(BaseSettings):
 
     # Account type
     account_type: Literal["spot", "margin", "futures"] = "spot"
-    leverage: int = 1  # 1x–10x (futures/margin)
+    leverage: int = 10  # 1x–10x (futures/margin)
     margin_mode: Literal["isolated", "cross"] = "isolated"  # futures only
 
     # Trading
     trading_mode: Literal["paper", "live"] = "paper"
     initial_balance: float = 2000.0
-    entry_threshold: float = 70.0  # Requires sweep + displacement at minimum
+    entry_threshold: float = 60.0  # Requires sweep + displacement at minimum (pullback is bonus)
     max_risk_pct: float = 0.10  # Max 10% of balance lost per trade (SL distance)
     max_position_pct: float = 0.25  # Max 25% of balance allocated per trade (margin)
     max_exposure_pct: float = 1.0  # Allow full budget deployment across positions
@@ -42,21 +61,24 @@ class Settings(BaseSettings):
     cooldown_hours: float = 2.0  # Cooldown after stop-loss before re-entering same symbol
     max_daily_trades: int = 15  # Allow more trades to deploy full balance
 
-    # Progressive take-profit tiers (disabled for Trade Travel Chill)
-    tp_tiers_enabled: bool = False  # Travel: single exit via trailing stop
-    tp1_rr: float = 1.0     # TP1 at 1R (legacy, inactive)
-    tp2_rr: float = 2.0     # TP2 at 2R (legacy, inactive)
-    tp1_pct: float = 0.33   # close 33% at TP1 (legacy, inactive)
-    tp2_pct: float = 0.33   # close 33% at TP2 (legacy, inactive)
-    tp3_pct: float = 0.34   # remaining 34% via trailing stop (legacy, inactive)
-    move_sl_to_be_after_tp1: bool = True  # move SL to breakeven after TP1 (legacy, inactive)
+    # Progressive take-profit tiers
+    # TP1 hit → close 33%, move SL to breakeven
+    # TP2 hit → close 33%, move SL to TP1 price
+    # TP3    → remaining 34% via trailing stop
+    tp_tiers_enabled: bool = True
+    tp1_rr: float = 1.0     # TP1 at 1R
+    tp2_rr: float = 2.0     # TP2 at 2R
+    tp1_pct: float = 0.33   # close 33% at TP1
+    tp2_pct: float = 0.33   # close 33% at TP2
+    tp3_pct: float = 0.34   # remaining 34% via trailing stop
+    move_sl_to_be_after_tp1: bool = True  # move SL to breakeven after TP1
 
     # Pullback entry timing
     pullback_min_retracement: float = 0.20  # Min retracement to consider pullback valid
     pullback_max_retracement: float = 0.78  # Max retracement before setup is invalid
 
     # Trailing stop (Travel phase)
-    trailing_activation_rr: float = 2.0  # Activate trailing after 2R profit
+    trailing_activation_rr: float = 1.0  # Activate trailing after 1R profit
     trailing_atr_multiplier: float = 1.5  # Trail at 1.5x ATR from high water mark
 
     # Signal reversal — disabled for Trade Travel Chill (no reversals, accept the loss)
@@ -70,8 +92,8 @@ class Settings(BaseSettings):
     min_volume_usd: float = 20_000_000  # $20M min 24h volume — filters to top ~100 coins
     quality_filter: bool = True  # Only scan established coins (QUALITY_BASES whitelist)
     max_position_volume_pct: float = 0.001  # Position size must be < 0.1% of 24h volume
-    max_spread_pct: float = 0.003  # Max 0.3% bid-ask spread — skip illiquid pairs
-    min_ob_depth_usd: float = 100.0  # Min $100 depth at best bid/ask level
+    max_spread_pct: float = 0.002  # Max 0.2% bid-ask spread — skip illiquid pairs
+    min_ob_depth_usd: float = 1000.0  # Min $1,000 depth at best bid/ask — ensures exit liquidity
     quote_currencies: list[str] = Field(default_factory=lambda: ["USD", "USDT"])
 
     # Hugging Face Inference API
@@ -100,6 +122,29 @@ class Settings(BaseSettings):
     flipped_max_risk_pct: float = 0.15  # 15% of balance at risk per trade (bigger than main)
     flipped_min_rr_ratio: float = 2.0  # Looser R:R for flipped (main uses 3.0)
 
+    # Custom configurable bot — second shadow bot with adjustable direction & margin
+    custom_enabled: bool = True
+    custom_initial_balance: float = 2000.0
+    custom_leverage: int = 5
+    custom_flip_direction: bool = True       # Default starts flipped (user can toggle)
+    custom_margin_pct: float = 0.15          # 15% default (user can slide 5%–40%)
+    custom_flip_mode: str = "smart_flip"     # "always_flip" | "smart_flip" | "normal"
+    custom_flip_threshold: float = 0.50      # 0.0–1.0 — only flip when sweep prob > this
+    custom_scan_interval_minutes: int = 20   # Offset from flipped's 15min
+
+    # Multi-market configuration
+    # Each key is a market name like "crypto", "stocks", "commodities"
+    # Populated from MARKET_* env vars or left empty for backward-compat (uses legacy flat fields)
+    markets: dict[str, MarketConfig] = Field(default_factory=dict)
+
+    # Extra market env vars (parsed in __init__)
+    market_stocks_connector: str = ""
+    market_stocks_symbol_universe: str = ""  # Comma-separated: "AAPL,MSFT,GOOGL"
+    market_stocks_initial_balance: float = 2000.0
+    market_commodities_connector: str = ""
+    market_commodities_symbol_universe: str = ""  # Comma-separated: "GC=F,SI=F,CL=F"
+    market_commodities_initial_balance: float = 2000.0
+
     # One-time force reset — set FORCE_RESET=true to wipe all data on next startup
     force_reset: bool = False
 
@@ -120,3 +165,50 @@ class Settings(BaseSettings):
             self.leverage = 10
         if self.account_type == "spot":
             self.leverage = 1
+
+        # Build markets dict from env vars if not explicitly set
+        self._build_markets()
+
+    def _build_markets(self) -> None:
+        """Auto-construct market configs from flat env vars."""
+        # Always include crypto from legacy flat fields (backward compat)
+        if "crypto" not in self.markets and self.binance_api_key:
+            account_type = self.account_type
+            connector = f"binance_{account_type}" if account_type != "spot" else "binance_spot"
+            self.markets["crypto"] = MarketConfig(
+                connector=connector,
+                api_key=self.binance_api_key,
+                api_secret=self.binance_api_secret,
+                account_type=account_type,
+                leverage=self.leverage,
+                margin_mode=self.margin_mode,
+                min_volume_usd=self.min_volume_usd,
+                scan_interval_minutes=self.scan_interval_minutes,
+                quality_filter=self.quality_filter,
+                quote_currencies=self.quote_currencies,
+                initial_balance=self.initial_balance,
+            )
+
+        # Stocks from MARKET_STOCKS_* env vars
+        if "stocks" not in self.markets and self.market_stocks_connector:
+            universe = [s.strip() for s in self.market_stocks_symbol_universe.split(",") if s.strip()]
+            self.markets["stocks"] = MarketConfig(
+                connector=self.market_stocks_connector,
+                symbol_universe=universe,
+                initial_balance=self.market_stocks_initial_balance,
+                scan_interval_minutes=15,
+                quality_filter=False,  # Stocks use symbol_universe instead
+                min_volume_usd=0,      # No volume filter for stocks
+            )
+
+        # Commodities from MARKET_COMMODITIES_* env vars
+        if "commodities" not in self.markets and self.market_commodities_connector:
+            universe = [s.strip() for s in self.market_commodities_symbol_universe.split(",") if s.strip()]
+            self.markets["commodities"] = MarketConfig(
+                connector=self.market_commodities_connector,
+                symbol_universe=universe,
+                initial_balance=self.market_commodities_initial_balance,
+                scan_interval_minutes=15,
+                quality_filter=False,
+                min_volume_usd=0,
+            )

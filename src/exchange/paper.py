@@ -6,6 +6,7 @@ from uuid import uuid4
 import pandas as pd
 
 from src.exchange.models import OrderResult
+from src.exchange.protocol import parse_symbol_base
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -45,8 +46,7 @@ class PaperExchange:
         restored = 0
 
         for symbol, pos in open_positions.items():
-            base = symbol.split("/")[0]
-            base = base.split(":")[0] if ":" in base else base
+            base = parse_symbol_base(symbol)
             leverage = pos.leverage or self._leverage
 
             if self._account_type == "futures":
@@ -114,7 +114,7 @@ class PaperExchange:
         if self._account_type == "futures":
             return await self._futures_limit_order(symbol, side, quantity, fill_price)
 
-        base = symbol.split("/")[0]
+        base = parse_symbol_base(symbol)
         if side == "buy":
             cost = quantity * fill_price
             fee = cost * self._fee_rate
@@ -171,7 +171,7 @@ class PaperExchange:
     async def _futures_limit_order(self, symbol: str, side: str, quantity: float, fill_price: float) -> OrderResult:
         """Simulate a futures limit order with leverage."""
         leverage = self._leverage
-        base = symbol.split("/")[0]
+        base = parse_symbol_base(symbol)
         long_key = f"LONG_{base}"
         short_key = f"SHORT_{base}"
         notional = quantity * fill_price
@@ -252,7 +252,7 @@ class PaperExchange:
             cost = quantity * fill_price
             fee = cost * self._fee_rate
 
-            base = symbol.split("/")[0]
+            base = parse_symbol_base(symbol)
             short_key = f"SHORT_{base}"
 
             if self.balance.get(short_key, 0) >= quantity * 0.99:
@@ -275,7 +275,7 @@ class PaperExchange:
             revenue = quantity * fill_price
             fee = revenue * self._fee_rate
 
-            base = symbol.split("/")[0]
+            base = parse_symbol_base(symbol)
             base_balance = self.balance.get(base, 0)
 
             if base_balance >= quantity * 0.99:
@@ -325,7 +325,7 @@ class PaperExchange:
     async def _futures_order(self, symbol: str, side: str, quantity: float, price: float) -> OrderResult:
         """Simulate a futures order with leverage. Margin-based accounting."""
         leverage = self._leverage
-        base = symbol.split("/")[0]
+        base = parse_symbol_base(symbol)
         long_key = f"LONG_{base}"
         short_key = f"SHORT_{base}"
 
@@ -411,11 +411,10 @@ class PaperExchange:
         self,
         min_volume_usd: float = 50_000,
         quote_currencies: list[str] | None = None,
-        exclude: list[str] | None = None,
-        quality_filter: bool = True,
+        **kwargs,
     ) -> list[str]:
         """Delegate to live exchange."""
-        return await self.live.get_tradeable_pairs(min_volume_usd, quote_currencies, exclude, quality_filter)
+        return await self.live.get_tradeable_pairs(min_volume_usd, quote_currencies, **kwargs)
 
     def get_24h_volume(self, symbol: str) -> float:
         """Delegate to live exchange."""
@@ -453,12 +452,16 @@ class PaperExchange:
     def leverage(self) -> int:
         return self._leverage
 
+    @property
+    def market_info(self):
+        """Delegate to live exchange for market metadata."""
+        return getattr(self.live, "market_info", None)
+
     async def get_position_risk(self, symbol: str) -> dict:
         """Simulated position risk for futures paper trading."""
         if self._account_type != "futures":
             return {}
-        base = symbol.split("/")[0]
-        base = base.split(":")[0] if ":" in base else base
+        base = parse_symbol_base(symbol)
         for prefix, direction in [("LONG_", "long"), ("SHORT_", "short")]:
             key = f"{prefix}{base}"
             qty = self.balance.get(key, 0)

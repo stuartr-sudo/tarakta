@@ -26,7 +26,7 @@ class Repository:
 
     # Known columns in the Supabase trades table
     _TRADE_COLUMNS = {
-        "symbol", "direction", "status", "mode",
+        "symbol", "direction", "status", "mode", "market",
         "entry_price", "entry_quantity", "entry_cost_usd", "entry_order_id", "entry_time",
         "exit_price", "exit_quantity", "exit_order_id", "exit_time", "exit_reason",
         "stop_loss", "take_profit", "risk_usd", "risk_reward",
@@ -386,6 +386,38 @@ class Repository:
             _exec, self.db.table("engine_state").upsert(state)
         )
         return result.data[0] if result.data else {}
+
+    async def reset_mode_data(self, mode: str) -> dict:
+        """Reset trades and snapshots for a specific mode (e.g. 'paper' or 'flipped_paper').
+
+        Returns summary of what was deleted.
+        """
+        deleted = {"trades": 0, "snapshots": 0}
+
+        # Delete trades for this mode
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("trades").delete().eq("mode", mode).gte("created_at", "1970-01-01"),
+            )
+            deleted["trades"] = len(result.data) if result.data else 0
+            logger.info("reset_mode_trades", mode=mode, count=deleted["trades"])
+        except Exception as e:
+            logger.warning("reset_mode_trades_failed", mode=mode, error=str(e))
+
+        # Delete portfolio snapshots (shared — only clear if resetting main)
+        if mode != "flipped_paper":
+            try:
+                result = await asyncio.to_thread(
+                    _exec,
+                    self.db.table("portfolio_snapshots").delete().neq("id", 0),
+                )
+                deleted["snapshots"] = len(result.data) if result.data else 0
+                logger.info("reset_mode_snapshots", mode=mode, count=deleted["snapshots"])
+            except Exception as e:
+                logger.warning("reset_mode_snapshots_failed", mode=mode, error=str(e))
+
+        return deleted
 
     async def wipe_all_data(self) -> None:
         """Nuclear reset — delete ALL data from every table. Used by FORCE_RESET."""

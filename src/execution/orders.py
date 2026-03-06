@@ -4,10 +4,10 @@ SL: Behind the sweep extreme (wick tip) + 0.5% buffer. This is the
 safest SL because MMs already grabbed that liquidity and have no
 reason to revisit it.
 
-TP: At the opposite liquidity pool (where stops exist on the other
-side). Minimum 2:1 R:R.
-
-No progressive TP tiers — single exit via trailing stop.
+TP: Progressive 3-tier take-profit:
+  TP1 (1R) → close 33%, move SL to breakeven
+  TP2 (2R) → close 33%, move SL to TP1 price
+  TP3      → remaining 34% via trailing stop
 """
 from __future__ import annotations
 
@@ -125,9 +125,13 @@ class OrderExecutor:
                 )
                 return None, None, None
 
-            # Check depth at best level
-            bid_depth_usd = best_bid * float(bids[0][1])
-            ask_depth_usd = best_ask * float(asks[0][1])
+            # Check depth across top 5 levels (not just best level)
+            bid_depth_usd = sum(
+                float(level[0]) * float(level[1]) for level in bids[:5]
+            )
+            ask_depth_usd = sum(
+                float(level[0]) * float(level[1]) for level in asks[:5]
+            )
             relevant_depth = bid_depth_usd if is_long else ask_depth_usd
 
             if relevant_depth < self.config.min_ob_depth_usd:
@@ -140,12 +144,44 @@ class OrderExecutor:
                 )
                 return None, None, None
 
+            # --- 24h volume re-check at entry time ---
+            try:
+                ticker = await self.exchange.fetch_ticker(signal.symbol)
+                quote_vol_24h = float(ticker.get("quoteVolume", 0) or 0)
+                if quote_vol_24h < self.config.min_volume_usd:
+                    logger.info(
+                        "skip_low_volume_at_entry",
+                        symbol=signal.symbol,
+                        volume_24h=f"{quote_vol_24h:,.0f}",
+                        min_volume=f"{self.config.min_volume_usd:,.0f}",
+                    )
+                    return None, None, None
+
+                # --- Position size vs daily volume check ---
+                notional = pos_size.quantity * signal.entry_price
+                vol_pct = notional / quote_vol_24h if quote_vol_24h > 0 else 1.0
+                if vol_pct > self.config.max_position_volume_pct:
+                    logger.info(
+                        "skip_position_too_large_for_volume",
+                        symbol=signal.symbol,
+                        notional=f"{notional:,.2f}",
+                        volume_24h=f"{quote_vol_24h:,.0f}",
+                        vol_pct=f"{vol_pct:.6f}",
+                        max_pct=f"{self.config.max_position_volume_pct:.4f}",
+                    )
+                    return None, None, None
+            except Exception as e:
+                logger.warning("volume_recheck_failed", symbol=signal.symbol, error=str(e)[:100])
+                # Conservative: skip entry if we can't verify volume
+                return None, None, None
+
             logger.info(
                 "liquidity_check_passed",
                 symbol=signal.symbol,
                 spread_pct=f"{spread_pct:.4f}",
                 bid_depth_usd=f"{bid_depth_usd:.0f}",
                 ask_depth_usd=f"{ask_depth_usd:.0f}",
+                volume_24h=f"{quote_vol_24h:,.0f}",
             )
 
             if is_long:
@@ -348,7 +384,7 @@ class OrderExecutor:
         quantity: float,
         direction: str,
     ) -> list[TakeProfitTier]:
-        """Build 3-tier TP plan. Legacy — only used if tp_tiers_enabled=True."""
+        """Build 3-tier progressive TP plan: 33% at 1R, 33% at 2R, 34% trailing."""
         sl_distance = abs(entry_price - sl_price)
         is_long = direction == "long"
 

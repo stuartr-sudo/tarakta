@@ -26,6 +26,11 @@ class RiskManager:
         self._account_type = config.account_type
         self._leverage = config.leverage
 
+        # Market-aware fee rate (from exchange.market_info if available)
+        market_info = getattr(exchange, "market_info", None) if exchange else None
+        self._supports_shorting = market_info.supports_shorting if market_info else (config.account_type != "spot")
+        self._fee_rate_override = market_info.default_fee_rate if market_info else None
+
     def record_stop_out(self, symbol: str) -> None:
         """Record a stop-loss exit — symbol goes on cooldown."""
         until = datetime.now(timezone.utc) + timedelta(hours=self.cooldown_hours)
@@ -84,8 +89,12 @@ class RiskManager:
         quantity = risk_amount / sl_distance
         cost = quantity * entry_price
 
-        # Account for fees + slippage (~0.36% total for spot, ~0.14% for futures)
-        fee_multiplier = 1.002 if self._account_type == "futures" else 1.004
+        # Account for fees + slippage
+        if self._fee_rate_override is not None:
+            # Market-aware: use actual fee rate * 2 (entry + exit) + 0.1% slippage
+            fee_multiplier = 1 + (self._fee_rate_override * 2) + 0.001
+        else:
+            fee_multiplier = 1.002 if self._account_type == "futures" else 1.004
         total_cost = cost * fee_multiplier
 
         # For futures: the margin required is notional / leverage
@@ -137,11 +146,11 @@ class RiskManager:
         total_exposure_usd: float = 0.0,
     ) -> TradeValidation:
         """Pre-trade validation checks."""
-        # Spot account cannot short — reject bearish signals
-        if signal.direction == "bearish" and self._account_type == "spot":
+        # Cannot short on spot/data-only accounts — reject bearish signals
+        if signal.direction == "bearish" and not self._supports_shorting:
             return TradeValidation(
                 allowed=False,
-                reason="Spot accounts cannot short. Bearish signal rejected.",
+                reason="This market/account does not support shorting. Bearish signal rejected.",
             )
 
         # Max total exposure (pct of equity = cash + open positions)

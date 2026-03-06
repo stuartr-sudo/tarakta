@@ -6,7 +6,7 @@ no leverage intelligence, no quality whitelist). Every qualifying signal
 is direction-flipped: bullish → short, bearish → long.
 
 Wider SL, higher leverage. No exchange orders — purely simulated using
-ticker prices. Trades stored in DB with mode='flipped_paper'.
+ticker prices. Trades stored in DB with configurable mode (default: 'flipped_paper').
 """
 from __future__ import annotations
 
@@ -21,7 +21,8 @@ import pandas as pd
 from src.config import Settings
 from src.data.candles import CandleManager
 from src.data.repository import Repository
-from src.exchange.models import Position, SignalCandidate
+from src.exchange.models import Position, SignalCandidate, TakeProfitTier
+from src.strategy.leverage import LeverageAnalyzer
 from src.strategy.market_structure import MarketStructureAnalyzer
 from src.strategy.sessions import SessionAnalyzer
 from src.strategy.sweep_detector import SweepDetector
@@ -37,14 +38,21 @@ SIM_FEE_RATE = 0.0004
 # Sweep (35) + Displacement (25) = 60 minimum
 # HTF (15) + Timing (15) = bonus
 FLIPPED_THRESHOLD = 60.0
-FLIPPED_MAX_CONCURRENT = 0  # 0 = no cap; position sizing handles risk naturally
+FLIPPED_MAX_CONCURRENT = 8  # Cap concurrent positions to limit total exposure
+MAX_EXPOSURE_PCT = 0.60  # Don't deploy more than 60% of initial balance as margin
 BATCH_SIZE = 16  # Larger batches for faster scans (475 pairs is a lot)
 BATCH_DELAY = 0.5  # Shorter delay between batches
 SCAN_TIMEFRAMES = ["1h", "4h"]  # Drop 1d — not worth extra API calls for 5pts HTF bonus
 
 
 class FlippedTrader:
-    """Shadow bot with its own scanner. Flips every signal and paper-trades it."""
+    """Configurable shadow bot with its own scanner.
+
+    Supports both flipped (inverted direction) and normal trading modes.
+    Parameters ``flip_direction``, ``mode_name``, and ``state_key`` allow
+    multiple independent instances to run side-by-side (e.g. the default
+    flipped bot AND a user-configurable "custom" bot).
+    """
 
     def __init__(
         self,
@@ -52,7 +60,12 @@ class FlippedTrader:
         repo: Repository,
         candle_manager: CandleManager | None = None,
         exchange=None,
+        *,
+        flip_direction: bool = True,
+        mode_name: str = "flipped_paper",
+        state_key: str = "flipped_trader",
     ) -> None:
+        self.config = config  # Store reference for liquidity checks etc.
         self.enabled = config.flipped_enabled
         self.leverage = config.flipped_leverage
         self.sl_buffer = config.flipped_sl_buffer
@@ -69,11 +82,19 @@ class FlippedTrader:
         self.candle_manager = candle_manager
         self.exchange = exchange
 
-        # Simplified strategy components (no pullback, no leverage analyzer)
+        # Configurable direction & identity
+        self.flip_direction = flip_direction
+        self.mode_name = mode_name
+        self.state_key = state_key
+        self.flip_mode = "always_flip"   # Default for flipped bot; custom overrides to "smart_flip"
+        self.flip_threshold = 0.50
+
+        # Strategy components
         self.ms_analyzer = MarketStructureAnalyzer()
         self.vol_analyzer = VolumeAnalyzer()
         self.session_analyzer = SessionAnalyzer()
         self.sweep_detector = SweepDetector()
+        self.leverage_analyzer = LeverageAnalyzer()
 
         # Separate paper balance — independent of main bot
         self.balance = config.flipped_initial_balance
@@ -89,6 +110,114 @@ class FlippedTrader:
         self._closed_symbols: dict[str, datetime] = {}  # symbol → close time
         self.REENTRY_COOLDOWN_HOURS = 4
 
+        # Thread-safe flags — set by dashboard API, checked by monitor/scan loops
+        import threading
+        self._reset_event = threading.Event()
+        self._trigger_scan_event = threading.Event()
+        self._scanning_active = True  # Default True; custom bot will override to False
+        self._initial_balance = config.flipped_initial_balance
+
+    # ------------------------------------------------------------------
+    # Runtime settings update (hot-reload from dashboard)
+    # ------------------------------------------------------------------
+
+    def update_settings(
+        self,
+        flip_direction: bool | None = None,
+        margin_pct: float | None = None,
+        flip_mode: str | None = None,
+        flip_threshold: float | None = None,
+    ) -> None:
+        """Update configurable parameters at runtime (thread-safe for simple scalars)."""
+        if flip_direction is not None:
+            self.flip_direction = flip_direction
+        if margin_pct is not None:
+            self.max_position_pct = margin_pct
+            self.max_risk_pct = margin_pct
+        if flip_mode is not None and flip_mode in ("always_flip", "smart_flip", "normal"):
+            self.flip_mode = flip_mode
+        if flip_threshold is not None:
+            self.flip_threshold = max(0.0, min(1.0, flip_threshold))
+
+    def request_reset(self) -> None:
+        """Signal the flipped trader to reset on next tick (thread-safe)."""
+        self._reset_event.set()
+
+    def request_scan(self) -> None:
+        """Signal the flipped trader to run an immediate scan (thread-safe)."""
+        self._trigger_scan_event.set()
+
+    def begin_scanning(self) -> None:
+        """Enable the scan loop (called by dashboard Begin button)."""
+        self._scanning_active = True
+        self._trigger_scan_event.set()  # Also trigger an immediate scan
+        logger.info("bot_scanning_started", mode=self.mode_name)
+
+    def stop_scanning(self) -> None:
+        """Pause the scan loop (keeps monitoring open positions)."""
+        self._scanning_active = False
+        logger.info("bot_scanning_stopped", mode=self.mode_name)
+
+    async def _check_and_apply_reset(self) -> bool:
+        """Check if a reset was requested and apply it. Returns True if reset happened."""
+        if not self._reset_event.is_set():
+            return False
+
+        self._reset_event.clear()
+        logger.info("flipped_reset_applying", reason="dashboard_reset_button")
+
+        # Clear all in-memory state
+        self.positions.clear()
+        self.balance = self._initial_balance
+        self.peak_balance = self._initial_balance
+        self.daily_start_balance = self._initial_balance
+        self.daily_pnl = 0.0
+        self.total_pnl = 0.0
+        self.daily_trade_count = 0
+        self._scan_count = 0
+        self.last_scan_time = None
+        self._closed_symbols.clear()
+
+        # Save the clean state to DB (overwrite any stale data)
+        await self._save_state()
+
+        logger.info(
+            "flipped_reset_complete",
+            balance=self.balance,
+            positions=len(self.positions),
+        )
+        return True
+
+    def _purge_incompatible_positions(self) -> None:
+        """Remove in-memory positions for symbols that don't belong to this exchange.
+
+        After multi-market split, state may contain non-crypto symbols (like CL=F)
+        that were entered when all markets shared the same flipped/custom state.
+        These can't be monitored on the current exchange (e.g. Binance).
+        """
+        exchange_name = getattr(self.exchange, "exchange_name", "")
+        is_crypto_exchange = "binance" in exchange_name.lower() or "ccxt" in str(type(self.exchange)).lower()
+
+        if not is_crypto_exchange:
+            return  # Non-crypto exchanges can have any symbol format
+
+        to_remove = []
+        for sym in self.positions:
+            # Crypto symbols contain "/" (e.g. BTC/USDT:USDT), non-crypto don't
+            if "/" not in sym:
+                to_remove.append(sym)
+
+        for sym in to_remove:
+            pos = self.positions.pop(sym)
+            logger.info(
+                "purged_incompatible_position",
+                mode=self.mode_name,
+                symbol=sym,
+                direction=pos.direction,
+                entry_price=pos.entry_price,
+                reason="non_crypto_on_crypto_exchange",
+            )
+
     # ------------------------------------------------------------------
     # Independent scan loop
     # ------------------------------------------------------------------
@@ -96,32 +225,60 @@ class FlippedTrader:
     async def run_loop(self) -> None:
         """Independent scan loop — runs every N minutes, completely separate from main bot."""
         if not self.enabled or not self.candle_manager or not self.exchange:
-            logger.warning("flipped_loop_disabled", reason="missing dependencies or disabled")
+            logger.warning("flipped_loop_disabled", mode=self.mode_name, reason="missing dependencies or disabled")
             return
 
         logger.info(
             "flipped_loop_started",
+            mode=self.mode_name,
             interval_minutes=self.scan_interval,
             leverage=self.leverage,
             sl_buffer=self.sl_buffer,
             threshold=FLIPPED_THRESHOLD,
+            flip_mode=self.flip_mode,
+            flip_direction=self.flip_direction,
+            scanning_active=self._scanning_active,
+            margin_pct=self.max_position_pct,
         )
 
         # Reconcile in-memory positions with DB (handles restarts)
         await self._reconcile_from_db()
 
+        # Auto-purge positions for symbols the exchange can't handle
+        # (e.g. CL=F stuck in crypto engine after multi-market was split)
+        self._purge_incompatible_positions()
+
         # Start independent position monitor (every 60s)
         monitor_task = asyncio.create_task(self._monitor_loop())
 
-        # Run an immediate scan on startup
-        try:
-            await self._run_scan()
-        except Exception as e:
-            logger.error("flipped_startup_scan_failed", error=str(e))
+        # Run an immediate scan on startup (only if scanning is active)
+        if self._scanning_active:
+            try:
+                await self._run_scan()
+            except Exception as e:
+                logger.error("flipped_startup_scan_failed", mode=self.mode_name, error=str(e))
+        else:
+            logger.info("bot_scanning_paused_at_startup", mode=self.mode_name)
 
         while True:
             try:
-                await asyncio.sleep(self.scan_interval * 60)
+                # Sleep in 5s increments so we can respond quickly to trigger requests
+                remaining = self.scan_interval * 60
+                triggered = False
+                while remaining > 0:
+                    await asyncio.sleep(min(5, remaining))
+                    remaining -= 5
+                    if self._trigger_scan_event.is_set():
+                        self._trigger_scan_event.clear()
+                        triggered = True
+                        logger.info("flipped_scan_triggered", reason="manual_trigger")
+                        break
+                # Check for reset request from dashboard
+                if await self._check_and_apply_reset():
+                    continue  # Skip scan this tick, state was just reset
+                # Check if scanning is active (custom bot may be paused)
+                if not self._scanning_active:
+                    continue
                 await self._run_scan()
             except asyncio.CancelledError:
                 logger.info("flipped_loop_cancelled")
@@ -145,6 +302,9 @@ class FlippedTrader:
         while True:
             try:
                 await asyncio.sleep(60)
+                # Check for reset request from dashboard
+                if await self._check_and_apply_reset():
+                    continue  # Skip monitoring this tick, state was just reset
                 if self.positions:
                     await self.monitor_positions()
                     # Persist state after monitoring (in case positions were closed)
@@ -156,17 +316,57 @@ class FlippedTrader:
                 logger.error("flipped_monitor_loop_error", error=str(e))
 
     async def _reconcile_from_db(self) -> None:
-        """Ensure in-memory positions match DB open trades.
+        """Ensure in-memory positions match DB open trades (bidirectional).
 
         On restart, config_overrides might be stale. This queries the DB for
-        open flipped_paper trades and adds any missing positions to memory.
+        open trades (matching self.mode_name) and:
+        1. Adds DB positions missing from memory
+        2. REMOVES memory positions missing from DB (orphans from failed resets)
         """
         try:
-            open_trades = await self.repo.get_open_trades(mode="flipped_paper")
+            open_trades = await self.repo.get_open_trades(mode=self.mode_name)
+            db_symbols = {t["symbol"] for t in open_trades} if open_trades else set()
+
+            # --- Remove orphaned positions (in memory but not in DB) ---
+            orphaned = [s for s in self.positions if s not in db_symbols]
+            if orphaned:
+                for sym in orphaned:
+                    pos = self.positions.pop(sym)
+                    self.balance += pos.margin_used  # Return margin
+                    logger.warning(
+                        "flipped_reconcile_removed_orphan",
+                        symbol=sym,
+                        margin_returned=round(pos.margin_used, 2),
+                        balance=round(self.balance, 2),
+                    )
+                # Save cleaned state immediately
+                await self._save_state()
+
             if not open_trades:
-                logger.info("flipped_reconcile_no_open_trades")
+                # If all positions were orphans (DB was wiped by reset), reset balance to initial
+                if orphaned and not self.positions:
+                    logger.info(
+                        "flipped_reconcile_full_reset_detected",
+                        old_balance=round(self.balance, 2),
+                        new_balance=self._initial_balance,
+                        orphans_removed=len(orphaned),
+                    )
+                    self.balance = self._initial_balance
+                    self.peak_balance = self._initial_balance
+                    self.total_pnl = 0.0
+                    self.daily_pnl = 0.0
+                    self.daily_start_balance = self._initial_balance
+                    self._closed_symbols.clear()
+                    await self._save_state()
+                else:
+                    logger.info(
+                        "flipped_reconcile_no_open_trades",
+                        orphans_removed=len(orphaned),
+                        balance=round(self.balance, 2),
+                    )
                 return
 
+            # --- Add DB positions missing from memory ---
             added = 0
             for trade in open_trades:
                 symbol = trade["symbol"]
@@ -215,14 +415,14 @@ class FlippedTrader:
     async def _run_scan(self) -> None:
         """Run a full scan with simplified strategy, then enter flipped trades."""
         self._scan_count += 1
-        logger.info("flipped_scan_start", scan=self._scan_count)
+        logger.info("flipped_scan_start", mode=self.mode_name, scan=self._scan_count)
 
-        # Get ALL tradeable pairs (no quality whitelist filter)
+        # Get tradeable pairs — quality whitelist ensures only liquid, established coins
         try:
             pairs = await self.exchange.get_tradeable_pairs(
                 min_volume_usd=self.min_volume_usd,
                 quote_currencies=self.quote_currencies,
-                quality_filter=False,  # No whitelist — scan everything
+                quality_filter=True,  # Only established coins with reliable liquidity
             )
         except Exception as e:
             logger.error("flipped_pair_scan_failed", error=str(e))
@@ -242,15 +442,37 @@ class FlippedTrader:
         for s in expired:
             del self._closed_symbols[s]
 
+        # Log signal details for debugging
+        if signals:
+            logger.info(
+                "flipped_signals_detail",
+                signals=[
+                    {"symbol": s.symbol, "score": s.score, "dir": s.direction}
+                    for s in signals[:10]  # top 10
+                ],
+            )
+
         # Enter flipped trades (limited by available balance)
         entered = 0
         skipped_cooldown = 0
+        skipped_already_open = 0
+        skipped_entry_failed = 0
         for signal in signals:
             if FLIPPED_MAX_CONCURRENT > 0 and len(self.positions) >= FLIPPED_MAX_CONCURRENT:
                 break
             if self.balance < 5.0:
                 break  # No margin left
+            # Total exposure cap: don't deploy more than MAX_EXPOSURE_PCT of initial balance
+            total_margin = sum(p.margin_used for p in self.positions.values())
+            if total_margin >= self._initial_balance * MAX_EXPOSURE_PCT:
+                logger.info(
+                    "flipped_exposure_cap_reached",
+                    total_margin=round(total_margin, 2),
+                    limit=round(self._initial_balance * MAX_EXPOSURE_PCT, 2),
+                )
+                break
             if signal.symbol in self.positions:
+                skipped_already_open += 1
                 continue
             # Cooldown: don't re-enter a symbol too soon after closing
             if signal.symbol in self._closed_symbols:
@@ -259,6 +481,8 @@ class FlippedTrader:
             try:
                 if await self._try_enter(signal):
                     entered += 1
+                else:
+                    skipped_entry_failed += 1
             except Exception as e:
                 logger.warning("flipped_entry_error", symbol=signal.symbol, error=str(e))
 
@@ -266,13 +490,18 @@ class FlippedTrader:
 
         logger.info(
             "flipped_scan_complete",
+            mode=self.mode_name,
             scan=self._scan_count,
             pairs_scanned=len(pairs),
             signals_found=len(signals),
             trades_entered=entered,
             skipped_cooldown=skipped_cooldown,
+            skipped_already_open=skipped_already_open,
+            skipped_entry_failed=skipped_entry_failed,
             open_positions=len(self.positions),
             balance=round(self.balance, 2),
+            flip_mode=self.flip_mode,
+            margin_pct=self.max_position_pct,
         )
 
     async def _scan_pairs(self, pairs: list[str]) -> list[SignalCandidate]:
@@ -456,24 +685,121 @@ class FlippedTrader:
         return None
 
     # ------------------------------------------------------------------
+    # Leverage enrichment for smart flip
+    # ------------------------------------------------------------------
+
+    async def _enrich_signal_with_leverage(self, signal: SignalCandidate) -> float:
+        """Fetch leverage data and compute sweep flip probability for a signal.
+
+        Returns a float in [0.0, 1.0]. On any error, returns 0.5 (neutral).
+        """
+        try:
+            funding_data = await self.exchange.fetch_funding_rate(signal.symbol)
+            oi_data = await self.exchange.fetch_open_interest(signal.symbol)
+            ls_data = await self.exchange.fetch_long_short_ratio(signal.symbol)
+
+            funding_rate = float(funding_data.get("funding_rate", 0))
+            oi_usd = float(oi_data.get("open_interest_usd", 0))
+            ls_ratio = ls_data.get("long_short_ratio")  # May be None
+
+            session_result = getattr(signal, "session_result", None)
+            in_kz = session_result.in_kill_zone if session_result else False
+            in_pkz = session_result.in_post_kill_zone if session_result else False
+
+            prob = self.leverage_analyzer.compute_sweep_flip_probability(
+                signal_direction=signal.direction,
+                current_price=signal.entry_price,
+                open_interest_usd=oi_usd,
+                funding_rate=funding_rate,
+                long_short_ratio=ls_ratio,
+                in_kill_zone=in_kz,
+                in_post_kill_zone=in_pkz,
+            )
+            return prob
+        except Exception as e:
+            logger.warning("leverage_enrichment_failed", symbol=signal.symbol, error=str(e)[:100])
+            return 0.5  # Neutral fallback — let threshold decide
+
+    # ------------------------------------------------------------------
     # Trade entry (flipped direction)
     # ------------------------------------------------------------------
 
     async def _try_enter(self, signal: SignalCandidate) -> bool:
-        """Flip direction and simulate entry."""
-        # FLIP: bullish → short, bearish → long
-        is_long = signal.direction == "bearish"
+        """Flip direction (or not) and simulate entry."""
+        # ── Fetch LIVE ticker price ──────────────────────────────────
+        # The signal's entry_price comes from the last 1H candle close,
+        # which can be up to 59 minutes stale.  Using it directly causes
+        # paper trades to "enter" at a price the market has already moved
+        # past, leading to instant SL hits.  Fetch the real-time ticker
+        # and replace the signal price so all SL/TP/sizing calcs use the
+        # actual current price.
+        try:
+            ticker = await self.exchange.fetch_ticker(signal.symbol)
+            live_price = float(ticker["last"])
+        except Exception as e:
+            logger.warning("flipped_entry_ticker_failed", symbol=signal.symbol, error=str(e)[:100])
+            return False
+
+        # Reject if live price drifted >3% from signal — candle data too stale
+        price_drift = abs(live_price - signal.entry_price) / signal.entry_price if signal.entry_price else 1.0
+        if price_drift > 0.03:
+            logger.info(
+                "flipped_entry_rejected",
+                symbol=signal.symbol,
+                reason="price_drift",
+                signal_price=signal.entry_price,
+                live_price=live_price,
+                drift_pct=round(price_drift * 100, 2),
+            )
+            return False
+
+        # Update signal to use live price for SL/TP/sizing calculations
+        signal.entry_price = live_price
+
+        # Determine trade direction based on flip mode
+        if self.flip_mode == "always_flip":
+            is_long = signal.direction == "bearish"
+        elif self.flip_mode == "normal":
+            is_long = signal.direction == "bullish"
+        elif self.flip_mode == "smart_flip":
+            sweep_prob = await self._enrich_signal_with_leverage(signal)
+            should_flip = sweep_prob >= self.flip_threshold
+            if should_flip:
+                is_long = signal.direction == "bearish"
+            else:
+                is_long = signal.direction == "bullish"
+            logger.info(
+                "smart_flip_decision",
+                mode=self.mode_name,
+                symbol=signal.symbol,
+                signal_direction=signal.direction,
+                sweep_prob=round(sweep_prob, 3),
+                threshold=self.flip_threshold,
+                flipped=should_flip,
+                final_direction="long" if is_long else "short",
+            )
+        else:
+            # Fallback: use legacy flip_direction bool
+            if self.flip_direction:
+                is_long = signal.direction == "bearish"
+            else:
+                is_long = signal.direction == "bullish"
         direction = "long" if is_long else "short"
 
         # Calculate flipped SL
         sl_price = self._calculate_sl(signal, is_long)
         if sl_price is None:
+            logger.debug("flipped_entry_rejected", symbol=signal.symbol, reason="sl_calc_failed")
             return False
 
         # Validate SL direction
         if is_long and sl_price >= signal.entry_price:
+            logger.debug("flipped_entry_rejected", symbol=signal.symbol, reason="sl_above_entry_for_long",
+                        sl=sl_price, entry=signal.entry_price)
             return False
         if not is_long and sl_price <= signal.entry_price:
+            logger.debug("flipped_entry_rejected", symbol=signal.symbol, reason="sl_below_entry_for_short",
+                        sl=sl_price, entry=signal.entry_price)
             return False
 
         # Calculate flipped TP
@@ -486,11 +812,15 @@ class FlippedTrader:
         tp_distance = abs(tp_price - signal.entry_price) if tp_price else sl_distance * self.min_rr
         rr_ratio = tp_distance / sl_distance
         if rr_ratio < self.min_rr:
+            logger.info("flipped_entry_rejected", symbol=signal.symbol, reason="rr_too_low",
+                        rr=round(rr_ratio, 2), min_rr=self.min_rr)
             return False
 
         # Ensure SL within leverage safety (don't get liquidated before SL)
         liq_distance = signal.entry_price / self.leverage
         if sl_distance > liq_distance * 0.8:
+            logger.info("flipped_entry_rejected", symbol=signal.symbol, reason="sl_beyond_liquidation",
+                        sl_dist_pct=round(sl_distance/signal.entry_price*100, 2))
             return False
 
         # Position sizing
@@ -515,11 +845,70 @@ class FlippedTrader:
         if cost_usd < 5.0:
             return False  # Below exchange minimum
 
+        # ── LIQUIDITY GATE: spread, depth, volume checks ──────────
+        try:
+            ob = await self.exchange.fetch_order_book(signal.symbol, limit=10)
+            ob_bids = ob.get("bids") or []
+            ob_asks = ob.get("asks") or []
+            if not ob_bids or not ob_asks:
+                logger.info("flipped_skip_no_orderbook", symbol=signal.symbol)
+                return False
+
+            best_bid = float(ob_bids[0][0])
+            best_ask = float(ob_asks[0][0])
+            mid = (best_bid + best_ask) / 2
+            spread_pct = (best_ask - best_bid) / mid if mid > 0 else 1.0
+
+            if spread_pct > self.config.max_spread_pct:
+                logger.info("flipped_skip_wide_spread", symbol=signal.symbol,
+                            spread_pct=f"{spread_pct:.4f}", max=f"{self.config.max_spread_pct:.4f}")
+                return False
+
+            # Depth across top 5 levels
+            bid_depth = sum(float(l[0]) * float(l[1]) for l in ob_bids[:5])
+            ask_depth = sum(float(l[0]) * float(l[1]) for l in ob_asks[:5])
+            relevant_depth = bid_depth if is_long else ask_depth
+
+            if relevant_depth < self.config.min_ob_depth_usd:
+                logger.info("flipped_skip_thin_ob", symbol=signal.symbol,
+                            depth=f"{relevant_depth:.0f}", min=f"{self.config.min_ob_depth_usd:.0f}")
+                return False
+
+            # 24h volume re-check (ticker already fetched above)
+            quote_vol = float(ticker.get("quoteVolume", 0) or 0)
+            if quote_vol < self.config.min_volume_usd:
+                logger.info("flipped_skip_low_volume", symbol=signal.symbol,
+                            vol=f"{quote_vol:,.0f}", min=f"{self.config.min_volume_usd:,.0f}")
+                return False
+
+            # Position size vs daily volume
+            vol_pct = cost_usd / quote_vol if quote_vol > 0 else 1.0
+            if vol_pct > self.config.max_position_volume_pct:
+                logger.info("flipped_skip_pos_too_large", symbol=signal.symbol,
+                            cost=f"{cost_usd:.2f}", vol=f"{quote_vol:,.0f}",
+                            pct=f"{vol_pct:.6f}")
+                return False
+
+            logger.info("flipped_liquidity_passed", symbol=signal.symbol,
+                        spread=f"{spread_pct:.4f}", depth=f"{relevant_depth:.0f}",
+                        vol_24h=f"{quote_vol:,.0f}")
+        except Exception as e:
+            logger.warning("flipped_liquidity_check_failed", symbol=signal.symbol, error=str(e)[:100])
+            return False  # Conservative: skip if can't verify liquidity
+
         # Liquidation price
         if is_long:
             liq_price = signal.entry_price * (1 - 1 / self.leverage * 0.95)
         else:
             liq_price = signal.entry_price * (1 + 1 / self.leverage * 0.95)
+
+        # Build progressive TP tiers: 33% at TP1 (1R), 33% at TP2 (2R), 34% trailing
+        tp_tiers = self._calculate_tp_tiers(
+            entry_price=signal.entry_price,
+            sl_price=sl_price,
+            quantity=quantity,
+            is_long=is_long,
+        )
 
         # Build position
         position = Position(
@@ -539,28 +928,30 @@ class FlippedTrader:
             original_quantity=quantity,
             original_stop_loss=sl_price,
             confluence_score=signal.score,
+            tp_tiers=tp_tiers,
         )
 
         # Entry fee
         entry_fee = cost_usd * SIM_FEE_RATE
 
-        # Save to DB with mode="flipped_paper"
+        # Save to DB
+        direction_label = "FLIPPED" if self.flip_direction else "NORMAL"
         trade_record = {
             "symbol": signal.symbol,
             "direction": direction,
             "status": "open",
-            "mode": "flipped_paper",
+            "mode": self.mode_name,
             "entry_price": signal.entry_price,
             "entry_quantity": quantity,
             "entry_cost_usd": cost_usd,
-            "entry_order_id": "flipped_sim",
+            "entry_order_id": f"{self.state_key}_sim",
             "entry_time": position.entry_time.isoformat(),
             "stop_loss": sl_price,
             "take_profit": tp_price,
             "risk_usd": quantity * sl_distance,
             "risk_reward": round(rr_ratio, 2),
             "confluence_score": signal.score,
-            "signal_reasons": [f"FLIPPED:{signal.direction}\u2192{direction}"] + signal.reasons,
+            "signal_reasons": [f"{direction_label}:{signal.direction}\u2192{direction}"] + signal.reasons,
             "timeframes_used": {"htf": "4h", "entry": "1h"},
             "fees_usd": entry_fee,
             "leverage": self.leverage,
@@ -568,6 +959,11 @@ class FlippedTrader:
             "liquidation_price": liq_price,
             "original_quantity": quantity,
             "remaining_quantity": quantity,
+            "tp_tiers": [
+                {"level": t.level, "price": t.price, "pct": t.pct, "quantity": t.quantity, "filled": False}
+                for t in tp_tiers
+            ],
+            "current_tier": 0,
         }
 
         db_trade = await self.repo.insert_trade(trade_record)
@@ -582,6 +978,7 @@ class FlippedTrader:
 
         logger.info(
             "flipped_entry",
+            mode=self.mode_name,
             symbol=signal.symbol,
             original_direction=signal.direction,
             flipped_direction=direction,
@@ -592,6 +989,7 @@ class FlippedTrader:
             leverage=self.leverage,
             margin=round(margin_used, 2),
             balance=round(self.balance, 2),
+            flip_mode=self.flip_mode,
         )
         return True
 
@@ -643,46 +1041,34 @@ class FlippedTrader:
 
             exit_reason = None
 
-            # SL check
+            # SL check (full exit of remaining quantity)
+            # If SL was moved from original (by trailing/progressive TP), label correctly
             if pos.direction == "long" and current_price <= pos.stop_loss:
-                exit_reason = "sl_hit"
+                if pos.original_stop_loss and pos.stop_loss > pos.original_stop_loss:
+                    exit_reason = "trailing_stop"
+                else:
+                    exit_reason = "sl_hit"
             elif pos.direction == "short" and current_price >= pos.stop_loss:
-                exit_reason = "sl_hit"
+                if pos.original_stop_loss and pos.stop_loss < pos.original_stop_loss:
+                    exit_reason = "trailing_stop"
+                else:
+                    exit_reason = "sl_hit"
 
-            # TP milestone — when price reaches TP, DON'T close.
-            # Instead, move SL to breakeven and activate trailing stop.
-            # This is the "Travel" phase: let winners run with a trailing stop.
-            if not exit_reason and pos.take_profit and pos.current_tier == 0:
-                tp_reached = False
-                if pos.direction == "long" and current_price >= pos.take_profit:
-                    tp_reached = True
-                elif pos.direction == "short" and current_price <= pos.take_profit:
-                    tp_reached = True
+            # Progressive TP tiers — partial exits at 1R and 2R
+            if not exit_reason and pos.tp_tiers:
+                for tier in pos.tp_tiers:
+                    if tier.filled or tier.price is None:
+                        continue  # Skip filled tiers and tier 3 (trailing only)
+                    tier_hit = False
+                    if pos.direction == "long" and current_price >= tier.price:
+                        tier_hit = True
+                    elif pos.direction == "short" and current_price <= tier.price:
+                        tier_hit = True
 
-                if tp_reached:
-                    # Mark TP as reached (tier 1 = TP milestone hit)
-                    pos.current_tier = 1
-                    # Move SL to breakeven (entry price + small buffer for fees)
-                    fee_buffer = pos.entry_price * 0.001  # 0.1% buffer
-                    if pos.direction == "long":
-                        be_sl = pos.entry_price + fee_buffer
-                        if be_sl > pos.stop_loss:
-                            pos.stop_loss = be_sl
-                    else:
-                        be_sl = pos.entry_price - fee_buffer
-                        if be_sl < pos.stop_loss:
-                            pos.stop_loss = be_sl
-                    logger.info(
-                        "flipped_tp_milestone",
-                        symbol=symbol,
-                        direction=pos.direction,
-                        price=current_price,
-                        tp=pos.take_profit,
-                        new_sl=pos.stop_loss,
-                        msg="TP reached — SL moved to breakeven, trailing activated",
-                    )
+                    if tier_hit:
+                        await self._partial_exit(pos, symbol, current_price, tier)
 
-            # Trailing stop — activates after TP milestone OR after 2R profit
+            # Trailing stop — activates after TP1 milestone or 2R profit
             if not exit_reason:
                 sl_dist = abs(pos.entry_price - pos.original_stop_loss)
                 if sl_dist > 0:
@@ -691,7 +1077,7 @@ class FlippedTrader:
                     else:
                         r_multiple = (pos.entry_price - pos.high_water_mark) / sl_dist
 
-                    # Trailing activates if: TP milestone hit OR profit >= 2R
+                    # Trailing activates after first partial TP or 2R profit
                     trailing_active = pos.current_tier >= 1 or r_multiple >= self.trailing_activation_rr
 
                     if trailing_active:
@@ -720,58 +1106,191 @@ class FlippedTrader:
                     price=current_price,
                     sl=pos.stop_loss,
                     tp=pos.take_profit,
+                    remaining_qty=pos.quantity,
                 )
                 await self._close_position(symbol, current_price, exit_reason)
-                # Add cooldown to prevent re-entry on same stale signal
-                self._closed_symbols[symbol] = datetime.now(timezone.utc)
+                # Cooldown only on stop-loss exits — TP/trailing exits allow
+                # immediate re-entry (enables reverse trades after profit)
+                if exit_reason == "sl_hit":
+                    self._closed_symbols[symbol] = datetime.now(timezone.utc)
                 closed += 1
 
         if checked > 0 or ticker_errors > 0:
             logger.info(
                 "flipped_monitor_tick",
+                mode=self.mode_name,
                 checked=checked,
                 closed=closed,
                 errors=ticker_errors,
                 open=len(self.positions),
             )
 
-    async def _close_position(self, symbol: str, exit_price: float, reason: str) -> None:
-        """Simulate closing a flipped position."""
-        pos = self.positions.pop(symbol, None)
-        if not pos:
+    async def _partial_exit(self, pos: Position, symbol: str, current_price: float, tier: TakeProfitTier) -> None:
+        """Simulate a partial exit at a TP tier — take some profit, reduce position."""
+        exit_qty = tier.quantity
+        if exit_qty <= 0 or exit_qty > pos.quantity:
             return
 
-        # Calculate PnL
+        # Calculate partial PnL
         if pos.direction == "long":
-            pnl = (exit_price - pos.entry_price) * pos.quantity
+            pnl = (current_price - pos.entry_price) * exit_qty
         else:
-            pnl = (pos.entry_price - exit_price) * pos.quantity
+            pnl = (pos.entry_price - current_price) * exit_qty
 
-        # Simulate exit fee
-        exit_fee = pos.cost_usd * SIM_FEE_RATE
+        exit_fee = exit_qty * current_price * SIM_FEE_RATE
         pnl -= exit_fee
 
-        # Return margin + pnl to balance
-        margin = pos.margin_used
-        self.balance += margin + pnl
+        # Mark tier as filled
+        tier.filled = True
+        tier.fill_price = current_price
+        tier.fill_time = datetime.now(timezone.utc)
+        pos.current_tier = tier.level
+
+        # Reduce position quantity
+        pos.quantity -= exit_qty
+
+        # Progressive SL: move SL to previous TP level after each tier
+        if tier.level == 1:
+            # TP1 hit → move SL to breakeven (entry price + fee buffer)
+            fee_buffer = pos.entry_price * 0.001  # 0.1% buffer for fees
+            if pos.direction == "long":
+                be_sl = pos.entry_price + fee_buffer
+                if be_sl > pos.stop_loss:
+                    pos.stop_loss = be_sl
+            else:
+                be_sl = pos.entry_price - fee_buffer
+                if be_sl < pos.stop_loss:
+                    pos.stop_loss = be_sl
+        elif tier.level >= 2 and pos.tp_tiers:
+            # TP2+ hit → move SL to previous tier's price (lock in profit)
+            prev_tier = next(
+                (t for t in pos.tp_tiers if t.level == tier.level - 1),
+                None,
+            )
+            if prev_tier and prev_tier.price:
+                if pos.direction == "long" and prev_tier.price > pos.stop_loss:
+                    pos.stop_loss = prev_tier.price
+                elif pos.direction == "short" and prev_tier.price < pos.stop_loss:
+                    pos.stop_loss = prev_tier.price
+                logger.info("flipped_sl_moved_to_prev_tp", symbol=symbol,
+                            tier=tier.level, new_sl=prev_tier.price)
+
+        # Compute margin freed by this partial exit
+        partial_margin = (exit_qty / pos.original_quantity) * pos.margin_used if pos.original_quantity > 0 else 0
+
+        # Return freed margin + profit to balance
+        self.balance += partial_margin + pnl
         self.daily_pnl += pnl
         self.total_pnl += pnl
 
         if self.balance > self.peak_balance:
             self.peak_balance = self.balance
 
-        # Close in DB
-        pnl_pct = (pnl / pos.cost_usd * 100) if pos.cost_usd > 0 else 0
-        total_fees = pos.cost_usd * SIM_FEE_RATE + exit_fee
+        # Log partial exit to DB
+        partial_cost = exit_qty * pos.entry_price
+        pnl_pct = (pnl / partial_cost * 100) if partial_cost > 0 else 0
+
+        try:
+            await self.repo.log_partial_exit(
+                trade_id=pos.trade_id,
+                tier=tier.level,
+                exit_price=current_price,
+                exit_quantity=exit_qty,
+                exit_order_id=f"{self.state_key}_sim",
+                exit_reason=f"tp{tier.level}_hit",
+                pnl_usd=round(pnl, 4),
+                pnl_percent=round(pnl_pct, 2),
+                fees_usd=round(exit_fee, 4),
+                remaining_quantity=pos.quantity,
+                new_stop_loss=pos.stop_loss,
+            )
+        except Exception as e:
+            logger.warning("flipped_partial_exit_db_failed", symbol=symbol, tier=tier.level, error=str(e)[:100])
+
+        # Update the trade record in DB with new remaining qty + SL
+        try:
+            await self.repo.update_trade(pos.trade_id, {
+                "remaining_quantity": pos.quantity,
+                "current_tier": pos.current_tier,
+                "stop_loss": pos.stop_loss,
+                "tp_tiers": [
+                    {"level": t.level, "price": t.price, "pct": t.pct, "quantity": t.quantity,
+                     "filled": t.filled, "fill_price": t.fill_price}
+                    for t in pos.tp_tiers
+                ] if pos.tp_tiers else None,
+            })
+        except Exception as e:
+            logger.warning("flipped_partial_exit_update_failed", symbol=symbol, error=str(e)[:100])
+
+        logger.info(
+            "flipped_partial_exit",
+            symbol=symbol,
+            tier=tier.level,
+            direction=pos.direction,
+            price=current_price,
+            exit_qty=round(exit_qty, 6),
+            remaining_qty=round(pos.quantity, 6),
+            pnl=round(pnl, 2),
+            new_sl=pos.stop_loss,
+            balance=round(self.balance, 2),
+        )
+
+        # Save state after each partial exit
+        await self._save_state()
+
+    async def _close_position(self, symbol: str, exit_price: float, reason: str) -> None:
+        """Simulate closing a flipped position (remaining quantity after any partial exits)."""
+        pos = self.positions.pop(symbol, None)
+        if not pos:
+            return
+
+        # Calculate PnL on remaining quantity only
+        if pos.direction == "long":
+            pnl = (exit_price - pos.entry_price) * pos.quantity
+        else:
+            pnl = (pos.entry_price - exit_price) * pos.quantity
+
+        # Exit fee on remaining quantity
+        remaining_cost = pos.quantity * pos.entry_price
+        exit_fee = remaining_cost * SIM_FEE_RATE
+        pnl -= exit_fee
+
+        # Compute remaining margin (proportion of original margin)
+        if pos.original_quantity > 0:
+            remaining_ratio = pos.quantity / pos.original_quantity
+        else:
+            remaining_ratio = 1.0
+        remaining_margin = pos.margin_used * remaining_ratio
+
+        # Return remaining margin + pnl to balance
+        self.balance += remaining_margin + pnl
+        self.daily_pnl += pnl
+        self.total_pnl += pnl
+
+        if self.balance > self.peak_balance:
+            self.peak_balance = self.balance
+
+        # Accumulate total PnL across all partial exits for the DB record
+        total_trade_pnl = pnl
+        total_trade_fees = remaining_cost * SIM_FEE_RATE + exit_fee
+        try:
+            partial_exits = await self.repo.get_partial_exits(pos.trade_id)
+            total_trade_pnl += sum(float(pe.get("pnl_usd", 0)) for pe in partial_exits)
+            total_trade_fees += sum(float(pe.get("fees_usd", 0)) for pe in partial_exits)
+        except Exception:
+            pass  # If partial exits query fails, just use the final exit PnL
+
+        pnl_pct = (total_trade_pnl / pos.cost_usd * 100) if pos.cost_usd > 0 else 0
+
         await self.repo.close_trade(
             trade_id=pos.trade_id,
             exit_price=exit_price,
             exit_quantity=pos.quantity,
-            exit_order_id="flipped_sim",
+            exit_order_id=f"{self.state_key}_sim",
             exit_reason=reason,
-            pnl_usd=round(pnl, 4),
+            pnl_usd=round(total_trade_pnl, 4),
             pnl_percent=round(pnl_pct, 2),
-            fees_usd=round(total_fees, 4),
+            fees_usd=round(total_trade_fees, 4),
         )
 
         logger.info(
@@ -781,7 +1300,8 @@ class FlippedTrader:
             reason=reason,
             entry=pos.entry_price,
             exit=exit_price,
-            pnl=round(pnl, 2),
+            final_pnl=round(pnl, 2),
+            total_pnl=round(total_trade_pnl, 2),
             balance=round(self.balance, 2),
         )
 
@@ -802,7 +1322,7 @@ class FlippedTrader:
             overrides = state.get("config_overrides") or {}
             if not isinstance(overrides, dict):
                 overrides = {}
-            overrides["flipped_trader"] = self.to_state_dict()
+            overrides[self.state_key] = self.to_state_dict()
             state["config_overrides"] = overrides
             await self.repo.upsert_engine_state(state)
         except Exception as e:
@@ -877,6 +1397,33 @@ class FlippedTrader:
                     return level
             return min_tp
 
+    def _calculate_tp_tiers(
+        self,
+        entry_price: float,
+        sl_price: float,
+        quantity: float,
+        is_long: bool,
+    ) -> list[TakeProfitTier]:
+        """Build 3-tier progressive TP plan: 33% at 1R, 33% at 2R, 34% trailing."""
+        sl_distance = abs(entry_price - sl_price)
+
+        if is_long:
+            tp1_price = entry_price + sl_distance * 1.0   # 1R
+            tp2_price = entry_price + sl_distance * 2.0   # 2R
+        else:
+            tp1_price = entry_price - sl_distance * 1.0
+            tp2_price = entry_price - sl_distance * 2.0
+
+        tp1_qty = round(quantity * 0.33, 8)
+        tp2_qty = round(quantity * 0.33, 8)
+        tp3_qty = round(quantity - tp1_qty - tp2_qty, 8)
+
+        return [
+            TakeProfitTier(level=1, price=tp1_price, pct=0.33, quantity=tp1_qty),
+            TakeProfitTier(level=2, price=tp2_price, pct=0.33, quantity=tp2_qty),
+            TakeProfitTier(level=3, price=None, pct=0.34, quantity=tp3_qty),  # trailing only
+        ]
+
     # ------------------------------------------------------------------
     # State serialization
     # ------------------------------------------------------------------
@@ -889,7 +1436,7 @@ class FlippedTrader:
     def to_state_dict(self) -> dict:
         positions_data = {}
         for sym, pos in self.positions.items():
-            positions_data[sym] = {
+            pos_data = {
                 "trade_id": pos.trade_id,
                 "symbol": pos.symbol,
                 "entry_price": pos.entry_price,
@@ -906,7 +1453,15 @@ class FlippedTrader:
                 "original_quantity": pos.original_quantity,
                 "original_stop_loss": pos.original_stop_loss,
                 "confluence_score": pos.confluence_score,
+                "current_tier": pos.current_tier,
             }
+            if pos.tp_tiers:
+                pos_data["tp_tiers"] = [
+                    {"level": t.level, "price": t.price, "pct": t.pct,
+                     "quantity": t.quantity, "filled": t.filled, "fill_price": t.fill_price}
+                    for t in pos.tp_tiers
+                ]
+            positions_data[sym] = pos_data
         return {
             "balance": self.balance,
             "peak_balance": self.peak_balance,
@@ -916,6 +1471,12 @@ class FlippedTrader:
             "daily_trade_count": self.daily_trade_count,
             "last_scan_time": self.last_scan_time,
             "positions": positions_data,
+            # Configurable settings (survive restarts)
+            "flip_direction": self.flip_direction,
+            "margin_pct": self.max_position_pct,
+            "flip_mode": self.flip_mode,
+            "flip_threshold": self.flip_threshold,
+            "scanning_active": self._scanning_active,
         }
 
     def restore_state(self, data: dict) -> None:
@@ -928,6 +1489,20 @@ class FlippedTrader:
         self.total_pnl = float(data.get("total_pnl", 0))
         self.daily_trade_count = int(data.get("daily_trade_count", 0))
         self.last_scan_time = data.get("last_scan_time")
+        # Restore configurable settings (if saved)
+        if "flip_direction" in data:
+            self.flip_direction = bool(data["flip_direction"])
+        if "margin_pct" in data:
+            self.max_position_pct = float(data["margin_pct"])
+            self.max_risk_pct = float(data["margin_pct"])
+        if "flip_mode" in data:
+            mode = str(data["flip_mode"])
+            if mode in ("always_flip", "smart_flip", "normal"):
+                self.flip_mode = mode
+        if "flip_threshold" in data:
+            self.flip_threshold = max(0.0, min(1.0, float(data["flip_threshold"])))
+        if "scanning_active" in data:
+            self._scanning_active = bool(data["scanning_active"])
 
         positions_data = data.get("positions", {})
         for sym, pd_ in positions_data.items():
@@ -935,6 +1510,21 @@ class FlippedTrader:
                 entry_time = datetime.now(timezone.utc)
                 if pd_.get("entry_time"):
                     entry_time = datetime.fromisoformat(str(pd_["entry_time"]))
+                # Rebuild TP tiers from saved state
+                tp_tiers = None
+                if pd_.get("tp_tiers"):
+                    tp_tiers = [
+                        TakeProfitTier(
+                            level=int(t["level"]),
+                            price=float(t["price"]) if t.get("price") is not None else None,
+                            pct=float(t.get("pct", 0.33)),
+                            quantity=float(t.get("quantity", 0)),
+                            filled=bool(t.get("filled", False)),
+                            fill_price=float(t.get("fill_price", 0)),
+                        )
+                        for t in pd_["tp_tiers"]
+                    ]
+
                 self.positions[sym] = Position(
                     trade_id=pd_.get("trade_id", ""),
                     symbol=sym,
@@ -952,6 +1542,8 @@ class FlippedTrader:
                     original_quantity=float(pd_.get("original_quantity", 0) or 0),
                     original_stop_loss=float(pd_.get("original_stop_loss", 0) or 0),
                     confluence_score=float(pd_.get("confluence_score", 0) or 0),
+                    current_tier=int(pd_.get("current_tier", 0)),
+                    tp_tiers=tp_tiers,
                 )
             except (ValueError, TypeError, KeyError) as e:
                 logger.warning("flipped_position_restore_failed", symbol=sym, error=str(e))

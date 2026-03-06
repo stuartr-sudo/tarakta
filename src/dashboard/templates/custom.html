@@ -1,26 +1,106 @@
 {% extends "base.html" %}
-{% block title %}Tarakta - Flipped Trader{% endblock %}
+{% block title %}Tarakta - Custom Bot{% endblock %}
 
 {% block content %}
 <!-- Page Header -->
 <div class="page-header" style="display:flex; justify-content:space-between; align-items:flex-start;">
     <div>
-        <h1>Flipped Shadow Trader</h1>
+        <h1>Custom Bot</h1>
         <p style="color:var(--text-muted); font-size:0.85rem; margin-top:0.25rem;">
-            Inverted direction &bull; {{ flipped_leverage }}x leverage &bull;
-            Sweep + displacement only (simplified strategy)
+            Smart Flip probability model &bull; {{ custom_leverage }}x leverage &bull;
+            Adjustable margin aggressiveness
         </p>
     </div>
-    <div class="scan-timer" id="flippedScanTimer" style="min-width:120px;">
-        <div class="timer-label">Flipped Scan</div>
-        <div class="timer-countdown" id="flippedTimerCountdown">--:--</div>
+    <div class="scan-timer" id="customScanTimer" style="min-width:120px;">
+        <div class="timer-label">Custom Scan</div>
+        <div class="timer-countdown" id="customTimerCountdown">--:--</div>
         <div class="timer-bar">
-            <div class="timer-bar-fill" id="flippedTimerBarFill"></div>
+            <div class="timer-bar-fill" id="customTimerBarFill"></div>
         </div>
     </div>
 </div>
 
-{% set fs = flipped_stats %}
+<!-- Controls Panel -->
+<div class="panel" style="margin-bottom:1.5rem; border-left:3px solid #8b5cf6;">
+    <div class="panel-header">
+        <h2>Bot Configuration</h2>
+        <span id="settings-status" style="font-size:0.75rem; color:var(--text-muted);"></span>
+    </div>
+    <div class="panel-body" style="display:flex; gap:2rem; align-items:flex-start; flex-wrap:wrap;">
+        <!-- Flip Mode Selector -->
+        <div style="display:flex; flex-direction:column; gap:0.5rem;">
+            <label style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">Flip Mode</label>
+            <div style="display:flex; gap:0.4rem;">
+                <button class="mode-btn{% if custom_flip_mode == 'always_flip' %} active{% endif %}" data-mode="always_flip">Always Flip</button>
+                <button class="mode-btn{% if custom_flip_mode == 'smart_flip' %} active{% endif %}" data-mode="smart_flip">Smart Flip</button>
+                <button class="mode-btn{% if custom_flip_mode == 'normal' %} active{% endif %}" data-mode="normal">Normal</button>
+            </div>
+            <div id="mode-description" style="font-size:0.7rem; color:var(--text-muted); max-width:220px;">
+                {% if custom_flip_mode == 'always_flip' %}
+                    Always inverts: Bullish &rarr; SHORT, Bearish &rarr; LONG
+                {% elif custom_flip_mode == 'smart_flip' %}
+                    Uses leverage data to decide per-signal flip probability
+                {% else %}
+                    Trades signal direction: Bullish &rarr; LONG, Bearish &rarr; SHORT
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Vertical divider -->
+        <div style="width:1px; height:70px; background:var(--border-color);"></div>
+
+        <!-- Threshold Slider (only visible for smart_flip) -->
+        <div id="threshold-section" style="display:{% if custom_flip_mode == 'smart_flip' %}flex{% else %}none{% endif %}; flex-direction:column; gap:0.5rem; min-width:180px;">
+            <label style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">
+                Flip Threshold:
+                <span id="threshold-value" style="color:#8b5cf6; font-size:1rem;">{{ (custom_flip_threshold * 100)|round(0)|int }}%</span>
+            </label>
+            <div style="display:flex; align-items:center; gap:0.5rem;">
+                <span style="font-size:0.7rem; color:var(--text-muted);">0%</span>
+                <input type="range" id="threshold-slider" min="0" max="100" step="5"
+                       value="{{ (custom_flip_threshold * 100)|round(0)|int }}"
+                       style="flex:1; accent-color:#8b5cf6; cursor:pointer;">
+                <span style="font-size:0.7rem; color:var(--text-muted);">100%</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:0.65rem; color:var(--text-muted);">
+                <span>Flip rarely</span>
+                <span>Flip often</span>
+            </div>
+        </div>
+
+        <!-- Vertical divider (between threshold and margin) -->
+        <div id="threshold-divider" style="width:1px; height:70px; background:var(--border-color); display:{% if custom_flip_mode == 'smart_flip' %}block{% else %}none{% endif %};"></div>
+
+        <!-- Margin Slider -->
+        <div style="display:flex; flex-direction:column; gap:0.5rem; flex:1; min-width:180px;">
+            <label style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">
+                Margin per Trade:
+                <span id="margin-value" style="color:var(--accent); font-size:1rem;">{{ (custom_margin_pct * 100)|round(0)|int }}%</span>
+            </label>
+            <div style="display:flex; align-items:center; gap:0.5rem;">
+                <span style="font-size:0.7rem; color:var(--text-muted);">5%</span>
+                <input type="range" id="margin-slider" min="5" max="40" step="1"
+                       value="{{ (custom_margin_pct * 100)|round(0)|int }}"
+                       style="flex:1; accent-color:#8b5cf6; cursor:pointer;">
+                <span style="font-size:0.7rem; color:var(--text-muted);">40%</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:0.65rem; color:var(--text-muted);">
+                <span>Conservative</span>
+                <span>Aggressive</span>
+            </div>
+        </div>
+
+        <!-- Current Config Badge -->
+        <div style="display:flex; flex-direction:column; gap:0.25rem; align-items:center;">
+            <span id="config-badge" class="badge" style="font-size:0.75rem; padding:4px 10px; background:#8b5cf6; color:#fff; border-radius:12px;">
+                {% if custom_flip_mode == 'always_flip' %}ALWAYS FLIP{% elif custom_flip_mode == 'smart_flip' %}SMART {{ (custom_flip_threshold * 100)|round(0)|int }}%{% else %}NORMAL{% endif %} &bull; {{ (custom_margin_pct * 100)|round(0)|int }}%
+            </span>
+            <span style="font-size:0.65rem; color:var(--text-muted);">Active config</span>
+        </div>
+    </div>
+</div>
+
+{% set cs = custom_stats %}
 {% set ms = main_stats %}
 
 <!-- Comparison Banner -->
@@ -46,34 +126,34 @@
             </div>
         </div>
     </div>
-    <div class="stat-card" style="border-left:3px solid #e040fb;">
-        <div class="stat-label">Flipped Bot</div>
+    <div class="stat-card" style="border-left:3px solid #8b5cf6;">
+        <div class="stat-label">Custom Bot</div>
         <div style="display:flex; justify-content:space-between; margin-top:0.5rem;">
             <div>
                 <div style="font-size:0.7rem; color:var(--text-muted);">Win Rate</div>
-                <div class="stat-value sm {% if fs.win_rate >= 0.5 %}positive{% else %}negative{% endif %}">
-                    {{ (fs.win_rate * 100)|round(1) }}%
+                <div class="stat-value sm {% if cs.win_rate >= 0.5 %}positive{% else %}negative{% endif %}">
+                    {{ (cs.win_rate * 100)|round(1) }}%
                 </div>
             </div>
             <div>
                 <div style="font-size:0.7rem; color:var(--text-muted);">Total P&L</div>
-                <div class="stat-value sm {% if fs.total_pnl >= 0 %}positive{% else %}negative{% endif %}">
-                    {% if fs.total_pnl >= 0 %}+{% endif %}${{ fs.total_pnl|round(2) }}
+                <div class="stat-value sm {% if cs.total_pnl >= 0 %}positive{% else %}negative{% endif %}">
+                    {% if cs.total_pnl >= 0 %}+{% endif %}${{ cs.total_pnl|round(2) }}
                 </div>
             </div>
             <div>
                 <div style="font-size:0.7rem; color:var(--text-muted);">Trades</div>
-                <div class="stat-value sm">{{ fs.total }}</div>
+                <div class="stat-value sm">{{ cs.total }}</div>
             </div>
         </div>
     </div>
 </div>
 
 <!-- Stat Cards -->
-{% set cash_balance = flipped_balance|float %}
+{% set cash_balance = custom_balance|float %}
 {% set ns = namespace(allocated=0.0) %}
-{% if flipped_open %}
-{% for t in flipped_open %}
+{% if custom_open %}
+{% for t in custom_open %}
     {% set lev = t.leverage|default(1)|int %}
     {% set qty = (t.entry_quantity or 0)|float %}
     {% set ep = (t.entry_price or 0)|float %}
@@ -87,13 +167,13 @@
 {% endif %}
 {% set allocated = ns.allocated %}
 {% set equity = cash_balance + allocated %}
-{% set drawdown = ((flipped_peak - equity) / flipped_peak * 100) if flipped_peak > 0 and equity < flipped_peak else 0 %}
+{% set drawdown = ((custom_peak - equity) / custom_peak * 100) if custom_peak > 0 and equity < custom_peak else 0 %}
 
 <div class="stats-grid">
     <div class="stat-card">
         <div class="stat-label">Equity</div>
         <div class="stat-value" id="equity-value">${{ "%.2f"|format(equity) }}</div>
-        <div class="stat-sub">of ${{ "%.2f"|format(flipped_initial_balance|float) }} initial (cash + margin)</div>
+        <div class="stat-sub">of ${{ "%.2f"|format(custom_initial_balance|float) }} initial (cash + margin)</div>
     </div>
     <div class="stat-card" style="border-left: 3px solid #22c55e;">
         <div class="stat-label">Cash Balance</div>
@@ -103,18 +183,18 @@
     <div class="stat-card" style="border-left: 3px solid #f59e0b;">
         <div class="stat-label">Margin Deployed</div>
         <div class="stat-value sm" id="allocated-value">${{ "%.2f"|format(allocated) }}</div>
-        <div class="stat-sub">across {{ flipped_open|length }} position{{ 's' if (flipped_open|length) != 1 else '' }}</div>
+        <div class="stat-sub">across {{ custom_open|length }} position{{ 's' if (custom_open|length) != 1 else '' }}</div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Daily P&L</div>
-        <div class="stat-value sm {{ 'positive' if fs.daily_pnl >= 0 else 'negative' }}" id="daily-pnl-value">
-            {% if fs.daily_pnl >= 0 %}+{% endif %}${{ fs.daily_pnl|round(2) }}
+        <div class="stat-value sm {{ 'positive' if cs.daily_pnl >= 0 else 'negative' }}" id="daily-pnl-value">
+            {% if cs.daily_pnl >= 0 %}+{% endif %}${{ cs.daily_pnl|round(2) }}
         </div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Total P&L</div>
-        <div class="stat-value sm {{ 'positive' if fs.total_pnl >= 0 else 'negative' }}" id="total-pnl-value">
-            {% if fs.total_pnl >= 0 %}+{% endif %}${{ fs.total_pnl|round(2) }}
+        <div class="stat-value sm {{ 'positive' if cs.total_pnl >= 0 else 'negative' }}" id="total-pnl-value">
+            {% if cs.total_pnl >= 0 %}+{% endif %}${{ cs.total_pnl|round(2) }}
         </div>
     </div>
     <div class="stat-card">
@@ -122,7 +202,7 @@
         <div class="stat-value sm {{ 'negative' if drawdown > 5 else '' }}">
             {{ "%.1f"|format(drawdown) }}%
         </div>
-        <div class="stat-sub">peak ${{ "%.2f"|format(flipped_peak|float) }}</div>
+        <div class="stat-sub">peak ${{ "%.2f"|format(custom_peak|float) }}</div>
     </div>
     <div class="stat-card" id="unrealized-card" style="border-left: 3px solid #22c55e;">
         <div class="stat-label">Unrealized Profit</div>
@@ -139,16 +219,16 @@
         <div class="stat-value sm" id="net-pnl-value">--</div>
         <div class="stat-sub" id="net-pnl-sub">realized + unrealized</div>
     </div>
-    {% if fs.total > 0 %}
+    {% if cs.total > 0 %}
     <div class="stat-card">
         <div class="stat-label">Win Rate</div>
-        <div class="stat-value sm">{{ "%.0f"|format(fs.win_rate * 100) }}%</div>
-        <div class="stat-sub">{{ fs.wins }}W / {{ fs.losses }}L ({{ fs.total }} trades)</div>
+        <div class="stat-value sm">{{ "%.0f"|format(cs.win_rate * 100) }}%</div>
+        <div class="stat-sub">{{ cs.wins }}W / {{ cs.losses }}L ({{ cs.total }} trades)</div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Avg P&L</div>
-        <div class="stat-value sm {{ 'positive' if fs.avg_pnl >= 0 else 'negative' }}">
-            {{ "+" if fs.avg_pnl >= 0 else "" }}${{ "%.2f"|format(fs.avg_pnl) }}
+        <div class="stat-value sm {{ 'positive' if cs.avg_pnl >= 0 else 'negative' }}">
+            {{ "+" if cs.avg_pnl >= 0 else "" }}${{ "%.2f"|format(cs.avg_pnl) }}
         </div>
     </div>
     {% endif %}
@@ -158,19 +238,20 @@
 <div class="panel">
     <div class="panel-header">
         <h2>Open Positions
-            <span class="account-badge">FLIPPED {{ flipped_leverage }}x</span>
+            <span class="account-badge" style="background:#8b5cf6;">CUSTOM {{ custom_leverage }}x</span>
         </h2>
         <div style="display:flex; align-items:center; gap:8px;">
-            <span class="badge text-blue">{{ flipped_open|length }}</span>
+            <span class="badge text-blue">{{ custom_open|length }}</span>
             <button id="refresh-btn" class="btn" onclick="manualRefresh()" style="font-size:0.8rem; padding:4px 10px;">Refresh Prices</button>
             <span id="last-updated" class="text-muted" style="font-size:0.7rem;"></span>
             {% if role == 'admin' %}
-            <button id="trigger-scan-btn" class="btn" style="font-size:0.75rem; padding:4px 8px; background:#f59e0b; color:#fff; border:none; border-radius:4px;" onclick="triggerFlippedScan()">Run Scan Now</button>
-            <button class="btn" style="font-size:0.75rem; padding:4px 8px; background:#ef4444; color:#fff; border:none; border-radius:4px;" onclick="confirmResetFlipped()">Reset Flipped</button>
+            <button id="begin-stop-btn" class="btn" style="font-size:0.75rem; padding:4px 10px; color:#fff; border:none; border-radius:4px;" onclick="toggleScanning()"></button>
+            <button id="trigger-scan-btn" class="btn" style="font-size:0.75rem; padding:4px 8px; background:#8b5cf6; color:#fff; border:none; border-radius:4px;" onclick="triggerScanNow()">Run Scan Now</button>
+            <button class="btn" style="font-size:0.75rem; padding:4px 8px; background:#ef4444; color:#fff; border:none; border-radius:4px;" onclick="confirmResetCustom()">Reset Custom</button>
             {% endif %}
         </div>
     </div>
-    {% if flipped_open %}
+    {% if custom_open %}
     <div class="panel-body no-pad">
         <div class="overflow-x">
             <table class="data-table">
@@ -188,7 +269,7 @@
                     </tr>
                 </thead>
                 <tbody id="positions-tbody">
-                    {% for t in flipped_open %}
+                    {% for t in custom_open %}
                     <tr data-symbol="{{ t.symbol }}" data-trade-id="{{ t.id }}">
                         <td><strong>{{ t.symbol|replace(':USDT', '') }}</strong></td>
                         <td>
@@ -222,7 +303,7 @@
     {% else %}
     <div class="empty-state">
         <div class="empty-icon">---</div>
-        <p>No open flipped positions. The shadow bot will scan and enter trades on the next cycle.</p>
+        <p>No open custom positions. The bot will scan and enter trades on the next cycle.</p>
     </div>
     {% endif %}
 </div>
@@ -232,12 +313,12 @@
     <div class="panel-header">
         <h2>Trade History</h2>
         <div class="filter-tabs" style="margin:0;">
-            <a href="/flipped?status=all" class="{{ 'active' if current_status == 'all' else '' }}">All</a>
-            <a href="/flipped?status=closed" class="{{ 'active' if current_status == 'closed' else '' }}">Closed</a>
-            <a href="/flipped?status=open" class="{{ 'active' if current_status == 'open' else '' }}">Open</a>
+            <a href="/custom?status=all" class="{{ 'active' if current_status == 'all' else '' }}">All</a>
+            <a href="/custom?status=closed" class="{{ 'active' if current_status == 'closed' else '' }}">Closed</a>
+            <a href="/custom?status=open" class="{{ 'active' if current_status == 'open' else '' }}">Open</a>
         </div>
     </div>
-    {% if flipped_trades %}
+    {% if custom_trades %}
     <div class="panel-body no-pad">
         <div class="overflow-x">
             <table class="data-table">
@@ -255,7 +336,7 @@
                     </tr>
                 </thead>
                 <tbody>
-                    {% for t in flipped_trades %}
+                    {% for t in custom_trades %}
                     <tr>
                         <td><strong>{{ t.symbol|replace(':USDT', '') }}</strong></td>
                         <td>
@@ -290,12 +371,12 @@
     </div>
     {% else %}
     <div class="empty-state">
-        <p>No flipped trades yet. The shadow bot will start placing paper trades on the next scan cycle.</p>
+        <p>No custom trades yet. The bot will start placing paper trades on the next scan cycle.</p>
     </div>
     {% endif %}
 </div>
 
-{% if fs.exit_reasons %}
+{% if cs.exit_reasons %}
 <div class="panel">
     <div class="panel-header">
         <h2>Exit Reasons</h2>
@@ -304,7 +385,7 @@
         <table class="data-table" style="max-width:400px;">
             <thead><tr><th>Reason</th><th>Count</th></tr></thead>
             <tbody>
-                {% for reason, count in fs.exit_reasons.items() %}
+                {% for reason, count in cs.exit_reasons.items() %}
                 <tr>
                     <td>{{ reason }}</td>
                     <td>{{ count }}</td>
@@ -322,30 +403,52 @@
         <h2>Strategy Info</h2>
     </div>
     <div class="panel-body" style="font-size:0.85rem; color:var(--text-secondary);">
-        <p><strong>Flipped bot uses a DIFFERENT, SIMPLER strategy than the main bot:</strong></p>
+        <p><strong>Custom bot uses a configurable strategy with Smart Flip:</strong></p>
         <ul style="margin:0.5rem 0; padding-left:1.5rem;">
             <li><strong>Signals:</strong> Sweep + Displacement only (threshold 60) &mdash; no pullback gate</li>
-            <li><strong>No leverage intelligence:</strong> Does not use funding rate data</li>
-            <li><strong>No quality whitelist:</strong> Scans ALL tradeable pairs</li>
-            <li><strong>Direction flip:</strong> Bullish signals traded as SHORT, bearish as LONG</li>
-            <li><strong>Independent scan:</strong> Runs its own 15-minute cycle, separate from main bot</li>
-            <li><strong>Trailing exits:</strong> TP acts as milestone &mdash; SL moves to breakeven, then trails via ATR. No fixed TP exits.</li>
+            <li><strong>Flip mode:</strong> <span id="strategy-mode" style="font-weight:700; color:#8b5cf6;">{{ custom_flip_mode|replace('_', ' ')|title }}</span> &mdash; adjustable above</li>
+            <li><strong>Smart Flip:</strong> Uses a 6-factor model (funding rate, L/S ratio, crowding, liquidation proximity, kill zone timing, OI) to compute per-signal sweep probability. Only flips when probability exceeds the threshold.</li>
+            <li><strong>Margin:</strong> <span id="strategy-margin" style="font-weight:700; color:#8b5cf6;">{{ (custom_margin_pct * 100)|round(0)|int }}%</span> of balance per trade &mdash; adjustable via slider above</li>
+            <li><strong>Independent scan:</strong> Runs its own {{ custom_scan_interval }}-minute cycle, separate from main and flipped bots</li>
+            <li><strong>Progressive TP:</strong> 33% at 1R, 33% at 2R, remaining 34% trails via ATR. SL moves to breakeven after TP1.</li>
+            <li><strong>Cooldown:</strong> Only applies after stop-loss exits (4h). TP/trailing stop exits allow immediate re-entry.</li>
         </ul>
-        <p style="color:var(--text-muted); margin-top:0.5rem;">
-            Main bot: TTC strategy (sweep + displacement + pullback, threshold 70, quality whitelist, leverage intelligence)
-        </p>
     </div>
 </div>
+
+<style>
+/* Mode selector buttons */
+.mode-btn {
+    font-size: 0.75rem;
+    padding: 5px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.2s;
+    font-weight: 500;
+}
+.mode-btn:hover {
+    border-color: #8b5cf6;
+    color: #8b5cf6;
+}
+.mode-btn.active {
+    background: #8b5cf6;
+    color: #fff;
+    border-color: #8b5cf6;
+}
+</style>
 {% endblock %}
 
 {% block scripts %}
 <script>
-// --- Flipped scan timer ---
+// --- Custom scan timer ---
 (function() {
-    const INTERVAL = {{ flipped_scan_interval }};
-    const lastScan = "{{ flipped_last_scan or '' }}";
-    const timerEl = document.getElementById('flippedTimerCountdown');
-    const barEl = document.getElementById('flippedTimerBarFill');
+    const INTERVAL = {{ custom_scan_interval }};
+    const lastScan = "{{ custom_last_scan or '' }}";
+    const timerEl = document.getElementById('customTimerCountdown');
+    const barEl = document.getElementById('customTimerBarFill');
     if (!timerEl) return;
 
     function update() {
@@ -358,7 +461,7 @@
             nextScanMs = lastMs + intervalMs;
             if (nextScanMs < now.getTime()) {
                 timerEl.textContent = 'scanning...';
-                timerEl.style.color = '#e040fb';
+                timerEl.style.color = '#8b5cf6';
                 barEl.style.width = '100%';
                 return;
             }
@@ -371,7 +474,7 @@
         const m = Math.floor(remainSec / 60);
         const s = remainSec % 60;
         timerEl.textContent = m + ':' + String(s).padStart(2, '0');
-        timerEl.style.color = remainSec < 60 ? '#e040fb' : '';
+        timerEl.style.color = remainSec < 60 ? '#8b5cf6' : '';
         barEl.style.width = Math.max(0, (1 - remainMs / intervalMs)) * 100 + '%';
     }
 
@@ -379,8 +482,126 @@
     setInterval(update, 1000);
 })();
 
+// --- Settings Controls ---
+let _settingsDebounce = null;
+let _currentMode = '{{ custom_flip_mode }}';
+
+const MODE_DESCRIPTIONS = {
+    'always_flip': 'Always inverts: Bullish &rarr; SHORT, Bearish &rarr; LONG',
+    'smart_flip': 'Uses leverage data to decide per-signal flip probability',
+    'normal': 'Trades signal direction: Bullish &rarr; LONG, Bearish &rarr; SHORT',
+};
+
+const MODE_LABELS = {
+    'always_flip': 'ALWAYS FLIP',
+    'smart_flip': 'SMART',
+    'normal': 'NORMAL',
+};
+
+async function updateSettings(body) {
+    const statusEl = document.getElementById('settings-status');
+    if (statusEl) statusEl.textContent = 'Saving...';
+
+    try {
+        const resp = await fetch('/api/custom/settings', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (data.success) {
+            if (statusEl) {
+                statusEl.textContent = 'Saved';
+                statusEl.style.color = '#22c55e';
+                setTimeout(() => { statusEl.textContent = ''; statusEl.style.color = ''; }, 2000);
+            }
+            // Update UI from response
+            const s = data.settings;
+            _currentMode = s.flip_mode || _currentMode;
+
+            // Update config badge
+            const badge = document.getElementById('config-badge');
+            if (badge) {
+                const modeLabel = MODE_LABELS[s.flip_mode] || 'SMART';
+                const pct = Math.round(s.margin_pct * 100);
+                if (s.flip_mode === 'smart_flip') {
+                    badge.textContent = modeLabel + ' ' + Math.round(s.flip_threshold * 100) + '% \u2022 ' + pct + '%';
+                } else {
+                    badge.textContent = modeLabel + ' \u2022 ' + pct + '%';
+                }
+            }
+
+            // Update mode description
+            const modeDesc = document.getElementById('mode-description');
+            if (modeDesc) modeDesc.innerHTML = MODE_DESCRIPTIONS[s.flip_mode] || '';
+
+            // Update strategy info
+            const stratMode = document.getElementById('strategy-mode');
+            if (stratMode) stratMode.textContent = (s.flip_mode || 'smart_flip').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+            const stratMargin = document.getElementById('strategy-margin');
+            if (stratMargin) stratMargin.textContent = Math.round(s.margin_pct * 100) + '%';
+
+            // Show/hide threshold section
+            const threshSec = document.getElementById('threshold-section');
+            const threshDiv = document.getElementById('threshold-divider');
+            if (threshSec) threshSec.style.display = s.flip_mode === 'smart_flip' ? 'flex' : 'none';
+            if (threshDiv) threshDiv.style.display = s.flip_mode === 'smart_flip' ? 'block' : 'none';
+
+            // Update mode button active states
+            document.querySelectorAll('.mode-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.mode === s.flip_mode);
+            });
+        } else {
+            if (statusEl) {
+                statusEl.textContent = 'Error: ' + (data.error || 'Unknown');
+                statusEl.style.color = '#ef4444';
+            }
+        }
+    } catch (e) {
+        if (statusEl) {
+            statusEl.textContent = 'Network error';
+            statusEl.style.color = '#ef4444';
+        }
+    }
+}
+
+// Mode buttons
+document.querySelectorAll('.mode-btn').forEach(btn => {
+    btn.addEventListener('click', function() {
+        updateSettings({ flip_mode: this.dataset.mode });
+    });
+});
+
+// Threshold slider (debounced 500ms)
+const threshSlider = document.getElementById('threshold-slider');
+const threshLabel = document.getElementById('threshold-value');
+if (threshSlider) {
+    threshSlider.addEventListener('input', function() {
+        threshLabel.textContent = this.value + '%';
+    });
+    threshSlider.addEventListener('change', function() {
+        clearTimeout(_settingsDebounce);
+        _settingsDebounce = setTimeout(() => {
+            updateSettings({ flip_threshold: parseInt(this.value) / 100 });
+        }, 500);
+    });
+}
+
+// Margin slider (debounced 500ms)
+const slider = document.getElementById('margin-slider');
+const marginLabel = document.getElementById('margin-value');
+slider.addEventListener('input', function() {
+    marginLabel.textContent = this.value + '%';
+});
+slider.addEventListener('change', function() {
+    clearTimeout(_settingsDebounce);
+    _settingsDebounce = setTimeout(() => {
+        updateSettings({ margin_pct: parseInt(this.value) / 100 });
+    }, 300);
+});
+
 // --- Net P&L (realized + unrealized) ---
-let _lastRealizedPnl = {{ flipped_stats.total_pnl|default(0)|float }};
+let _lastRealizedPnl = {{ custom_stats.total_pnl|default(0)|float }};
 
 function updateNetPnl(unrealized) {
     const net = _lastRealizedPnl + unrealized;
@@ -511,7 +732,7 @@ async function loadUnrealizedPnl() {
     try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 25000);
-        const resp = await fetch('/api/flipped/unrealized-pnl', { signal: controller.signal });
+        const resp = await fetch('/api/custom/unrealized-pnl', { signal: controller.signal });
         clearTimeout(timeout);
         const data = await resp.json();
 
@@ -527,7 +748,7 @@ async function loadUnrealizedPnl() {
         renderPnlData(data);
 
     } catch (e) {
-        console.error('Flipped unrealized P&L load failed:', e);
+        console.error('Custom unrealized P&L load failed:', e);
         if (_lastPnlData) {
             renderPnlData(_lastPnlData);
         } else {
@@ -550,22 +771,78 @@ loadUnrealizedPnl();
 // Auto-refresh prices every 10s
 setInterval(loadUnrealizedPnl, 10000);
 
+// --- BEGIN / STOP SCANNING ---
+let scanningActive = {{ 'true' if custom_scanning_active else 'false' }};
+
+function updateBeginStopButton() {
+    const btn = document.getElementById('begin-stop-btn');
+    if (!btn) return;
+    if (scanningActive) {
+        btn.textContent = 'Stop Scanning';
+        btn.style.background = '#ef4444';
+    } else {
+        btn.textContent = 'Begin Scanning';
+        btn.style.background = '#22c55e';
+    }
+    // Show/hide Run Scan Now based on scanning state
+    const scanBtn = document.getElementById('trigger-scan-btn');
+    if (scanBtn) scanBtn.style.display = scanningActive ? '' : 'none';
+}
+updateBeginStopButton();
+
+async function toggleScanning() {
+    const btn = document.getElementById('begin-stop-btn');
+    if (!btn) return;
+    btn.disabled = true;
+    const endpoint = scanningActive ? '/api/custom/stop' : '/api/custom/begin';
+    try {
+        const resp = await fetch(endpoint, { method: 'POST', credentials: 'same-origin' });
+        if (resp.redirected) {
+            alert('Session expired. Please refresh and log in again.');
+            btn.disabled = false;
+            return;
+        }
+        const data = await resp.json();
+        if (!resp.ok) {
+            alert('Error (' + resp.status + '): ' + (data.error || 'Not authorized. Please log in again.'));
+            btn.disabled = false;
+            return;
+        }
+        if (data.success) {
+            scanningActive = !scanningActive;
+            updateBeginStopButton();
+        } else {
+            alert('Failed: ' + (data.error || 'Unknown error'));
+        }
+    } catch (e) {
+        alert('Error toggling scan: ' + e.message);
+        console.error('Toggle scanning failed:', e);
+    }
+    btn.disabled = false;
+}
+
 // --- TRIGGER SCAN ---
-async function triggerFlippedScan() {
+async function triggerScanNow() {
     const btn = document.getElementById('trigger-scan-btn');
     if (!btn) return;
     btn.disabled = true;
     btn.textContent = 'Triggering...';
 
     try {
-        const resp = await fetch('/api/flipped/trigger-scan', { method: 'POST' });
+        const resp = await fetch('/api/custom/trigger-scan', { method: 'POST', credentials: 'same-origin' });
+        if (resp.redirected || resp.status === 401 || resp.status === 403) {
+            alert('Session expired or not authorized. Please refresh and log in again.');
+            btn.textContent = 'Run Scan Now'; btn.style.background = '#8b5cf6'; btn.disabled = false;
+            return;
+        }
         const data = await resp.json();
         if (data.success) {
             btn.textContent = 'Scan Queued';
             btn.style.background = '#22c55e';
+            // Reset button after 30s (scan should be underway)
             setTimeout(() => {
                 btn.textContent = 'Run Scan Now';
-                btn.style.background = '#f59e0b';
+                btn.style.background = '#8b5cf6';
                 btn.disabled = false;
             }, 30000);
         } else {
@@ -573,7 +850,7 @@ async function triggerFlippedScan() {
             btn.style.background = '#ef4444';
             setTimeout(() => {
                 btn.textContent = 'Run Scan Now';
-                btn.style.background = '#f59e0b';
+                btn.style.background = '#8b5cf6';
                 btn.disabled = false;
             }, 3000);
         }
@@ -582,26 +859,27 @@ async function triggerFlippedScan() {
         btn.style.background = '#ef4444';
         setTimeout(() => {
             btn.textContent = 'Run Scan Now';
-            btn.style.background = '#f59e0b';
+            btn.style.background = '#8b5cf6';
             btn.disabled = false;
         }, 3000);
     }
 }
 
-// --- RESET FLIPPED ---
-async function confirmResetFlipped() {
+// --- RESET CUSTOM ---
+async function confirmResetCustom() {
     const ok = confirm(
-        'RESET FLIPPED BOT\n\n' +
-        'This will DELETE all flipped trades and reset the balance to ${{ flipped_initial_balance }}.\n\n' +
+        'RESET CUSTOM BOT\n\n' +
+        'This will DELETE all custom trades and reset the balance to ${{ custom_initial_balance }}.\n\n' +
+        'Your direction and margin settings will be preserved.\n\n' +
         'Are you sure?'
     );
     if (!ok) return;
 
     try {
-        const resp = await fetch('/api/reset/flipped', { method: 'POST' });
+        const resp = await fetch('/api/reset/custom', { method: 'POST' });
         const data = await resp.json();
         if (data.success) {
-            alert('Flipped bot reset complete.\n\nTrades deleted: ' + (data.deleted.trades || 0) + '\nBalance reset to: $' + data.balance_reset);
+            alert('Custom bot reset complete.\n\nTrades deleted: ' + (data.deleted.trades || 0) + '\nBalance reset to: $' + data.balance_reset);
             location.reload();
         } else {
             alert('Reset failed: ' + (data.error || 'Unknown error'));
@@ -617,8 +895,8 @@ let _knownPositionCount = document.querySelectorAll('#positions-tbody tr[data-tr
 async function softRefreshStats() {
     try {
         const [statsResp, openResp] = await Promise.all([
-            fetch('/api/flipped/stats'),
-            fetch('/api/flipped/trades/open'),
+            fetch('/api/custom/stats'),
+            fetch('/api/custom/trades/open'),
         ]);
         const stats = await statsResp.json();
         const openData = await openResp.json();

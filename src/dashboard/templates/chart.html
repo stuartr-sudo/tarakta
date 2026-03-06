@@ -6,7 +6,7 @@
     <h1>Live Chart</h1>
     <div class="chart-symbol-picker">
         <label for="symbolInput">Symbol:</label>
-        <input type="text" id="symbolInput" value="BINANCE:BTCUSDT" placeholder="e.g. BINANCE:ETHUSDT" spellcheck="false">
+        <input type="text" id="symbolInput" value="{{ initial_symbol if initial_symbol else (tv_exchange_prefix | default('BINANCE')) + ':BTCUSDT' }}" placeholder="e.g. {{ tv_exchange_prefix | default('BINANCE') }}:BTCUSDT" spellcheck="false">
         <button class="btn" onclick="loadChart()">Load</button>
     </div>
 </div>
@@ -31,10 +31,14 @@
 {% block scripts %}
 <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
 <script>
+// Default prefix set by server-side template, or BINANCE if not provided
+var TV_EXCHANGE_PREFIX = '{{ tv_exchange_prefix | default("BINANCE") }}';
+
 function getTVSymbol(raw) {
-    // Convert "BTC/USDT" → "BINANCE:BTCUSDT", or pass through if already formatted
+    // Convert "BTC/USDT" → "BINANCE:BTCUSDT", "AAPL" → "NASDAQ:AAPL", or pass through if already formatted
     if (raw.includes(':')) return raw;
-    return 'BINANCE:' + raw.replace('/', '');
+    var clean = raw.replace('/', '');
+    return TV_EXCHANGE_PREFIX + ':' + clean;
 }
 
 function loadChart() {

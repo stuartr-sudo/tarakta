@@ -4,16 +4,16 @@ Replaces the old 8-component weighted SMC/ICT confluence system with a
 5-component binary checklist. The core insight: retail SMC signals
 (CRT, OBs, FVGs) are too well-known and get hunted by market makers. Instead
 of entering at those levels, we wait for the sweep to COMPLETE, confirm with
-displacement, then enter on the PULLBACK.
+displacement, then enter on the PULLBACK (preferred but not required).
 
 Scoring System (0-100):
   Completed Sweep Detection:      35 points (REQUIRED)
   Post-Sweep Displacement:        25 points (REQUIRED)
-  Pullback Confirmed:             10 points (REQUIRED)
+  Pullback Confirmed:             10 points (bonus, improves entry)
   HTF Trend Alignment (4H/1D):    15 points (bonus)
   Post-Kill Zone Timing:          15 points (bonus)
 
-Minimum threshold: 70 (requires sweep + displacement + pullback).
+Minimum threshold: 60 (requires sweep + displacement at minimum).
 """
 from __future__ import annotations
 
@@ -47,13 +47,14 @@ class PostSweepEngine:
     """Post-sweep displacement scoring engine.
 
     Binary checklist approach:
-    - sweep_detected (35) + displacement_confirmed (25) + pullback_confirmed (10) = 70 minimum
+    - sweep_detected (35) + displacement_confirmed (25) = 60 minimum
+    - pullback_confirmed (10) = bonus (better entry, not required)
     - htf_aligned (15) + timing_optimal (15) = bonus probability
 
-    Threshold = 70 (requires sweep AND displacement AND pullback at minimum).
+    Threshold = 60 (requires sweep AND displacement at minimum).
     """
 
-    def __init__(self, entry_threshold: float = 70.0) -> None:
+    def __init__(self, entry_threshold: float = 60.0) -> None:
         self.entry_threshold = entry_threshold
         self._weights: dict[str, int] = dict(WEIGHTS)
 
@@ -140,7 +141,7 @@ class PostSweepEngine:
                 key_levels=key_levels,
             )
 
-        # --- Pullback Confirmation (10 pts) --- REQUIRED
+        # --- Pullback Confirmation (10 pts) --- BONUS (improves entry, not required)
         if pullback_result is not None and pullback_result.pullback_detected:
             score += self._weights.get("pullback_confirmed", 10)
             reasons.append(
@@ -151,27 +152,16 @@ class PostSweepEngine:
             # Use the pullback price as entry (better than displacement close)
             current_price = pullback_result.current_price
         else:
-            # No pullback = no trade (hard gate)
+            # No pullback — still tradeable, just a less optimal entry
             if pullback_result and pullback_result.pullback_status == "waiting":
-                reasons.append("Pullback pending (too shallow, will re-check next scan)")
+                reasons.append("Pullback pending (entering at displacement level)")
             elif pullback_result and pullback_result.pullback_status == "failed":
                 reasons.append(
-                    f"Pullback too deep ({pullback_result.retracement_pct:.0%}) — setup failing"
+                    f"Pullback too deep ({pullback_result.retracement_pct:.0%}) — entering at displacement level"
                 )
             else:
-                reasons.append("No pullback detected after displacement")
+                reasons.append("No pullback detected — entering at displacement level")
             components["pullback_confirmed"] = 0
-
-            key_levels = self._collect_key_levels(ms_results)
-            return SignalCandidate(
-                score=score,
-                direction=direction,
-                reasons=reasons,
-                symbol=symbol,
-                entry_price=current_price,
-                components=components,
-                key_levels=key_levels,
-            )
 
         # --- HTF Alignment (15 pts) --- PREFERRED
         htf_score, htf_reasons = self._score_htf(htf_direction, direction, ms_results)

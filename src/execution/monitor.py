@@ -74,9 +74,15 @@ class PositionMonitor:
 
         # 1. Check stop loss (price drops below SL) — full exit of remaining quantity
         if current_price <= pos.stop_loss:
-            logger.info("sl_hit", symbol=symbol, direction="long",
-                        price=current_price, sl=pos.stop_loss)
-            return ExitSignal(symbol=symbol, reason="sl_hit", price=current_price)
+            # If SL was moved up from original (by trailing stop or progressive TP),
+            # this is a profitable exit — label it correctly
+            if pos.original_stop_loss and pos.stop_loss > pos.original_stop_loss:
+                reason = "trailing_stop"
+            else:
+                reason = "sl_hit"
+            logger.info(reason, symbol=symbol, direction="long",
+                        price=current_price, sl=pos.stop_loss, original_sl=pos.original_stop_loss)
+            return ExitSignal(symbol=symbol, reason=reason, price=current_price)
 
         # 2. Progressive TP tiers (if enabled)
         if pos.tp_tiers:
@@ -132,9 +138,15 @@ class PositionMonitor:
 
         # 1. Check stop loss (price rises above SL) — full exit of remaining quantity
         if current_price >= pos.stop_loss:
-            logger.info("sl_hit", symbol=symbol, direction="short",
-                        price=current_price, sl=pos.stop_loss)
-            return ExitSignal(symbol=symbol, reason="sl_hit", price=current_price)
+            # If SL was moved down from original (by trailing stop or progressive TP),
+            # this is a profitable exit — label it correctly
+            if pos.original_stop_loss and pos.stop_loss < pos.original_stop_loss:
+                reason = "trailing_stop"
+            else:
+                reason = "sl_hit"
+            logger.info(reason, symbol=symbol, direction="short",
+                        price=current_price, sl=pos.stop_loss, original_sl=pos.original_stop_loss)
+            return ExitSignal(symbol=symbol, reason=reason, price=current_price)
 
         # 2. Progressive TP tiers (if enabled)
         if pos.tp_tiers:

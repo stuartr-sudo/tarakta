@@ -22,6 +22,7 @@ import pandas as pd
 from src.config import Settings
 from src.data.candles import CandleManager
 from src.exchange.models import SignalCandidate
+from src.exchange.protocol import FuturesCapable
 from src.strategy.confluence import PostSweepEngine
 from src.strategy.leverage import LeverageAnalyzer
 from src.strategy.market_structure import MarketStructureAnalyzer
@@ -89,8 +90,8 @@ class AltcoinScanner:
             if batch_idx + BATCH_SIZE < total:
                 await asyncio.sleep(BATCH_DELAY)
 
-        # Leverage enrichment pass — only for qualifying signals (minimal API calls)
-        if all_signals and hasattr(self.candles.exchange, "fetch_open_interest"):
+        # Leverage enrichment pass — only for qualifying signals on futures (minimal API calls)
+        if all_signals and isinstance(self.candles.exchange, FuturesCapable):
             await self._enrich_with_leverage(all_signals)
 
         # Sort by score descending (re-sort after leverage bonus)

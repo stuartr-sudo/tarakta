@@ -1044,11 +1044,22 @@ class TradingEngine:
 
                     position.current_tier = exit_signal.tier
 
-                    # TP1: move SL to breakeven
+                    # Progressive SL: move SL to previous TP level after each tier
                     if exit_signal.tier == 1 and self.config.move_sl_to_be_after_tp1:
+                        # TP1 hit → move SL to breakeven (entry price)
                         position.stop_loss = position.entry_price
                         logger.info("sl_moved_to_breakeven", symbol=exit_signal.symbol,
                                     new_sl=position.entry_price)
+                    elif exit_signal.tier >= 2 and position.tp_tiers:
+                        # TP2+ hit → move SL to previous tier's price
+                        prev_tier = next(
+                            (t for t in position.tp_tiers if t.level == exit_signal.tier - 1),
+                            None,
+                        )
+                        if prev_tier and prev_tier.price:
+                            position.stop_loss = prev_tier.price
+                            logger.info("sl_moved_to_prev_tp", symbol=exit_signal.symbol,
+                                        tier=exit_signal.tier, new_sl=prev_tier.price)
 
                     # Record partial exit in portfolio (updates quantity, returns capital)
                     self.portfolio.record_partial_exit(

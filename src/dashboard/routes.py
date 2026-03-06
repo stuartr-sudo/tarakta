@@ -12,16 +12,32 @@ from src.data.repository import Repository
 
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
 
+# Map market type -> TradingView exchange prefix
+_TV_PREFIX_MAP = {
+    "crypto": "BINANCE",
+    "stocks": "NASDAQ",
+    "commodities": "COMEX",
+}
+
 
 def create_router(config: Settings, repo: Repository) -> APIRouter:
     router = APIRouter()
     templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
+    # Build list of enabled markets for nav display
+    enabled_markets = [name for name, mc in config.markets.items() if mc.enabled]
+
     async def _base_context(request: Request) -> dict:
         """Common context for all authenticated pages (mode banner, nav)."""
         state = await repo.get_engine_state()
         role = request.session.get("role", "viewer")
-        return {"request": request, "state": state, "config": config, "role": role}
+        return {
+            "request": request,
+            "state": state,
+            "config": config,
+            "role": role,
+            "enabled_markets": enabled_markets,
+        }
 
     @router.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request):
@@ -65,7 +81,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
     async def dashboard_home(request: Request):
         ctx = await _base_context(request)
         ctx["snapshot"] = await repo.get_latest_snapshot() or {}
-        ctx["trades"] = await repo.get_open_trades()
+        ctx["trades"] = await repo.get_open_trades(mode=config.trading_mode)
         ctx["signals"] = await repo.get_recent_signals(limit=10)
         ctx["stats"] = await repo.get_trade_stats(mode=config.trading_mode)
 
@@ -122,16 +138,61 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx["current_status"] = status
         return templates.TemplateResponse("flipped.html", ctx)
 
+    @router.get("/custom", response_class=HTMLResponse)
+    @login_required
+    async def custom_page(request: Request):
+        ctx = await _base_context(request)
+        status = request.query_params.get("status", "all")
+        ctx["custom_trades"] = await repo.get_trades(status=status, mode="custom_paper", per_page=50)
+        ctx["custom_open"] = await repo.get_open_trades(mode="custom_paper")
+        ctx["custom_stats"] = await repo.get_trade_stats(mode="custom_paper")
+        ctx["main_stats"] = await repo.get_trade_stats(mode=config.trading_mode)
+        # Custom bot state from engine_state (stored in config_overrides JSONB)
+        state = ctx.get("state") or {}
+        overrides = state.get("config_overrides") or {}
+        custom_data = overrides.get("custom_trader", {}) if isinstance(overrides, dict) else {}
+        custom_settings = overrides.get("custom_trader_settings", {}) if isinstance(overrides, dict) else {}
+        ctx["custom_balance"] = custom_data.get("balance", config.custom_initial_balance)
+        ctx["custom_peak"] = custom_data.get("peak_balance", config.custom_initial_balance)
+        ctx["custom_total_pnl"] = custom_data.get("total_pnl", 0)
+        ctx["custom_daily_pnl"] = custom_data.get("daily_pnl", 0)
+        ctx["custom_last_scan"] = custom_data.get("last_scan_time")
+        ctx["custom_scan_interval"] = config.custom_scan_interval_minutes
+        ctx["custom_initial_balance"] = config.custom_initial_balance
+        ctx["custom_leverage"] = config.custom_leverage
+        # Configurable settings (from saved state or config defaults)
+        ctx["custom_flip_direction"] = custom_settings.get(
+            "flip_direction",
+            custom_data.get("flip_direction", config.custom_flip_direction),
+        )
+        ctx["custom_margin_pct"] = custom_settings.get(
+            "margin_pct",
+            custom_data.get("margin_pct", config.custom_margin_pct),
+        )
+        ctx["custom_flip_mode"] = custom_settings.get(
+            "flip_mode",
+            custom_data.get("flip_mode", config.custom_flip_mode),
+        )
+        ctx["custom_flip_threshold"] = custom_settings.get(
+            "flip_threshold",
+            custom_data.get("flip_threshold", config.custom_flip_threshold),
+        )
+        ctx["custom_scanning_active"] = custom_data.get("scanning_active", False)
+        ctx["current_status"] = status
+        return templates.TemplateResponse("custom.html", ctx)
+
     @router.get("/chart", response_class=HTMLResponse)
     @login_required
     async def chart_page(request: Request):
         ctx = await _base_context(request)
         symbol = request.query_params.get("symbol", "")
+        market = request.query_params.get("market", "crypto")
         # Collect open position symbols for quick-pick buttons
         state = ctx.get("state") or {}
         open_positions = state.get("open_positions", {})
         ctx["open_symbols"] = list(open_positions.keys())
         ctx["initial_symbol"] = symbol
+        ctx["tv_exchange_prefix"] = _TV_PREFIX_MAP.get(market, "BINANCE")
         return templates.TemplateResponse("chart.html", ctx)
 
     @router.get("/settings", response_class=HTMLResponse)
