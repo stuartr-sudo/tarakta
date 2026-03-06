@@ -17,54 +17,116 @@ from src.exchange.paper import PaperExchange
 from src.utils.logging import get_logger, setup_logging
 
 
+def _create_market_exchange(market_name: str, market_config, config: Settings, logger):
+    """Create exchange + paper wrapper for a single market."""
+    connector_name = market_config.connector
+
+    # Build connector kwargs based on connector type
+    if connector_name.startswith("binance"):
+        live_exchange = create_exchange(
+            config.exchange_name,
+            market_config.api_key or config.binance_api_key,
+            market_config.api_secret or config.binance_api_secret,
+            account_type=market_config.account_type,
+            leverage=market_config.leverage,
+            margin_mode=market_config.margin_mode,
+        )
+    else:
+        # Non-crypto connectors (yfinance, alpaca, etc.)
+        # Ensure connectors module is imported to register them
+        import src.exchange.connectors  # noqa: F401
+        from src.exchange.factory import create_exchange as factory_create
+
+        live_exchange = factory_create(
+            connector_name,
+            symbol_universe=market_config.symbol_universe,
+            api_key=market_config.api_key,
+            api_secret=market_config.api_secret,
+        )
+
+    # Always paper trade non-crypto markets initially, and crypto if config says paper
+    is_paper = config.trading_mode == "paper" or not connector_name.startswith("binance")
+    if is_paper:
+        exchange = PaperExchange(
+            initial_balance=market_config.initial_balance,
+            live_exchange=live_exchange,
+            account_type=market_config.account_type,
+            leverage=market_config.leverage,
+        )
+        logger.info(
+            "market_paper_mode",
+            market=market_name,
+            connector=connector_name,
+            balance=market_config.initial_balance,
+        )
+    else:
+        exchange = live_exchange
+        logger.info("market_live_mode", market=market_name, connector=connector_name)
+
+    return live_exchange, exchange
+
+
 async def main() -> None:
     config = Settings()
     setup_logging(log_level=config.log_level, log_format=config.log_format)
     logger = get_logger("tarakta")
 
-    logger.info("tarakta_starting", mode=config.trading_mode)
+    logger.info("tarakta_starting", mode=config.trading_mode, markets=list(config.markets.keys()))
 
     # Database
     db = Database(config.supabase_url, config.supabase_key)
     repo = Repository(db)
 
-    # Exchange (Binance)
-    live_exchange = create_exchange(
-        config.exchange_name,
-        config.binance_api_key,
-        config.binance_api_secret,
-        account_type=config.account_type,
-        leverage=config.leverage,
-        margin_mode=config.margin_mode,
-    )
+    # Create engines for each enabled market
+    engines: dict[str, TradingEngine] = {}
+    live_exchanges = []
+    primary_exchange = None  # For dashboard (first market)
 
-    if config.trading_mode == "paper":
-        exchange = PaperExchange(
-            initial_balance=config.initial_balance,
-            live_exchange=live_exchange,
-            account_type=config.account_type,
-            leverage=config.leverage,
-        )
-        logger.info("paper_mode_active", balance=config.initial_balance, account_type=config.account_type, leverage=config.leverage)
-    else:
-        exchange = live_exchange
-        logger.info("live_mode_active", account_type=config.account_type, leverage=config.leverage)
+    for market_name, market_config in config.markets.items():
+        if not market_config.enabled:
+            continue
 
-    # Candle manager
-    candle_manager = CandleManager(exchange=live_exchange, repo=repo)
+        try:
+            live_exchange, exchange = _create_market_exchange(market_name, market_config, config, logger)
+            live_exchanges.append(live_exchange)
 
-    # Trading engine
-    engine = TradingEngine(
-        config=config,
-        exchange=exchange,
-        repo=repo,
-        candle_manager=candle_manager,
-    )
+            if primary_exchange is None:
+                primary_exchange = exchange
 
-    # Dashboard
+            candle_manager = CandleManager(exchange=live_exchange, repo=repo)
+
+            engine = TradingEngine(
+                config=config,
+                exchange=exchange,
+                repo=repo,
+                candle_manager=candle_manager,
+            )
+            engine._market_name = market_name
+
+            # Flipped bot only runs on crypto — disable for stocks/commodities
+            # Custom bot runs on ALL markets so it can pick up stocks/commodities signals
+            if market_name != "crypto":
+                engine.flipped_trader.enabled = False
+                # Give non-crypto custom traders unique state keys to avoid DB conflicts
+                engine.custom_trader.state_key = f"custom_trader_{market_name}"
+                logger.info("market_flipped_disabled", market=market_name,
+                            reason="only_crypto", custom_state_key=engine.custom_trader.state_key)
+
+            engines[market_name] = engine
+            logger.info("market_engine_created", market=market_name, connector=market_config.connector)
+
+        except Exception as e:
+            logger.error("market_engine_failed", market=market_name, error=str(e), exc_info=True)
+            continue
+
+    if not engines:
+        logger.critical("no_engines_created", hint="Check your market configuration")
+        return
+
+    # Dashboard (uses primary market's exchange for live data)
     from src.dashboard.app import create_dashboard_app
 
-    dashboard_app = create_dashboard_app(config, repo, exchange)
+    dashboard_app = create_dashboard_app(config, repo, primary_exchange, engine=list(engines.values())[0], engines=engines)
     port = int(os.getenv("PORT", config.port))
 
     dashboard_thread = threading.Thread(
@@ -78,18 +140,30 @@ async def main() -> None:
 
     # Graceful shutdown
     loop = asyncio.get_event_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(engine.shutdown()))
 
-    # Run engine
+    async def shutdown_all():
+        for engine in engines.values():
+            await engine.shutdown()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown_all()))
+
+    # Run all market engines concurrently
+    async def run_engine(name: str, engine: TradingEngine):
+        try:
+            await engine.run()
+        except Exception as e:
+            logger.critical("engine_fatal", market=name, error=str(e), exc_info=True)
+            await repo.log_error(f"engine_{name}", "critical", str(e))
+
     try:
-        await engine.run()
-    except Exception as e:
-        logger.critical("engine_fatal", error=str(e), exc_info=True)
-        await repo.log_error("engine", "critical", str(e))
-        raise
+        await asyncio.gather(*[run_engine(name, eng) for name, eng in engines.items()])
     finally:
-        await live_exchange.close()
+        for live_ex in live_exchanges:
+            try:
+                await live_ex.close()
+            except Exception:
+                pass
         logger.info("tarakta_stopped")
 
 

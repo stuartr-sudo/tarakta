@@ -14,6 +14,7 @@ from src.engine.flipped import FlippedTrader
 from src.engine.scheduler import Scheduler, TickType
 from src.engine.state import EngineState
 from src.exchange.models import Position, TakeProfitTier
+from src.exchange.trading_hours import TradingHoursManager
 from src.execution.monitor import PositionMonitor
 from src.execution.orders import OrderExecutor
 from src.risk.circuit_breaker import CircuitBreaker
@@ -61,6 +62,10 @@ class TradingEngine:
         )
         self.scanner = AltcoinScanner(candle_manager, config)
 
+        # Trading hours (24/7 for crypto, restricted for stocks/commodities)
+        self.trading_hours = TradingHoursManager()
+        self._market_name: str = "crypto"  # Set by main.py for multi-market
+
         # Self-improving components
         self.trade_analyzer = TradeAnalyzer(repo)
         self.adaptive_threshold = AdaptiveThreshold(config.entry_threshold)
@@ -94,6 +99,33 @@ class TradingEngine:
                 leverage=config.flipped_leverage,
                 sl_buffer=config.flipped_sl_buffer,
                 scan_interval=config.flipped_scan_interval_minutes,
+            )
+
+        # Custom configurable bot (user can toggle direction + margin via dashboard)
+        self.custom_trader = FlippedTrader(
+            config, repo, candle_manager=candle_manager, exchange=exchange,
+            flip_direction=config.custom_flip_direction,
+            mode_name="custom_paper",
+            state_key="custom_trader",
+        )
+        if config.custom_enabled:
+            self.custom_trader.enabled = True
+            self.custom_trader.scan_interval = config.custom_scan_interval_minutes
+            self.custom_trader.max_position_pct = config.custom_margin_pct
+            self.custom_trader.max_risk_pct = config.custom_margin_pct
+            self.custom_trader._initial_balance = config.custom_initial_balance
+            self.custom_trader.balance = config.custom_initial_balance
+            self.custom_trader.peak_balance = config.custom_initial_balance
+            self.custom_trader.daily_start_balance = config.custom_initial_balance
+            self.custom_trader.leverage = config.custom_leverage
+            # Custom bot starts PAUSED — user must click "Begin" on dashboard
+            self.custom_trader._scanning_active = False
+            logger.info(
+                "custom_trader_enabled",
+                leverage=config.custom_leverage,
+                flip_direction=config.custom_flip_direction,
+                margin_pct=config.custom_margin_pct,
+                scan_interval=config.custom_scan_interval_minutes,
             )
 
         # Background task infrastructure (for async post-mortems)
@@ -185,12 +217,57 @@ class TradingEngine:
                 total_pnl=self.flipped_trader.total_pnl,
             )
 
+        # Restore custom trader state (stored in config_overrides JSONB)
+        if self.custom_trader.enabled:
+            saved_state = await self.repo.get_engine_state() or {}
+            overrides = saved_state.get("config_overrides") or {}
+            # Use dynamic state_key (e.g. "custom_trader" for crypto, "custom_trader_stocks" for stocks)
+            ct_key = self.custom_trader.state_key
+            custom_data = overrides.get(ct_key) if isinstance(overrides, dict) else None
+            if custom_data:
+                self.custom_trader.restore_state(custom_data)
+            else:
+                custom_stats = await self.repo.get_trade_stats(mode="custom_paper")
+                self.custom_trader.total_pnl = custom_stats.get("total_pnl", 0)
+
+            # Apply custom_trader_settings (user's explicit dashboard choices) on top
+            # These are SHARED across all markets (one set of user preferences)
+            custom_settings = overrides.get("custom_trader_settings") if isinstance(overrides, dict) else None
+            if custom_settings and isinstance(custom_settings, dict):
+                if "flip_direction" in custom_settings:
+                    self.custom_trader.flip_direction = bool(custom_settings["flip_direction"])
+                if "margin_pct" in custom_settings:
+                    self.custom_trader.max_position_pct = float(custom_settings["margin_pct"])
+                    self.custom_trader.max_risk_pct = float(custom_settings["margin_pct"])
+                if "flip_mode" in custom_settings:
+                    mode = str(custom_settings["flip_mode"])
+                    if mode in ("always_flip", "smart_flip", "normal"):
+                        self.custom_trader.flip_mode = mode
+                if "flip_threshold" in custom_settings:
+                    self.custom_trader.flip_threshold = max(0.0, min(1.0, float(custom_settings["flip_threshold"])))
+                # Restore scanning_active from shared settings (applies to all markets)
+                if "scanning_active" in custom_settings:
+                    self.custom_trader._scanning_active = bool(custom_settings["scanning_active"])
+
+            logger.info(
+                "custom_trader_restored",
+                market=self._market_name,
+                state_key=ct_key,
+                balance=self.custom_trader.balance,
+                positions=len(self.custom_trader.positions),
+                total_pnl=self.custom_trader.total_pnl,
+                flip_direction=self.custom_trader.flip_direction,
+                flip_mode=self.custom_trader.flip_mode,
+                margin_pct=self.custom_trader.max_position_pct,
+                scanning_active=self.custom_trader._scanning_active,
+            )
+
         # Load historical trade data for self-improving components
         await self.trade_analyzer.load_history()
 
         # Bootstrap adaptive threshold from recent closed trades
         try:
-            recent_trades = await self.repo.get_trades(status="closed", per_page=50)
+            recent_trades = await self.repo.get_trades(status="closed", mode=self.state.mode, per_page=50)
             outcomes = [float(t.get("pnl_usd", 0)) > 0 for t in reversed(recent_trades)]
             if outcomes:
                 self.adaptive_threshold.load_outcomes(outcomes)
@@ -239,7 +316,21 @@ class TradingEngine:
             self._flipped_task = asyncio.create_task(self.flipped_trader.run_loop())
             self._background_tasks.add(self._flipped_task)
             self._flipped_task.add_done_callback(self._background_tasks.discard)
-            logger.info("flipped_loop_spawned")
+            logger.info("flipped_loop_spawned", mode=self.flipped_trader.mode_name)
+
+        # Start custom trader's independent scan loop (runs every 20 min)
+        if self.custom_trader.enabled:
+            self._custom_task = asyncio.create_task(self.custom_trader.run_loop())
+            self._background_tasks.add(self._custom_task)
+            self._custom_task.add_done_callback(self._background_tasks.discard)
+            logger.info(
+                "custom_loop_spawned",
+                mode=self.custom_trader.mode_name,
+                scanning_active=self.custom_trader._scanning_active,
+                flip_mode=self.custom_trader.flip_mode,
+                flip_direction=self.custom_trader.flip_direction,
+                margin_pct=self.custom_trader.max_position_pct,
+            )
 
         # Run an immediate scan on startup if no recent scan
         should_startup_scan = False
@@ -283,6 +374,13 @@ class TradingEngine:
                     await self._monitor_tick()
                     await self._persist_state()
                 else:
+                    # Check trading hours — skip scan if market is closed
+                    market_info = getattr(self.exchange, "market_info", None)
+                    if not self.trading_hours.should_scan(market_info):
+                        next_open = self.trading_hours.next_open(market_info)
+                        if next_open:
+                            logger.info("market_closed_skipping_scan", market=self._market_name, next_open=next_open.isoformat())
+                        continue
                     await self._primary_tick()
 
                 self.state.errors_consecutive = 0
@@ -447,7 +545,7 @@ class TradingEngine:
         llm_perf_context: dict[str, Any] = {}
         if llm_runtime_enabled and self.llm_analyst:
             try:
-                recent_trades = await self.repo.get_trades(status="closed", per_page=20)
+                recent_trades = await self.repo.get_trades(status="closed", mode=self.state.mode, per_page=20)
                 if recent_trades:
                     wins = sum(1 for t in recent_trades if (t.get("pnl_usd") or 0) > 0)
                     llm_perf_context["recent_win_rate"] = round(wins / len(recent_trades) * 100, 1)
@@ -1313,26 +1411,40 @@ class TradingEngine:
         return True
 
     async def _persist_state(self) -> None:
-        """Save engine state and portfolio snapshot to DB."""
+        """Save engine state and portfolio snapshot to DB.
+
+        Only the primary (crypto) engine writes full portfolio state.
+        Non-crypto engines save their custom trader state independently
+        via FlippedTrader._save_state() to avoid overwriting shared DB row.
+        """
         try:
+            # Non-crypto engines: only save custom_trader state, skip full portfolio write
+            if self._market_name != "crypto":
+                return
+
             state_dict = self.portfolio.to_state_dict(
                 status=self.state.status,
                 mode=self.state.mode,
                 cycle_count=self.state.cycle_count,
             )
-            # Store extra data in config_overrides JSONB (no schema changes needed)
+            # Read existing overrides first to preserve custom_trader and other engines' state
+            existing = await self.repo.get_engine_state()
             overrides = {}
+            if existing:
+                overrides = existing.get("config_overrides") or {}
+                if not isinstance(overrides, dict):
+                    overrides = {}
+                # Preserve dashboard-toggled fields that aren't in portfolio state
+                for key in ("llm_enabled",):
+                    if key in existing and key not in state_dict:
+                        state_dict[key] = existing[key]
+
+            # Update only the keys this engine manages (preserving custom_trader* keys etc.)
             if self.dynamic_weights:
                 overrides["dynamic_weights"] = self.dynamic_weights.to_state()
             if self.flipped_trader.enabled:
                 overrides["flipped_trader"] = self.flipped_trader.to_state_dict()
             state_dict["config_overrides"] = overrides
-            # Preserve dashboard-toggled fields that aren't in portfolio state
-            existing = await self.repo.get_engine_state()
-            if existing:
-                for key in ("llm_enabled",):
-                    if key in existing and key not in state_dict:
-                        state_dict[key] = existing[key]
             await self.repo.upsert_engine_state(state_dict)
             await self.repo.insert_snapshot(
                 self.portfolio.to_snapshot_dict(
