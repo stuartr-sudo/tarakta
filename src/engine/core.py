@@ -143,6 +143,24 @@ class TradingEngine:
         self._scanning_active = False
         logger.info("main_bot_scanning_stopped")
 
+    def update_settings(
+        self,
+        margin_pct: float | None = None,
+        leverage: int | None = None,
+    ) -> None:
+        """Update main bot margin % and leverage at runtime (takes effect on next trade)."""
+        if margin_pct is not None:
+            self.config.max_position_pct = margin_pct
+            self.risk_manager.max_position_pct = margin_pct
+            logger.info("main_bot_margin_updated", margin_pct=margin_pct)
+        if leverage is not None:
+            self.config.leverage = leverage
+            self.risk_manager._leverage = leverage
+            # Also update PaperExchange leverage if paper trading
+            if hasattr(self.exchange, "_leverage"):
+                self.exchange._leverage = leverage
+            logger.info("main_bot_leverage_updated", leverage=leverage)
+
     async def startup(self) -> None:
         """Initialize engine state from DB or create fresh."""
 
@@ -256,6 +274,12 @@ class TradingEngine:
                         self.custom_trader.flip_mode = mode
                 if "flip_threshold" in custom_settings:
                     self.custom_trader.flip_threshold = max(0.0, min(1.0, float(custom_settings["flip_threshold"])))
+                if "leverage" in custom_settings:
+                    saved_lev = int(custom_settings["leverage"])
+                    self.custom_trader.leverage = saved_lev
+                    if hasattr(self.custom_trader.exchange, "_leverage"):
+                        self.custom_trader.exchange._leverage = saved_lev
+                    logger.info("custom_leverage_restored", leverage=saved_lev)
                 # Restore scanning_active from shared settings (applies to all markets)
                 if "scanning_active" in custom_settings:
                     self.custom_trader._scanning_active = bool(custom_settings["scanning_active"])
@@ -343,13 +367,26 @@ class TradingEngine:
                 margin_pct=self.custom_trader.max_position_pct,
             )
 
-        # Restore main bot scanning_active from DB state
+        # Restore main bot settings from DB state
         db_state = await self.repo.get_engine_state()
         if db_state:
             overrides = db_state.get("config_overrides", {}) or {}
             main_settings = overrides.get("main_bot_settings", {}) or {}
             if "scanning_active" in main_settings:
                 self._scanning_active = bool(main_settings["scanning_active"])
+            # Restore margin_pct and leverage from saved settings
+            if "margin_pct" in main_settings:
+                saved_margin = float(main_settings["margin_pct"])
+                self.config.max_position_pct = saved_margin
+                self.risk_manager.max_position_pct = saved_margin
+                logger.info("main_bot_margin_restored", margin_pct=saved_margin)
+            if "leverage" in main_settings:
+                saved_leverage = int(main_settings["leverage"])
+                self.config.leverage = saved_leverage
+                self.risk_manager._leverage = saved_leverage
+                if hasattr(self.exchange, "_leverage"):
+                    self.exchange._leverage = saved_leverage
+                logger.info("main_bot_leverage_restored", leverage=saved_leverage)
 
         # Run an immediate scan on startup if scanning is active and no recent scan
         if self._scanning_active:

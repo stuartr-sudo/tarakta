@@ -91,6 +91,13 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx["snapshot"]["daily_pnl_usd"] = stats.get("daily_pnl", 0)
         ctx["snapshot"]["total_pnl_usd"] = stats.get("total_pnl", 0)
 
+        # Main bot settings (margin_pct, leverage) from saved state
+        state = ctx.get("state") or {}
+        overrides = state.get("config_overrides") or {}
+        main_settings = overrides.get("main_bot_settings", {}) if isinstance(overrides, dict) else {}
+        ctx["main_margin_pct"] = main_settings.get("margin_pct", config.max_position_pct)
+        ctx["main_leverage"] = main_settings.get("leverage", config.leverage)
+
         return templates.TemplateResponse("dashboard.html", ctx)
 
     @router.get("/trades", response_class=HTMLResponse)
@@ -159,7 +166,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx["custom_last_scan"] = custom_data.get("last_scan_time")
         ctx["custom_scan_interval"] = config.custom_scan_interval_minutes
         ctx["custom_initial_balance"] = config.custom_initial_balance
-        ctx["custom_leverage"] = config.custom_leverage
+        ctx["custom_leverage"] = custom_settings.get("leverage", config.custom_leverage)
         # Configurable settings (from saved state or config defaults)
         ctx["custom_flip_direction"] = custom_settings.get(
             "flip_direction",

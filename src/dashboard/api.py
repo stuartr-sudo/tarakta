@@ -660,6 +660,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         margin_pct = body.get("margin_pct")
         flip_mode = body.get("flip_mode")
         flip_threshold = body.get("flip_threshold")
+        leverage = body.get("leverage")
 
         # Validate margin_pct range (5% to 40%)
         if margin_pct is not None:
@@ -680,6 +681,12 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             if flip_threshold < 0.0 or flip_threshold > 1.0:
                 return JSONResponse({"error": "flip_threshold must be between 0.0 and 1.0"}, status_code=400)
 
+        # Validate leverage range (1x to 100x)
+        if leverage is not None:
+            leverage = int(leverage)
+            if leverage < 1 or leverage > 100:
+                return JSONResponse({"error": "leverage must be between 1 and 100"}, status_code=400)
+
         # Update in-memory settings on ALL engines' custom traders (crypto + stocks + commodities)
         all_traders = _get_all_custom_traders()
         for ct in all_traders:
@@ -688,6 +695,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 margin_pct=margin_pct,
                 flip_mode=flip_mode,
                 flip_threshold=flip_threshold,
+                leverage=leverage,
             )
         # Also update the primary engine's custom trader (even if not in all_traders yet)
         if engine and hasattr(engine, "custom_trader") and engine.custom_trader:
@@ -696,6 +704,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 margin_pct=margin_pct,
                 flip_mode=flip_mode,
                 flip_threshold=flip_threshold,
+                leverage=leverage,
             )
             logger.info(
                 "custom_settings_updated",
@@ -703,6 +712,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 margin_pct=engine.custom_trader.max_position_pct,
                 flip_mode=engine.custom_trader.flip_mode,
                 flip_threshold=engine.custom_trader.flip_threshold,
+                leverage=engine.custom_trader.leverage,
                 engines_updated=len(all_traders),
             )
 
@@ -722,6 +732,8 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                     settings["flip_mode"] = flip_mode
                 if flip_threshold is not None:
                     settings["flip_threshold"] = flip_threshold
+                if leverage is not None:
+                    settings["leverage"] = leverage
                 overrides["custom_trader_settings"] = settings
                 state["config_overrides"] = overrides
                 await repo.upsert_engine_state(state)
@@ -735,6 +747,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             "margin_pct": ct.max_position_pct if ct else 0.15,
             "flip_mode": ct.flip_mode if ct else "smart_flip",
             "flip_threshold": ct.flip_threshold if ct else 0.50,
+            "leverage": ct.leverage if ct else 10,
         }
         return {"success": True, "settings": current}
 
@@ -765,6 +778,76 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         engine.flipped_trader.request_scan()
         logger.info("flipped_scan_triggered_via_api")
         return {"success": True, "message": "Scan triggered — will start within ~5 seconds"}
+
+    # ── Main Bot Settings ────────────────────────────────────────────
+    @router.post("/main/settings")
+    @admin_required
+    async def update_main_settings(request: Request):
+        """Update main bot margin % and leverage at runtime (takes effect on next trade)."""
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+        margin_pct = body.get("margin_pct")
+        leverage = body.get("leverage")
+
+        # Validate margin_pct range (5% to 40%)
+        if margin_pct is not None:
+            margin_pct = float(margin_pct)
+            if margin_pct < 0.05 or margin_pct > 0.40:
+                return JSONResponse({"error": "margin_pct must be between 0.05 and 0.40"}, status_code=400)
+
+        # Validate leverage range (1x to 100x)
+        if leverage is not None:
+            leverage = int(leverage)
+            if leverage < 1 or leverage > 100:
+                return JSONResponse({"error": "leverage must be between 1 and 100"}, status_code=400)
+
+        # Update in-memory settings on ALL engines' main bots
+        for eng in _all_engines.values():
+            eng.update_settings(margin_pct=margin_pct, leverage=leverage)
+        # Also update the primary engine
+        if engine:
+            engine.update_settings(margin_pct=margin_pct, leverage=leverage)
+
+        # Persist to DB
+        try:
+            state = await repo.get_engine_state()
+            if state:
+                overrides = state.get("config_overrides", {}) or {}
+                if not isinstance(overrides, dict):
+                    overrides = {}
+                main_settings = overrides.get("main_bot_settings", {}) or {}
+                if not isinstance(main_settings, dict):
+                    main_settings = {}
+                if margin_pct is not None:
+                    main_settings["margin_pct"] = margin_pct
+                if leverage is not None:
+                    main_settings["leverage"] = leverage
+                overrides["main_bot_settings"] = main_settings
+                state["config_overrides"] = overrides
+                await repo.upsert_engine_state(state)
+        except Exception as e:
+            logger.warning("main_settings_db_save_failed", error=str(e))
+
+        current = {
+            "margin_pct": engine.config.max_position_pct if engine else 0.05,
+            "leverage": engine.config.leverage if engine else 10,
+        }
+        return {"success": True, "settings": current}
+
+    @router.get("/main/settings")
+    @login_required
+    async def get_main_settings(request: Request):
+        """Get current main bot settings."""
+        if not engine:
+            return {"margin_pct": 0.05, "leverage": 10}
+        return {
+            "margin_pct": engine.config.max_position_pct,
+            "leverage": engine.config.leverage,
+            "scanning_active": engine._scanning_active,
+        }
 
     # ── Main Bot Start/Stop ───────────────────────────────────────────
     @router.post("/main/begin")

@@ -109,13 +109,59 @@
 <div class="panel" style="border-left: 3px solid #8b5cf6;">
     <div class="panel-header">
         <h2>Main Bot
-            {% if config and config.account_type != 'spot' %}
-            <span class="account-badge">{{ config.account_type | upper }} {{ config.leverage }}x</span>
-            {% endif %}
+            <span id="main-config-badge" class="account-badge" style="background:#8b5cf6;">{{ main_leverage }}x &bull; {{ (main_margin_pct * 100)|round(0)|int }}%</span>
             <span id="main-status-badge" class="account-badge" style="background:#ef4444;">STOPPED</span>
         </h2>
         <div style="display:flex; align-items:center; gap:8px;">
             <button id="main-start-btn" class="btn" style="background:#22c55e; color:#fff; border:none; padding:6px 16px; border-radius:4px; font-weight:600;" onclick="toggleMainBot()">▶ Start</button>
+        </div>
+    </div>
+    <div class="panel-body" style="display:flex; gap:2rem; align-items:flex-start; flex-wrap:wrap;">
+        <!-- Leverage Slider -->
+        <div style="display:flex; flex-direction:column; gap:0.5rem; min-width:180px;">
+            <label style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">
+                Leverage:
+                <span id="main-leverage-value" style="color:var(--accent); font-size:1rem;">{{ main_leverage }}x</span>
+            </label>
+            <div style="display:flex; align-items:center; gap:0.5rem;">
+                <span style="font-size:0.7rem; color:var(--text-muted);">5x</span>
+                <input type="range" id="main-leverage-slider" min="5" max="100" step="5"
+                       value="{{ main_leverage }}"
+                       style="flex:1; accent-color:#8b5cf6; cursor:pointer;">
+                <span style="font-size:0.7rem; color:var(--text-muted);">100x</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:0.65rem; color:var(--text-muted);">
+                <span>Safer</span>
+                <span>Aggressive</span>
+            </div>
+        </div>
+        <div style="width:1px; height:70px; background:var(--border-color);"></div>
+        <!-- Margin % Slider -->
+        <div style="display:flex; flex-direction:column; gap:0.5rem; min-width:180px;">
+            <label style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">
+                Margin per Trade:
+                <span id="main-margin-value" style="color:var(--accent); font-size:1rem;">{{ (main_margin_pct * 100)|round(0)|int }}%</span>
+            </label>
+            <div style="display:flex; align-items:center; gap:0.5rem;">
+                <span style="font-size:0.7rem; color:var(--text-muted);">5%</span>
+                <input type="range" id="main-margin-slider" min="5" max="40" step="1"
+                       value="{{ (main_margin_pct * 100)|round(0)|int }}"
+                       style="flex:1; accent-color:#8b5cf6; cursor:pointer;">
+                <span style="font-size:0.7rem; color:var(--text-muted);">40%</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:0.65rem; color:var(--text-muted);">
+                <span>Conservative</span>
+                <span>Aggressive</span>
+            </div>
+        </div>
+        <div style="width:1px; height:70px; background:var(--border-color);"></div>
+        <!-- Trade Size Preview -->
+        <div style="display:flex; flex-direction:column; gap:0.25rem; align-items:center; justify-content:center;">
+            <span style="font-size:0.7rem; color:var(--text-muted);">Est. trade size</span>
+            <span id="main-trade-preview" class="badge" style="font-size:0.85rem; padding:4px 12px; background:#8b5cf6; color:#fff; border-radius:12px;">
+                ${{ "%.0f" | format((main_margin_pct * (snapshot.current_balance|default(2000)|float) * main_leverage)) }}
+            </span>
+            <span style="font-size:0.6rem; color:var(--text-muted);">margin x leverage</span>
         </div>
     </div>
 </div>
@@ -185,7 +231,16 @@
                                 <span class="positive">{{ ("$%.4f" | format(t.take_profit | float)) if t.take_profit else '-' }}</span>
                             {% endif %}
                         </td>
-                        <td class="mono">${{ "%.2f" | format(t.entry_cost_usd | default(0) | float) }}</td>
+                        <td class="mono">
+                            {% set lev = t.leverage | default(1) | int %}
+                            {% set cost = t.entry_cost_usd | default(0) | float %}
+                            {% if lev > 1 %}
+                                <div style="font-weight:600;">${{ "%.2f" | format(cost) }}</div>
+                                <div style="font-size:0.7rem; color:var(--text-muted);">${{ "%.2f" | format(cost / lev) }} margin</div>
+                            {% else %}
+                                ${{ "%.2f" | format(cost) }}
+                            {% endif %}
+                        </td>
                         <td>
                             <div class="score-bar">
                                 <span class="score-num {{ 'positive' if (t.confluence_score | int) >= 65 else ('text-orange' if (t.confluence_score | int) >= 50 else 'negative') }}">{{ t.confluence_score }}</span>
@@ -656,6 +711,58 @@ async function toggleMainBot() {
 }
 loadMainStatus();
 setInterval(loadMainStatus, 15000);
+
+// --- Main Bot Settings Sliders ---
+let _mainSettingsDebounce = null;
+const _mainBalance = {{ snapshot.current_balance|default(2000)|float }};
+
+function updateMainSettingsUI() {
+    const levSlider = document.getElementById('main-leverage-slider');
+    const marginSlider = document.getElementById('main-margin-slider');
+    if (!levSlider || !marginSlider) return;
+    const lev = parseInt(levSlider.value);
+    const marginPct = parseInt(marginSlider.value);
+    document.getElementById('main-leverage-value').textContent = lev + 'x';
+    document.getElementById('main-margin-value').textContent = marginPct + '%';
+    const tradeSize = Math.round(_mainBalance * (marginPct / 100) * lev);
+    document.getElementById('main-trade-preview').textContent = '$' + tradeSize.toLocaleString();
+    document.getElementById('main-config-badge').innerHTML = lev + 'x &bull; ' + marginPct + '%';
+}
+
+async function saveMainSettings(settings) {
+    try {
+        const resp = await fetch('/api/main/settings', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(settings),
+        });
+        const data = await resp.json();
+        if (!data.success) console.error('Main settings save failed:', data.error);
+    } catch (e) {
+        console.error('Main settings save error:', e);
+    }
+}
+
+const mainLevSlider = document.getElementById('main-leverage-slider');
+const mainMarginSlider = document.getElementById('main-margin-slider');
+if (mainLevSlider) {
+    mainLevSlider.addEventListener('input', updateMainSettingsUI);
+    mainLevSlider.addEventListener('change', function() {
+        clearTimeout(_mainSettingsDebounce);
+        _mainSettingsDebounce = setTimeout(() => {
+            saveMainSettings({ leverage: parseInt(this.value) });
+        }, 500);
+    });
+}
+if (mainMarginSlider) {
+    mainMarginSlider.addEventListener('input', updateMainSettingsUI);
+    mainMarginSlider.addEventListener('change', function() {
+        clearTimeout(_mainSettingsDebounce);
+        _mainSettingsDebounce = setTimeout(() => {
+            saveMainSettings({ margin_pct: parseInt(this.value) / 100 });
+        }, 300);
+    });
+}
 
 // Soft-refresh stat cards every 30s. Full reload if position count changes.
 let _knownPositionCount = document.querySelectorAll('#positions-tbody tr[data-trade-id]').length;

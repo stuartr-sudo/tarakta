@@ -127,6 +127,7 @@ class FlippedTrader:
         margin_pct: float | None = None,
         flip_mode: str | None = None,
         flip_threshold: float | None = None,
+        leverage: int | None = None,
     ) -> None:
         """Update configurable parameters at runtime (thread-safe for simple scalars)."""
         if flip_direction is not None:
@@ -138,6 +139,11 @@ class FlippedTrader:
             self.flip_mode = flip_mode
         if flip_threshold is not None:
             self.flip_threshold = max(0.0, min(1.0, flip_threshold))
+        if leverage is not None:
+            self.leverage = leverage
+            # Also update PaperExchange leverage if paper trading
+            if hasattr(self.exchange, "_leverage"):
+                self.exchange._leverage = leverage
 
     def request_reset(self) -> None:
         """Signal the flipped trader to reset on next tick (thread-safe)."""

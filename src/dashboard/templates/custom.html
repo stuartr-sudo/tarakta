@@ -72,7 +72,7 @@
         <div id="threshold-divider" style="width:1px; height:70px; background:var(--border-color); display:{% if custom_flip_mode == 'smart_flip' %}block{% else %}none{% endif %};"></div>
 
         <!-- Margin Slider -->
-        <div style="display:flex; flex-direction:column; gap:0.5rem; flex:1; min-width:180px;">
+        <div style="display:flex; flex-direction:column; gap:0.5rem; min-width:180px;">
             <label style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">
                 Margin per Trade:
                 <span id="margin-value" style="color:var(--accent); font-size:1rem;">{{ (custom_margin_pct * 100)|round(0)|int }}%</span>
@@ -90,12 +90,38 @@
             </div>
         </div>
 
-        <!-- Current Config Badge -->
+        <div style="width:1px; height:70px; background:var(--border-color);"></div>
+
+        <!-- Leverage Slider -->
+        <div style="display:flex; flex-direction:column; gap:0.5rem; min-width:180px;">
+            <label style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">
+                Leverage:
+                <span id="leverage-value" style="color:var(--accent); font-size:1rem;">{{ custom_leverage }}x</span>
+            </label>
+            <div style="display:flex; align-items:center; gap:0.5rem;">
+                <span style="font-size:0.7rem; color:var(--text-muted);">5x</span>
+                <input type="range" id="leverage-slider" min="5" max="100" step="5"
+                       value="{{ custom_leverage }}"
+                       style="flex:1; accent-color:#8b5cf6; cursor:pointer;">
+                <span style="font-size:0.7rem; color:var(--text-muted);">100x</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:0.65rem; color:var(--text-muted);">
+                <span>Safer</span>
+                <span>Aggressive</span>
+            </div>
+        </div>
+
+        <div style="width:1px; height:70px; background:var(--border-color);"></div>
+
+        <!-- Config Badge + Trade Preview -->
         <div style="display:flex; flex-direction:column; gap:0.25rem; align-items:center;">
             <span id="config-badge" class="badge" style="font-size:0.75rem; padding:4px 10px; background:#8b5cf6; color:#fff; border-radius:12px;">
-                {% if custom_flip_mode == 'always_flip' %}ALWAYS FLIP{% elif custom_flip_mode == 'smart_flip' %}SMART {{ (custom_flip_threshold * 100)|round(0)|int }}%{% else %}NORMAL{% endif %} &bull; {{ (custom_margin_pct * 100)|round(0)|int }}%
+                {% if custom_flip_mode == 'always_flip' %}ALWAYS FLIP{% elif custom_flip_mode == 'smart_flip' %}SMART {{ (custom_flip_threshold * 100)|round(0)|int }}%{% else %}NORMAL{% endif %} &bull; {{ (custom_margin_pct * 100)|round(0)|int }}% &bull; {{ custom_leverage }}x
             </span>
-            <span style="font-size:0.65rem; color:var(--text-muted);">Active config</span>
+            <span id="custom-trade-preview" style="font-size:0.75rem; font-weight:600; color:var(--accent);">
+                ~${{ "%.0f" | format((custom_margin_pct * custom_balance|default(2000)|float * custom_leverage)) }} per trade
+            </span>
+            <span style="font-size:0.6rem; color:var(--text-muted);">margin x leverage</span>
         </div>
     </div>
 </div>
@@ -282,9 +308,33 @@
                         <td class="mono pos-pnl">--</td>
                         <td class="mono negative">${{ "%.4f"|format(t.stop_loss|float) }}</td>
                         <td class="mono">
-                            <span class="positive">{{ ("$%.4f"|format(t.take_profit|float)) if t.take_profit else '-' }}</span>
+                            {% if t.tp_tiers %}
+                                {% set tiers_done = t.current_tier | default(0) | int %}
+                                <div class="tp-tiers-detail">
+                                    {% for tier in t.tp_tiers %}
+                                    <div class="tp-tier-row {{ 'filled' if tier.filled else ('target' if tier.level == tiers_done + 1 else 'pending') }}">
+                                        <span class="tp-tier-dot {{ 'filled' if tier.filled else ('target' if tier.level == tiers_done + 1 else '') }}"></span>
+                                        <span class="tp-tier-name">TP{{ tier.level }}</span>
+                                        <span class="tp-tier-price">{% if tier.price %}${{ "%.4f" | format(tier.price | float) }}{% else %}Trail{% endif %}</span>
+                                        <span class="tp-tier-pct">({{ (tier.pct * 100) | int }}%)</span>
+                                        {% if tier.filled %}<span class="tp-tier-check">✓</span>{% endif %}
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                            {% else %}
+                                <span class="positive">{{ ("$%.4f"|format(t.take_profit|float)) if t.take_profit else '-' }}</span>
+                            {% endif %}
                         </td>
-                        <td class="mono">${{ "%.2f"|format(t.entry_cost_usd|default(0)|float) }}</td>
+                        <td class="mono">
+                            {% set lev = t.leverage | default(1) | int %}
+                            {% set cost = t.entry_cost_usd | default(0) | float %}
+                            {% if lev > 1 %}
+                                <div style="font-weight:600;">${{ "%.2f" | format(cost) }}</div>
+                                <div style="font-size:0.7rem; color:var(--text-muted);">${{ "%.2f" | format(cost / lev) }} margin</div>
+                            {% else %}
+                                ${{ "%.2f" | format(cost) }}
+                            {% endif %}
+                        </td>
                         <td>
                             <div class="score-bar">
                                 <span class="score-num {{ 'positive' if (t.confluence_score|int) >= 65 else ('text-orange' if (t.confluence_score|int) >= 50 else 'negative') }}">{{ t.confluence_score }}</span>
@@ -592,6 +642,7 @@ const slider = document.getElementById('margin-slider');
 const marginLabel = document.getElementById('margin-value');
 slider.addEventListener('input', function() {
     marginLabel.textContent = this.value + '%';
+    updateCustomTradePreview();
 });
 slider.addEventListener('change', function() {
     clearTimeout(_settingsDebounce);
@@ -599,6 +650,38 @@ slider.addEventListener('change', function() {
         updateSettings({ margin_pct: parseInt(this.value) / 100 });
     }, 300);
 });
+
+// Leverage slider (debounced 500ms)
+const levSlider = document.getElementById('leverage-slider');
+const levLabel = document.getElementById('leverage-value');
+if (levSlider) {
+    levSlider.addEventListener('input', function() {
+        levLabel.textContent = this.value + 'x';
+        updateCustomTradePreview();
+    });
+    levSlider.addEventListener('change', function() {
+        clearTimeout(_settingsDebounce);
+        _settingsDebounce = setTimeout(() => {
+            updateSettings({ leverage: parseInt(this.value) });
+        }, 500);
+    });
+}
+
+// Trade preview update
+const _customBalance = {{ custom_balance|default(2000)|float }};
+function updateCustomTradePreview() {
+    const marginPct = parseInt(document.getElementById('margin-slider').value);
+    const lev = parseInt(document.getElementById('leverage-slider').value);
+    const tradeSize = Math.round(_customBalance * (marginPct / 100) * lev);
+    const preview = document.getElementById('custom-trade-preview');
+    if (preview) preview.textContent = '~$' + tradeSize.toLocaleString() + ' per trade';
+    const badge = document.getElementById('config-badge');
+    if (badge) {
+        const mode = document.querySelector('.mode-btn.active');
+        const modeText = mode ? mode.textContent.trim() : 'SMART';
+        badge.innerHTML = modeText.toUpperCase() + ' &bull; ' + marginPct + '% &bull; ' + lev + 'x';
+    }
+}
 
 // --- Net P&L (realized + unrealized) ---
 let _lastRealizedPnl = {{ custom_stats.total_pnl|default(0)|float }};
