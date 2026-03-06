@@ -899,6 +899,75 @@ p { margin: 0 0 0.5rem; }
     white-space: nowrap;
 }
 
+/* ---- TP Tier Detail View (price-level display) ---- */
+.tp-tiers-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 0.72rem;
+}
+
+.tp-tier-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    opacity: 0.5;
+}
+
+.tp-tier-row.filled {
+    opacity: 1.0;
+}
+
+.tp-tier-row.target {
+    opacity: 1.0;
+}
+
+.tp-tier-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.15);
+    flex-shrink: 0;
+}
+
+.tp-tier-dot.filled {
+    background: var(--green);
+}
+
+.tp-tier-dot.target {
+    background: var(--orange);
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+.tp-tier-name {
+    font-weight: 600;
+    color: var(--text-secondary);
+    min-width: 22px;
+}
+
+.tp-tier-price {
+    color: #e5e7eb;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.tp-tier-row.filled .tp-tier-price {
+    color: var(--green);
+}
+
+.tp-tier-row.target .tp-tier-price {
+    color: var(--orange);
+}
+
+.tp-tier-pct {
+    color: var(--text-muted);
+    font-size: 0.65rem;
+}
+
+.tp-tier-check {
+    color: var(--green);
+    font-size: 0.7rem;
+}
+
 /* ---- Expandable Detail Rows ---- */
 .data-table tr.clickable-row {
     cursor: pointer;

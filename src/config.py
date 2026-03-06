@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     min_rr_ratio: float = 2.0  # Minimum 2:1 reward-to-risk
     cooldown_hours: float = 2.0  # Cooldown after stop-loss before re-entering same symbol
     max_daily_trades: int = 15  # Allow more trades to deploy full balance
+    min_trade_usd: float = 150.0  # Minimum margin per trade ($150 × leverage = min notional)
 
     # Progressive take-profit tiers
     # TP1 hit → close 33%, move SL to breakeven
@@ -111,8 +112,8 @@ class Settings(BaseSettings):
     # Dynamic strategy weights
     dynamic_weights_enabled: bool = False  # Adjust confluence weights based on trade outcomes
 
-    # Flipped shadow bot — paper trades with inverted direction
-    flipped_enabled: bool = True
+    # Flipped shadow bot — DISABLED (not producing results)
+    flipped_enabled: bool = False
     flipped_leverage: int = 5  # Higher leverage for flipped trades
     flipped_sl_buffer: float = 0.02  # 2% SL buffer (wider than main 0.5%)
     flipped_min_sl_pct: float = 0.015  # Minimum SL distance = 1.5% of entry price

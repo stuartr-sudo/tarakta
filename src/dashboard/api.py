@@ -766,6 +766,66 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         logger.info("flipped_scan_triggered_via_api")
         return {"success": True, "message": "Scan triggered — will start within ~5 seconds"}
 
+    # ── Main Bot Start/Stop ───────────────────────────────────────────
+    @router.post("/main/begin")
+    @admin_required
+    async def begin_main_scanning(request: Request):
+        """Start the main bot's scan loop."""
+        if not engine:
+            return JSONResponse({"success": False, "error": "Engine not available"}, status_code=503)
+        engine.begin_scanning()
+        # Persist to DB
+        try:
+            state = await repo.get_engine_state()
+            if state:
+                overrides = state.get("config_overrides", {}) or {}
+                if not isinstance(overrides, dict):
+                    overrides = {}
+                main_settings = overrides.get("main_bot_settings", {})
+                if not isinstance(main_settings, dict):
+                    main_settings = {}
+                main_settings["scanning_active"] = True
+                overrides["main_bot_settings"] = main_settings
+                state["config_overrides"] = overrides
+                await repo.upsert_engine_state(state)
+        except Exception as e:
+            logger.warning("begin_main_persist_failed", error=str(e))
+        return {"success": True, "message": "Main bot scanning started"}
+
+    @router.post("/main/stop")
+    @admin_required
+    async def stop_main_scanning(request: Request):
+        """Pause the main bot's scan loop (keeps monitoring open positions)."""
+        if not engine:
+            return JSONResponse({"success": False, "error": "Engine not available"}, status_code=503)
+        engine.stop_scanning()
+        # Persist to DB
+        try:
+            state = await repo.get_engine_state()
+            if state:
+                overrides = state.get("config_overrides", {}) or {}
+                if not isinstance(overrides, dict):
+                    overrides = {}
+                main_settings = overrides.get("main_bot_settings", {})
+                if not isinstance(main_settings, dict):
+                    main_settings = {}
+                main_settings["scanning_active"] = False
+                overrides["main_bot_settings"] = main_settings
+                state["config_overrides"] = overrides
+                await repo.upsert_engine_state(state)
+        except Exception as e:
+            logger.warning("stop_main_persist_failed", error=str(e))
+        return {"success": True, "message": "Main bot scanning paused (still monitoring positions)"}
+
+    @router.get("/main/status")
+    @login_required
+    async def get_main_status(request: Request):
+        """Get main bot running status."""
+        if not engine:
+            return {"scanning_active": False, "available": False}
+        return {"scanning_active": engine._scanning_active, "available": True}
+
+    # ── Custom Bot Start/Stop ──────────────────────────────────────────
     @router.post("/custom/begin")
     @admin_required
     async def begin_custom_scanning(request: Request):

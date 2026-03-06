@@ -104,14 +104,27 @@
     {% endif %}
 </div>
 
-<!-- Open Positions (full width) -->
-<div class="panel">
+<!-- Main Bot Controls -->
+{% if role == 'admin' %}
+<div class="panel" style="border-left: 3px solid #8b5cf6;">
     <div class="panel-header">
-        <h2>Open Positions
+        <h2>Main Bot
             {% if config and config.account_type != 'spot' %}
             <span class="account-badge">{{ config.account_type | upper }} {{ config.leverage }}x</span>
             {% endif %}
+            <span id="main-status-badge" class="account-badge" style="background:#ef4444;">STOPPED</span>
         </h2>
+        <div style="display:flex; align-items:center; gap:8px;">
+            <button id="main-start-btn" class="btn" style="background:#22c55e; color:#fff; border:none; padding:6px 16px; border-radius:4px; font-weight:600;" onclick="toggleMainBot()">▶ Start</button>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- Open Positions (full width) -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>Open Positions</h2>
         <div style="display:flex; align-items:center; gap:8px;">
             <span class="badge text-blue">{{ trades | length }}</span>
             <button id="refresh-btn" class="btn" onclick="manualRefresh()" style="font-size:0.8rem; padding:4px 10px;">Refresh Prices</button>
@@ -157,11 +170,16 @@
                         <td class="mono">
                             {% if t.tp_tiers %}
                                 {% set tiers_done = t.current_tier | default(0) | int %}
-                                <div class="tp-tiers">
+                                <div class="tp-tiers-detail">
                                     {% for tier in t.tp_tiers %}
-                                    <div class="tp-tier-seg {{ 'filled' if tier.level <= tiers_done else ('target' if tier.level == tiers_done + 1 else 'pending') }}" title="TP{{ tier.level }}: ${{ '%.4f' | format(tier.price | float) if tier.price else 'trail' }} ({{ (tier.pct * 100) | int }}%)"></div>
+                                    <div class="tp-tier-row {{ 'filled' if tier.filled else ('target' if tier.level == tiers_done + 1 else 'pending') }}">
+                                        <span class="tp-tier-dot {{ 'filled' if tier.filled else ('target' if tier.level == tiers_done + 1 else '') }}"></span>
+                                        <span class="tp-tier-name">TP{{ tier.level }}</span>
+                                        <span class="tp-tier-price">{% if tier.price %}${{ "%.4f" | format(tier.price | float) }}{% else %}Trail{% endif %}</span>
+                                        <span class="tp-tier-pct">({{ (tier.pct * 100) | int }}%)</span>
+                                        {% if tier.filled %}<span class="tp-tier-check">✓</span>{% endif %}
+                                    </div>
                                     {% endfor %}
-                                    <span class="tp-tier-label">{% if tiers_done >= 3 %}Done{% else %}TP{{ tiers_done + 1 }}{% endif %}</span>
                                 </div>
                             {% else %}
                                 <span class="positive">{{ ("$%.4f" | format(t.take_profit | float)) if t.take_profit else '-' }}</span>
@@ -587,6 +605,57 @@ async function confirmResetMain() {
         alert('Reset failed: ' + e.message);
     }
 }
+
+// --- Main Bot Start/Stop ---
+let _mainScanning = false;
+
+async function loadMainStatus() {
+    try {
+        const resp = await fetch('/api/main/status');
+        const data = await resp.json();
+        _mainScanning = data.scanning_active;
+        updateMainButton();
+    } catch (e) {
+        console.error('Main status fetch failed:', e);
+    }
+}
+
+function updateMainButton() {
+    const btn = document.getElementById('main-start-btn');
+    const badge = document.getElementById('main-status-badge');
+    if (!btn) return;
+    if (_mainScanning) {
+        btn.textContent = '⏹ Stop';
+        btn.style.background = '#ef4444';
+        if (badge) { badge.textContent = 'SCANNING'; badge.style.background = '#22c55e'; }
+    } else {
+        btn.textContent = '▶ Start';
+        btn.style.background = '#22c55e';
+        if (badge) { badge.textContent = 'STOPPED'; badge.style.background = '#ef4444'; }
+    }
+}
+
+async function toggleMainBot() {
+    const btn = document.getElementById('main-start-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '...'; }
+    try {
+        const url = _mainScanning ? '/api/main/stop' : '/api/main/begin';
+        const resp = await fetch(url, { method: 'POST' });
+        const data = await resp.json();
+        if (data.success) {
+            _mainScanning = !_mainScanning;
+            updateMainButton();
+        } else {
+            alert('Failed: ' + (data.error || 'Unknown'));
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+loadMainStatus();
+setInterval(loadMainStatus, 15000);
 
 // Soft-refresh stat cards every 30s. Full reload if position count changes.
 let _knownPositionCount = document.querySelectorAll('#positions-tbody tr[data-trade-id]').length;

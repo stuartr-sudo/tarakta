@@ -81,6 +81,7 @@ class TradingEngine:
         self.state: EngineState | None = None
         self.portfolio: PortfolioTracker | None = None
         self._running = False
+        self._scanning_active = False  # Main bot starts PAUSED — user clicks Start
         self._reversal_cooldowns: dict[str, datetime] = {}
 
         # Dynamic weight optimizer
@@ -131,6 +132,16 @@ class TradingEngine:
         # Background task infrastructure (for async post-mortems)
         self._postmortem_semaphore = asyncio.Semaphore(2)
         self._background_tasks: set[asyncio.Task] = set()
+
+    def begin_scanning(self) -> None:
+        """Start the main bot's scan loop (called from dashboard)."""
+        self._scanning_active = True
+        logger.info("main_bot_scanning_started")
+
+    def stop_scanning(self) -> None:
+        """Pause the main bot's scan loop (keeps monitoring open positions)."""
+        self._scanning_active = False
+        logger.info("main_bot_scanning_stopped")
 
     async def startup(self) -> None:
         """Initialize engine state from DB or create fresh."""
@@ -332,21 +343,32 @@ class TradingEngine:
                 margin_pct=self.custom_trader.max_position_pct,
             )
 
-        # Run an immediate scan on startup if no recent scan
-        should_startup_scan = False
-        if self.state.last_scan_time is None:
-            should_startup_scan = True
-        else:
-            elapsed = (datetime.now(timezone.utc) - self.state.last_scan_time).total_seconds()
-            if elapsed > self.config.scan_interval_minutes * 60:
-                should_startup_scan = True
+        # Restore main bot scanning_active from DB state
+        db_state = await self.repo.get_engine_state()
+        if db_state:
+            overrides = db_state.get("config_overrides", {}) or {}
+            main_settings = overrides.get("main_bot_settings", {}) or {}
+            if "scanning_active" in main_settings:
+                self._scanning_active = bool(main_settings["scanning_active"])
 
-        if should_startup_scan:
-            logger.info("startup_scan", reason="no recent scan, running immediately")
-            try:
-                await self._primary_tick()
-            except Exception as e:
-                logger.error("startup_scan_failed", error=str(e))
+        # Run an immediate scan on startup if scanning is active and no recent scan
+        if self._scanning_active:
+            should_startup_scan = False
+            if self.state.last_scan_time is None:
+                should_startup_scan = True
+            else:
+                elapsed = (datetime.now(timezone.utc) - self.state.last_scan_time).total_seconds()
+                if elapsed > self.config.scan_interval_minutes * 60:
+                    should_startup_scan = True
+
+            if should_startup_scan:
+                logger.info("startup_scan", reason="no recent scan, running immediately")
+                try:
+                    await self._primary_tick()
+                except Exception as e:
+                    logger.error("startup_scan_failed", error=str(e))
+        else:
+            logger.info("main_bot_paused_at_startup", reason="waiting for user to click Start")
 
         while self._running:
             try:
@@ -371,9 +393,13 @@ class TradingEngine:
                     )
 
                 if tick_type == TickType.MONITOR:
+                    # Always monitor open positions (even when scanning is paused)
                     await self._monitor_tick()
                     await self._persist_state()
                 else:
+                    # Skip scanning for new trades if bot is paused
+                    if not self._scanning_active:
+                        continue
                     # Check trading hours — skip scan if market is closed
                     market_info = getattr(self.exchange, "market_info", None)
                     if not self.trading_hours.should_scan(market_info):
@@ -1455,6 +1481,12 @@ class TradingEngine:
                 overrides["dynamic_weights"] = self.dynamic_weights.to_state()
             if self.flipped_trader.enabled:
                 overrides["flipped_trader"] = self.flipped_trader.to_state_dict()
+            # Persist main bot scanning state
+            main_settings = overrides.get("main_bot_settings", {})
+            if not isinstance(main_settings, dict):
+                main_settings = {}
+            main_settings["scanning_active"] = self._scanning_active
+            overrides["main_bot_settings"] = main_settings
             state_dict["config_overrides"] = overrides
             await self.repo.upsert_engine_state(state_dict)
             await self.repo.insert_snapshot(

@@ -97,6 +97,15 @@ class OrderExecutor:
             logger.info("skip_invalid_size", symbol=signal.symbol, reason=pos_size.reason)
             return None, None, None
 
+        # Minimum trade size: $min_trade_usd × leverage
+        leverage = getattr(self.exchange, "leverage", 1) or 1
+        min_notional = self.config.min_trade_usd * leverage
+        if pos_size.cost_usd < min_notional:
+            logger.info("skip_below_min_trade", symbol=signal.symbol,
+                        cost_usd=f"{pos_size.cost_usd:.2f}", min_notional=f"{min_notional:.2f}",
+                        min_trade_usd=self.config.min_trade_usd, leverage=leverage)
+            return None, None, None
+
         # Place order — long=buy, short=sell
         side = "buy" if is_long else "sell"
         try:

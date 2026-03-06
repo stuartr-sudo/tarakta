@@ -842,8 +842,12 @@ class FlippedTrader:
             cost_usd = margin_used * self.leverage
             quantity = cost_usd / signal.entry_price
 
-        if cost_usd < 5.0:
-            return False  # Below exchange minimum
+        # Minimum trade size: $min_trade_usd × leverage
+        min_notional = self.config.min_trade_usd * self.leverage
+        if cost_usd < min_notional:
+            logger.info("flipped_skip_below_min_trade", symbol=signal.symbol,
+                        cost=f"{cost_usd:.2f}", min=f"{min_notional:.2f}")
+            return False
 
         # ── LIQUIDITY GATE: spread, depth, volume checks ──────────
         try:
