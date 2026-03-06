@@ -121,7 +121,7 @@
             <span id="custom-trade-preview" style="font-size:0.75rem; font-weight:600; color:var(--accent);">
                 ~${{ "%.0f" | format((custom_margin_pct * custom_balance|default(2000)|float * custom_leverage)) }} per trade
             </span>
-            <span style="font-size:0.6rem; color:var(--text-muted);">margin x leverage</span>
+            <span style="font-size:0.6rem; color:var(--text-muted);">of available cash</span>
         </div>
     </div>
 </div>
@@ -668,11 +668,11 @@ if (levSlider) {
 }
 
 // Trade preview update
-const _customBalance = {{ custom_balance|default(2000)|float }};
+let _customAvailCash = {{ custom_balance|default(2000)|float }};
 function updateCustomTradePreview() {
     const marginPct = parseInt(document.getElementById('margin-slider').value);
     const lev = parseInt(document.getElementById('leverage-slider').value);
-    const tradeSize = Math.round(_customBalance * (marginPct / 100) * lev);
+    const tradeSize = Math.round(_customAvailCash * (marginPct / 100) * lev);
     const preview = document.getElementById('custom-trade-preview');
     if (preview) preview.textContent = '~$' + tradeSize.toLocaleString() + ' per trade';
     const badge = document.getElementById('config-badge');
@@ -782,8 +782,11 @@ function renderPnlData(data) {
 
     const eqText = (document.getElementById('equity-value') || {}).textContent || '';
     const eqVal = parseFloat(eqText.replace(/[^0-9.\-]/g, '')) || 0;
+    const newAvail = eqVal - totalAllocated;
     const avEl = document.getElementById('available-value');
-    if (avEl) avEl.textContent = '$' + (eqVal - totalAllocated).toFixed(2);
+    if (avEl) avEl.textContent = '$' + newAvail.toFixed(2);
+    _customAvailCash = newAvail;
+    updateCustomTradePreview();
 
     // 5. Price error indicator
     const errCount = data.positions.filter(p => p.current_price === null).length;

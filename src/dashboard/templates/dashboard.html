@@ -159,9 +159,9 @@
         <div style="display:flex; flex-direction:column; gap:0.25rem; align-items:center; justify-content:center;">
             <span style="font-size:0.7rem; color:var(--text-muted);">Est. trade size</span>
             <span id="main-trade-preview" class="badge" style="font-size:0.85rem; padding:4px 12px; background:#8b5cf6; color:#fff; border-radius:12px;">
-                ${{ "%.0f" | format((main_margin_pct * (snapshot.current_balance|default(2000)|float) * main_leverage)) }}
+                ${{ "%.0f" | format((main_margin_pct * (balance - allocated) * main_leverage)) }}
             </span>
-            <span style="font-size:0.6rem; color:var(--text-muted);">margin x leverage</span>
+            <span style="font-size:0.6rem; color:var(--text-muted);">of available cash</span>
         </div>
     </div>
 </div>
@@ -524,8 +524,11 @@ function renderPnlData(data) {
 
     const eqText = (document.getElementById('equity-value') || {}).textContent || '';
     const eqVal = parseFloat(eqText.replace(/[^0-9.\-]/g, '')) || 0;
+    const newAvail = eqVal - totalAllocated;
     const avEl = document.getElementById('available-value');
-    if (avEl) avEl.textContent = '$' + (eqVal - totalAllocated).toFixed(2);
+    if (avEl) avEl.textContent = '$' + newAvail.toFixed(2);
+    _mainAvailCash = newAvail;
+    updateMainSettingsUI();
 
     // 5. Price error indicator
     const errCount = data.positions.filter(p => p.current_price === null).length;
@@ -714,7 +717,7 @@ setInterval(loadMainStatus, 15000);
 
 // --- Main Bot Settings Sliders ---
 let _mainSettingsDebounce = null;
-const _mainBalance = {{ snapshot.current_balance|default(2000)|float }};
+let _mainAvailCash = {{ (balance - allocated)|float }};
 
 function updateMainSettingsUI() {
     const levSlider = document.getElementById('main-leverage-slider');
@@ -724,7 +727,7 @@ function updateMainSettingsUI() {
     const marginPct = parseInt(marginSlider.value);
     document.getElementById('main-leverage-value').textContent = lev + 'x';
     document.getElementById('main-margin-value').textContent = marginPct + '%';
-    const tradeSize = Math.round(_mainBalance * (marginPct / 100) * lev);
+    const tradeSize = Math.round(_mainAvailCash * (marginPct / 100) * lev);
     document.getElementById('main-trade-preview').textContent = '$' + tradeSize.toLocaleString();
     document.getElementById('main-config-badge').innerHTML = lev + 'x &bull; ' + marginPct + '%';
 }
@@ -827,8 +830,11 @@ async function softRefreshStats() {
             });
             const allocEl = document.getElementById('allocated-value');
             if (allocEl) allocEl.textContent = '$' + allocated.toFixed(2);
+            const newAvail = equity - allocated;
             const avEl = document.getElementById('available-value');
-            if (avEl) avEl.textContent = '$' + (equity - allocated).toFixed(2);
+            if (avEl) avEl.textContent = '$' + newAvail.toFixed(2);
+            _mainAvailCash = newAvail;
+            updateMainSettingsUI();
         }
     } catch (e) {
         console.error('Soft refresh failed:', e);
