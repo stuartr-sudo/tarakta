@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tarakta",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "src.main"],
+      "port": 8080
+    }
+  ]
+}

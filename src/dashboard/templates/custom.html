@@ -290,6 +290,7 @@
                         <th>P&L</th>
                         <th>SL</th>
                         <th>TP</th>
+                        <th>Qty</th>
                         <th>Size</th>
                         <th>Score</th>
                     </tr>
@@ -323,6 +324,14 @@
                                 </div>
                             {% else %}
                                 <span class="positive">{{ ("$%.4f"|format(t.take_profit|float)) if t.take_profit else '-' }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="mono">
+                            {% set rem_qty = (t.remaining_quantity or t.entry_quantity or 0) | float %}
+                            {% set full_qty = (t.entry_quantity or 0) | float %}
+                            <div style="font-weight:600;">{{ "%.6g" | format(rem_qty) }}</div>
+                            {% if rem_qty != full_qty and full_qty > 0 %}
+                            <div style="font-size:0.65rem; color:var(--text-muted);">of {{ "%.6g" | format(full_qty) }}</div>
                             {% endif %}
                         </td>
                         <td class="mono">

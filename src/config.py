@@ -20,7 +20,7 @@ class MarketConfig(BaseModel):
     scan_interval_minutes: int = 15
     quality_filter: bool = True
     quote_currencies: list[str] = Field(default_factory=lambda: ["USDT"])
-    initial_balance: float = 2000.0
+    initial_balance: float = 10000.0
     # Symbol universe (for stocks/commodities — the equivalent of QUALITY_BASES)
     symbol_universe: list[str] = Field(default_factory=list)
 
@@ -49,7 +49,7 @@ class Settings(BaseSettings):
 
     # Trading
     trading_mode: Literal["paper", "live"] = "paper"
-    initial_balance: float = 2000.0
+    initial_balance: float = 10000.0
     entry_threshold: float = 60.0  # Requires sweep + displacement at minimum (pullback is bonus)
     max_risk_pct: float = 0.10  # Max 10% of balance lost per trade (SL distance)
     max_position_pct: float = 0.25  # Max 25% of balance allocated per trade (margin)
@@ -117,7 +117,7 @@ class Settings(BaseSettings):
     flipped_leverage: int = 5  # Higher leverage for flipped trades
     flipped_sl_buffer: float = 0.02  # 2% SL buffer (wider than main 0.5%)
     flipped_min_sl_pct: float = 0.015  # Minimum SL distance = 1.5% of entry price
-    flipped_initial_balance: float = 2000.0  # Separate paper balance
+    flipped_initial_balance: float = 10000.0  # Separate paper balance (disabled)
     flipped_scan_interval_minutes: int = 15  # Independent scan cycle (not tied to main bot)
     flipped_max_position_pct: float = 0.15  # 15% of balance as margin per trade (bigger than main)
     flipped_max_risk_pct: float = 0.15  # 15% of balance at risk per trade (bigger than main)
@@ -125,7 +125,7 @@ class Settings(BaseSettings):
 
     # Custom configurable bot — second shadow bot with adjustable direction & margin
     custom_enabled: bool = True
-    custom_initial_balance: float = 2000.0
+    custom_initial_balance: float = 10000.0
     custom_leverage: int = 10
     custom_flip_direction: bool = True       # Default starts flipped (user can toggle)
     custom_margin_pct: float = 0.15          # 15% default (user can slide 5%–40%)
@@ -141,10 +141,10 @@ class Settings(BaseSettings):
     # Extra market env vars (parsed in __init__)
     market_stocks_connector: str = ""
     market_stocks_symbol_universe: str = ""  # Comma-separated: "AAPL,MSFT,GOOGL"
-    market_stocks_initial_balance: float = 2000.0
+    market_stocks_initial_balance: float = 10000.0
     market_commodities_connector: str = ""
     market_commodities_symbol_universe: str = ""  # Comma-separated: "GC=F,SI=F,CL=F"
-    market_commodities_initial_balance: float = 2000.0
+    market_commodities_initial_balance: float = 10000.0
 
     # One-time force reset — set FORCE_RESET=true to wipe all data on next startup
     force_reset: bool = False

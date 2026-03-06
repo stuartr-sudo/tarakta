@@ -1,0 +1,487 @@
+{
+  "type": "original",
+  "run_time": "2026-03-05T04:46:01.426974+00:00",
+  "period": {
+    "start": "2026-02-26",
+    "end": "2026-03-05",
+    "days": 7
+  },
+  "config": {
+    "balance": 2000.0,
+    "leverage": 3,
+    "threshold": 70.0,
+    "fee_rate": 0.0004,
+    "min_rr": 2.0
+  },
+  "summary": {
+    "pairs_scanned": 93,
+    "signals_generated": 605,
+    "trades_entered": 19,
+    "trades_closed": 19,
+    "still_open": 0,
+    "unique_symbols": 17,
+    "win_rate": 0.421,
+    "total_pnl": -92.68,
+    "avg_win": 64.97,
+    "avg_loss": -55.68,
+    "max_drawdown": 0.2503,
+    "final_balance": 1896.02,
+    "best_trade": {
+      "symbol": "STRK",
+      "pnl": 123.44
+    },
+    "worst_trade": {
+      "symbol": "KAVA",
+      "pnl": -118.48
+    }
+  },
+  "trades": [
+    {
+      "symbol": "ARB/USDT:USDT",
+      "direction": "short",
+      "entry_price": 0.0964,
+      "sl": 0.10029899999999999,
+      "tp": 0.0881,
+      "exit_price": 0.10029899999999999,
+      "entry_time": "2026-02-26T17:00:00+00:00",
+      "exit_time": "2026-02-26T22:00:00+00:00",
+      "exit_reason": "sl_hit",
+      "pnl": -61.29,
+      "score": 70.0,
+      "reasons": [
+        "Sweep completed: swing_high (depth=0.0027)",
+        "Post-sweep displacement confirmed: bearish",
+        "Pullback confirmed: 21% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "YFI/USDT:USDT",
+      "direction": "short",
+      "entry_price": 2700.0,
+      "sl": 2765.7599999999998,
+      "tp": 2299.0,
+      "exit_price": 2765.7599999999998,
+      "entry_time": "2026-02-26T17:00:00+00:00",
+      "exit_time": "2026-02-27T02:00:00+00:00",
+      "exit_reason": "sl_hit",
+      "pnl": -37.13,
+      "score": 70.0,
+      "reasons": [
+        "Sweep completed: swing_high (depth=27.0000)",
+        "Post-sweep displacement confirmed: bearish",
+        "Pullback confirmed: 31% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "STRK/USDT:USDT",
+      "direction": "short",
+      "entry_price": 0.04231,
+      "sl": 0.04405919999999999,
+      "tp": 0.038811600000000016,
+      "exit_price": 0.038811600000000016,
+      "entry_time": "2026-02-26T17:00:00+00:00",
+      "exit_time": "2026-02-28T07:00:00+00:00",
+      "exit_reason": "tp_hit",
+      "pnl": 123.44,
+      "score": 70.0,
+      "reasons": [
+        "Sweep completed: swing_high (depth=0.0012)",
+        "Post-sweep displacement confirmed: bearish",
+        "Pullback confirmed: 23% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "JASMY/USDT:USDT",
+      "direction": "short",
+      "entry_price": 0.005884,
+      "sl": 0.005810392857142858,
+      "tp": 0.004464,
+      "exit_price": 0.005810392857142858,
+      "entry_time": "2026-02-26T22:00:00+00:00",
+      "exit_time": "2026-02-27T04:00:00+00:00",
+      "exit_reason": "sl_hit",
+      "pnl": 17.6,
+      "score": 70.0,
+      "reasons": [
+        "Sweep completed: swing_high (depth=0.0000)",
+        "Post-sweep displacement confirmed: bearish",
+        "Pullback confirmed: 53% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "JTO/USDT:USDT",
+      "direction": "long",
+      "entry_price": 0.2857,
+      "sl": 0.2785005,
+      "tp": 0.30009900000000006,
+      "exit_price": 0.2785005,
+      "entry_time": "2026-02-27T05:00:00+00:00",
+      "exit_time": "2026-02-27T17:00:00+00:00",
+      "exit_reason": "sl_hit",
+      "pnl": -36.79,
+      "score": 70.0,
+      "reasons": [
+        "Sweep completed: asian_low (depth=0.0048)",
+        "Post-sweep displacement confirmed: bullish",
+        "Pullback confirmed: 36% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "APT/USDT:USDT",
+      "direction": "short",
+      "entry_price": 0.9717,
+      "sl": 0.9034071428571429,
+      "tp": 0.7885,
+      "exit_price": 0.9034071428571429,
+      "entry_time": "2026-02-27T11:00:00+00:00",
+      "exit_time": "2026-02-28T06:00:00+00:00",
+      "exit_reason": "trailing_stop",
+      "pnl": 100.47,
+      "score": 85.0,
+      "reasons": [
+        "Sweep completed: swing_high (depth=0.0232)",
+        "Post-sweep displacement confirmed: bearish",
+        "Pullback confirmed: 23% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "ARB/USDT:USDT",
+      "direction": "short",
+      "entry_price": 0.1017,
+      "sl": 0.10153214285714285,
+      "tp": 0.0953,
+      "exit_price": 0.0953,
+      "entry_time": "2026-02-27T17:00:00+00:00",
+      "exit_time": "2026-02-28T06:00:00+00:00",
+      "exit_reason": "tp_hit",
+      "pnl": 88.15,
+      "score": 70.0,
+      "reasons": [
+        "Sweep completed: swing_high (depth=0.0008)",
+        "Post-sweep displacement confirmed: bearish",
+        "Pullback confirmed: 26% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "ICP/USDT:USDT",
+      "direction": "short",
+      "entry_price": 2.35,
+      "sl": 2.4401399999999995,
+      "tp": 2.012,
+      "exit_price": 2.4401399999999995,
+      "entry_time": "2026-02-28T07:00:00+00:00",
+      "exit_time": "2026-02-28T20:00:00+00:00",
+      "exit_reason": "sl_hit",
+      "pnl": -63.69,
+      "score": 70.0,
+      "reasons": [
+        "Sweep completed: swing_high (depth=0.0510)",
+        "Post-sweep displacement confirmed: bearish",
+        "Pullback confirmed: 36% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "LQTY/USDT:USDT",
+      "direction": "short",
+      "entry_price": 0.2712,
+      "sl": 0.27979199999999993,
+      "tp": 0.25401600000000013,
+      "exit_price": 0.27979199999999993,
+      "entry_time": "2026-02-28T07:00:00+00:00",
+      "exit_time": "2026-02-28T20:00:00+00:00",
+      "exit_reason": "sl_hit",
+      "pnl": -52.69,
+      "score": 70.0,
+      "reasons": [
+        "Sweep completed: swing_high (depth=0.0049)",
+        "Post-sweep displacement confirmed: bearish",
+        "Pullback confirmed: 43% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "KAVA/USDT:USDT",
+      "direction": "short",
+      "entry_price": 0.0467,
+      "sl": 0.05004899999999999,
+      "tp": 0.04000200000000002,
+      "exit_price": 0.05004899999999999,
+      "entry_time": "2026-02-28T07:00:00+00:00",
+      "exit_time": "2026-02-28T22:00:00+00:00",
+      "exit_reason": "sl_hit",
+      "pnl": -118.48,
+      "score": 70.0,
+      "reasons": [
+        "Sweep completed: asian_high (depth=0.0001)",
+        "Post-sweep displacement confirmed: bearish",
+        "Pullback confirmed: 30% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "TON/USDT:USDT",
+      "direction": "short",
+      "entry_price": 1.2458,
+      "sl": 1.2163642857142856,
+      "tp": 1.185,
+      "exit_price": 1.185,
+      "entry_time": "2026-03-01T09:00:00+00:00",
+      "exit_time": "2026-03-01T21:00:00+00:00",
+      "exit_reason": "tp_hit",
+      "pnl": 70.95,
+      "score": 70.0,
+      "reasons": [
+        "Sweep completed: swing_high (depth=0.0131)",
+        "Post-sweep displacement confirmed: bearish",
+        "Pullback confirmed: 45% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "TRX/USDT:USDT",
+      "direction": "long",
+      "entry_price": 0.28135,
+      "sl": 0.27906765,
+      "tp": 0.28761,
+      "exit_price": 0.27906765,
+      "entry_time": "2026-03-01T14:00:00+00:00",
+      "exit_time": "2026-03-01T20:00:00+00:00",
+      "exit_reason": "sl_hit",
+      "pnl": -12.46,
+      "score": 70.0,
+      "reasons": [
+        "Sweep completed: asian_low (depth=0.0006)",
+        "Post-sweep displacement confirmed: bullish",
+        "Pullback confirmed: 49% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "AXS/USDT:USDT",
+      "direction": "long",
+      "entry_price": 1.3,
+      "sl": 1.2338,
+      "tp": 1.4324000000000001,
+      "exit_price": 1.2338,
+      "entry_time": "2026-03-02T15:00:00+00:00",
+      "exit_time": "2026-03-03T02:00:00+00:00",
+      "exit_reason": "sl_hit",
+      "pnl": -77.32,
+      "score": 85.0,
+      "reasons": [
+        "Sweep completed: asian_low (depth=0.0030)",
+        "Post-sweep displacement confirmed: bullish",
+        "Pullback confirmed: 20% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "ALGO/USDT:USDT",
+      "direction": "long",
+      "entry_price": 0.089,
+      "sl": 0.084774,
+      "tp": 0.09745199999999998,
+      "exit_price": 0.084774,
+      "entry_time": "2026-03-02T15:00:00+00:00",
+      "exit_time": "2026-03-03T11:00:00+00:00",
+      "exit_reason": "sl_hit",
+      "pnl": -72.19,
+      "score": 85.0,
+      "reasons": [
+        "Sweep completed: asian_low (depth=0.0001)",
+        "Post-sweep displacement confirmed: bullish",
+        "Pullback confirmed: 23% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "ARB/USDT:USDT",
+      "direction": "long",
+      "entry_price": 0.1057,
+      "sl": 0.097908,
+      "tp": 0.12128400000000002,
+      "exit_price": 0.1036,
+      "entry_time": "2026-03-02T15:00:00+00:00",
+      "exit_time": "2026-03-05T04:00:00+00:00",
+      "exit_reason": "backtest_end",
+      "pnl": -30.54,
+      "score": 85.0,
+      "reasons": [
+        "Sweep completed: asian_low (depth=0.0001)",
+        "Post-sweep displacement confirmed: bullish",
+        "Pullback confirmed: 38% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "EGLD/USDT:USDT",
+      "direction": "short",
+      "entry_price": 4.225,
+      "sl": 4.455164999999999,
+      "tp": 3.7646700000000006,
+      "exit_price": 4.217,
+      "entry_time": "2026-03-03T03:00:00+00:00",
+      "exit_time": "2026-03-05T04:00:00+00:00",
+      "exit_reason": "backtest_end",
+      "pnl": 2.16,
+      "score": 70.0,
+      "reasons": [
+        "Sweep completed: asian_high (depth=0.0010)",
+        "Post-sweep displacement confirmed: bearish",
+        "Pullback confirmed: 23% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "WIF/USDT:USDT",
+      "direction": "short",
+      "entry_price": 0.1986,
+      "sl": 0.20562299999999997,
+      "tp": 0.1811,
+      "exit_price": 0.20562299999999997,
+      "entry_time": "2026-03-03T12:00:00+00:00",
+      "exit_time": "2026-03-03T16:00:00+00:00",
+      "exit_reason": "sl_hit",
+      "pnl": -49.88,
+      "score": 80.0,
+      "reasons": [
+        "Sweep completed: asian_high (depth=0.0001)",
+        "Post-sweep displacement confirmed: bearish",
+        "Pullback confirmed: 42% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "AKT/USDT:USDT",
+      "direction": "long",
+      "entry_price": 0.3365,
+      "sl": 0.3234745,
+      "tp": 0.36255100000000007,
+      "exit_price": 0.36255100000000007,
+      "entry_time": "2026-03-03T16:00:00+00:00",
+      "exit_time": "2026-03-04T04:00:00+00:00",
+      "exit_reason": "tp_hit",
+      "pnl": 104.42,
+      "score": 95.0,
+      "reasons": [
+        "Sweep completed: swing_low (depth=0.0082)",
+        "Post-sweep displacement confirmed: bullish",
+        "Pullback confirmed: 30% retracement (optimal)"
+      ]
+    },
+    {
+      "symbol": "ADA/USDT:USDT",
+      "direction": "long",
+      "entry_price": 0.2723,
+      "sl": 0.2621825,
+      "tp": 0.292535,
+      "exit_price": 0.2748,
+      "entry_time": "2026-03-04T09:00:00+00:00",
+      "exit_time": "2026-03-05T04:00:00+00:00",
+      "exit_reason": "backtest_end",
+      "pnl": 12.59,
+      "score": 70.0,
+      "reasons": [
+        "Sweep completed: swing_low (depth=0.0065)",
+        "Post-sweep displacement confirmed: bullish",
+        "Pullback confirmed: 20% retracement (optimal)"
+      ]
+    }
+  ],
+  "by_exit_reason": {
+    "sl_hit": {
+      "count": 11,
+      "pnl": -564.32
+    },
+    "trailing_stop": {
+      "count": 1,
+      "pnl": 100.47
+    },
+    "tp_hit": {
+      "count": 4,
+      "pnl": 386.96
+    },
+    "backtest_end": {
+      "count": 3,
+      "pnl": -15.79
+    }
+  },
+  "by_symbol": {
+    "ARB": {
+      "count": 3,
+      "wins": 1,
+      "pnl": -3.68
+    },
+    "YFI": {
+      "count": 1,
+      "wins": 0,
+      "pnl": -37.13
+    },
+    "JASMY": {
+      "count": 1,
+      "wins": 1,
+      "pnl": 17.6
+    },
+    "JTO": {
+      "count": 1,
+      "wins": 0,
+      "pnl": -36.79
+    },
+    "APT": {
+      "count": 1,
+      "wins": 1,
+      "pnl": 100.47
+    },
+    "STRK": {
+      "count": 1,
+      "wins": 1,
+      "pnl": 123.44
+    },
+    "ICP": {
+      "count": 1,
+      "wins": 0,
+      "pnl": -63.69
+    },
+    "LQTY": {
+      "count": 1,
+      "wins": 0,
+      "pnl": -52.69
+    },
+    "KAVA": {
+      "count": 1,
+      "wins": 0,
+      "pnl": -118.48
+    },
+    "TRX": {
+      "count": 1,
+      "wins": 0,
+      "pnl": -12.46
+    },
+    "TON": {
+      "count": 1,
+      "wins": 1,
+      "pnl": 70.95
+    },
+    "AXS": {
+      "count": 1,
+      "wins": 0,
+      "pnl": -77.32
+    },
+    "ALGO": {
+      "count": 1,
+      "wins": 0,
+      "pnl": -72.19
+    },
+    "WIF": {
+      "count": 1,
+      "wins": 0,
+      "pnl": -49.88
+    },
+    "AKT": {
+      "count": 1,
+      "wins": 1,
+      "pnl": 104.42
+    },
+    "EGLD": {
+      "count": 1,
+      "wins": 1,
+      "pnl": 2.16
+    },
+    "ADA": {
+      "count": 1,
+      "wins": 1,
+      "pnl": 12.59
+    }
+  }
+}
