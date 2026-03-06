@@ -73,7 +73,7 @@ US_STOCKS_MARKET_INFO = MarketInfo(
     ),
     symbol_format="TICKER",
     supports_shorting=False,  # Data-only connectors can't short
-    max_leverage=1,
+    max_leverage=10,          # Paper trading supports simulated leverage
     default_fee_rate=0.0,
     min_order_value=1.0,
     currency="USD",
@@ -90,7 +90,7 @@ COMMODITIES_MARKET_INFO = MarketInfo(
     ),
     symbol_format="TICKER",
     supports_shorting=False,
-    max_leverage=1,
+    max_leverage=10,          # Paper trading supports simulated leverage
     default_fee_rate=0.0,
     min_order_value=1.0,
     currency="USD",

@@ -126,7 +126,7 @@ class Settings(BaseSettings):
     # Custom configurable bot — second shadow bot with adjustable direction & margin
     custom_enabled: bool = True
     custom_initial_balance: float = 2000.0
-    custom_leverage: int = 5
+    custom_leverage: int = 10
     custom_flip_direction: bool = True       # Default starts flipped (user can toggle)
     custom_margin_pct: float = 0.15          # 15% default (user can slide 5%–40%)
     custom_flip_mode: str = "smart_flip"     # "always_flip" | "smart_flip" | "normal"
@@ -191,24 +191,30 @@ class Settings(BaseSettings):
             )
 
         # Stocks from MARKET_STOCKS_* env vars
+        # Inherit global leverage + account_type so paper trading simulates margin
         if "stocks" not in self.markets and self.market_stocks_connector:
             universe = [s.strip() for s in self.market_stocks_symbol_universe.split(",") if s.strip()]
             self.markets["stocks"] = MarketConfig(
                 connector=self.market_stocks_connector,
                 symbol_universe=universe,
                 initial_balance=self.market_stocks_initial_balance,
+                leverage=self.leverage,           # Inherit global leverage (e.g. 10x)
+                account_type=self.account_type,   # Inherit global account type (e.g. "futures")
                 scan_interval_minutes=15,
                 quality_filter=False,  # Stocks use symbol_universe instead
                 min_volume_usd=0,      # No volume filter for stocks
             )
 
         # Commodities from MARKET_COMMODITIES_* env vars
+        # Inherit global leverage + account_type so paper trading simulates margin
         if "commodities" not in self.markets and self.market_commodities_connector:
             universe = [s.strip() for s in self.market_commodities_symbol_universe.split(",") if s.strip()]
             self.markets["commodities"] = MarketConfig(
                 connector=self.market_commodities_connector,
                 symbol_universe=universe,
                 initial_balance=self.market_commodities_initial_balance,
+                leverage=self.leverage,           # Inherit global leverage (e.g. 10x)
+                account_type=self.account_type,   # Inherit global account type (e.g. "futures")
                 scan_interval_minutes=15,
                 quality_filter=False,
                 min_volume_usd=0,

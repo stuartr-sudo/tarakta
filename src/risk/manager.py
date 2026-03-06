@@ -23,8 +23,9 @@ class RiskManager:
         self._symbol_cooldowns: dict[str, datetime] = {}
         self._exchange_name = getattr(exchange, "exchange_name", config.exchange_name) if exchange else config.exchange_name
         self._min_order_usd = getattr(exchange, "min_order_usd", 5.0) if exchange else 5.0
-        self._account_type = config.account_type
-        self._leverage = config.leverage
+        # Use exchange-specific leverage and account_type (per-market) rather than global config
+        self._account_type = getattr(exchange, "account_type", config.account_type) if exchange else config.account_type
+        self._leverage = getattr(exchange, "leverage", config.leverage) if exchange else config.leverage
 
         # Market-aware fee rate (from exchange.market_info if available)
         market_info = getattr(exchange, "market_info", None) if exchange else None
