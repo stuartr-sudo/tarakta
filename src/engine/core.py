@@ -488,20 +488,30 @@ class TradingEngine:
 
         # Run an immediate scan on startup if scanning is active and no recent scan
         if self._scanning_active:
-            should_startup_scan = False
-            if self.state.last_scan_time is None:
-                should_startup_scan = True
+            # Check trading hours first — don't scan on weekends for stocks/commodities
+            market_info = getattr(self.exchange, "market_info", None)
+            if not self.trading_hours.should_scan(market_info):
+                next_open = self.trading_hours.next_open(market_info)
+                logger.info(
+                    "startup_scan_skipped_market_closed",
+                    market=self._market_name,
+                    next_open=next_open.isoformat() if next_open else "unknown",
+                )
             else:
-                elapsed = (datetime.now(timezone.utc) - self.state.last_scan_time).total_seconds()
-                if elapsed > self.config.scan_interval_minutes * 60:
+                should_startup_scan = False
+                if self.state.last_scan_time is None:
                     should_startup_scan = True
+                else:
+                    elapsed = (datetime.now(timezone.utc) - self.state.last_scan_time).total_seconds()
+                    if elapsed > self.config.scan_interval_minutes * 60:
+                        should_startup_scan = True
 
-            if should_startup_scan:
-                logger.info("startup_scan", reason="no recent scan, running immediately")
-                try:
-                    await self._primary_tick()
-                except Exception as e:
-                    logger.error("startup_scan_failed", error=str(e))
+                if should_startup_scan:
+                    logger.info("startup_scan", reason="no recent scan, running immediately")
+                    try:
+                        await self._primary_tick()
+                    except Exception as e:
+                        logger.error("startup_scan_failed", error=str(e))
         else:
             logger.info("main_bot_paused_at_startup", reason="waiting for user to click Start")
 
