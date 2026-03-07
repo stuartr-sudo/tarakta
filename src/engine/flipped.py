@@ -121,6 +121,11 @@ class FlippedTrader:
         self._scanning_active = True  # Default True; custom bot will override to False
         self._initial_balance = config.flipped_initial_balance
 
+        # Throttled logging: suppress repeated ticker errors per symbol
+        self._ticker_error_last_logged: dict[str, datetime] = {}
+        self._ticker_error_throttle_seconds = 300  # Log same error once per 5 min
+        self._monitor_tick_count = 0  # For periodic heartbeat log
+
     # ------------------------------------------------------------------
     # Runtime settings update (hot-reload from dashboard)
     # ------------------------------------------------------------------
@@ -1080,7 +1085,12 @@ class FlippedTrader:
                 checked += 1
             except Exception as e:
                 ticker_errors += 1
-                logger.warning("flipped_ticker_failed", symbol=symbol, error=str(e)[:100])
+                # Throttle: only log same symbol's ticker error once per 5 min
+                now_err = datetime.now(timezone.utc)
+                last_logged = self._ticker_error_last_logged.get(symbol)
+                if last_logged is None or (now_err - last_logged).total_seconds() >= self._ticker_error_throttle_seconds:
+                    logger.warning("flipped_ticker_failed", symbol=symbol, error=str(e)[:100])
+                    self._ticker_error_last_logged[symbol] = now_err
                 continue
 
             # Update high water mark
@@ -1168,14 +1178,20 @@ class FlippedTrader:
                 closed += 1
 
         if checked > 0 or ticker_errors > 0:
-            logger.info(
-                "flipped_monitor_tick",
-                mode=self.mode_name,
-                checked=checked,
-                closed=closed,
-                errors=ticker_errors,
-                open=len(self.positions),
-            )
+            self._monitor_tick_count += 1
+            # Only log monitor tick every 5th cycle (every 5 min) to reduce noise
+            if self._monitor_tick_count % 5 == 0 or closed > 0:
+                logger.info(
+                    "flipped_monitor_tick",
+                    mode=self.mode_name,
+                    checked=checked,
+                    closed=closed,
+                    errors=ticker_errors,
+                    open=len(self.positions),
+                    scan_count=self._scan_count,
+                    last_scan=self.last_scan_time,
+                    scanning=self._scanning_active,
+                )
 
     async def _partial_exit(self, pos: Position, symbol: str, current_price: float, tier: TakeProfitTier) -> None:
         """Simulate a partial exit at a TP tier — take some profit, reduce position."""
@@ -1521,6 +1537,7 @@ class FlippedTrader:
             "daily_pnl": self.daily_pnl,
             "total_pnl": self.total_pnl,
             "daily_trade_count": self.daily_trade_count,
+            "scan_count": self._scan_count,
             "last_scan_time": self.last_scan_time,
             "positions": positions_data,
             # Configurable settings (survive restarts)
@@ -1540,6 +1557,7 @@ class FlippedTrader:
         self.daily_pnl = float(data.get("daily_pnl", 0))
         self.total_pnl = float(data.get("total_pnl", 0))
         self.daily_trade_count = int(data.get("daily_trade_count", 0))
+        self._scan_count = int(data.get("scan_count", 0))
         self.last_scan_time = data.get("last_scan_time")
         # Restore configurable settings (if saved)
         if "flip_direction" in data:

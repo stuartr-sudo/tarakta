@@ -96,6 +96,8 @@ class TradingEngine:
         self._running = False
         self._scanning_active = False  # Main bot starts PAUSED — user clicks Start
         self._reversal_cooldowns: dict[str, datetime] = {}
+        # Throttle repeated error logs (e.g. liq_check_failed for same symbol)
+        self._error_last_logged: dict[str, datetime] = {}
 
         # Dynamic weight optimizer
         self.dynamic_weights: DynamicWeightOptimizer | None = None
@@ -1222,7 +1224,13 @@ class TradingEngine:
                     )
                     liq_exits.append(ExitSignal(symbol=symbol, reason="liquidation_proximity", price=cur_price))
             except Exception as e:
-                logger.warning("liq_check_failed", symbol=symbol, error=str(e))
+                # Throttle: only log same symbol's error once per 5 min
+                now_err = datetime.now(timezone.utc)
+                err_key = f"liq_{symbol}"
+                last = self._error_last_logged.get(err_key)
+                if last is None or (now_err - last).total_seconds() >= 300:
+                    logger.warning("liq_check_failed", symbol=symbol, error=str(e))
+                    self._error_last_logged[err_key] = now_err
 
         for liq_exit in liq_exits:
             liq_pos = self.portfolio.open_positions.get(liq_exit.symbol)

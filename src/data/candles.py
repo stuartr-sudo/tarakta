@@ -18,6 +18,9 @@ class CandleManager:
     def __init__(self, exchange, repo: Repository) -> None:
         self.exchange = exchange
         self.repo = repo
+        # Throttle repeated error logs (same symbol+tf once per 10 min)
+        self._error_last_logged: dict[str, datetime] = {}
+        self._error_throttle_seconds = 600
 
     async def get_candles(
         self, symbol: str, timeframe: str, limit: int = 200
@@ -48,7 +51,13 @@ class CandleManager:
                     df = combined.drop_duplicates()
                     del combined
             except Exception as e:
-                logger.warning("candle_refresh_failed", symbol=symbol, tf=timeframe, error=str(e))
+                # Throttle: only log same symbol+tf error once per 10 min
+                err_key = f"{symbol}_{timeframe}"
+                now_err = datetime.now(timezone.utc)
+                last = self._error_last_logged.get(err_key)
+                if last is None or (now_err - last).total_seconds() >= self._error_throttle_seconds:
+                    logger.warning("candle_refresh_failed", symbol=symbol, tf=timeframe, error=str(e))
+                    self._error_last_logged[err_key] = now_err
             return df.tail(limit)
 
         # Full fetch

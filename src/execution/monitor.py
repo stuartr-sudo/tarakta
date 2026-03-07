@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 
 from src.exchange.models import ExitSignal, Position
 from src.utils.logging import get_logger
@@ -21,6 +22,9 @@ class PositionMonitor:
     ) -> None:
         self.trailing_activation_rr = trailing_activation_rr
         self.trailing_atr_multiplier = trailing_atr_multiplier
+        # Throttle repeated ticker errors: only log per symbol once per 5 min
+        self._ticker_error_last_logged: dict[str, datetime] = {}
+        self._ticker_error_throttle_seconds = 300
 
     async def check_positions(
         self, positions: dict[str, Position], exchange, atr_values: dict[str, float] | None = None,
@@ -46,7 +50,12 @@ class PositionMonitor:
                 logger.warning("ticker_fetch_timeout", symbol=symbol, timeout=TICKER_FETCH_TIMEOUT)
                 continue
             except Exception as e:
-                logger.warning("ticker_fetch_failed", symbol=symbol, error=str(e))
+                # Throttle: only log same symbol's ticker error once per 5 min
+                now_err = datetime.now(timezone.utc)
+                last_logged = self._ticker_error_last_logged.get(symbol)
+                if last_logged is None or (now_err - last_logged).total_seconds() >= self._ticker_error_throttle_seconds:
+                    logger.warning("ticker_fetch_failed", symbol=symbol, error=str(e))
+                    self._ticker_error_last_logged[symbol] = now_err
                 continue
 
             atr = atr_values.get(symbol, 0.0)
