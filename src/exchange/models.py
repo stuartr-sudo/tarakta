@@ -216,6 +216,10 @@ class SignalCandidate:
     watchlist_promoted: bool = False           # True if signal graduated from watchlist
     watchlist_duration_seconds: float = 0.0    # How long it was monitored before graduating
     htf_direction_cache: str | None = None     # Preserved HTF direction for watchlist re-scoring
+    # Post-sweep entry refinement fields
+    refined_entry: bool = False              # True if entry was refined on 5m
+    refinement_duration_seconds: float = 0.0 # How long 5m monitoring took
+    original_1h_price: float = 0.0           # The stale 1H close we avoided entering at
 
 
 @dataclass

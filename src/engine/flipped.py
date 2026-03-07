@@ -28,6 +28,7 @@ from src.strategy.pullback import PullbackAnalyzer
 from src.strategy.sessions import SessionAnalyzer
 from src.strategy.sweep_detector import SweepDetector
 from src.strategy.volume import VolumeAnalyzer
+from src.engine.entry_refiner import EntryRefiner
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -99,6 +100,9 @@ class FlippedTrader:
             max_retracement=config.pullback_max_retracement,
         )
         self.leverage_analyzer = LeverageAnalyzer()
+
+        # Post-sweep entry refinement (set by core.py for custom bot only)
+        self.entry_refiner: EntryRefiner | None = None
 
         # Separate paper balance — independent of main bot
         self.balance = config.flipped_initial_balance
@@ -192,6 +196,8 @@ class FlippedTrader:
         self._scan_count = 0
         self.last_scan_time = None
         self._closed_symbols.clear()
+        if self.entry_refiner:
+            self.entry_refiner.stop()
 
         # Save the clean state to DB (overwrite any stale data)
         await self._save_state()
@@ -312,6 +318,7 @@ class FlippedTrader:
 
         This runs alongside the main engine's _monitor_tick as a safety net.
         Positions are checked here regardless of the main engine's state.
+        Also checks the entry refiner for signals ready to enter (custom bot).
         """
         logger.info("flipped_monitor_loop_started")
         while True:
@@ -324,11 +331,54 @@ class FlippedTrader:
                     await self.monitor_positions()
                     # Persist state after monitoring (in case positions were closed)
                     await self._save_state()
+                # Check entry refiner for signals ready to enter
+                if self.entry_refiner and self.entry_refiner.queue:
+                    await self._process_refined_entries()
             except asyncio.CancelledError:
                 logger.info("flipped_monitor_loop_cancelled")
                 break
             except Exception as e:
                 logger.error("flipped_monitor_loop_error", error=str(e))
+
+    async def _process_refined_entries(self) -> None:
+        """Check refiner queue and enter trades that have 5m confirmation."""
+        ready_signals = await self.entry_refiner.check_all()
+        for signal in ready_signals:
+            # Check capacity before entering
+            if FLIPPED_MAX_CONCURRENT > 0 and len(self.positions) >= FLIPPED_MAX_CONCURRENT:
+                logger.info("refiner_skip_max_positions", symbol=signal.symbol)
+                continue
+            if self.balance < 5.0:
+                logger.info("refiner_skip_no_balance", symbol=signal.symbol)
+                continue
+            if signal.symbol in self.positions:
+                continue
+            if signal.symbol in self._closed_symbols:
+                continue
+            try:
+                if await self._try_enter(signal):
+                    improvement = ""
+                    if signal.original_1h_price > 0 and signal.refined_entry:
+                        imp_pct = abs(
+                            signal.entry_price - signal.original_1h_price
+                        ) / signal.original_1h_price * 100
+                        improvement = f"{imp_pct:.2f}%"
+                    logger.info(
+                        "refiner_entered",
+                        symbol=signal.symbol,
+                        refined=signal.refined_entry,
+                        entry_price=round(signal.entry_price, 6),
+                        original_1h_price=round(signal.original_1h_price, 6),
+                        improvement_pct=improvement,
+                        duration_seconds=round(signal.refinement_duration_seconds, 0),
+                    )
+                    await self._save_state()
+            except Exception as e:
+                logger.warning(
+                    "refiner_entry_error",
+                    symbol=signal.symbol,
+                    error=str(e)[:100],
+                )
 
     async def _reconcile_from_db(self) -> None:
         """Ensure in-memory positions match DB open trades (bidirectional).
@@ -469,6 +519,7 @@ class FlippedTrader:
 
         # Enter flipped trades (limited by available balance)
         entered = 0
+        queued_for_refinement = 0
         skipped_cooldown = 0
         skipped_already_open = 0
         skipped_entry_failed = 0
@@ -493,6 +544,24 @@ class FlippedTrader:
             if signal.symbol in self._closed_symbols:
                 skipped_cooldown += 1
                 continue
+            # Also skip if already queued in the entry refiner
+            if self.entry_refiner and signal.symbol in self.entry_refiner.get_queued_symbols():
+                skipped_already_open += 1
+                continue
+
+            # Post-sweep entry refinement: queue sweep signals for 5m monitoring
+            # instead of entering at the stale 1H close price
+            if (
+                self.entry_refiner
+                and signal.sweep_result
+                and signal.sweep_result.sweep_detected
+            ):
+                signal.original_1h_price = signal.entry_price
+                if self.entry_refiner.add(signal):
+                    queued_for_refinement += 1
+                    continue
+                # If refiner queue is full, fall through to immediate entry
+
             try:
                 if await self._try_enter(signal):
                     entered += 1
@@ -510,6 +579,7 @@ class FlippedTrader:
             pairs_scanned=len(pairs),
             signals_found=len(signals),
             trades_entered=entered,
+            queued_for_refinement=queued_for_refinement,
             skipped_cooldown=skipped_cooldown,
             skipped_already_open=skipped_already_open,
             skipped_entry_failed=skipped_entry_failed,
@@ -1538,7 +1608,7 @@ class FlippedTrader:
                     for t in pos.tp_tiers
                 ]
             positions_data[sym] = pos_data
-        return {
+        state = {
             "balance": self.balance,
             "peak_balance": self.peak_balance,
             "daily_start_balance": self.daily_start_balance,
@@ -1555,6 +1625,10 @@ class FlippedTrader:
             "flip_threshold": self.flip_threshold,
             "scanning_active": self._scanning_active,
         }
+        # Persist entry refiner state (custom bot only)
+        if self.entry_refiner:
+            state["entry_refiner"] = self.entry_refiner.get_state()
+        return state
 
     def restore_state(self, data: dict) -> None:
         if not data:
@@ -1581,6 +1655,10 @@ class FlippedTrader:
             self.flip_threshold = max(0.0, min(1.0, float(data["flip_threshold"])))
         if "scanning_active" in data:
             self._scanning_active = bool(data["scanning_active"])
+
+        # Restore entry refiner state (custom bot only)
+        if self.entry_refiner and data.get("entry_refiner"):
+            self.entry_refiner.restore_state(data["entry_refiner"])
 
         positions_data = data.get("positions", {})
         for sym, pd_ in positions_data.items():

@@ -587,42 +587,55 @@ class OrderExecutor:
         return None
 
     def _calculate_stop_loss(self, signal: SignalCandidate) -> float | None:
-        """SL behind the sweep extreme + 0.5% buffer.
+        """SL behind the sweep extreme + configurable buffer (default 3%).
 
         The sweep wick tip is the safest SL because MMs already grabbed
-        that liquidity and have no reason to revisit it.
+        that liquidity and have no reason to revisit it. The buffer gives
+        extra room for unexpected wicks.
 
         Falls back to ATR-based SL if no sweep data available.
+        Enforces a minimum SL distance floor (default 2% of entry).
         """
         entry = signal.entry_price
         is_long = signal.direction == "bullish"
+        sl_buffer = getattr(self.config, "sl_buffer", 0.03)
+        min_sl_pct = getattr(self.config, "min_sl_pct", 0.02)
+        min_distance = entry * min_sl_pct
         sweep = getattr(signal, "sweep_result", None)
 
+        sl = None
         if sweep is not None and sweep.sweep_detected and sweep.sweep_level > 0:
             if is_long:
                 # SL below the sweep low (bearish sweep wick tip)
-                sl = sweep.sweep_level * 0.995  # 0.5% buffer below
+                sl = sweep.sweep_level * (1 - sl_buffer)
                 if sl >= entry:
-                    # Sweep level too close to or above entry — use ATR fallback
-                    return self._atr_fallback_sl(signal, entry, is_long)
-                return sl
+                    sl = None  # Invalid — use ATR fallback
             else:
                 # SL above the sweep high (bullish sweep wick tip)
-                sl = sweep.sweep_level * 1.005  # 0.5% buffer above
+                sl = sweep.sweep_level * (1 + sl_buffer)
                 if sl <= entry:
-                    return self._atr_fallback_sl(signal, entry, is_long)
-                return sl
+                    sl = None  # Invalid — use ATR fallback
 
-        # No sweep data — ATR fallback
-        return self._atr_fallback_sl(signal, entry, is_long)
+        # Enforce minimum SL distance
+        if sl is not None:
+            actual_distance = abs(entry - sl)
+            if actual_distance < min_distance:
+                sl = entry - min_distance if is_long else entry + min_distance
+            return sl
 
-    def _atr_fallback_sl(self, signal: SignalCandidate, entry: float, is_long: bool) -> float:
+        # No sweep data or invalid — ATR fallback
+        return self._atr_fallback_sl(signal, entry, is_long, min_distance)
+
+    def _atr_fallback_sl(
+        self, signal: SignalCandidate, entry: float, is_long: bool,
+        min_distance: float = 0.0,
+    ) -> float:
         """ATR-based SL fallback when sweep data is unavailable."""
         atr = getattr(signal, "atr_1h", 0.0) or 0.0
         if atr > 0:
-            distance = atr * 2.0
+            distance = max(atr * 2.5, min_distance)
         else:
-            distance = entry * 0.03  # 3% fallback
+            distance = max(entry * 0.04, min_distance)  # 4% fallback
 
         if is_long:
             return entry - distance

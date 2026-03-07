@@ -10,6 +10,7 @@ import pandas as pd
 from src.config import Settings
 from src.data.candles import CandleManager
 from src.data.repository import Repository
+from src.engine.entry_refiner import EntryRefiner
 from src.engine.flipped import FlippedTrader
 from src.engine.scheduler import Scheduler, TickType
 from src.engine.watchlist import WatchlistMonitor
@@ -75,6 +76,13 @@ class TradingEngine:
             else None
         )
 
+        # Post-sweep entry refinement — 5m monitoring for better entries (main bot)
+        self.main_entry_refiner: EntryRefiner | None = (
+            EntryRefiner(candle_manager=candle_manager, config=config)
+            if config.entry_refiner_enabled
+            else None
+        )
+
         # Trading hours (24/7 for crypto, restricted for stocks/commodities)
         self.trading_hours = TradingHoursManager()
         self._market_name: str = "crypto"  # Set by main.py for multi-market
@@ -136,12 +144,19 @@ class TradingEngine:
             self.custom_trader.leverage = config.custom_leverage
             # Custom bot starts PAUSED — user must click "Begin" on dashboard
             self.custom_trader._scanning_active = False
+            # Post-sweep entry refinement: drop to 5m after 1H sweep detection
+            if config.entry_refiner_enabled:
+                self.custom_trader.entry_refiner = EntryRefiner(
+                    candle_manager=candle_manager,
+                    config=config,
+                )
             logger.info(
                 "custom_trader_enabled",
                 leverage=config.custom_leverage,
                 flip_direction=config.custom_flip_direction,
                 margin_pct=config.custom_margin_pct,
                 scan_interval=config.custom_scan_interval_minutes,
+                entry_refiner=config.entry_refiner_enabled,
             )
 
         # Background task infrastructure (for async post-mortems)
@@ -460,6 +475,17 @@ class TradingEngine:
                 entries=len(self.watchlist_monitor.entries),
             )
 
+        # Restore entry refiner state (main bot)
+        if self.main_entry_refiner and db_state:
+            refiner_overrides = (db_state.get("config_overrides") or {})
+            refiner_data = refiner_overrides.get("main_entry_refiner")
+            if refiner_data:
+                self.main_entry_refiner.restore_state(refiner_data)
+                logger.info(
+                    "main_entry_refiner_restored",
+                    queued=len(self.main_entry_refiner.queue),
+                )
+
         # Run an immediate scan on startup if scanning is active and no recent scan
         if self._scanning_active:
             should_startup_scan = False
@@ -506,6 +532,8 @@ class TradingEngine:
                     await self._monitor_tick()
                     # Process graduated signals from hyper-watchlist
                     await self._process_watchlist_graduations()
+                    # Process refined entries from post-sweep 5m monitoring
+                    await self._process_refined_entries()
                     await self._persist_state()
                 else:
                     # Skip scanning for new trades if bot is paused
@@ -732,9 +760,41 @@ class TradingEngine:
         # Execute entries for top signals
         signals_saved = 0
         trades_entered = 0
+        refiner_queued = 0
         for signal in signals:
             try:
                 position = None
+
+                # --- Post-sweep entry refinement: queue for 5m monitoring ---
+                # If refiner is active AND signal has a sweep, queue for 5m
+                # confirmation instead of entering at the stale 1H close.
+                if (
+                    self.main_entry_refiner
+                    and signal.sweep_result
+                    and signal.sweep_result.sweep_detected
+                    and signal.symbol not in self.portfolio.open_positions
+                    and signal.symbol not in self.main_entry_refiner.get_queued_symbols()
+                ):
+                    signal.original_1h_price = signal.entry_price
+                    if self.main_entry_refiner.add(signal):
+                        refiner_queued += 1
+                        # Still log the signal (as not acted on)
+                        vol_24h = self.exchange.get_24h_volume(signal.symbol)
+                        await self.repo.insert_signal(
+                            {
+                                "symbol": signal.symbol,
+                                "direction": signal.direction or "none",
+                                "score": signal.score,
+                                "reasons": signal.reasons + ["QUEUED:entry_refiner"],
+                                "components": {"volume_24h": vol_24h},
+                                "current_price": signal.entry_price,
+                                "acted_on": False,
+                                "scan_cycle": cycle,
+                            }
+                        )
+                        signals_saved += 1
+                        continue
+                    # If refiner queue is full, fall through to immediate entry
 
                 # --- Daily trade limit (Chill phase) ---
                 if self.state.daily_trade_count >= self.config.max_daily_trades:
@@ -1084,7 +1144,104 @@ class TradingEngine:
             signals_found=len(signals),
             signals_saved=signals_saved,
             trades_entered=trades_entered,
+            refiner_queued=refiner_queued,
         )
+
+    async def _process_refined_entries(self) -> None:
+        """Process signals refined on 5m candles (post-sweep entry refinement).
+
+        Runs every 60s (on MONITOR tick). Checks the entry refiner for signals
+        that have confirmed a sweep reclaim on 5m, or have expired.
+        Follows the same pipeline as watchlist graduations.
+        """
+        if not self.main_entry_refiner or not self.main_entry_refiner.queue:
+            return
+
+        ready_signals = await self.main_entry_refiner.check_all()
+        for signal in ready_signals:
+            # Skip if we already have a position in this symbol
+            if signal.symbol in self.portfolio.open_positions:
+                continue
+
+            # Skip if in cooldown
+            cooldown_until = self._reversal_cooldowns.get(signal.symbol)
+            if cooldown_until and datetime.now(timezone.utc) < cooldown_until:
+                continue
+
+            # Daily trade limit
+            if self.state.daily_trade_count >= self.config.max_daily_trades:
+                continue
+
+            # Risk validation
+            try:
+                total_exposure = sum(
+                    pos.cost_usd for pos in self.portfolio.open_positions.values()
+                )
+                validation = self.risk_manager.validate_trade(
+                    open_position_count=len(self.portfolio.open_positions),
+                    open_position_symbols=set(self.portfolio.open_positions.keys()),
+                    current_balance=self.portfolio.current_balance,
+                    daily_start_balance=self.portfolio.daily_start_balance,
+                    daily_pnl=self.portfolio.daily_pnl,
+                    signal=signal,
+                    total_exposure_usd=total_exposure,
+                )
+                if not validation.allowed:
+                    logger.info(
+                        "refiner_signal_risk_rejected",
+                        symbol=signal.symbol,
+                        reason=validation.reason,
+                    )
+                    continue
+            except Exception as e:
+                logger.warning("refiner_risk_check_failed", error=str(e))
+                continue
+
+            # Execute the trade
+            try:
+                position, order_result, trade_record = (
+                    await self.order_executor.execute_entry(
+                        signal=signal,
+                        current_balance=self.portfolio.current_balance,
+                        mode=self.state.mode,
+                    )
+                )
+
+                if position and trade_record:
+                    position.confluence_score = signal.score
+                    db_trade = await self.repo.insert_trade(trade_record)
+                    if db_trade:
+                        position.trade_id = db_trade.get("id", "")
+                    self.portfolio.record_entry(position)
+                    self.state.open_positions[signal.symbol] = position
+                    self.state.daily_trade_count += 1
+
+                    improvement = ""
+                    if signal.original_1h_price > 0 and signal.refined_entry:
+                        imp_pct = abs(
+                            signal.entry_price - signal.original_1h_price
+                        ) / signal.original_1h_price * 100
+                        improvement = f"{imp_pct:.2f}%"
+
+                    logger.info(
+                        "refiner_trade_entered",
+                        symbol=signal.symbol,
+                        direction=signal.direction,
+                        entry=position.entry_price,
+                        sl=position.stop_loss,
+                        tp=position.take_profit,
+                        score=signal.score,
+                        refined=signal.refined_entry,
+                        original_1h_price=round(signal.original_1h_price, 6),
+                        improvement_pct=improvement,
+                        duration_seconds=round(signal.refinement_duration_seconds, 0),
+                    )
+            except Exception as e:
+                logger.warning(
+                    "refiner_entry_failed",
+                    symbol=signal.symbol,
+                    error=str(e),
+                )
 
     async def _process_watchlist_graduations(self) -> None:
         """Process signals that graduated from the hyper-watchlist.
@@ -1722,6 +1879,9 @@ class TradingEngine:
             # Persist hyper-watchlist state
             if self.watchlist_monitor:
                 overrides["watchlist_monitor"] = self.watchlist_monitor.get_state()
+            # Persist entry refiner state (main bot)
+            if self.main_entry_refiner:
+                overrides["main_entry_refiner"] = self.main_entry_refiner.get_state()
             # Persist main bot scanning state
             main_settings = overrides.get("main_bot_settings", {})
             if not isinstance(main_settings, dict):

@@ -58,6 +58,8 @@ class Settings(BaseSettings):
     max_daily_drawdown: float = 0.10
     circuit_breaker_pct: float = 0.15
     min_rr_ratio: float = 2.0  # Minimum 2:1 reward-to-risk
+    sl_buffer: float = 0.03  # 3% SL buffer beyond sweep level (wick protection)
+    min_sl_pct: float = 0.02  # Minimum SL distance = 2% of entry price
     cooldown_hours: float = 2.0  # Cooldown after stop-loss before re-entering same symbol
     max_daily_trades: int = 15  # Allow more trades to deploy full balance
     min_trade_usd: float = 150.0  # Minimum margin per trade ($150 × leverage = min notional)
@@ -115,8 +117,8 @@ class Settings(BaseSettings):
     # Flipped shadow bot — DISABLED (not producing results)
     flipped_enabled: bool = False
     flipped_leverage: int = 5  # Higher leverage for flipped trades
-    flipped_sl_buffer: float = 0.02  # 2% SL buffer (wider than main 0.5%)
-    flipped_min_sl_pct: float = 0.015  # Minimum SL distance = 1.5% of entry price
+    flipped_sl_buffer: float = 0.03  # 3% SL buffer — extra room for wicks
+    flipped_min_sl_pct: float = 0.02  # Minimum SL distance = 2% of entry price
     flipped_initial_balance: float = 10000.0  # Separate paper balance (disabled)
     flipped_scan_interval_minutes: int = 15  # Independent scan cycle (not tied to main bot)
     flipped_max_position_pct: float = 0.15  # 15% of balance as margin per trade (bigger than main)
@@ -139,6 +141,12 @@ class Settings(BaseSettings):
     watchlist_expiry_hours: float = 3.0             # Release after 3 hours
     watchlist_max_size: int = 10                    # Max symbols to hyper-watch
     watchlist_min_score: float = 35.0               # Must have at least a sweep (35 pts)
+
+    # Post-Sweep Entry Refinement — custom bot drops to 5m after 1H sweep detection
+    entry_refiner_enabled: bool = True
+    entry_refiner_check_interval_seconds: int = 60   # Check every 60s in monitor loop
+    entry_refiner_expiry_minutes: float = 30.0       # Max wait for 5m confirmation
+    entry_refiner_max_queue: int = 5                  # Max signals queued for refinement
 
     # Multi-market configuration
     # Each key is a market name like "crypto", "stocks", "commodities"
