@@ -1,9 +1,9 @@
 """Flipped shadow trader — independent scanner with inverted direction.
 
-Runs alongside the main bot on its own 15-minute scan cycle. Uses a SIMPLER
-strategy than the main bot: sweep + displacement only (no pullback gate,
-no leverage intelligence, no quality whitelist). Every qualifying signal
-is direction-flipped: bullish → short, bearish → long.
+Runs alongside the main bot on its own scan cycle. Uses the same core
+pipeline: sweep + displacement + pullback + HTF + timing, with London/NY
+ranges for more sweep opportunities. Direction can be flipped or run
+normally depending on mode.
 
 Wider SL, higher leverage. No exchange orders — purely simulated using
 ticker prices. Trades stored in DB with configurable mode (default: 'flipped_paper').
@@ -24,6 +24,7 @@ from src.data.repository import Repository
 from src.exchange.models import Position, SignalCandidate, TakeProfitTier
 from src.strategy.leverage import LeverageAnalyzer
 from src.strategy.market_structure import MarketStructureAnalyzer
+from src.strategy.pullback import PullbackAnalyzer
 from src.strategy.sessions import SessionAnalyzer
 from src.strategy.sweep_detector import SweepDetector
 from src.strategy.volume import VolumeAnalyzer
@@ -34,9 +35,8 @@ logger = get_logger(__name__)
 # Simulated fee rate (taker fee on Binance futures)
 SIM_FEE_RATE = 0.0004
 
-# Simplified scoring (no pullback, no leverage intelligence)
-# Sweep (35) + Displacement (25) = 60 minimum
-# HTF (15) + Timing (15) = bonus
+# Scoring: sweep (35) + displacement (25) + pullback (10) + HTF (15) + timing (15)
+# Classic path: sweep + displacement = 60.  Alternative: sweep + HTF + timing = 65.
 FLIPPED_THRESHOLD = 60.0
 FLIPPED_MAX_CONCURRENT = 8  # Cap concurrent positions to limit total exposure
 MAX_EXPOSURE_PCT = 0.60  # Don't deploy more than 60% of initial balance as margin
@@ -94,6 +94,10 @@ class FlippedTrader:
         self.vol_analyzer = VolumeAnalyzer()
         self.session_analyzer = SessionAnalyzer()
         self.sweep_detector = SweepDetector()
+        self.pullback_analyzer = PullbackAnalyzer(
+            min_retracement=config.pullback_min_retracement,
+            max_retracement=config.pullback_max_retracement,
+        )
         self.leverage_analyzer = LeverageAnalyzer()
 
         # Separate paper balance — independent of main bot
@@ -511,7 +515,7 @@ class FlippedTrader:
         )
 
     async def _scan_pairs(self, pairs: list[str]) -> list[SignalCandidate]:
-        """Simplified scan pipeline: sweep + displacement only. No pullback, no leverage."""
+        """Scan pipeline: sweep + displacement + pullback + HTF + timing."""
         all_signals: list[SignalCandidate] = []
         total = len(pairs)
 
@@ -553,7 +557,12 @@ class FlippedTrader:
         return all_signals
 
     async def _analyze_pair(self, symbol: str) -> SignalCandidate:
-        """Simplified analysis: sweep + displacement + HTF + timing. No pullback."""
+        """Analysis: sweep + displacement + pullback + HTF + timing.
+
+        Now includes London/NY ranges for more sweep opportunities,
+        pullback detection for better entries, and no early return
+        on displacement miss (lets HTF + timing compensate).
+        """
         # 1. Fetch candles
         candles: dict[str, pd.DataFrame] = {}
         for tf in SCAN_TIMEFRAMES:
@@ -564,7 +573,7 @@ class FlippedTrader:
         for tf, df in candles.items():
             ms_results[tf] = self.ms_analyzer.analyze(df, timeframe=tf)
 
-        # 3. Session analysis
+        # 3. Session analysis (Asian + London + NY ranges)
         session_result = self.session_analyzer.analyze(candles["1h"])
 
         # 4. Swing levels from 1H
@@ -576,7 +585,7 @@ class FlippedTrader:
         displacement_confirmed = vol_profile.displacement_detected
         displacement_direction = vol_profile.displacement_direction
 
-        # 6. Sweep detection on 1H
+        # 6. Sweep detection on 1H (now with London/NY ranges)
         sweep_result = self.sweep_detector.detect(
             candles_1h=candles["1h"],
             asian_high=session_result.asian_high,
@@ -585,7 +594,20 @@ class FlippedTrader:
             swing_low=swing_low,
             lookback=8,
             prefer_direction=displacement_direction,
+            london_high=session_result.london_high,
+            london_low=session_result.london_low,
+            ny_high=session_result.ny_high,
+            ny_low=session_result.ny_low,
         )
+
+        # 6.5 Pullback detection (requires displacement)
+        pullback_result = None
+        if displacement_confirmed and vol_profile.displacement_candle_idx is not None:
+            pullback_result = self.pullback_analyzer.analyze(
+                candles_1h=candles["1h"],
+                displacement_candle_idx=vol_profile.displacement_candle_idx,
+                direction=displacement_direction,
+            )
 
         # 7. Current price + ATR
         current_price = float(candles["1h"]["close"].iloc[-1]) if not candles["1h"].empty else 0
@@ -594,7 +616,7 @@ class FlippedTrader:
         # 8. HTF direction
         htf_direction = self._resolve_htf_direction(ms_results)
 
-        # 9. SIMPLIFIED SCORING (no pullback, no leverage)
+        # 9. SCORING (sweep required, everything else contributes)
         score = 0.0
         direction = None
         reasons: list[str] = []
@@ -612,16 +634,29 @@ class FlippedTrader:
                 symbol=symbol, entry_price=current_price, components={},
             )
 
-        # Displacement (25 pts) — REQUIRED
+        # Displacement (25 pts) — strongly preferred, no early return
         if displacement_confirmed and displacement_direction == direction:
             score += 25
             reasons.append(f"Displacement confirmed: {direction}")
             components["displacement_confirmed"] = 25
         else:
-            return SignalCandidate(
-                score=score, direction=direction, reasons=reasons,
-                symbol=symbol, entry_price=current_price, components=components,
+            if displacement_confirmed and displacement_direction != direction:
+                reasons.append(f"Displacement mismatch: sweep={direction}, disp={displacement_direction}")
+            else:
+                reasons.append("No displacement after sweep")
+            components["displacement_confirmed"] = 0
+
+        # Pullback (10 pts) — bonus, better entry price
+        if pullback_result is not None and pullback_result.pullback_detected:
+            score += 10
+            reasons.append(
+                f"Pullback: {pullback_result.retracement_pct:.0%} "
+                f"retracement ({pullback_result.pullback_status})"
             )
+            components["pullback_confirmed"] = 10
+            current_price = pullback_result.current_price
+        else:
+            components["pullback_confirmed"] = 0
 
         # HTF alignment (15 pts) — bonus
         if htf_direction == direction:
