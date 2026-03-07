@@ -243,12 +243,19 @@ class AltcoinScanner:
         signal.atr_1h = atr_1h
         signal.session_result = session_result
 
-        if signal.score >= self.config.entry_threshold:
+        # Log qualifying signals (sweep threshold=60, breakout threshold=45)
+        log_threshold = (
+            BREAKOUT_THRESHOLD
+            if signal.breakout_result is not None
+            else self.config.entry_threshold
+        )
+        if signal.score >= log_threshold:
             logger.info(
                 "signal_detected",
                 symbol=symbol,
                 score=signal.score,
                 direction=signal.direction,
+                signal_type="breakout" if signal.breakout_result is not None else "sweep",
                 reasons=signal.reasons,
             )
 

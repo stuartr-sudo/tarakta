@@ -366,6 +366,53 @@ class BinanceFuturesClient:
         return ticker
 
     @async_retry(max_attempts=3, base_delay=5.0, exceptions=(ccxt.NetworkError, ccxt.ExchangeNotAvailable))
+    async def fetch_order(self, order_id: str, symbol: str) -> dict:
+        """Fetch a single order by ID. Returns order status, filled qty, avg price."""
+        async with self._semaphore:
+            await self._rate_limit_wait()
+            order = await self.exchange.fetch_order(order_id, symbol)
+            self._last_request_time = time.time()
+        return {
+            "id": order.get("id"),
+            "status": order.get("status"),  # "open", "closed", "canceled", "expired"
+            "filled": float(order.get("filled", 0) or 0),
+            "remaining": float(order.get("remaining", 0) or 0),
+            "average": float(order.get("average", 0) or 0),
+            "price": float(order.get("price", 0) or 0),
+            "side": order.get("side"),
+            "type": order.get("type"),
+            "symbol": order.get("symbol"),
+        }
+
+    @async_retry(max_attempts=3, base_delay=5.0, exceptions=(ccxt.NetworkError, ccxt.ExchangeNotAvailable))
+    async def fetch_all_positions(self) -> list[dict]:
+        """Fetch ALL open futures positions from Binance.
+
+        Used for startup reconciliation — compares exchange state vs DB state.
+        Returns only positions with non-zero contract quantity.
+        """
+        async with self._semaphore:
+            await self._rate_limit_wait()
+            positions = await self.exchange.fetch_positions()
+            self._last_request_time = time.time()
+
+        active = []
+        for pos in positions:
+            contracts = float(pos.get("contracts", 0) or 0)
+            if contracts > 0:
+                active.append({
+                    "symbol": pos.get("symbol"),
+                    "side": pos.get("side"),  # "long" or "short"
+                    "contracts": contracts,
+                    "entry_price": float(pos.get("entryPrice", 0) or 0),
+                    "unrealized_pnl": float(pos.get("unrealizedPnl", 0) or 0),
+                    "margin_used": float(pos.get("initialMargin", 0) or 0),
+                    "notional": float(pos.get("notional", 0) or 0),
+                    "liquidation_price": float(pos.get("liquidationPrice", 0) or 0),
+                })
+        return active
+
+    @async_retry(max_attempts=3, base_delay=5.0, exceptions=(ccxt.NetworkError, ccxt.ExchangeNotAvailable))
     async def get_position_risk(self, symbol: str) -> dict:
         """Fetch position risk info: margin ratio, liquidation price, unrealized PnL."""
         async with self._semaphore:

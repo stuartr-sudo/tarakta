@@ -11,6 +11,7 @@ TP: Progressive 3-tier take-profit:
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 from src.config import Settings
@@ -19,6 +20,12 @@ from src.risk.manager import RiskManager
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Order fill verification settings
+FILL_CHECK_DELAY = 2.0      # seconds to wait before checking fill
+FILL_CHECK_RETRIES = 3      # how many times to check
+FILL_CHECK_INTERVAL = 3.0   # seconds between retries
+CANCEL_UNFILLED = True       # cancel unfilled limit orders
 
 
 class OrderExecutor:
@@ -204,6 +211,21 @@ class OrderExecutor:
                 quantity=pos_size.quantity,
                 price=limit_price,
             )
+
+            # --- Live order fill verification ---
+            # In live mode, limit orders may not fill immediately.
+            # Check fill status and cancel if unfilled.
+            if hasattr(self.exchange, "fetch_order") and result.status != "closed":
+                verified = await self._verify_order_fill(
+                    order_id=result.order_id,
+                    symbol=signal.symbol,
+                    expected_qty=pos_size.quantity,
+                )
+                if verified is None:
+                    # Order didn't fill — skip this trade
+                    return None, None, None
+                result = verified
+
         except Exception as e:
             logger.error("order_failed", symbol=signal.symbol, error=str(e))
             return None, None, None
@@ -315,6 +337,34 @@ class OrderExecutor:
                 quantity=position.quantity,
                 price=limit_price,
             )
+
+            # Verify exit fill in live mode
+            if hasattr(self.exchange, "fetch_order") and result.status != "closed":
+                verified = await self._verify_order_fill(
+                    order_id=result.order_id,
+                    symbol=symbol,
+                    expected_qty=position.quantity,
+                )
+                if verified is None:
+                    # Exit order didn't fill — critical, log and try market order
+                    logger.error(
+                        "exit_fill_failed_trying_market",
+                        symbol=symbol,
+                        reason=reason,
+                        order_id=result.order_id,
+                    )
+                    try:
+                        result = await self.exchange.place_market_order(
+                            symbol=symbol,
+                            side=side,
+                            quantity=position.quantity,
+                        )
+                    except Exception as e2:
+                        logger.error("exit_market_fallback_failed", symbol=symbol, error=str(e2))
+                        return None, 0.0
+                else:
+                    result = verified
+
         except Exception as e:
             logger.error("exit_order_failed", symbol=symbol, reason=reason, error=str(e))
             return None, 0.0
@@ -360,6 +410,34 @@ class OrderExecutor:
                 quantity=quantity,
                 price=limit_price,
             )
+
+            # Verify partial exit fill in live mode
+            if hasattr(self.exchange, "fetch_order") and result.status != "closed":
+                verified = await self._verify_order_fill(
+                    order_id=result.order_id,
+                    symbol=symbol,
+                    expected_qty=quantity,
+                )
+                if verified is None:
+                    logger.error(
+                        "partial_exit_fill_failed_trying_market",
+                        symbol=symbol,
+                        tier=tier,
+                        quantity=quantity,
+                    )
+                    try:
+                        result = await self.exchange.place_market_order(
+                            symbol=symbol,
+                            side=side,
+                            quantity=quantity,
+                        )
+                    except Exception as e2:
+                        logger.error("partial_exit_market_fallback_failed",
+                                     symbol=symbol, error=str(e2))
+                        return None, 0.0
+                else:
+                    result = verified
+
         except Exception as e:
             logger.error("partial_exit_failed", symbol=symbol, reason=reason,
                          tier=tier, quantity=quantity, error=str(e))
@@ -413,6 +491,100 @@ class OrderExecutor:
             TakeProfitTier(level=2, price=tp2_price, pct=self.config.tp2_pct, quantity=tp2_qty),
             TakeProfitTier(level=3, price=None, pct=self.config.tp3_pct, quantity=tp3_qty),
         ]
+
+    async def _verify_order_fill(
+        self, order_id: str, symbol: str, expected_qty: float
+    ) -> OrderResult | None:
+        """Verify a limit order filled in live trading.
+
+        Polls the exchange for order status. If the order doesn't fill
+        within the retry window, cancels it and returns None.
+
+        Returns:
+            OrderResult with actual fill data, or None if unfilled/cancelled.
+        """
+        await asyncio.sleep(FILL_CHECK_DELAY)
+
+        for attempt in range(FILL_CHECK_RETRIES):
+            try:
+                order_data = await self.exchange.fetch_order(order_id, symbol)
+                status = order_data.get("status", "unknown")
+                filled = order_data.get("filled", 0)
+                avg_price = order_data.get("average", 0)
+
+                if status == "closed" and filled > 0:
+                    # Fully filled
+                    logger.info(
+                        "order_fill_verified",
+                        symbol=symbol,
+                        order_id=order_id,
+                        filled=filled,
+                        avg_price=avg_price,
+                        attempt=attempt + 1,
+                    )
+                    return OrderResult(
+                        order_id=order_id,
+                        symbol=symbol,
+                        side=order_data.get("side", "buy"),
+                        filled_quantity=filled,
+                        avg_price=avg_price,
+                        fee=0.0,  # Fees computed by exchange
+                        status="closed",
+                    )
+
+                if status in ("canceled", "cancelled", "expired", "rejected"):
+                    logger.warning(
+                        "order_not_filled",
+                        symbol=symbol,
+                        order_id=order_id,
+                        status=status,
+                    )
+                    return None
+
+                # Still open — wait and retry
+                logger.info(
+                    "order_pending",
+                    symbol=symbol,
+                    order_id=order_id,
+                    status=status,
+                    filled=filled,
+                    attempt=attempt + 1,
+                    max_attempts=FILL_CHECK_RETRIES,
+                )
+
+                if attempt < FILL_CHECK_RETRIES - 1:
+                    await asyncio.sleep(FILL_CHECK_INTERVAL)
+
+            except Exception as e:
+                logger.warning(
+                    "order_check_failed",
+                    symbol=symbol,
+                    order_id=order_id,
+                    error=str(e)[:200],
+                    attempt=attempt + 1,
+                )
+                if attempt < FILL_CHECK_RETRIES - 1:
+                    await asyncio.sleep(FILL_CHECK_INTERVAL)
+
+        # Order still not filled after retries — cancel it
+        if CANCEL_UNFILLED:
+            try:
+                await self.exchange.exchange.cancel_order(order_id, symbol)
+                logger.warning(
+                    "unfilled_order_cancelled",
+                    symbol=symbol,
+                    order_id=order_id,
+                    reason="not_filled_within_timeout",
+                )
+            except Exception as e:
+                logger.warning(
+                    "cancel_failed",
+                    symbol=symbol,
+                    order_id=order_id,
+                    error=str(e)[:200],
+                )
+
+        return None
 
     def _calculate_stop_loss(self, signal: SignalCandidate) -> float | None:
         """SL behind the sweep extreme + 0.5% buffer.

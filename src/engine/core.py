@@ -228,6 +228,10 @@ class TradingEngine:
         if hasattr(self.exchange, "restore_positions"):
             self.exchange.restore_positions(self.state.open_positions)
 
+        # Live exchange reconciliation — compare Binance positions vs DB state
+        # This catches orphaned exchange positions (e.g. manual trades, failed exits)
+        await self._reconcile_exchange_positions()
+
         # Restore flipped trader state (stored in config_overrides JSONB)
         if self.flipped_trader.enabled:
             saved_state = await self.repo.get_engine_state() or {}
@@ -336,6 +340,43 @@ class TradingEngine:
 
         # Persist initial state immediately so the dashboard has data
         await self._persist_state()
+
+        # --- LIVE MODE SAFETY WARNINGS ---
+        is_live = self.config.trading_mode == "live"
+        if is_live:
+            logger.warning(
+                "LIVE_TRADING_MODE",
+                message="⚠️  LIVE TRADING WITH REAL MONEY ⚠️",
+                mode="LIVE",
+                account_type=self.config.account_type,
+                leverage=self.config.leverage,
+                margin_mode=getattr(self.config, "margin_mode", "isolated"),
+                max_position_pct=self.config.max_position_pct,
+                min_trade_usd=self.config.min_trade_usd,
+                max_concurrent=self.config.max_concurrent_positions,
+            )
+            # Fetch and log actual exchange balance
+            try:
+                balance = await self.exchange.get_balance()
+                usdt = balance.get("USDT", 0)
+                logger.warning(
+                    "live_exchange_balance",
+                    exchange_usdt=f"{usdt:.2f}",
+                    db_balance=f"{self.state.current_balance:.2f}",
+                    open_positions=len(self.state.open_positions),
+                )
+                if usdt < self.config.min_trade_usd:
+                    logger.critical(
+                        "insufficient_live_balance",
+                        exchange_usdt=f"{usdt:.2f}",
+                        min_trade_usd=self.config.min_trade_usd,
+                        hint="Exchange balance is below minimum trade size. "
+                             "Deposit funds or reduce min_trade_usd.",
+                    )
+            except Exception as e:
+                logger.warning("live_balance_check_failed", error=str(e)[:200])
+        else:
+            logger.info("paper_trading_mode", mode="PAPER")
 
         logger.info(
             "engine_started",
@@ -1729,6 +1770,119 @@ class TradingEngine:
         if changed:
             self.state.current_balance = self.portfolio.current_balance
             self.state.peak_balance = self.portfolio.peak_balance
+
+    async def _reconcile_exchange_positions(self) -> None:
+        """Compare live exchange positions with DB/engine state on startup.
+
+        This is critical for live trading safety:
+        - Detects positions on the exchange that the bot doesn't know about
+          (e.g. manual trades, failed exit orders, restart during order placement)
+        - Detects positions in the DB that don't exist on the exchange
+          (e.g. positions closed manually on Binance UI)
+        - Logs warnings for any mismatch so the operator can investigate
+
+        Only runs for exchanges that support fetch_all_positions() (BinanceFuturesClient).
+        PaperExchange and data-only connectors skip this.
+        """
+        exchange = self.exchange
+        # For PaperExchange, get the live exchange underneath
+        if hasattr(exchange, "live"):
+            exchange = exchange.live
+
+        if not hasattr(exchange, "fetch_all_positions"):
+            return
+
+        try:
+            live_positions = await exchange.fetch_all_positions()
+        except Exception as e:
+            logger.warning("exchange_reconciliation_failed", error=str(e)[:200])
+            return
+
+        # Build maps for comparison
+        live_map: dict[str, dict] = {}
+        for pos in live_positions:
+            symbol = pos.get("symbol")
+            if symbol:
+                live_map[symbol] = pos
+
+        db_symbols = set(self.state.open_positions.keys())
+        live_symbols = set(live_map.keys())
+
+        # Positions on exchange but NOT in our DB state
+        orphaned_on_exchange = live_symbols - db_symbols
+        for symbol in orphaned_on_exchange:
+            pos = live_map[symbol]
+            logger.warning(
+                "exchange_position_not_in_db",
+                symbol=symbol,
+                side=pos.get("side"),
+                contracts=pos.get("contracts"),
+                entry_price=pos.get("entry_price"),
+                unrealized_pnl=pos.get("unrealized_pnl"),
+                action="MANUAL_REVIEW_REQUIRED",
+                hint="Position exists on exchange but bot doesn't track it. "
+                     "May be a manual trade or failed exit. Check Binance UI.",
+            )
+
+        # Positions in our DB state but NOT on exchange (exchange closed them)
+        missing_from_exchange = db_symbols - live_symbols
+        for symbol in missing_from_exchange:
+            db_pos = self.state.open_positions[symbol]
+            # Only flag if this is a futures position (spot positions aren't tracked as "positions")
+            if db_pos.leverage > 1:
+                logger.warning(
+                    "db_position_not_on_exchange",
+                    symbol=symbol,
+                    direction=db_pos.direction,
+                    entry_price=db_pos.entry_price,
+                    quantity=db_pos.quantity,
+                    action="POSITION_MAY_HAVE_BEEN_LIQUIDATED_OR_CLOSED_EXTERNALLY",
+                    hint="Position tracked in DB but not found on exchange. "
+                         "May have been liquidated or closed via Binance UI.",
+                )
+
+        # Positions in both — check for quantity mismatches
+        common = db_symbols & live_symbols
+        for symbol in common:
+            db_pos = self.state.open_positions[symbol]
+            live_pos = live_map[symbol]
+            live_qty = live_pos.get("contracts", 0)
+            db_qty = db_pos.quantity
+
+            # Allow 1% tolerance for rounding
+            if abs(live_qty - db_qty) / max(db_qty, 0.0001) > 0.01:
+                logger.warning(
+                    "position_quantity_mismatch",
+                    symbol=symbol,
+                    db_quantity=db_qty,
+                    exchange_quantity=live_qty,
+                    difference=abs(live_qty - db_qty),
+                    action="QUANTITY_SYNC_NEEDED",
+                    hint="Position quantity differs between DB and exchange. "
+                         "Partial fill or manual adjustment may have occurred.",
+                )
+
+        # Log the balance from exchange for verification
+        try:
+            balance = await exchange.get_balance()
+            usdt_balance = balance.get("USDT", 0)
+            logger.info(
+                "exchange_reconciliation_complete",
+                live_positions=len(live_positions),
+                db_positions=len(db_symbols),
+                orphaned_on_exchange=len(orphaned_on_exchange),
+                missing_from_exchange=len(missing_from_exchange),
+                exchange_usdt_balance=f"{usdt_balance:.2f}",
+                db_balance=f"{self.state.current_balance:.2f}",
+            )
+        except Exception:
+            logger.info(
+                "exchange_reconciliation_complete",
+                live_positions=len(live_positions),
+                db_positions=len(db_symbols),
+                orphaned_on_exchange=len(orphaned_on_exchange),
+                missing_from_exchange=len(missing_from_exchange),
+            )
 
     async def shutdown(self) -> None:
         """Graceful shutdown."""
