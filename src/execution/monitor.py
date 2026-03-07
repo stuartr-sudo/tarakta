@@ -126,10 +126,20 @@ class PositionMonitor:
             if unrealized_rr >= self.trailing_activation_rr:
                 # ATR-dynamic trailing: high_water_mark - ATR * multiplier
                 if atr > 0:
-                    trailing_sl = pos.high_water_mark - (atr * self.trailing_atr_multiplier)
+                    atr_trail = atr * self.trailing_atr_multiplier
                 else:
                     # Fallback to percentage if ATR unavailable
-                    trailing_sl = pos.high_water_mark * (1 - TRAILING_STOP_PCT_FALLBACK)
+                    atr_trail = pos.high_water_mark * TRAILING_STOP_PCT_FALLBACK
+
+                # After TP1 but before TP2: use wider trail (1R = SL distance)
+                # so the position has room to reach TP2.  After TP2: tighten.
+                tier = getattr(pos, "current_tier", 0) or 0
+                if tier >= 2:
+                    trail_dist = atr_trail          # Tight trail for runner
+                else:
+                    trail_dist = max(atr_trail, sl_distance)  # Wide trail until TP2
+
+                trailing_sl = pos.high_water_mark - trail_dist
                 if trailing_sl > pos.stop_loss:
                     pos.stop_loss = trailing_sl
                 if current_price <= trailing_sl:
@@ -189,9 +199,19 @@ class PositionMonitor:
             if unrealized_rr >= self.trailing_activation_rr:
                 # ATR-dynamic trailing: low_water_mark + ATR * multiplier
                 if atr > 0:
-                    trailing_sl = pos.high_water_mark + (atr * self.trailing_atr_multiplier)
+                    atr_trail = atr * self.trailing_atr_multiplier
                 else:
-                    trailing_sl = pos.high_water_mark * (1 + TRAILING_STOP_PCT_FALLBACK)
+                    atr_trail = pos.high_water_mark * TRAILING_STOP_PCT_FALLBACK
+
+                # After TP1 but before TP2: use wider trail (1R = SL distance)
+                # so the position has room to reach TP2.  After TP2: tighten.
+                tier = getattr(pos, "current_tier", 0) or 0
+                if tier >= 2:
+                    trail_dist = atr_trail          # Tight trail for runner
+                else:
+                    trail_dist = max(atr_trail, sl_distance)  # Wide trail until TP2
+
+                trailing_sl = pos.high_water_mark + trail_dist
                 if trailing_sl < pos.stop_loss:
                     pos.stop_loss = trailing_sl
                 if current_price >= trailing_sl:

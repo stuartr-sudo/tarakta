@@ -1144,7 +1144,15 @@ class FlippedTrader:
 
                     if trailing_active:
                         atr = atr_values.get(symbol, 0)
-                        trail_dist = atr * self.trailing_atr_multiplier if atr > 0 else sl_dist * 0.75
+                        atr_trail = atr * self.trailing_atr_multiplier if atr > 0 else sl_dist * 0.75
+
+                        # After TP1 but before TP2: use wider trail (1R = SL distance)
+                        # so the position has room to reach TP2.  After TP2 (runner
+                        # portion): tighten to ATR-based trail to lock in profit.
+                        if pos.current_tier >= 2:
+                            trail_dist = atr_trail          # Tight trail for runner
+                        else:
+                            trail_dist = max(atr_trail, sl_dist)  # Wide trail until TP2
 
                         if pos.direction == "long":
                             trail_sl = pos.high_water_mark - trail_dist
