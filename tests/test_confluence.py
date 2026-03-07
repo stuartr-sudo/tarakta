@@ -97,8 +97,11 @@ class TestPostSweepEngine:
         assert signal.direction is None
         assert "No completed sweep detected" in signal.reasons
 
-    def test_sweep_no_displacement_returns_35(self, engine):
-        """Sweep detected but no displacement -> score=35, below threshold."""
+    def test_sweep_no_displacement_scores_all_components(self, engine):
+        """Sweep without displacement still evaluates HTF/timing/pullback.
+
+        Before: early return at 35.  Now: sweep(35) + pullback(10) + HTF(15) + timing(15) = 75.
+        """
         ms = {"4h": _ms("bullish"), "1d": _ms("bullish"), "1h": _ms("bullish")}
         signal = engine.score_signal(
             symbol="BTC/USD", current_price=100.0,
@@ -109,6 +112,27 @@ class TestPostSweepEngine:
             in_post_kill_zone=True,
             ms_results=ms,
             pullback_result=_valid_pullback(),
+        )
+        assert signal.score == 75  # 35 + 10 + 15 + 15
+        assert signal.direction == "bullish"
+        assert signal.components["sweep_detected"] == 35
+        assert signal.components["displacement_confirmed"] == 0
+        assert signal.components["pullback_confirmed"] == 10
+        assert signal.components["htf_aligned"] == 15
+        assert signal.components["timing_optimal"] == 15
+
+    def test_sweep_no_displacement_no_bonus_stays_low(self, engine):
+        """Sweep alone (no displacement, no HTF, no timing) = 35, below threshold."""
+        ms = {"4h": _ms("ranging"), "1d": _ms("ranging"), "1h": _ms("ranging")}
+        signal = engine.score_signal(
+            symbol="BTC/USD", current_price=100.0,
+            sweep_result=_bullish_sweep(),
+            displacement_confirmed=False,
+            displacement_direction=None,
+            htf_direction=None,
+            in_post_kill_zone=False,
+            ms_results=ms,
+            pullback_result=None,
         )
         assert signal.score == 35
         assert signal.direction == "bullish"
@@ -197,8 +221,12 @@ class TestPostSweepEngine:
         assert signal.score == 100
         assert signal.direction == "bullish"
 
-    def test_displacement_wrong_direction_rejected(self, engine):
-        """Displacement exists but opposite to sweep direction -> below threshold."""
+    def test_displacement_wrong_direction_no_displacement_pts(self, engine):
+        """Displacement exists but opposite to sweep direction -> no displacement pts.
+
+        Still scores HTF/timing/pullback though (no early return).
+        sweep(35) + pullback(10) + HTF(15) + timing(15) = 75.
+        """
         ms = {"4h": _ms("bullish"), "1d": _ms("bullish"), "1h": _ms("bullish")}
         signal = engine.score_signal(
             symbol="BTC/USD", current_price=100.0,
@@ -210,7 +238,8 @@ class TestPostSweepEngine:
             ms_results=ms,
             pullback_result=_valid_pullback(),
         )
-        assert signal.score == 35
+        assert signal.score == 75  # No displacement pts, but everything else scores
+        assert signal.components["displacement_confirmed"] == 0
         assert "mismatch" in " ".join(signal.reasons).lower()
 
     def test_bearish_full_setup(self, engine):

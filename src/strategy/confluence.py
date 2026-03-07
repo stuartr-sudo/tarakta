@@ -8,12 +8,15 @@ displacement, then enter on the PULLBACK (preferred but not required).
 
 Scoring System (0-100):
   Completed Sweep Detection:      35 points (REQUIRED)
-  Post-Sweep Displacement:        25 points (REQUIRED)
+  Post-Sweep Displacement:        25 points (strongly preferred)
   Pullback Confirmed:             10 points (bonus, improves entry)
   HTF Trend Alignment (4H/1D):    15 points (bonus)
   Post-Kill Zone Timing:          15 points (bonus)
 
-Minimum threshold: 60 (requires sweep + displacement at minimum).
+Minimum threshold: 60.
+Classic path: sweep (35) + displacement (25) = 60.
+Alternative paths (no displacement): sweep (35) + HTF (15) + timing (15) = 65,
+  sweep (35) + pullback (10) + timing (15) = 60, etc.
 """
 from __future__ import annotations
 
@@ -61,11 +64,13 @@ class PostSweepEngine:
     """Post-sweep displacement scoring engine.
 
     Binary checklist approach:
-    - sweep_detected (35) + displacement_confirmed (25) = 60 minimum
+    - sweep_detected (35) = REQUIRED, no trade without a completed sweep
+    - displacement_confirmed (25) = strongly preferred, but not a hard gate
     - pullback_confirmed (10) = bonus (better entry, not required)
     - htf_aligned (15) + timing_optimal (15) = bonus probability
 
-    Threshold = 60 (requires sweep AND displacement at minimum).
+    Threshold = 60.  Classic: sweep + displacement.
+    Alternative: sweep + enough bonus confirmations (HTF + timing, etc.).
     """
 
     def __init__(self, entry_threshold: float = 60.0) -> None:
@@ -129,7 +134,9 @@ class PostSweepEngine:
                 components={"sweep_detected": 0},
             )
 
-        # --- Post-Sweep Displacement (25 pts) --- REQUIRED
+        # --- Post-Sweep Displacement (25 pts) --- STRONGLY PREFERRED
+        # (No longer an early return — let HTF/timing/pullback contribute even
+        #  when displacement is absent.  This opens sweep+HTF+timing paths.)
         if displacement_confirmed and displacement_direction == direction:
             score += self._weights.get("displacement_confirmed", 25)
             reasons.append(f"Post-sweep displacement confirmed: {direction}")
@@ -143,17 +150,6 @@ class PostSweepEngine:
             else:
                 reasons.append("No displacement after sweep")
             components["displacement_confirmed"] = 0
-
-            key_levels = self._collect_key_levels(ms_results)
-            return SignalCandidate(
-                score=score,
-                direction=direction,
-                reasons=reasons,
-                symbol=symbol,
-                entry_price=current_price,
-                components=components,
-                key_levels=key_levels,
-            )
 
         # --- Pullback Confirmation (10 pts) --- BONUS (improves entry, not required)
         if pullback_result is not None and pullback_result.pullback_detected:

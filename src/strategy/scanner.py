@@ -31,7 +31,7 @@ from src.data.candles import CandleManager
 from src.exchange.models import SignalCandidate
 from src.exchange.protocol import FuturesCapable
 from src.strategy.breakout_detector import BreakoutDetector
-from src.strategy.confluence import BREAKOUT_THRESHOLD, PostSweepEngine
+from src.strategy.confluence import BREAKOUT_THRESHOLD, BREAKOUT_WEIGHTS, PostSweepEngine
 from src.strategy.leverage import LeverageAnalyzer
 from src.strategy.market_structure import MarketStructureAnalyzer
 from src.strategy.pullback import PullbackAnalyzer
@@ -70,6 +70,15 @@ class AltcoinScanner:
         all_signals: list[SignalCandidate] = []
         total = len(pairs)
 
+        # ── Diagnostic counters (reset each scan) ──
+        diag_sweeps = 0
+        diag_displacements = 0
+        diag_sweep_and_disp = 0
+        diag_breakouts = 0
+        diag_breakout_vol = 0
+        diag_near_misses: list[tuple[str, float, str]] = []  # (symbol, score, type)
+        diag_errors = 0
+
         for batch_idx in range(0, total, BATCH_SIZE):
             batch = pairs[batch_idx : batch_idx + BATCH_SIZE]
             batch_num = batch_idx // BATCH_SIZE + 1
@@ -88,8 +97,28 @@ class AltcoinScanner:
             for result in results:
                 if isinstance(result, Exception):
                     logger.warning("pair_analysis_failed", error=str(result))
+                    diag_errors += 1
                     continue
                 if isinstance(result, SignalCandidate):
+                    # ── Diagnostic tracking ──
+                    comp = result.components
+                    has_sweep = comp.get("sweep_detected", 0) > 0
+                    has_disp = comp.get("displacement_confirmed", 0) > 0
+                    has_breakout = comp.get("breakout_confirmed", 0) > 0
+                    has_bo_vol = comp.get("volume_confirmed", 0) > 0
+
+                    if has_sweep:
+                        diag_sweeps += 1
+                    if has_disp:
+                        diag_displacements += 1
+                    if has_sweep and has_disp:
+                        diag_sweep_and_disp += 1
+                    if has_breakout:
+                        diag_breakouts += 1
+                    if has_breakout and has_bo_vol:
+                        diag_breakout_vol += 1
+
+                    # ── Threshold check ──
                     # Breakout signals use lower threshold (45) vs sweep (60)
                     threshold = (
                         BREAKOUT_THRESHOLD
@@ -98,6 +127,12 @@ class AltcoinScanner:
                     )
                     if result.score >= threshold:
                         all_signals.append(result)
+                    elif result.score > 0:
+                        # Near miss — scored but didn't qualify
+                        sig_type = "breakout" if has_breakout else "sweep"
+                        diag_near_misses.append(
+                            (result.symbol, round(result.score, 1), sig_type)
+                        )
 
             # Free memory between batches
             gc.collect()
@@ -112,6 +147,26 @@ class AltcoinScanner:
 
         # Sort by score descending (re-sort after leverage bonus)
         all_signals.sort(key=lambda s: s.score, reverse=True)
+
+        # ── Diagnostic summary ──
+        diag_near_misses.sort(key=lambda x: x[1], reverse=True)
+        top_misses = [
+            f"{sym}={score}({typ})" for sym, score, typ in diag_near_misses[:5]
+        ]
+
+        logger.info(
+            "scan_diagnostics",
+            pairs_scanned=total,
+            sweeps_found=diag_sweeps,
+            displacements_found=diag_displacements,
+            sweep_plus_displacement=diag_sweep_and_disp,
+            breakouts_found=diag_breakouts,
+            breakouts_with_volume=diag_breakout_vol,
+            signals_qualified=len(all_signals),
+            near_misses=len(diag_near_misses),
+            top_near_misses=top_misses if top_misses else "none",
+            errors=diag_errors,
+        )
 
         logger.info(
             "scan_complete",
@@ -237,6 +292,11 @@ class AltcoinScanner:
                     breakout_signal.atr_1h = atr_1h
                     breakout_signal.session_result = session_result
                     signal = breakout_signal
+                else:
+                    # Breakout found but too low — tag sweep signal for diagnostics
+                    signal.components["breakout_confirmed"] = BREAKOUT_WEIGHTS["breakout_confirmed"]
+                    if breakout_result.volume_confirmed:
+                        signal.components["volume_confirmed"] = BREAKOUT_WEIGHTS["volume_confirmed"]
 
         # Attach sweep data and ATR for order execution
         signal.sweep_result = sweep_result
