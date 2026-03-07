@@ -45,12 +45,18 @@ class SweepDetector:
         swing_low: float | None = None,
         lookback: int = 8,
         prefer_direction: str | None = None,
+        london_high: float = 0.0,
+        london_low: float = 0.0,
+        ny_high: float = 0.0,
+        ny_low: float = 0.0,
     ) -> SweepResult:
         """Check last `lookback` completed 1H candles for sweep completion.
 
         Priority order:
-        1. Asian range sweep (most reliable for intraday)
-        2. Swing high/low sweep (structural levels)
+        1. Asian range sweep (most reliable — overnight consolidation)
+        2. London range sweep (London session extremes)
+        3. NY range sweep (NY session extremes)
+        4. Swing high/low sweep (structural levels)
 
         Args:
             candles_1h: 1H OHLCV DataFrame.
@@ -62,6 +68,10 @@ class SweepDetector:
             prefer_direction: If set ("bullish"/"bearish"), prefer sweeps
                 matching this direction.  Falls back to any sweep if no
                 match is found in the window.
+            london_high: London session high (07:00-12:00 UTC).
+            london_low: London session low (07:00-12:00 UTC).
+            ny_high: NY session high (12:00-17:00 UTC).
+            ny_low: NY session low (12:00-17:00 UTC).
 
         Returns:
             SweepResult with detection details. sweep_level is the wick
@@ -72,11 +82,20 @@ class SweepDetector:
             return _empty_result()
 
         # Build list of levels to check in priority order
+        # Priority: Asian > London > NY > Swing (overnight consolidation is most reliable)
         levels: list[tuple[float, str, float]] = []  # (level, type, opposite_target)
 
         if asian_low > 0 and asian_high > 0 and asian_high > asian_low:
             levels.append((asian_low, "asian_low", asian_high))
             levels.append((asian_high, "asian_high", asian_low))
+
+        if london_low > 0 and london_high > 0 and london_high > london_low:
+            levels.append((london_low, "london_low", london_high))
+            levels.append((london_high, "london_high", london_low))
+
+        if ny_low > 0 and ny_high > 0 and ny_high > ny_low:
+            levels.append((ny_low, "ny_low", ny_high))
+            levels.append((ny_high, "ny_high", ny_low))
 
         if swing_low and swing_low > 0:
             target = swing_high if (swing_high and swing_high > 0) else 0.0
@@ -175,7 +194,7 @@ class SweepDetector:
         → target_level = opposite low (TP targets this)
         """
         # Bullish sweep: wick below level, close back above
-        if level_type in ("asian_low", "swing_low"):
+        if level_type in ("asian_low", "london_low", "ny_low", "swing_low"):
             if l < level and c > level:
                 depth = level - l
                 return SweepResult(
@@ -188,7 +207,7 @@ class SweepDetector:
                 )
 
         # Bearish sweep: wick above level, close back below
-        if level_type in ("asian_high", "swing_high"):
+        if level_type in ("asian_high", "london_high", "ny_high", "swing_high"):
             if h > level and c < level:
                 depth = h - level
                 return SweepResult(

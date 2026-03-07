@@ -18,6 +18,7 @@ Minimum threshold: 60 (requires sweep + displacement at minimum).
 from __future__ import annotations
 
 from src.exchange.models import (
+    BreakoutResult,
     MarketStructureResult,
     PullbackResult,
     SignalCandidate,
@@ -41,6 +42,19 @@ WEIGHTS = {
 
 # Backward compat alias
 POST_SWEEP_WEIGHTS = WEIGHTS
+
+# Breakout scoring weights (separate path, max 90 before leverage bonus)
+BREAKOUT_WEIGHTS = {
+    "breakout_confirmed": 25,   # Price broke AND held beyond level (REQUIRED)
+    "volume_confirmed": 20,     # Elevated volume on breakout (REQUIRED)
+    "htf_aligned": 15,          # 4H/1D trend agrees with breakout direction
+    "timing_optimal": 10,       # Post-kill zone timing
+    "candles_held_bonus": 10,   # Extra candles held = stronger conviction
+    "atr_distance_bonus": 10,   # Distance from level in ATR = genuine move
+}
+
+BREAKOUT_THRESHOLD = 45  # breakout (25) + volume (20) = 45 minimum
+MIN_HOLD = 2  # Minimum candles held to qualify as breakout
 
 
 class PostSweepEngine:
@@ -178,6 +192,113 @@ class PostSweepEngine:
             components["timing_optimal"] = 0
 
         # Collect key levels for SL/TP calculation
+        key_levels = self._collect_key_levels(ms_results)
+
+        return SignalCandidate(
+            score=score,
+            direction=direction,
+            reasons=reasons,
+            symbol=symbol,
+            entry_price=current_price,
+            key_levels=key_levels,
+            components=components,
+        )
+
+    def score_breakout(
+        self,
+        symbol: str,
+        current_price: float,
+        breakout_result: BreakoutResult,
+        htf_direction: str | None,
+        in_post_kill_zone: bool,
+        ms_results: dict[str, MarketStructureResult],
+    ) -> SignalCandidate:
+        """Score a breakout signal (complementary to sweep scoring).
+
+        Breakout Scoring (0-90, threshold 45):
+          Breakout confirmed:       25 pts (REQUIRED — price broke + held level)
+          Volume confirmed:         20 pts (REQUIRED — institutional participation)
+          HTF trend aligned:        15 pts (bonus — 4H/1D agree)
+          Post-kill zone timing:    10 pts (bonus — manipulation done)
+          Candles held bonus:       10 pts (bonus — more hold = higher conviction)
+          ATR distance bonus:       10 pts (bonus — genuine move, not noise)
+
+        Minimum threshold: 45 (breakout + volume).
+        """
+        score = 0.0
+        direction = breakout_result.breakout_direction
+        reasons: list[str] = []
+        components: dict[str, float] = {}
+
+        if not breakout_result.breakout_detected:
+            return SignalCandidate(
+                score=0,
+                direction=None,
+                reasons=["No breakout detected"],
+                symbol=symbol,
+                entry_price=current_price,
+                components={"breakout_confirmed": 0},
+            )
+
+        # --- Breakout Confirmed (25 pts) --- REQUIRED
+        score += BREAKOUT_WEIGHTS["breakout_confirmed"]
+        reasons.append(
+            f"Breakout confirmed: {breakout_result.breakout_type} "
+            f"({breakout_result.candles_held} candles held, "
+            f"{breakout_result.atr_distance:.1f} ATR distance)"
+        )
+        components["breakout_confirmed"] = BREAKOUT_WEIGHTS["breakout_confirmed"]
+
+        # --- Volume Confirmed (20 pts) --- REQUIRED for threshold
+        if breakout_result.volume_confirmed:
+            score += BREAKOUT_WEIGHTS["volume_confirmed"]
+            reasons.append("Volume confirmed on breakout (>1.5x average)")
+            components["volume_confirmed"] = BREAKOUT_WEIGHTS["volume_confirmed"]
+        else:
+            reasons.append("Low volume breakout (caution)")
+            components["volume_confirmed"] = 0
+
+        # --- HTF Alignment (15 pts) --- PREFERRED
+        htf_score, htf_reasons = self._score_htf(htf_direction, direction, ms_results)
+        score += htf_score
+        components["htf_aligned"] = htf_score
+        reasons.extend(htf_reasons)
+
+        # --- Post-Kill Zone Timing (10 pts) --- PREFERRED
+        if in_post_kill_zone:
+            score += BREAKOUT_WEIGHTS["timing_optimal"]
+            reasons.append("In post-kill-zone window")
+            components["timing_optimal"] = BREAKOUT_WEIGHTS["timing_optimal"]
+        else:
+            components["timing_optimal"] = 0
+
+        # --- Candles Held Bonus (up to 10 pts) ---
+        # 2 candles = 0 bonus, 3 = +3, 4 = +6, 5+ = +10
+        hold_bonus = min(
+            BREAKOUT_WEIGHTS["candles_held_bonus"],
+            max(0, (breakout_result.candles_held - MIN_HOLD) * 3),
+        )
+        if hold_bonus > 0:
+            score += hold_bonus
+            reasons.append(
+                f"Strong hold: {breakout_result.candles_held} candles beyond level (+{hold_bonus})"
+            )
+        components["candles_held_bonus"] = hold_bonus
+
+        # --- ATR Distance Bonus (up to 10 pts) ---
+        # 0.3 ATR = 0 bonus, 0.5 = +3, 1.0 = +7, 1.5+ = +10
+        atr_bonus = min(
+            BREAKOUT_WEIGHTS["atr_distance_bonus"],
+            max(0, int((breakout_result.atr_distance - 0.3) * 14)),
+        )
+        if atr_bonus > 0:
+            score += atr_bonus
+            reasons.append(
+                f"Clear breakout: {breakout_result.atr_distance:.1f} ATR from level (+{atr_bonus})"
+            )
+        components["atr_distance_bonus"] = atr_bonus
+
+        # Collect key levels for SL/TP
         key_levels = self._collect_key_levels(ms_results)
 
         return SignalCandidate(

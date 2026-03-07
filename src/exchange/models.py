@@ -99,6 +99,19 @@ class SweepResult:
 
 
 @dataclass
+class BreakoutResult:
+    """Result of breakout detection (price breaks AND holds beyond a level)."""
+    breakout_detected: bool
+    breakout_direction: str | None    # "bullish" or "bearish"
+    breakout_level: float             # The level that was broken
+    breakout_type: str | None         # "london_high", "swing_high", etc.
+    target_level: float               # Opposite side (for TP)
+    volume_confirmed: bool            # Volume > 1.5x average
+    candles_held: int                 # How many candles price held above/below
+    atr_distance: float               # Distance from level in ATR units
+
+
+@dataclass
 class PullbackResult:
     """Result of pullback detection after a displacement move."""
     pullback_detected: bool
@@ -197,6 +210,7 @@ class SignalCandidate:
     crt_result: object | None = None     # CRTResult from strategy.crt
     session_result: object | None = None  # SessionResult from strategy.sessions
     sweep_result: object | None = None   # SweepResult from strategy.sweep_detector
+    breakout_result: object | None = None  # BreakoutResult from strategy.breakout_detector
     leverage_profile: object | None = None  # LeverageProfile from strategy.leverage
 
 

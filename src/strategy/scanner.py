@@ -1,12 +1,19 @@
-"""Trade Travel Chill scanner — simplified post-sweep displacement pipeline.
+"""Trade Travel Chill scanner — post-sweep displacement + breakout pipeline.
 
-Scans all tradeable pairs through a streamlined pipeline:
+Scans all tradeable pairs through a dual-path pipeline:
+
+Path A — Sweep & Reverse (primary):
 1. Fetch candles (1H, 4H, 1D)
 2. Market structure on all TFs (for HTF trend + swing levels)
-3. Session analysis (for Asian range + post-KZ timing)
+3. Session analysis (Asian, London, NY ranges + post-KZ timing)
 4. Sweep detection on 1H (completed sweep = entry signal)
 5. Displacement check on 1H (confirms institutional commitment)
 6. Score with PostSweepEngine
+
+Path B — Breakout (complementary):
+7. If no sweep detected, check for genuine breakouts
+8. Price broke AND held beyond a key level with volume
+9. Score with PostSweepEngine.score_breakout()
 
 Removed from pipeline: CRT, Order Blocks, FVGs, Premium/Discount,
 LiquidityAnalyzer, MarketRegimeAnalyzer — these are the retail signals
@@ -23,7 +30,8 @@ from src.config import Settings
 from src.data.candles import CandleManager
 from src.exchange.models import SignalCandidate
 from src.exchange.protocol import FuturesCapable
-from src.strategy.confluence import PostSweepEngine
+from src.strategy.breakout_detector import BreakoutDetector
+from src.strategy.confluence import BREAKOUT_THRESHOLD, PostSweepEngine
 from src.strategy.leverage import LeverageAnalyzer
 from src.strategy.market_structure import MarketStructureAnalyzer
 from src.strategy.pullback import PullbackAnalyzer
@@ -49,6 +57,7 @@ class AltcoinScanner:
         self.vol_analyzer = VolumeAnalyzer()
         self.session_analyzer = SessionAnalyzer()
         self.sweep_detector = SweepDetector()
+        self.breakout_detector = BreakoutDetector()
         self.pullback_analyzer = PullbackAnalyzer(
             min_retracement=config.pullback_min_retracement,
             max_retracement=config.pullback_max_retracement,
@@ -80,8 +89,15 @@ class AltcoinScanner:
                 if isinstance(result, Exception):
                     logger.warning("pair_analysis_failed", error=str(result))
                     continue
-                if isinstance(result, SignalCandidate) and result.score >= self.config.entry_threshold:
-                    all_signals.append(result)
+                if isinstance(result, SignalCandidate):
+                    # Breakout signals use lower threshold (45) vs sweep (60)
+                    threshold = (
+                        BREAKOUT_THRESHOLD
+                        if result.breakout_result is not None
+                        else self.config.entry_threshold
+                    )
+                    if result.score >= threshold:
+                        all_signals.append(result)
 
             # Free memory between batches
             gc.collect()
@@ -141,6 +157,10 @@ class AltcoinScanner:
             swing_low=swing_low,
             lookback=8,
             prefer_direction=displacement_direction,
+            london_high=session_result.london_high,
+            london_low=session_result.london_low,
+            ny_high=session_result.ny_high,
+            ny_low=session_result.ny_low,
         )
 
         # 6.5 Pullback detection (requires displacement)
@@ -174,7 +194,7 @@ class AltcoinScanner:
         # Resolve HTF direction
         htf_direction = self._resolve_htf_direction(ms_results)
 
-        # 7. Score with PostSweepEngine
+        # 7. Score with PostSweepEngine (sweep path)
         signal = self.confluence.score_signal(
             symbol=symbol,
             current_price=current_price,
@@ -186,6 +206,37 @@ class AltcoinScanner:
             ms_results=ms_results,
             pullback_result=pullback_result,
         )
+
+        # 8. If sweep didn't produce a qualifying signal, try breakout path
+        if signal.score < self.config.entry_threshold:
+            breakout_result = self.breakout_detector.detect(
+                candles_1h=candles["1h"],
+                asian_high=session_result.asian_high,
+                asian_low=session_result.asian_low,
+                london_high=session_result.london_high,
+                london_low=session_result.london_low,
+                ny_high=session_result.ny_high,
+                ny_low=session_result.ny_low,
+                swing_high=swing_high,
+                swing_low=swing_low,
+            )
+
+            if breakout_result.breakout_detected:
+                breakout_signal = self.confluence.score_breakout(
+                    symbol=symbol,
+                    current_price=current_price,
+                    breakout_result=breakout_result,
+                    htf_direction=htf_direction,
+                    in_post_kill_zone=session_result.in_post_kill_zone,
+                    ms_results=ms_results,
+                )
+
+                # Use breakout signal if it scores above breakout threshold
+                if breakout_signal.score >= BREAKOUT_THRESHOLD:
+                    breakout_signal.breakout_result = breakout_result
+                    breakout_signal.atr_1h = atr_1h
+                    breakout_signal.session_result = session_result
+                    signal = breakout_signal
 
         # Attach sweep data and ATR for order execution
         signal.sweep_result = sweep_result

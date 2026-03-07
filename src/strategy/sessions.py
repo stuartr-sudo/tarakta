@@ -53,6 +53,10 @@ class SessionResult:
     post_kill_zone_name: str | None = None  # "post_london_kz", "post_ny_kz"
     asian_high: float = 0.0
     asian_low: float = 0.0
+    london_high: float = 0.0
+    london_low: float = 0.0
+    ny_high: float = 0.0
+    ny_low: float = 0.0
     asian_range_swept: str | None = None  # "above" (bearish signal) or "below" (bullish) or None
     minutes_into_session: int = 0
 
@@ -99,8 +103,14 @@ class SessionAnalyzer:
         # --- Minutes into current session ---
         mins = self._minutes_into_session(now, session)
 
-        # --- Asian range ---
+        # --- Session ranges ---
         asian_high, asian_low = self._get_asian_range(candles_1h, now)
+        london_high, london_low = self._get_session_range(
+            candles_1h, now, hour_start=7, hour_end=12, session_name="london",
+        )
+        ny_high, ny_low = self._get_session_range(
+            candles_1h, now, hour_start=12, hour_end=17, session_name="ny",
+        )
 
         # --- Asian sweep detection ---
         current_price = 0.0
@@ -117,6 +127,10 @@ class SessionAnalyzer:
             post_kill_zone_name=post_kz_name,
             asian_high=asian_high,
             asian_low=asian_low,
+            london_high=london_high,
+            london_low=london_low,
+            ny_high=ny_high,
+            ny_low=ny_low,
             asian_range_swept=sweep,
             minutes_into_session=mins,
         )
@@ -246,6 +260,77 @@ class SessionAnalyzer:
         asian_low = float(asian_candles["low"].min())
 
         return asian_high, asian_low
+
+    def _get_session_range(
+        self,
+        candles_1h: pd.DataFrame,
+        now: datetime,
+        hour_start: int,
+        hour_end: int,
+        session_name: str,
+    ) -> tuple[float, float]:
+        """Calculate a session's high/low from 1H candles.
+
+        Works for London (07:00-12:00 UTC) and NY (12:00-17:00 UTC).
+        If we're currently inside the session, uses previous day's completed range.
+        """
+        if candles_1h is None or candles_1h.empty:
+            return 0.0, 0.0
+
+        idx = candles_1h.index
+        if not isinstance(idx, pd.DatetimeIndex):
+            return 0.0, 0.0
+
+        current_time = now.time()
+        target_date = now.date()
+
+        # If we're currently inside this session window, use yesterday's completed range
+        session_start_time = time(hour_start, 0)
+        session_end_time = time(hour_end, 0)
+        if _in_range(current_time, session_start_time, session_end_time):
+            target_date = (now - pd.Timedelta(days=1)).date()
+
+        # Build timestamps for the target session window
+        range_start = pd.Timestamp(
+            year=target_date.year,
+            month=target_date.month,
+            day=target_date.day,
+            hour=hour_start, minute=0,
+            tz="UTC",
+        )
+        range_end = pd.Timestamp(
+            year=target_date.year,
+            month=target_date.month,
+            day=target_date.day,
+            hour=hour_end, minute=0,
+            tz="UTC",
+        )
+
+        # Ensure index is tz-aware for comparison
+        if idx.tz is None:
+            idx = idx.tz_localize("UTC")
+            candles_1h = candles_1h.copy()
+            candles_1h.index = idx
+
+        session_candles = candles_1h[
+            (candles_1h.index >= range_start) & (candles_1h.index < range_end)
+        ]
+
+        if session_candles.empty:
+            # Try previous day as fallback
+            range_start -= pd.Timedelta(days=1)
+            range_end -= pd.Timedelta(days=1)
+            session_candles = candles_1h[
+                (candles_1h.index >= range_start) & (candles_1h.index < range_end)
+            ]
+
+        if session_candles.empty:
+            return 0.0, 0.0
+
+        session_high = float(session_candles["high"].max())
+        session_low = float(session_candles["low"].min())
+
+        return session_high, session_low
 
     def _check_asian_sweep(
         self,
