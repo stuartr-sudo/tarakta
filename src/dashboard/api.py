@@ -908,6 +908,52 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             return {"scanning_active": False, "available": False}
         return {"scanning_active": engine._scanning_active, "available": True}
 
+    # ── Entry Refiner Queue ───────────────────────────────────────────
+    @router.get("/refiner/main")
+    @login_required
+    async def get_main_refiner_queue(request: Request):
+        """Get main bot entry refiner queue."""
+        if not engine or not engine.main_entry_refiner:
+            return {"entries": [], "total_queued": 0, "enabled": False}
+        state = engine.main_entry_refiner.get_state()
+        entries = []
+        for sym, data in state.get("entries", {}).items():
+            entries.append(data)
+        return {"entries": entries, "total_queued": state.get("total_queued", 0), "enabled": True}
+
+    @router.get("/refiner/custom")
+    @login_required
+    async def get_custom_refiner_queue(request: Request):
+        """Get custom bot entry refiner queue (all markets)."""
+        all_entries = []
+        total = 0
+        enabled = False
+
+        # Check primary custom trader
+        if engine and hasattr(engine, "custom_trader") and engine.custom_trader:
+            refiner = engine.custom_trader.entry_refiner
+            if refiner:
+                enabled = True
+                state = refiner.get_state()
+                for sym, data in state.get("entries", {}).items():
+                    data["market"] = "crypto"
+                    all_entries.append(data)
+                total += state.get("total_queued", 0)
+
+        # Check multi-market custom traders
+        for market_name, eng in _all_engines.items():
+            if hasattr(eng, "custom_trader") and eng.custom_trader:
+                refiner = eng.custom_trader.entry_refiner
+                if refiner:
+                    enabled = True
+                    state = refiner.get_state()
+                    for sym, data in state.get("entries", {}).items():
+                        data["market"] = market_name
+                        all_entries.append(data)
+                    total += state.get("total_queued", 0)
+
+        return {"entries": all_entries, "total_queued": total, "enabled": enabled}
+
     # ── Custom Bot Start/Stop ──────────────────────────────────────────
     @router.post("/custom/begin")
     @admin_required

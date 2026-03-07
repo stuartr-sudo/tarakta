@@ -167,6 +167,37 @@
 </div>
 {% endif %}
 
+<!-- Entry Refiner Queue -->
+<div class="panel" id="refiner-panel" style="border-left: 3px solid #f59e0b; display:none;">
+    <div class="panel-header">
+        <h2>Entry Refiner Queue
+            <span id="refiner-badge" class="badge" style="background:#f59e0b; color:#000; font-size:0.75rem;">0</span>
+        </h2>
+        <span style="font-size:0.7rem; color:var(--text-muted);">Sweep signals waiting for 5m reclaim confirmation</span>
+    </div>
+    <div id="refiner-body" class="panel-body no-pad">
+        <div class="overflow-x">
+            <table class="data-table" id="refiner-table">
+                <thead>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Dir</th>
+                        <th>Score</th>
+                        <th>Sweep Level</th>
+                        <th>1H Price</th>
+                        <th>Checks</th>
+                        <th>Expires</th>
+                    </tr>
+                </thead>
+                <tbody id="refiner-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+    <div id="refiner-empty" class="empty-state" style="display:none;">
+        <p>No signals queued for refinement. Sweep signals will appear here when detected.</p>
+    </div>
+</div>
+
 <!-- Open Positions (full width) -->
 <div class="panel">
     <div class="panel-header">
@@ -850,5 +881,60 @@ async function softRefreshStats() {
     }
 }
 setInterval(softRefreshStats, 30000);
+
+// --- Entry Refiner Queue ---
+async function loadRefinerQueue() {
+    try {
+        const resp = await fetch('/api/refiner/main');
+        const data = await resp.json();
+        const panel = document.getElementById('refiner-panel');
+        const badge = document.getElementById('refiner-badge');
+        const tbody = document.getElementById('refiner-tbody');
+        const body = document.getElementById('refiner-body');
+        const empty = document.getElementById('refiner-empty');
+        if (!panel) return;
+
+        if (!data.enabled) { panel.style.display = 'none'; return; }
+        panel.style.display = 'block';
+        badge.textContent = data.total_queued;
+
+        if (data.entries.length === 0) {
+            body.style.display = 'none';
+            empty.style.display = 'block';
+            return;
+        }
+        body.style.display = 'block';
+        empty.style.display = 'none';
+
+        tbody.innerHTML = '';
+        data.entries.forEach(e => {
+            const now = Date.now();
+            const expires = new Date(e.expires_at).getTime();
+            const remaining = Math.max(0, Math.round((expires - now) / 1000));
+            const mins = Math.floor(remaining / 60);
+            const secs = remaining % 60;
+            const timeStr = remaining > 0 ? mins + ':' + String(secs).padStart(2, '0') : 'Expired';
+            const timeClass = remaining < 300 ? 'text-orange' : '';
+
+            const dirClass = e.sweep_direction === 'bullish' ? 'long' : 'short';
+            const dirLabel = e.sweep_direction === 'bullish' ? 'LONG' : 'SHORT';
+
+            const row = document.createElement('tr');
+            row.innerHTML =
+                '<td><strong>' + (e.symbol || '').replace(':USDT', '') + '</strong></td>' +
+                '<td><span class="dir-badge ' + dirClass + '">' + dirLabel + '</span></td>' +
+                '<td><div class="score-bar"><span class="score-num ' + (e.score >= 65 ? 'positive' : (e.score >= 50 ? 'text-orange' : 'negative')) + '">' + (e.score || 0) + '</span></div></td>' +
+                '<td class="mono">$' + (e.sweep_level || 0).toFixed(6) + '</td>' +
+                '<td class="mono">$' + (e.original_1h_price || 0).toFixed(6) + '</td>' +
+                '<td class="mono">' + (e.check_count || 0) + '</td>' +
+                '<td class="mono ' + timeClass + '">' + timeStr + '</td>';
+            tbody.appendChild(row);
+        });
+    } catch (e) {
+        console.error('Refiner queue load failed:', e);
+    }
+}
+loadRefinerQueue();
+setInterval(loadRefinerQueue, 15000);
 </script>
 {% endblock %}
