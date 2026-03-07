@@ -29,6 +29,7 @@ from src.strategy.sessions import SessionAnalyzer
 from src.strategy.sweep_detector import SweepDetector
 from src.strategy.volume import VolumeAnalyzer
 from src.engine.entry_refiner import EntryRefiner
+from src.exchange.trading_hours import TradingHoursManager
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -103,6 +104,9 @@ class FlippedTrader:
 
         # Post-sweep entry refinement (set by core.py for custom bot only)
         self.entry_refiner: EntryRefiner | None = None
+
+        # Trading hours (skip scans when market is closed — stocks/commodities only)
+        self.trading_hours = TradingHoursManager()
 
         # Separate paper balance — independent of main bot
         self.balance = config.flipped_initial_balance
@@ -299,6 +303,18 @@ class FlippedTrader:
                     continue  # Skip scan this tick, state was just reset
                 # Check if scanning is active (custom bot may be paused)
                 if not self._scanning_active:
+                    continue
+                # Check trading hours — skip scan if market is closed (stocks/commodities)
+                market_info = getattr(self.exchange, "market_info", None)
+                if not self.trading_hours.should_scan(market_info):
+                    next_open = self.trading_hours.next_open(market_info)
+                    if next_open:
+                        logger.info(
+                            "flipped_market_closed",
+                            mode=self.mode_name,
+                            state_key=self.state_key,
+                            next_open=next_open.isoformat(),
+                        )
                     continue
                 await self._run_scan()
             except asyncio.CancelledError:
