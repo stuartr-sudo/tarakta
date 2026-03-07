@@ -64,10 +64,19 @@ class AltcoinScanner:
         )
         self.confluence = PostSweepEngine(entry_threshold=config.entry_threshold)
         self.leverage_analyzer = LeverageAnalyzer()
+        # Near-misses for hyper-watchlist promotion (populated each scan cycle)
+        self.last_near_misses: list[SignalCandidate] = []
 
-    async def scan(self, pairs: list[str]) -> list[SignalCandidate]:
+    async def scan(
+        self, pairs: list[str], exclude: set[str] | None = None,
+    ) -> list[SignalCandidate]:
         """Scan all pairs through the post-sweep displacement pipeline."""
+        # Exclude symbols currently on the hyper-watchlist
+        if exclude:
+            pairs = [p for p in pairs if p not in exclude]
+
         all_signals: list[SignalCandidate] = []
+        self.last_near_misses = []  # Reset each scan cycle
         total = len(pairs)
 
         # ── Diagnostic counters (reset each scan) ──
@@ -133,6 +142,9 @@ class AltcoinScanner:
                         diag_near_misses.append(
                             (result.symbol, round(result.score, 1), sig_type)
                         )
+                        # Collect full signal for hyper-watchlist promotion
+                        if result.score >= self.config.watchlist_min_score:
+                            self.last_near_misses.append(result)
 
             # Free memory between batches
             gc.collect()
@@ -309,6 +321,7 @@ class AltcoinScanner:
         signal.sweep_result = sweep_result
         signal.atr_1h = atr_1h
         signal.session_result = session_result
+        signal.htf_direction_cache = htf_direction  # Preserved for hyper-watchlist
 
         # Log qualifying signals (sweep threshold=60, breakout threshold=45)
         log_threshold = (

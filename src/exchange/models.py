@@ -212,6 +212,10 @@ class SignalCandidate:
     sweep_result: object | None = None   # SweepResult from strategy.sweep_detector
     breakout_result: object | None = None  # BreakoutResult from strategy.breakout_detector
     leverage_profile: object | None = None  # LeverageProfile from strategy.leverage
+    # Hyper-Watchlist fields
+    watchlist_promoted: bool = False           # True if signal graduated from watchlist
+    watchlist_duration_seconds: float = 0.0    # How long it was monitored before graduating
+    htf_direction_cache: str | None = None     # Preserved HTF direction for watchlist re-scoring
 
 
 @dataclass

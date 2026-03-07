@@ -133,6 +133,13 @@ class Settings(BaseSettings):
     custom_flip_threshold: float = 0.50      # 0.0–1.0 — only flip when sweep prob > this
     custom_scan_interval_minutes: int = 20   # Offset from flipped's 15min
 
+    # Hyper-Watchlist Monitor — promotes near-miss signals to a fast 5m monitor
+    watchlist_enabled: bool = True
+    watchlist_monitor_interval_seconds: int = 150   # Check every 2.5 min
+    watchlist_expiry_hours: float = 3.0             # Release after 3 hours
+    watchlist_max_size: int = 10                    # Max symbols to hyper-watch
+    watchlist_min_score: float = 35.0               # Must have at least a sweep (35 pts)
+
     # Multi-market configuration
     # Each key is a market name like "crypto", "stocks", "commodities"
     # Populated from MARKET_* env vars or left empty for backward-compat (uses legacy flat fields)

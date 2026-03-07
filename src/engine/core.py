@@ -12,6 +12,7 @@ from src.data.candles import CandleManager
 from src.data.repository import Repository
 from src.engine.flipped import FlippedTrader
 from src.engine.scheduler import Scheduler, TickType
+from src.engine.watchlist import WatchlistMonitor
 from src.engine.state import EngineState
 from src.exchange.models import Position, TakeProfitTier
 from src.exchange.trading_hours import TradingHoursManager
@@ -61,6 +62,18 @@ class TradingEngine:
             trailing_atr_multiplier=config.trailing_atr_multiplier,
         )
         self.scanner = AltcoinScanner(candle_manager, config)
+
+        # Hyper-Watchlist Monitor — fast 5m monitoring for near-miss signals
+        self._watchlist_queue: asyncio.Queue = asyncio.Queue()
+        self.watchlist_monitor: WatchlistMonitor | None = (
+            WatchlistMonitor(
+                candle_manager=candle_manager,
+                config=config,
+                signal_queue=self._watchlist_queue,
+            )
+            if config.watchlist_enabled
+            else None
+        )
 
         # Trading hours (24/7 for crypto, restricted for stocks/commodities)
         self.trading_hours = TradingHoursManager()
@@ -429,6 +442,22 @@ class TradingEngine:
                     self.exchange._leverage = saved_leverage
                 logger.info("main_bot_leverage_restored", leverage=saved_leverage)
 
+        # Start hyper-watchlist monitor loop (checks every 2.5 min on 5m candles)
+        if self.watchlist_monitor:
+            # Restore watchlist state from DB
+            if db_state:
+                wl_overrides = (db_state.get("config_overrides") or {})
+                wl_data = wl_overrides.get("watchlist_monitor")
+                if wl_data:
+                    self.watchlist_monitor.restore_state(wl_data)
+            self._watchlist_task = asyncio.create_task(self.watchlist_monitor.run_loop())
+            self._background_tasks.add(self._watchlist_task)
+            self._watchlist_task.add_done_callback(self._background_tasks.discard)
+            logger.info(
+                "watchlist_monitor_spawned",
+                entries=len(self.watchlist_monitor.entries),
+            )
+
         # Run an immediate scan on startup if scanning is active and no recent scan
         if self._scanning_active:
             should_startup_scan = False
@@ -473,6 +502,8 @@ class TradingEngine:
                 if tick_type == TickType.MONITOR:
                     # Always monitor open positions (even when scanning is paused)
                     await self._monitor_tick()
+                    # Process graduated signals from hyper-watchlist
+                    await self._process_watchlist_graduations()
                     await self._persist_state()
                 else:
                     # Skip scanning for new trades if bot is paused
@@ -618,8 +649,28 @@ class TradingEngine:
             await self._persist_state()
             return
 
-        # Scan for signals
-        signals = await self.scanner.scan(pairs)
+        # Scan for signals (exclude symbols already on the hyper-watchlist)
+        watchlist_exclude = (
+            self.watchlist_monitor.get_excluded_symbols()
+            if self.watchlist_monitor
+            else set()
+        )
+        signals = await self.scanner.scan(pairs, exclude=watchlist_exclude)
+
+        # Promote near-misses to hyper-watchlist for fast 5m monitoring
+        if self.watchlist_monitor and self.scanner.last_near_misses:
+            promoted = 0
+            for near_miss in self.scanner.last_near_misses:
+                sig_type = "breakout" if near_miss.breakout_result is not None else "sweep"
+                if self.watchlist_monitor.add_entry(near_miss, sig_type):
+                    promoted += 1
+            if promoted:
+                logger.info(
+                    "watchlist_near_misses_promoted",
+                    promoted=promoted,
+                    total_near_misses=len(self.scanner.last_near_misses),
+                    watchlist_size=len(self.watchlist_monitor.entries),
+                )
 
         # Apply adaptive threshold filter
         active_threshold = self.adaptive_threshold.threshold
@@ -1032,6 +1083,107 @@ class TradingEngine:
             signals_saved=signals_saved,
             trades_entered=trades_entered,
         )
+
+    async def _process_watchlist_graduations(self) -> None:
+        """Process signals that graduated from the hyper-watchlist.
+
+        Runs every 60s (on MONITOR tick). Graduated signals are fed through
+        the same execution pipeline as regular signals (risk validation,
+        order execution, etc.).
+        """
+        if not self.watchlist_monitor:
+            return
+
+        while not self._watchlist_queue.empty():
+            try:
+                graduated = self._watchlist_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+            logger.info(
+                "watchlist_signal_processing",
+                symbol=graduated.symbol,
+                score=graduated.score,
+                direction=graduated.direction,
+                duration_seconds=graduated.watchlist_duration_seconds,
+            )
+
+            # Skip if we already have a position in this symbol
+            if graduated.symbol in self.portfolio.open_positions:
+                logger.info(
+                    "watchlist_signal_skipped_open_position",
+                    symbol=graduated.symbol,
+                )
+                continue
+
+            # Skip if in cooldown
+            cooldown_until = self._reversal_cooldowns.get(graduated.symbol)
+            if cooldown_until and datetime.now(timezone.utc) < cooldown_until:
+                logger.info(
+                    "watchlist_signal_skipped_cooldown",
+                    symbol=graduated.symbol,
+                )
+                continue
+
+            # Daily trade limit check
+            if self.state.daily_trade_count >= self.config.max_daily_trades:
+                logger.info("watchlist_signal_skipped_daily_limit")
+                continue
+
+            # Risk validation (max concurrent, balance, exposure, etc.)
+            try:
+                total_exposure = sum(
+                    pos.cost_usd for pos in self.portfolio.open_positions.values()
+                )
+                validation = self.risk_manager.validate_trade(
+                    open_position_count=len(self.portfolio.open_positions),
+                    open_position_symbols=set(self.portfolio.open_positions.keys()),
+                    current_balance=self.portfolio.current_balance,
+                    daily_start_balance=self.portfolio.daily_start_balance,
+                    daily_pnl=self.portfolio.daily_pnl,
+                    signal=graduated,
+                    total_exposure_usd=total_exposure,
+                )
+                if not validation.allowed:
+                    logger.info(
+                        "watchlist_signal_risk_rejected",
+                        symbol=graduated.symbol,
+                        reason=validation.reason,
+                    )
+                    continue
+            except Exception as e:
+                logger.warning("watchlist_risk_check_failed", error=str(e))
+                continue
+
+            # Execute the trade
+            try:
+                position, order_result, trade_record = (
+                    await self.order_executor.execute_entry(
+                        signal=graduated,
+                        current_balance=self.portfolio.current_balance,
+                        mode=self.state.mode,
+                    )
+                )
+
+                if position and order_result.filled:
+                    self.portfolio.add_position(position)
+                    self.state.daily_trade_count += 1
+                    logger.info(
+                        "watchlist_trade_entered",
+                        symbol=graduated.symbol,
+                        direction=graduated.direction,
+                        entry=position.entry_price,
+                        sl=position.stop_loss,
+                        tp=position.take_profit,
+                        score=graduated.score,
+                        watchlist_duration=graduated.watchlist_duration_seconds,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "watchlist_entry_failed",
+                    symbol=graduated.symbol,
+                    error=str(e),
+                )
 
     async def _monitor_tick(self) -> None:
         """Check open positions for SL/TP/trailing stop + liquidation proximity."""
@@ -1559,6 +1711,9 @@ class TradingEngine:
                 overrides["dynamic_weights"] = self.dynamic_weights.to_state()
             if self.flipped_trader.enabled:
                 overrides["flipped_trader"] = self.flipped_trader.to_state_dict()
+            # Persist hyper-watchlist state
+            if self.watchlist_monitor:
+                overrides["watchlist_monitor"] = self.watchlist_monitor.get_state()
             # Persist main bot scanning state
             main_settings = overrides.get("main_bot_settings", {})
             if not isinstance(main_settings, dict):
