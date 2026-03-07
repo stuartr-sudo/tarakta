@@ -1346,7 +1346,11 @@ class TradingEngine:
 
     async def _monitor_tick(self) -> None:
         """Check open positions for SL/TP/trailing stop + liquidation proximity."""
-        has_main_positions = bool(self.portfolio.open_positions)
+        # Non-crypto engines must NOT monitor main bot positions — those are crypto
+        # symbols that only the crypto engine's Binance connector can handle.
+        # Without this guard, stocks/commodities engines try to fetch crypto tickers
+        # from Yahoo Finance → 500 errors + triple API call volume.
+        has_main_positions = bool(self.portfolio.open_positions) and self._market_name == "crypto"
         has_flipped_positions = self.flipped_trader.enabled and bool(self.flipped_trader.positions)
 
         if not has_main_positions and not has_flipped_positions:
