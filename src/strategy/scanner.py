@@ -202,6 +202,13 @@ class AltcoinScanner:
         displacement_confirmed = vol_profile.displacement_detected
         displacement_direction = vol_profile.displacement_direction
 
+        # 5.5 Volume sustainability check: if volume is declining after the
+        # displacement spike, treat it as unreliable (likely a one-off liquidation
+        # cascade or single whale, not sustained institutional interest).
+        if displacement_confirmed and vol_profile.volume_trend == "decreasing":
+            displacement_confirmed = False
+            displacement_direction = None
+
         # 6. Sweep detection on 1H (prefer sweeps matching displacement direction
         #    to avoid pullback candles being misread as new conflicting sweeps)
         sweep_result = self.sweep_detector.detect(
