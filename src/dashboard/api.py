@@ -940,8 +940,10 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                     all_entries.append(data)
                 total += state.get("total_queued", 0)
 
-        # Check multi-market custom traders
+        # Check multi-market custom traders (skip primary to avoid double-counting)
         for market_name, eng in _all_engines.items():
+            if eng is engine:
+                continue  # Already checked above as primary
             if hasattr(eng, "custom_trader") and eng.custom_trader:
                 refiner = eng.custom_trader.entry_refiner
                 if refiner:
