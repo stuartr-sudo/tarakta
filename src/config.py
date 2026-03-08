@@ -91,7 +91,7 @@ class Settings(BaseSettings):
 
     # Stale trade auto-close — close losing trades that haven't worked out
     max_hold_hours: float = 4.0  # Auto-close trades open longer than this IF in negative
-    stale_close_below_rr: float = 0.5  # Only auto-close if unrealized R is below this threshold
+    stale_close_below_rr: float = 0.0  # Only auto-close if trade is in the red (negative PnL)
 
     # Signal reversal — disabled for Trade Travel Chill (no reversals, accept the loss)
     reversal_enabled: bool = False
