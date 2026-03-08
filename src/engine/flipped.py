@@ -30,6 +30,7 @@ from src.strategy.sweep_detector import SweepDetector
 from src.strategy.volume import VolumeAnalyzer
 from src.engine.consensus import ConsensusMonitor
 from src.engine.entry_refiner import EntryRefiner
+from src.exchange.protocol import get_symbol_category, CATEGORY_LABELS
 from src.exchange.trading_hours import TradingHoursManager
 from src.utils.logging import get_logger
 
@@ -580,6 +581,7 @@ class FlippedTrader:
         skipped_cooldown = 0
         skipped_already_open = 0
         skipped_entry_failed = 0
+        skipped_sector_cap = 0
         for signal in signals:
             if FLIPPED_MAX_CONCURRENT > 0 and len(self.positions) >= FLIPPED_MAX_CONCURRENT:
                 break
@@ -601,6 +603,18 @@ class FlippedTrader:
             if signal.symbol in self._closed_symbols:
                 skipped_cooldown += 1
                 continue
+            # Sector concentration cap — limit correlated positions
+            max_sector = self.config.max_sector_positions
+            if max_sector > 0:
+                signal_category = get_symbol_category(signal.symbol)
+                if signal_category != "other":
+                    sector_count = sum(
+                        1 for sym in self.positions
+                        if get_symbol_category(sym) == signal_category
+                    )
+                    if sector_count >= max_sector:
+                        skipped_sector_cap += 1
+                        continue
             # Also skip if already queued in the entry refiner
             if self.entry_refiner and signal.symbol in self.entry_refiner.get_queued_symbols():
                 skipped_already_open += 1
@@ -663,6 +677,7 @@ class FlippedTrader:
             skipped_cooldown=skipped_cooldown,
             skipped_already_open=skipped_already_open,
             skipped_entry_failed=skipped_entry_failed,
+            skipped_sector_cap=skipped_sector_cap,
             open_positions=len(self.positions),
             balance=round(self.balance, 2),
             flip_mode=self.flip_mode,

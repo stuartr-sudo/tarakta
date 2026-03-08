@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     max_position_pct: float = 0.25  # Max 25% of balance allocated per trade (margin)
     max_exposure_pct: float = 1.0  # Allow full budget deployment across positions
     max_concurrent: int = 0  # 0 = unlimited
+    max_sector_positions: int = 3  # Max positions per sector/category (0 = unlimited)
     max_daily_drawdown: float = 0.10
     circuit_breaker_pct: float = 0.15
     min_rr_ratio: float = 2.0  # Minimum 2:1 reward-to-risk

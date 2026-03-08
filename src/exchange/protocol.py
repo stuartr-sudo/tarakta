@@ -177,3 +177,82 @@ def parse_symbol_base(symbol: str) -> str:
         base = symbol.split("/")[0]
         return base.split(":")[0] if ":" in base else base
     return symbol
+
+
+# ---------------------------------------------------------------------------
+# Sector / Category mapping for correlation risk
+# ---------------------------------------------------------------------------
+# Maps base symbol -> sector key.  Mirrors the comment-based grouping in
+# BinanceFuturesClient.QUALITY_BASES but as structured data.
+# Symbols not in this map default to "other".
+
+SYMBOL_CATEGORIES: dict[str, str] = {
+    # Layer 1s
+    "BTC": "layer1", "ETH": "layer1", "SOL": "layer1", "ADA": "layer1",
+    "AVAX": "layer1", "DOT": "layer1", "ATOM": "layer1", "NEAR": "layer1",
+    "SUI": "layer1", "APT": "layer1", "SEI": "layer1", "TIA": "layer1",
+    "INJ": "layer1", "FTM": "layer1", "ALGO": "layer1", "EGLD": "layer1",
+    "HBAR": "layer1", "ICP": "layer1", "FIL": "layer1", "TON": "layer1",
+    "TRX": "layer1", "XLM": "layer1", "XRP": "layer1", "EOS": "layer1",
+    "FLOW": "layer1", "MINA": "layer1", "CELO": "layer1", "ONE": "layer1",
+    "KAVA": "layer1", "VET": "layer1", "THETA": "layer1",
+    # Layer 2s / Scaling
+    "MATIC": "layer2", "POL": "layer2", "ARB": "layer2", "OP": "layer2",
+    "IMX": "layer2", "STRK": "layer2", "MNT": "layer2", "METIS": "layer2",
+    "ZK": "layer2", "MANTA": "layer2", "BLAST": "layer2",
+    # DeFi
+    "UNI": "defi", "AAVE": "defi", "MKR": "defi", "SNX": "defi",
+    "COMP": "defi", "CRV": "defi", "SUSHI": "defi", "YFI": "defi",
+    "DYDX": "defi", "GMX": "defi", "PENDLE": "defi", "JUP": "defi",
+    "RAY": "defi", "JTO": "defi", "PYTH": "defi", "LDO": "defi",
+    "RPL": "defi", "FXS": "defi", "LQTY": "defi", "BAL": "defi",
+    "1INCH": "defi",
+    # Infrastructure / Oracles
+    "LINK": "infra", "GRT": "infra", "API3": "infra", "BAND": "infra",
+    "REN": "infra",
+    # Storage / Compute / AI
+    "AR": "compute", "RENDER": "compute", "AKT": "compute",
+    "TAO": "compute", "FET": "compute", "AGIX": "compute",
+    # Gaming / Metaverse
+    "AXS": "gaming", "SAND": "gaming", "MANA": "gaming", "GALA": "gaming",
+    "ENJ": "gaming", "RONIN": "gaming", "PIXEL": "gaming",
+    # Exchange Tokens
+    "BNB": "exchange", "OKB": "exchange", "CRO": "exchange",
+    # Privacy
+    "XMR": "privacy", "ZEC": "privacy",
+    # Interoperability
+    "RUNE": "interop", "ZRO": "interop", "W": "interop",
+    "WOO": "interop", "STX": "interop",
+    # Meme Coins (highly correlated with each other)
+    "DOGE": "meme", "SHIB": "meme", "PEPE": "meme",
+    "BONK": "meme", "WIF": "meme", "FLOKI": "meme",
+    # Other Established
+    "LTC": "other", "BCH": "other", "ETC": "other",
+    "ONDO": "other", "ENS": "other", "SSV": "other",
+    "EIGEN": "other", "ETHFI": "other", "WLD": "other",
+    "JASMY": "other", "CHZ": "other", "MASK": "other", "BLUR": "other",
+}
+
+CATEGORY_LABELS: dict[str, str] = {
+    "layer1": "Layer 1s",
+    "layer2": "Layer 2s / Scaling",
+    "defi": "DeFi",
+    "infra": "Infrastructure / Oracles",
+    "compute": "Storage / Compute / AI",
+    "gaming": "Gaming / Metaverse",
+    "exchange": "Exchange Tokens",
+    "privacy": "Privacy",
+    "interop": "Interoperability",
+    "meme": "Meme Coins",
+    "other": "Other",
+}
+
+
+def get_symbol_category(symbol: str) -> str:
+    """Get the sector category for a trading symbol.
+
+    Handles any symbol format (crypto, stocks, commodities).
+    Returns ``"other"`` for unknown symbols.
+    """
+    base = parse_symbol_base(symbol)
+    return SYMBOL_CATEGORIES.get(base, "other")

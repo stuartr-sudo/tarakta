@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.config import Settings
 from src.exchange.models import PositionSize, SignalCandidate, TradeValidation
+from src.exchange.protocol import get_symbol_category, CATEGORY_LABELS
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -17,6 +18,7 @@ class RiskManager:
         self.max_position_pct = config.max_position_pct
         self.max_exposure_pct = config.max_exposure_pct
         self.max_concurrent = config.max_concurrent
+        self.max_sector_positions = config.max_sector_positions
         self.max_daily_drawdown = config.max_daily_drawdown
         self.min_rr_ratio = config.min_rr_ratio
         self.cooldown_hours = config.cooldown_hours
@@ -174,6 +176,22 @@ class RiskManager:
             return TradeValidation(
                 allowed=False, reason=f"Max {self.max_concurrent} concurrent positions reached"
             )
+
+        # Sector concentration cap — limit correlated positions
+        if self.max_sector_positions > 0:
+            signal_category = get_symbol_category(signal.symbol)
+            if signal_category != "other":  # Don't cap the catch-all bucket
+                sector_count = sum(
+                    1 for sym in open_position_symbols
+                    if get_symbol_category(sym) == signal_category
+                )
+                if sector_count >= self.max_sector_positions:
+                    label = CATEGORY_LABELS.get(signal_category, signal_category)
+                    return TradeValidation(
+                        allowed=False,
+                        reason=f"Sector cap: {sector_count}/{self.max_sector_positions} "
+                               f"{label} positions already open",
+                    )
 
         # Daily drawdown check — use equity (cash + positions), not just cash
         if daily_start_balance > 0:

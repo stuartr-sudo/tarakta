@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from src.dashboard.auth import admin_required, login_required
 from src.data.repository import Repository
 from src.exchange.models import OrderResult
+from src.exchange.protocol import get_symbol_category, CATEGORY_LABELS
 from src.strategy.split_test import SplitTestManager
 from src.utils.logging import get_logger
 
@@ -259,6 +260,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 "unrealized_pct": round(unrealized / effective_cost * 100, 2) if effective_cost > 0 else 0,
                 "leverage": leverage,
                 "trade_id": trade.get("id"),
+                "sector": CATEGORY_LABELS.get(get_symbol_category(symbol), "Other"),
             })
             total_unrealized += unrealized
 
@@ -464,6 +466,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 "confluence_score": float(trade.get("confluence_score", 0) or 0),
                 "entry_time": trade.get("entry_time"),
                 "signal_reasons": trade.get("signal_reasons", []),
+                "sector": CATEGORY_LABELS.get(get_symbol_category(symbol), "Other"),
             })
             total_unrealized += unrealized
 
@@ -628,6 +631,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 "confluence_score": float(trade.get("confluence_score", 0) or 0),
                 "entry_time": trade.get("entry_time"),
                 "signal_reasons": trade.get("signal_reasons", []),
+                "sector": CATEGORY_LABELS.get(get_symbol_category(symbol), "Other"),
             })
             total_unrealized += unrealized
 
