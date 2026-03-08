@@ -802,6 +802,7 @@ class TradingEngine:
         for signal in signals:
             try:
                 position = None
+                sig_type = "breakout" if signal.breakout_result is not None else "sweep"
 
                 # --- Post-sweep entry refinement: queue for 5m monitoring ---
                 # If refiner is active AND signal has a sweep, queue for 5m
@@ -824,7 +825,7 @@ class TradingEngine:
                                 "direction": signal.direction or "none",
                                 "score": signal.score,
                                 "reasons": signal.reasons + ["QUEUED:entry_refiner"],
-                                "components": {"volume_24h": vol_24h},
+                                "components": {"volume_24h": vol_24h, "signal_type": sig_type},
                                 "current_price": signal.entry_price,
                                 "acted_on": False,
                                 "scan_cycle": cycle,
@@ -865,7 +866,7 @@ class TradingEngine:
                             "direction": signal.direction or "none",
                             "score": signal.score,
                             "reasons": signal.reasons + [f"BLOCKED:sentiment={sentiment_score:.1f}"],
-                            "components": {"volume_24h": vol_24h, "sentiment": sentiment_score},
+                            "components": {"volume_24h": vol_24h, "sentiment": sentiment_score, "signal_type": sig_type},
                             "current_price": signal.entry_price,
                             "acted_on": False,
                             "scan_cycle": cycle,
@@ -889,7 +890,7 @@ class TradingEngine:
                             "direction": signal.direction or "none",
                             "score": signal.score,
                             "reasons": signal.reasons + [f"BLOCKED:critical_event={critical_event}"],
-                            "components": {"volume_24h": vol_24h, "sentiment": sentiment_score},
+                            "components": {"volume_24h": vol_24h, "sentiment": sentiment_score, "signal_type": sig_type},
                             "current_price": signal.entry_price,
                             "acted_on": False,
                             "scan_cycle": cycle,
@@ -934,7 +935,7 @@ class TradingEngine:
                             "direction": signal.direction or "none",
                             "score": signal.score,
                             "reasons": signal.reasons + [f"adj_score={adjusted_score:.1f}"],
-                            "components": {"volume_24h": vol_24h, "sentiment": sentiment_score},
+                            "components": {"volume_24h": vol_24h, "sentiment": sentiment_score, "signal_type": sig_type},
                             "current_price": signal.entry_price,
                             "acted_on": False,
                             "scan_cycle": cycle,
@@ -982,6 +983,7 @@ class TradingEngine:
                                             "consensus_penalty": consensus_result.penalty,
                                             "portfolio_bias": consensus_result.portfolio_bias,
                                             "btc_trend": consensus_result.btc_trend,
+                                            "signal_type": sig_type,
                                         },
                                         "current_price": signal.entry_price,
                                         "acted_on": False,
@@ -1067,6 +1069,7 @@ class TradingEngine:
                                     "adjusted_score": round(adjusted_score, 2),
                                     "test_group": test_group,
                                     "llm_analysis": llm_analysis_data,
+                                    "signal_type": sig_type,
                                 },
                                 "current_price": signal.entry_price,
                                 "acted_on": False,
@@ -1103,6 +1106,7 @@ class TradingEngine:
                                         "sentiment": sentiment_score,
                                         "adjusted_score": round(adjusted_score, 2),
                                         "test_group": test_group,
+                                        "signal_type": sig_type,
                                     },
                                     "current_price": signal.entry_price,
                                     "acted_on": True,
@@ -1181,6 +1185,7 @@ class TradingEngine:
                     "sentiment": sentiment_score,
                     "adjusted_score": round(adjusted_score, 2),
                     "test_group": test_group,
+                    "signal_type": sig_type,
                 }
                 if llm_analysis_data:
                     signal_components["llm_analysis"] = llm_analysis_data

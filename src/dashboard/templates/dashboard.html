@@ -338,7 +338,12 @@
                 <tbody>
                     {% for s in signals %}
                     <tr>
-                        <td><strong>{{ s.symbol|replace(':USDT', '') }}</strong></td>
+                        <td>
+                            <strong>{{ s.symbol|replace(':USDT', '') }}</strong>
+                            {% if s.components and s.components.signal_type == 'breakout' %}
+                            <span class="reason-pill" style="font-size:0.6rem; margin-left:4px; background:var(--accent-blue, #3b82f6); color:#fff;">BRK</span>
+                            {% endif %}
+                        </td>
                         <td>
                             <span class="dir-badge {{ s.direction }}">{{ s.direction }}</span>
                         </td>
