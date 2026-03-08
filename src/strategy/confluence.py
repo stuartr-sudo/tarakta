@@ -57,7 +57,7 @@ BREAKOUT_WEIGHTS = {
 }
 
 BREAKOUT_THRESHOLD = 45  # breakout (25) + volume (20) = 45 minimum
-MIN_HOLD = 2  # Minimum candles held to qualify as breakout
+MIN_HOLD = 3  # Minimum candles held to qualify as breakout
 
 
 class PostSweepEngine:
@@ -251,6 +251,21 @@ class PostSweepEngine:
                 components={"breakout_confirmed": 0},
             )
 
+        # --- HTF Alignment Gate --- REQUIRED for breakouts
+        # Breakouts lack sweep+displacement conviction, so HTF agreement is
+        # mandatory. A breakout against the 4H trend is a classic trap.
+        if htf_direction is not None and htf_direction != direction:
+            return SignalCandidate(
+                score=0,
+                direction=None,
+                reasons=[
+                    f"Breakout {direction} rejected: HTF trend is {htf_direction}"
+                ],
+                symbol=symbol,
+                entry_price=current_price,
+                components={"breakout_confirmed": 0},
+            )
+
         # --- Breakout Confirmed (25 pts) --- REQUIRED
         score += BREAKOUT_WEIGHTS["breakout_confirmed"]
         reasons.append(
@@ -297,10 +312,10 @@ class PostSweepEngine:
         components["candles_held_bonus"] = hold_bonus
 
         # --- ATR Distance Bonus (up to 10 pts) ---
-        # 0.3 ATR = 0 bonus, 0.5 = +3, 1.0 = +7, 1.5+ = +10
+        # 0.5 ATR = 0 bonus, 0.7 = +3, 1.2 = +10 (capped)
         atr_bonus = min(
             BREAKOUT_WEIGHTS["atr_distance_bonus"],
-            max(0, int((breakout_result.atr_distance - 0.3) * 14)),
+            max(0, int((breakout_result.atr_distance - 0.5) * 14)),
         )
         if atr_bonus > 0:
             score += atr_bonus

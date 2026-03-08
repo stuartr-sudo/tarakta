@@ -10,11 +10,13 @@ momentum moves).
 
 Breakout criteria:
 1. Price closes beyond a key level (session range or swing high/low)
-2. Price HOLDS beyond that level for 2+ completed candles
-3. Volume is elevated (> 1.5x average) — institutional participation
-4. Distance from level is meaningful (> 0.3 ATR to filter noise)
+2. Price HOLDS beyond that level for 3+ completed candles
+3. Volume is elevated (> 1.5x average) on majority of hold candles — sustained institutional participation
+4. Distance from level is meaningful (> 0.5 ATR to filter noise)
 """
 from __future__ import annotations
+
+import math
 
 import pandas as pd
 
@@ -24,13 +26,13 @@ from src.utils.logging import get_logger
 logger = get_logger(__name__)
 
 # Minimum candles price must hold beyond the level
-MIN_HOLD_CANDLES = 2
+MIN_HOLD_CANDLES = 3
 
 # Minimum volume ratio vs 20-period average
 MIN_VOLUME_RATIO = 1.5
 
 # Minimum distance from level in ATR units (filters noise touches)
-MIN_ATR_DISTANCE = 0.3
+MIN_ATR_DISTANCE = 0.5
 
 
 def _empty_result() -> BreakoutResult:
@@ -190,7 +192,7 @@ class BreakoutDetector:
             # Bullish breakout: price breaks above a high level
             # Check the most recent candles (skip -1 which may be incomplete)
             candles_above = 0
-            vol_elevated = False
+            vol_elevated_count = 0
             max_distance = 0.0
 
             for i in range(-2, -2 - lookback, -1):
@@ -201,15 +203,17 @@ class BreakoutDetector:
                     candles_above += 1
                     distance = c - level
                     max_distance = max(max_distance, distance)
-                    # Check volume on the breakout candle
+                    # Count candles with elevated volume (sustained participation)
                     v = float(volume.iloc[i])
                     if v > avg_vol * MIN_VOLUME_RATIO:
-                        vol_elevated = True
+                        vol_elevated_count += 1
                 else:
                     # Price closed back below — not a clean breakout hold
                     break
 
             atr_dist = max_distance / atr if atr > 0 else 0
+            # Require majority of hold candles to have elevated volume
+            vol_elevated = vol_elevated_count >= math.ceil(candles_above / 2) if candles_above > 0 else False
 
             if candles_above >= MIN_HOLD_CANDLES and atr_dist >= MIN_ATR_DISTANCE:
                 return BreakoutResult(
@@ -226,7 +230,7 @@ class BreakoutDetector:
         elif level_type in ("asian_low", "london_low", "ny_low", "swing_low"):
             # Bearish breakout: price breaks below a low level
             candles_below = 0
-            vol_elevated = False
+            vol_elevated_count = 0
             max_distance = 0.0
 
             for i in range(-2, -2 - lookback, -1):
@@ -239,11 +243,13 @@ class BreakoutDetector:
                     max_distance = max(max_distance, distance)
                     v = float(volume.iloc[i])
                     if v > avg_vol * MIN_VOLUME_RATIO:
-                        vol_elevated = True
+                        vol_elevated_count += 1
                 else:
                     break
 
             atr_dist = max_distance / atr if atr > 0 else 0
+            # Require majority of hold candles to have elevated volume
+            vol_elevated = vol_elevated_count >= math.ceil(candles_below / 2) if candles_below > 0 else False
 
             if candles_below >= MIN_HOLD_CANDLES and atr_dist >= MIN_ATR_DISTANCE:
                 return BreakoutResult(

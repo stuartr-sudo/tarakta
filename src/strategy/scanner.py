@@ -28,7 +28,7 @@ import pandas as pd
 
 from src.config import Settings
 from src.data.candles import CandleManager
-from src.exchange.models import SignalCandidate
+from src.exchange.models import BreakoutResult, SignalCandidate
 from src.exchange.protocol import FuturesCapable
 from src.strategy.breakout_detector import BreakoutDetector
 from src.strategy.confluence import BREAKOUT_THRESHOLD, BREAKOUT_WEIGHTS, PostSweepEngine
@@ -294,6 +294,22 @@ class AltcoinScanner:
                 swing_high=swing_high,
                 swing_low=swing_low,
             )
+
+            if breakout_result.breakout_detected:
+                # Volume sustainability check for breakouts (same logic as sweep path).
+                # Declining overall volume = likely a one-off spike, not sustained
+                # institutional interest.
+                if vol_profile.volume_trend == "decreasing":
+                    breakout_result = BreakoutResult(
+                        breakout_detected=False,
+                        breakout_direction=None,
+                        breakout_level=0.0,
+                        breakout_type=None,
+                        target_level=0.0,
+                        volume_confirmed=False,
+                        candles_held=0,
+                        atr_distance=0.0,
+                    )
 
             if breakout_result.breakout_detected:
                 breakout_signal = self.confluence.score_breakout(
