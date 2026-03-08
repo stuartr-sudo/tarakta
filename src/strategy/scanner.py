@@ -336,6 +336,7 @@ class AltcoinScanner:
                 score=signal.score,
                 direction=signal.direction,
                 signal_type="breakout" if signal.breakout_result is not None else "sweep",
+                htf_continuation=sweep_result.htf_continuation if sweep_result.sweep_detected else False,
                 reasons=signal.reasons,
             )
 

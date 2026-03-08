@@ -407,7 +407,17 @@ class ConsensusMonitor:
         return bias, profitable_longs, profitable_shorts, losing_longs, losing_shorts, reasons
 
     async def _get_btc_trend(self, candle_manager: CandleManager) -> str:
-        """Get BTC/USDT 4H trend direction (cached for 2 minutes)."""
+        """Get BTC/USDT 4H trend direction (cached for 2 minutes).
+
+        Uses SMC structure (BOS/CHoCH) as primary indicator, with two guards
+        to prevent false classifications from noisy single-signal readings:
+
+        1. **Structure strength ≥ 0.6** — recent BOS signals must be directionally
+           consistent.  Below this threshold the trend is ambiguous.
+        2. **50 EMA cross-check** — price must sit on the correct side of the 4H
+           50-period EMA (bullish = above, bearish = below).  If SMC structure
+           says "bullish" but price is below the EMA, we downgrade to "ranging".
+        """
         now = datetime.now(timezone.utc)
 
         # Return cached value if fresh
@@ -426,9 +436,51 @@ class ConsensusMonitor:
                 return "ranging"
 
             ms_result = self._ms_analyzer.analyze(btc_candles, timeframe="4h")
-            self._btc_trend_cache = ms_result.trend
+            trend = ms_result.trend
+
+            # ── Guard 1: Minimum structure strength ─────────────────
+            # structure_strength is 0-1 based on last-5 BOS consistency.
+            # Below 0.6, BOS signals are mixed — trend is unreliable.
+            if trend != "ranging" and ms_result.structure_strength < 0.6:
+                logger.info(
+                    "btc_trend_downgraded",
+                    raw_trend=trend,
+                    structure_strength=round(ms_result.structure_strength, 2),
+                    reason="structure_strength below 0.6",
+                )
+                trend = "ranging"
+
+            # ── Guard 2: 50 EMA cross-check ─────────────────────────
+            # Structure must agree with price position relative to 50 EMA.
+            # Prevents a single noisy BOS from overriding the macro trend.
+            if trend != "ranging":
+                ema_50 = btc_candles["close"].ewm(span=50, adjust=False).mean()
+                current_price = float(btc_candles["close"].iloc[-1])
+                current_ema = float(ema_50.iloc[-1])
+                price_above_ema = current_price > current_ema
+
+                if trend == "bullish" and not price_above_ema:
+                    logger.info(
+                        "btc_trend_downgraded",
+                        raw_trend="bullish",
+                        price=round(current_price, 2),
+                        ema_50=round(current_ema, 2),
+                        reason="bullish structure but price below 50 EMA",
+                    )
+                    trend = "ranging"
+                elif trend == "bearish" and price_above_ema:
+                    logger.info(
+                        "btc_trend_downgraded",
+                        raw_trend="bearish",
+                        price=round(current_price, 2),
+                        ema_50=round(current_ema, 2),
+                        reason="bearish structure but price above 50 EMA",
+                    )
+                    trend = "ranging"
+
+            self._btc_trend_cache = trend
             self._btc_trend_cache_time = now
-            return ms_result.trend
+            return trend
         except Exception as e:
             logger.warning("consensus_btc_trend_failed", error=str(e)[:100])
             self._btc_trend_cache = "ranging"

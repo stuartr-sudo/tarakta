@@ -96,6 +96,7 @@ class SweepResult:
     sweep_type: str | None         # "asian_low", "asian_high", "swing_low", "swing_high"
     target_level: float            # Opposite side liquidity (for TP)
     sweep_depth: float             # How far past the level
+    htf_continuation: bool = False # True when trade direction was overridden by HTF context
 
 
 @dataclass
