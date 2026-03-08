@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     max_risk_pct: float = 0.10  # Max 10% of balance lost per trade (SL distance)
     max_position_pct: float = 0.25  # Max 25% of balance allocated per trade (margin)
     max_exposure_pct: float = 1.0  # Allow full budget deployment across positions
-    max_concurrent: int = 100
+    max_concurrent: int = 0  # 0 = unlimited
     max_daily_drawdown: float = 0.10
     circuit_breaker_pct: float = 0.15
     min_rr_ratio: float = 2.0  # Minimum 2:1 reward-to-risk
@@ -147,6 +147,15 @@ class Settings(BaseSettings):
     entry_refiner_check_interval_seconds: int = 60   # Check every 60s in monitor loop
     entry_refiner_expiry_minutes: float = 30.0       # Max wait for 5m confirmation
     entry_refiner_max_queue: int = 5                  # Max signals queued for refinement
+
+    # Market Consensus Check — portfolio + BTC alignment before entry
+    consensus_enabled: bool = True
+    consensus_portfolio_penalty: float = 10.0    # Score penalty when portfolio bias alone disagrees
+    consensus_btc_penalty: float = 15.0          # Total penalty when BTC also disagrees
+    consensus_monitor_expiry_minutes: float = 30.0  # How long to monitor before expiring
+    consensus_min_positions: int = 3             # Min open positions before consensus applies
+    consensus_profitable_threshold: float = 0.0  # P&L threshold to count as "profitable"
+    consensus_max_queue: int = 10                # Max signals in consensus monitor
 
     # Multi-market configuration
     # Each key is a market name like "crypto", "stocks", "commodities"

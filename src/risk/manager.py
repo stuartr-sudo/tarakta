@@ -170,7 +170,7 @@ class RiskManager:
                 )
 
         # Max concurrent positions
-        if open_position_count >= self.max_concurrent:
+        if self.max_concurrent > 0 and open_position_count >= self.max_concurrent:
             return TradeValidation(
                 allowed=False, reason=f"Max {self.max_concurrent} concurrent positions reached"
             )

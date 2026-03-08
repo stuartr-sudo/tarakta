@@ -28,6 +28,7 @@ from src.strategy.pullback import PullbackAnalyzer
 from src.strategy.sessions import SessionAnalyzer
 from src.strategy.sweep_detector import SweepDetector
 from src.strategy.volume import VolumeAnalyzer
+from src.engine.consensus import ConsensusMonitor
 from src.engine.entry_refiner import EntryRefiner
 from src.exchange.trading_hours import TradingHoursManager
 from src.utils.logging import get_logger
@@ -40,8 +41,8 @@ SIM_FEE_RATE = 0.0004
 # Scoring: sweep (35) + displacement (25) + pullback (10) + HTF (15) + timing (15)
 # Classic path: sweep + displacement = 60.  Alternative: sweep + HTF + timing = 65.
 FLIPPED_THRESHOLD = 60.0
-FLIPPED_MAX_CONCURRENT = 8  # Cap concurrent positions to limit total exposure
-MAX_EXPOSURE_PCT = 0.60  # Don't deploy more than 60% of initial balance as margin
+FLIPPED_MAX_CONCURRENT = 0  # 0 = unlimited (no artificial cap)
+MAX_EXPOSURE_PCT = 1.0  # Allow full balance deployment
 BATCH_SIZE = 16  # Larger batches for faster scans (475 pairs is a lot)
 BATCH_DELAY = 0.5  # Shorter delay between batches
 SCAN_TIMEFRAMES = ["1h", "4h"]  # Drop 1d — not worth extra API calls for 5pts HTF bonus
@@ -104,6 +105,9 @@ class FlippedTrader:
 
         # Post-sweep entry refinement (set by core.py for custom bot only)
         self.entry_refiner: EntryRefiner | None = None
+
+        # Market consensus monitor (set by core.py — portfolio + BTC alignment check)
+        self.consensus_monitor: ConsensusMonitor | None = None
 
         # Trading hours (skip scans when market is closed — stocks/commodities only)
         self.trading_hours = TradingHoursManager()
@@ -202,6 +206,8 @@ class FlippedTrader:
         self._closed_symbols.clear()
         if self.entry_refiner:
             self.entry_refiner.stop()
+        if self.consensus_monitor:
+            self.consensus_monitor.stop()
 
         # Save the clean state to DB (overwrite any stale data)
         await self._save_state()
@@ -350,6 +356,9 @@ class FlippedTrader:
                 # Check entry refiner for signals ready to enter
                 if self.entry_refiner and self.entry_refiner.queue:
                     await self._process_refined_entries()
+                # Check consensus monitor for graduated signals
+                if self.consensus_monitor and self.consensus_monitor.queue:
+                    await self._process_consensus_entries()
             except asyncio.CancelledError:
                 logger.info("flipped_monitor_loop_cancelled")
                 break
@@ -392,6 +401,38 @@ class FlippedTrader:
             except Exception as e:
                 logger.warning(
                     "refiner_entry_error",
+                    symbol=signal.symbol,
+                    error=str(e)[:100],
+                )
+
+    async def _process_consensus_entries(self) -> None:
+        """Check consensus monitor and enter trades where consensus cleared or flipped."""
+        ready_signals = await self.consensus_monitor.check_all(
+            open_positions=self.positions,
+            exchange=self.exchange,
+            candle_manager=self.candle_manager,
+        )
+        for signal in ready_signals:
+            if FLIPPED_MAX_CONCURRENT > 0 and len(self.positions) >= FLIPPED_MAX_CONCURRENT:
+                continue
+            if self.balance < 5.0:
+                continue
+            if signal.symbol in self.positions:
+                continue
+            if signal.symbol in self._closed_symbols:
+                continue
+            try:
+                if await self._try_enter(signal):
+                    logger.info(
+                        "consensus_entered",
+                        symbol=signal.symbol,
+                        direction=signal.direction,
+                        score=signal.score,
+                    )
+                    await self._save_state()
+            except Exception as e:
+                logger.warning(
+                    "consensus_entry_error",
                     symbol=signal.symbol,
                     error=str(e)[:100],
                 )
@@ -577,6 +618,29 @@ class FlippedTrader:
                     queued_for_refinement += 1
                     continue
                 # If refiner queue is full, fall through to immediate entry
+
+            # Market Consensus Check — portfolio + BTC alignment
+            if self.consensus_monitor and signal.direction:
+                consensus_result = await self.consensus_monitor.compute_consensus(
+                    signal=signal,
+                    open_positions=self.positions,
+                    exchange=self.exchange,
+                    candle_manager=self.candle_manager,
+                )
+                if consensus_result.applied and consensus_result.penalty > 0:
+                    adj_score = signal.score - consensus_result.penalty
+                    signal.reasons.append(
+                        f"consensus_penalty=-{consensus_result.penalty:.0f} "
+                        f"(portfolio={consensus_result.portfolio_bias}, "
+                        f"btc={consensus_result.btc_trend})"
+                    )
+                    if adj_score < FLIPPED_THRESHOLD:
+                        if self.consensus_monitor.add(signal, consensus_result):
+                            # Remove from refiner if present
+                            if self.entry_refiner:
+                                self.entry_refiner.queue.pop(signal.symbol, None)
+                            continue
+                        # If consensus queue is full, fall through to entry
 
             try:
                 if await self._try_enter(signal):
@@ -1644,6 +1708,9 @@ class FlippedTrader:
         # Persist entry refiner state (custom bot only)
         if self.entry_refiner:
             state["entry_refiner"] = self.entry_refiner.get_state()
+        # Persist consensus monitor state
+        if self.consensus_monitor:
+            state["consensus_monitor"] = self.consensus_monitor.get_state()
         return state
 
     def restore_state(self, data: dict) -> None:
@@ -1675,6 +1742,10 @@ class FlippedTrader:
         # Restore entry refiner state (custom bot only)
         if self.entry_refiner and data.get("entry_refiner"):
             self.entry_refiner.restore_state(data["entry_refiner"])
+
+        # Restore consensus monitor state
+        if self.consensus_monitor and data.get("consensus_monitor"):
+            self.consensus_monitor.restore_state(data["consensus_monitor"])
 
         positions_data = data.get("positions", {})
         for sym, pd_ in positions_data.items():

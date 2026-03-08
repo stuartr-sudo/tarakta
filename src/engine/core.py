@@ -10,6 +10,7 @@ import pandas as pd
 from src.config import Settings
 from src.data.candles import CandleManager
 from src.data.repository import Repository
+from src.engine.consensus import ConsensusMonitor
 from src.engine.entry_refiner import EntryRefiner
 from src.engine.flipped import FlippedTrader
 from src.engine.scheduler import Scheduler, TickType
@@ -83,6 +84,13 @@ class TradingEngine:
             else None
         )
 
+        # Market consensus monitor — portfolio + BTC alignment check
+        self.consensus_monitor: ConsensusMonitor | None = (
+            ConsensusMonitor(candle_manager=candle_manager, config=config)
+            if config.consensus_enabled
+            else None
+        )
+
         # Trading hours (24/7 for crypto, restricted for stocks/commodities)
         self.trading_hours = TradingHoursManager()
         self._market_name: str = "crypto"  # Set by main.py for multi-market
@@ -150,6 +158,12 @@ class TradingEngine:
                     candle_manager=candle_manager,
                     config=config,
                 )
+            # Market consensus monitor for custom bot
+            if config.consensus_enabled:
+                self.custom_trader.consensus_monitor = ConsensusMonitor(
+                    candle_manager=candle_manager,
+                    config=config,
+                )
             logger.info(
                 "custom_trader_enabled",
                 leverage=config.custom_leverage,
@@ -157,6 +171,7 @@ class TradingEngine:
                 margin_pct=config.custom_margin_pct,
                 scan_interval=config.custom_scan_interval_minutes,
                 entry_refiner=config.entry_refiner_enabled,
+                consensus=config.consensus_enabled,
             )
 
         # Background task infrastructure (for async post-mortems)
@@ -486,6 +501,17 @@ class TradingEngine:
                     queued=len(self.main_entry_refiner.queue),
                 )
 
+        # Restore consensus monitor state (main bot)
+        if self.consensus_monitor and db_state:
+            consensus_overrides = (db_state.get("config_overrides") or {})
+            consensus_data = consensus_overrides.get("consensus_monitor")
+            if consensus_data:
+                self.consensus_monitor.restore_state(consensus_data)
+                logger.info(
+                    "consensus_monitor_restored",
+                    queued=len(self.consensus_monitor.queue),
+                )
+
         # Run an immediate scan on startup if scanning is active and no recent scan
         if self._scanning_active:
             # Check trading hours first — don't scan on weekends for stocks/commodities
@@ -544,6 +570,8 @@ class TradingEngine:
                     await self._process_watchlist_graduations()
                     # Process refined entries from post-sweep 5m monitoring
                     await self._process_refined_entries()
+                    # Process graduated signals from consensus monitor
+                    await self._process_consensus_graduations()
                     await self._persist_state()
                 else:
                     # Skip scanning for new trades if bot is paused
@@ -915,6 +943,55 @@ class TradingEngine:
                     signals_saved += 1
                     continue
 
+                # --- Market Consensus Check: portfolio + BTC alignment ---
+                if self.consensus_monitor and signal.direction:
+                    consensus_result = await self.consensus_monitor.compute_consensus(
+                        signal=signal,
+                        open_positions=self.portfolio.open_positions,
+                        exchange=self.exchange,
+                        candle_manager=self.candle_manager,
+                    )
+                    if consensus_result.applied and consensus_result.penalty > 0:
+                        adjusted_score -= consensus_result.penalty
+                        signal.reasons.append(
+                            f"consensus_penalty=-{consensus_result.penalty:.0f} "
+                            f"(portfolio={consensus_result.portfolio_bias}, "
+                            f"btc={consensus_result.btc_trend})"
+                        )
+                        if adjusted_score < active_threshold:
+                            # Score dropped below threshold — move to consensus monitor
+                            if self.consensus_monitor.add(signal, consensus_result):
+                                # Remove from other queues
+                                if self.main_entry_refiner:
+                                    self.main_entry_refiner.queue.pop(signal.symbol, None)
+                                if self.watchlist_monitor:
+                                    self.watchlist_monitor.remove_entry(signal.symbol)
+                                vol_24h = self.exchange.get_24h_volume(signal.symbol)
+                                await self.repo.insert_signal(
+                                    {
+                                        "symbol": signal.symbol,
+                                        "direction": signal.direction or "none",
+                                        "score": signal.score,
+                                        "reasons": signal.reasons + [
+                                            f"DEFERRED:consensus(adj={adjusted_score:.1f})"
+                                        ],
+                                        "components": {
+                                            "volume_24h": vol_24h,
+                                            "sentiment": sentiment_score,
+                                            "adjusted_score": round(adjusted_score, 2),
+                                            "consensus_penalty": consensus_result.penalty,
+                                            "portfolio_bias": consensus_result.portfolio_bias,
+                                            "btc_trend": consensus_result.btc_trend,
+                                        },
+                                        "current_price": signal.entry_price,
+                                        "acted_on": False,
+                                        "scan_cycle": cycle,
+                                    }
+                                )
+                                signals_saved += 1
+                                continue
+                            # If consensus queue is full, fall through to normal entry
+
                 # --- LLM Split Test: assign group and optionally analyze ---
                 if llm_runtime_enabled:
                     test_group = self.split_test.assign_group(signal)
@@ -1249,6 +1326,84 @@ class TradingEngine:
             except Exception as e:
                 logger.warning(
                     "refiner_entry_failed",
+                    symbol=signal.symbol,
+                    error=str(e),
+                )
+
+    async def _process_consensus_graduations(self) -> None:
+        """Process signals that graduated from the consensus monitor.
+
+        Runs every 60s (on MONITOR tick). Graduated signals cleared consensus
+        (portfolio/BTC now agree) or had their direction flipped.
+        """
+        if not self.consensus_monitor or not self.consensus_monitor.queue:
+            return
+
+        ready_signals = await self.consensus_monitor.check_all(
+            open_positions=self.portfolio.open_positions,
+            exchange=self.exchange,
+            candle_manager=self.candle_manager,
+        )
+        for signal in ready_signals:
+            if signal.symbol in self.portfolio.open_positions:
+                continue
+            if self.state.daily_trade_count >= self.config.max_daily_trades:
+                continue
+
+            try:
+                total_exposure = sum(
+                    pos.cost_usd for pos in self.portfolio.open_positions.values()
+                )
+                validation = self.risk_manager.validate_trade(
+                    open_position_count=len(self.portfolio.open_positions),
+                    open_position_symbols=set(self.portfolio.open_positions.keys()),
+                    current_balance=self.portfolio.current_balance,
+                    daily_start_balance=self.portfolio.daily_start_balance,
+                    daily_pnl=self.portfolio.daily_pnl,
+                    signal=signal,
+                    total_exposure_usd=total_exposure,
+                )
+                if not validation.allowed:
+                    logger.info(
+                        "consensus_signal_risk_rejected",
+                        symbol=signal.symbol,
+                        reason=validation.reason,
+                    )
+                    continue
+            except Exception as e:
+                logger.warning("consensus_risk_check_failed", error=str(e))
+                continue
+
+            try:
+                position, order_result, trade_record = (
+                    await self.order_executor.execute_entry(
+                        signal=signal,
+                        current_balance=self.portfolio.current_balance,
+                        mode=self.state.mode,
+                    )
+                )
+
+                if position and trade_record:
+                    position.confluence_score = signal.score
+                    db_trade = await self.repo.insert_trade(trade_record)
+                    if db_trade:
+                        position.trade_id = db_trade.get("id", "")
+                    self.portfolio.record_entry(position)
+                    self.state.open_positions[signal.symbol] = position
+                    self.state.daily_trade_count += 1
+
+                    logger.info(
+                        "consensus_trade_entered",
+                        symbol=signal.symbol,
+                        direction=signal.direction,
+                        entry=position.entry_price,
+                        sl=position.stop_loss,
+                        tp=position.take_profit,
+                        score=signal.score,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "consensus_entry_failed",
                     symbol=signal.symbol,
                     error=str(e),
                 )
@@ -1896,6 +2051,9 @@ class TradingEngine:
             # Persist entry refiner state (main bot)
             if self.main_entry_refiner:
                 overrides["main_entry_refiner"] = self.main_entry_refiner.get_state()
+            # Persist consensus monitor state (main bot)
+            if self.consensus_monitor:
+                overrides["consensus_monitor"] = self.consensus_monitor.get_state()
             # Persist main bot scanning state
             main_settings = overrides.get("main_bot_settings", {})
             if not isinstance(main_settings, dict):
