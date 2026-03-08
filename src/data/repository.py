@@ -425,6 +425,8 @@ class Repository:
         int_pk_tables = ["engine_state", "portfolio_snapshots", "error_log"]
         # Tables with UUID PK (use gte created_at)
         uuid_pk_tables = ["signals", "partial_exits", "reversals", "trades"]
+        # Tables with composite PK
+        timestamp_tables = ["candle_cache"]
 
         for table in int_pk_tables:
             try:
@@ -440,6 +442,16 @@ class Repository:
                 await asyncio.to_thread(
                     _exec,
                     self.db.table(table).delete().gte("created_at", "1970-01-01"),
+                )
+                logger.info("wipe_table_ok", table=table)
+            except Exception as e:
+                logger.warning("wipe_table_failed", table=table, error=str(e))
+
+        for table in timestamp_tables:
+            try:
+                await asyncio.to_thread(
+                    _exec,
+                    self.db.table(table).delete().gte("timestamp", "1970-01-01"),
                 )
                 logger.info("wipe_table_ok", table=table)
             except Exception as e:

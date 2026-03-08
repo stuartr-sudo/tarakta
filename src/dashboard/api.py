@@ -489,26 +489,31 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
     @router.post("/reset/main")
     @admin_required
     async def reset_main_data(request: Request):
-        """Reset main bot: delete trades, snapshots, reset engine state balance."""
+        """Nuclear reset: wipe ALL tables and start completely fresh."""
         from src.config import Settings
         _cfg = Settings()
         try:
-            deleted = await repo.reset_mode_data(mode=_cfg.trading_mode)
+            # Nuclear wipe — all tables
+            await repo.wipe_all_data()
 
-            # Reset engine state balance/pnl
-            state = await repo.get_engine_state()
-            if state:
-                state["current_balance"] = _cfg.initial_balance
-                state["peak_balance"] = _cfg.initial_balance
-                state["daily_pnl_usd"] = 0
-                state["total_pnl_usd"] = 0
-                state["daily_start_bal"] = _cfg.initial_balance
-                state["open_positions"] = {}
-                state["cycle_count"] = 0
-                state["last_scan_time"] = None
-                await repo.upsert_engine_state(state)
+            # Create fresh engine state
+            state = {
+                "id": 1,
+                "mode": _cfg.trading_mode,
+                "status": "running",
+                "current_balance": _cfg.initial_balance,
+                "peak_balance": _cfg.initial_balance,
+                "daily_start_bal": _cfg.initial_balance,
+                "daily_pnl_usd": 0,
+                "total_pnl_usd": 0,
+                "open_positions": {},
+                "cycle_count": 0,
+                "last_scan_time": None,
+                "config_overrides": {},
+            }
+            await repo.upsert_engine_state(state)
 
-            # Signal the engine to clear in-memory open positions
+            # Signal the engine to clear in-memory state
             if engine:
                 try:
                     if hasattr(engine, "portfolio"):
@@ -522,12 +527,14 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                         engine.state.open_positions = {}
                         engine.state.current_balance = _cfg.initial_balance
                         engine.state.peak_balance = _cfg.initial_balance
+                        engine.state.daily_pnl = 0
+                        engine.state.total_pnl = 0
                     logger.info("reset_main_signaled_engine")
                 except Exception as e:
                     logger.warning("reset_main_engine_signal_failed", error=str(e))
 
-            logger.info("reset_main_complete", deleted=deleted)
-            return {"success": True, "deleted": deleted, "balance_reset": _cfg.initial_balance}
+            logger.info("nuclear_reset_complete")
+            return {"success": True, "deleted": {"trades": "all", "snapshots": "all"}, "balance_reset": _cfg.initial_balance}
         except Exception as e:
             logger.error("reset_main_failed", error=str(e))
             return {"success": False, "error": str(e)}
