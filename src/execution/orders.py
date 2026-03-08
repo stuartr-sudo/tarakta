@@ -621,10 +621,41 @@ class OrderExecutor:
             actual_distance = abs(entry - sl)
             if actual_distance < min_distance:
                 sl = entry - min_distance if is_long else entry + min_distance
+
+            # Enforce maximum SL distance — skip trades where SL is too far
+            max_sl_pct = getattr(self.config, "max_sl_pct", 0.0)
+            if max_sl_pct > 0:
+                max_distance = entry * max_sl_pct
+                actual_distance = abs(entry - sl)
+                if actual_distance > max_distance:
+                    logger.info(
+                        "skip_sl_too_wide",
+                        symbol=signal.symbol,
+                        sl_distance_pct=f"{(actual_distance / entry):.2%}",
+                        max_sl_pct=f"{max_sl_pct:.2%}",
+                    )
+                    return None
+
             return sl
 
         # No sweep data or invalid — ATR fallback
-        return self._atr_fallback_sl(signal, entry, is_long, min_distance)
+        sl = self._atr_fallback_sl(signal, entry, is_long, min_distance)
+
+        # Enforce maximum SL distance on ATR fallback too
+        max_sl_pct = getattr(self.config, "max_sl_pct", 0.0)
+        if max_sl_pct > 0 and sl is not None:
+            max_distance = entry * max_sl_pct
+            actual_distance = abs(entry - sl)
+            if actual_distance > max_distance:
+                logger.info(
+                    "skip_sl_too_wide",
+                    symbol=signal.symbol,
+                    sl_distance_pct=f"{(actual_distance / entry):.2%}",
+                    max_sl_pct=f"{max_sl_pct:.2%}",
+                )
+                return None
+
+        return sl
 
     def _atr_fallback_sl(
         self, signal: SignalCandidate, entry: float, is_long: bool,

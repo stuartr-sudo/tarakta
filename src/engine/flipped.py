@@ -79,6 +79,9 @@ class FlippedTrader:
         self.max_position_pct = config.flipped_max_position_pct
         self.trailing_activation_rr = config.trailing_activation_rr
         self.trailing_atr_multiplier = config.trailing_atr_multiplier
+        self.breakeven_activation_rr = config.breakeven_activation_rr
+        self.max_hold_hours = config.max_hold_hours
+        self.stale_close_below_rr = config.stale_close_below_rr
         self.scan_interval = config.flipped_scan_interval_minutes
         self.min_volume_usd = config.min_volume_usd
         self.quote_currencies = config.quote_currencies
@@ -1309,7 +1312,58 @@ class FlippedTrader:
                     if tier_hit:
                         await self._partial_exit(pos, symbol, current_price, tier)
 
-            # Trailing stop — activates after TP1 milestone or 2R profit
+            # Early breakeven protection — move SL to entry once 0.5R in profit
+            if not exit_reason:
+                sl_dist = abs(pos.entry_price - pos.original_stop_loss)
+                if sl_dist > 0:
+                    if pos.direction == "long":
+                        unrealized_rr = (current_price - pos.entry_price) / sl_dist
+                        if (
+                            unrealized_rr >= self.breakeven_activation_rr
+                            and pos.stop_loss < pos.entry_price
+                        ):
+                            pos.stop_loss = pos.entry_price
+                            logger.info(
+                                "flipped_sl_moved_to_breakeven_early",
+                                symbol=symbol, direction="long",
+                                unrealized_rr=f"{unrealized_rr:.2f}",
+                                new_sl=pos.entry_price,
+                            )
+                    else:
+                        unrealized_rr = (pos.entry_price - current_price) / sl_dist
+                        if (
+                            unrealized_rr >= self.breakeven_activation_rr
+                            and pos.stop_loss > pos.entry_price
+                        ):
+                            pos.stop_loss = pos.entry_price
+                            logger.info(
+                                "flipped_sl_moved_to_breakeven_early",
+                                symbol=symbol, direction="short",
+                                unrealized_rr=f"{unrealized_rr:.2f}",
+                                new_sl=pos.entry_price,
+                            )
+
+            # Stale trade auto-close — close losing trades open too long
+            if not exit_reason and self.max_hold_hours > 0 and pos.entry_time:
+                sl_dist = abs(pos.entry_price - pos.original_stop_loss) if pos.original_stop_loss else 0
+                hours_open = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 3600
+                if hours_open >= self.max_hold_hours and sl_dist > 0:
+                    if pos.direction == "long":
+                        stale_rr = (current_price - pos.entry_price) / sl_dist
+                    else:
+                        stale_rr = (pos.entry_price - current_price) / sl_dist
+                    if stale_rr < self.stale_close_below_rr:
+                        exit_reason = "stale_close"
+                        logger.info(
+                            "flipped_stale_trade_closed",
+                            symbol=symbol,
+                            direction=pos.direction,
+                            hours_open=f"{hours_open:.1f}",
+                            unrealized_rr=f"{stale_rr:.2f}",
+                            max_hold_hours=self.max_hold_hours,
+                        )
+
+            # Trailing stop — activates after TP1 milestone or profit threshold
             if not exit_reason:
                 sl_dist = abs(pos.entry_price - pos.original_stop_loss)
                 if sl_dist > 0:
@@ -1318,7 +1372,7 @@ class FlippedTrader:
                     else:
                         r_multiple = (pos.entry_price - pos.high_water_mark) / sl_dist
 
-                    # Trailing activates after first partial TP or 2R profit
+                    # Trailing activates after first partial TP or profit threshold
                     trailing_active = pos.current_tier >= 1 or r_multiple >= self.trailing_activation_rr
 
                     if trailing_active:
@@ -1358,9 +1412,8 @@ class FlippedTrader:
                     remaining_qty=pos.quantity,
                 )
                 await self._close_position(symbol, current_price, exit_reason)
-                # Cooldown only on stop-loss exits — TP/trailing exits allow
-                # immediate re-entry (enables reverse trades after profit)
-                if exit_reason == "sl_hit":
+                # Cooldown on stop-loss and stale exits
+                if exit_reason in ("sl_hit", "stale_close"):
                     self._closed_symbols[symbol] = datetime.now(timezone.utc)
                 closed += 1
 

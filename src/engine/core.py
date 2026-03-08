@@ -62,6 +62,9 @@ class TradingEngine:
         self.position_monitor = PositionMonitor(
             trailing_activation_rr=config.trailing_activation_rr,
             trailing_atr_multiplier=config.trailing_atr_multiplier,
+            breakeven_activation_rr=config.breakeven_activation_rr,
+            max_hold_hours=config.max_hold_hours,
+            stale_close_below_rr=config.stale_close_below_rr,
         )
         self.scanner = AltcoinScanner(candle_manager, config)
 
@@ -1743,8 +1746,8 @@ class TradingEngine:
                     # Update portfolio
                     self.portfolio.record_exit(exit_signal.symbol, exit_signal.price, order_result.fee)
 
-                    # Record cooldown on stop-loss exits
-                    if exit_signal.reason == "sl_hit":
+                    # Record cooldown on stop-loss and stale exits
+                    if exit_signal.reason in ("sl_hit", "stale_close"):
                         self.risk_manager.record_stop_out(exit_signal.symbol)
 
                     # --- Post-trade analysis (Strategy B) ---

@@ -19,9 +19,15 @@ class PositionMonitor:
         self,
         trailing_activation_rr: float = 2.0,
         trailing_atr_multiplier: float = 1.5,
+        breakeven_activation_rr: float = 0.5,
+        max_hold_hours: float = 4.0,
+        stale_close_below_rr: float = 0.5,
     ) -> None:
         self.trailing_activation_rr = trailing_activation_rr
         self.trailing_atr_multiplier = trailing_atr_multiplier
+        self.breakeven_activation_rr = breakeven_activation_rr
+        self.max_hold_hours = max_hold_hours
+        self.stale_close_below_rr = stale_close_below_rr
         # Throttle repeated ticker errors: only log per symbol once per 5 min
         self._ticker_error_last_logged: dict[str, datetime] = {}
         self._ticker_error_throttle_seconds = 300
@@ -118,9 +124,42 @@ class PositionMonitor:
                         price=current_price, tp=pos.take_profit)
             return ExitSignal(symbol=symbol, reason="tp_hit", price=current_price)
 
-        # 3. ATR-based trailing stop — use original SL distance for R:R calculation
+        # 3. Early breakeven protection — move SL to entry once 0.5R in profit
+        #    (only if SL hasn't already been moved above entry by TP1 hit)
         original_sl_dist = (pos.entry_price - pos.original_stop_loss) if pos.original_stop_loss else 0
         sl_distance = original_sl_dist if original_sl_dist > 0 else (pos.entry_price - pos.stop_loss)
+        if sl_distance > 0:
+            unrealized_rr = (current_price - pos.entry_price) / sl_distance
+            if (
+                unrealized_rr >= self.breakeven_activation_rr
+                and pos.stop_loss < pos.entry_price  # Not already at/above breakeven
+            ):
+                pos.stop_loss = pos.entry_price
+                logger.info(
+                    "sl_moved_to_breakeven_early",
+                    symbol=symbol,
+                    direction="long",
+                    unrealized_rr=f"{unrealized_rr:.2f}",
+                    new_sl=pos.entry_price,
+                )
+
+        # 4. Stale trade auto-close — close losing trades open too long
+        if self.max_hold_hours > 0 and pos.entry_time:
+            hours_open = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 3600
+            if hours_open >= self.max_hold_hours:
+                stale_rr = (current_price - pos.entry_price) / sl_distance if sl_distance > 0 else 0
+                if stale_rr < self.stale_close_below_rr:
+                    logger.info(
+                        "stale_trade_closed",
+                        symbol=symbol,
+                        direction="long",
+                        hours_open=f"{hours_open:.1f}",
+                        unrealized_rr=f"{stale_rr:.2f}",
+                        max_hold_hours=self.max_hold_hours,
+                    )
+                    return ExitSignal(symbol=symbol, reason="stale_close", price=current_price)
+
+        # 5. ATR-based trailing stop — use original SL distance for R:R calculation
         if sl_distance > 0:
             unrealized_rr = (current_price - pos.entry_price) / sl_distance
             if unrealized_rr >= self.trailing_activation_rr:
@@ -191,9 +230,42 @@ class PositionMonitor:
                         price=current_price, tp=pos.take_profit)
             return ExitSignal(symbol=symbol, reason="tp_hit", price=current_price)
 
-        # 3. ATR-based trailing stop for shorts — use original SL distance for R:R calculation
+        # 3. Early breakeven protection — move SL to entry once 0.5R in profit
+        #    (only if SL hasn't already been moved below entry by TP1 hit)
         original_sl_dist = (pos.original_stop_loss - pos.entry_price) if pos.original_stop_loss else 0
         sl_distance = original_sl_dist if original_sl_dist > 0 else (pos.stop_loss - pos.entry_price)
+        if sl_distance > 0:
+            unrealized_rr = (pos.entry_price - current_price) / sl_distance
+            if (
+                unrealized_rr >= self.breakeven_activation_rr
+                and pos.stop_loss > pos.entry_price  # Not already at/below breakeven
+            ):
+                pos.stop_loss = pos.entry_price
+                logger.info(
+                    "sl_moved_to_breakeven_early",
+                    symbol=symbol,
+                    direction="short",
+                    unrealized_rr=f"{unrealized_rr:.2f}",
+                    new_sl=pos.entry_price,
+                )
+
+        # 4. Stale trade auto-close — close losing trades open too long
+        if self.max_hold_hours > 0 and pos.entry_time:
+            hours_open = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 3600
+            if hours_open >= self.max_hold_hours:
+                stale_rr = (pos.entry_price - current_price) / sl_distance if sl_distance > 0 else 0
+                if stale_rr < self.stale_close_below_rr:
+                    logger.info(
+                        "stale_trade_closed",
+                        symbol=symbol,
+                        direction="short",
+                        hours_open=f"{hours_open:.1f}",
+                        unrealized_rr=f"{stale_rr:.2f}",
+                        max_hold_hours=self.max_hold_hours,
+                    )
+                    return ExitSignal(symbol=symbol, reason="stale_close", price=current_price)
+
+        # 5. ATR-based trailing stop for shorts — use original SL distance for R:R calculation
         if sl_distance > 0:
             unrealized_rr = (pos.entry_price - current_price) / sl_distance
             if unrealized_rr >= self.trailing_activation_rr:

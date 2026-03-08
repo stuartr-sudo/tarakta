@@ -6,13 +6,24 @@ from src.risk.manager import RiskManager
 
 
 @pytest.fixture
-def risk_manager():
+def risk_manager(monkeypatch):
+    # Clear env vars that .env would inject, so tests use explicit values
+    for key in [
+        "MAX_RISK_PCT", "MAX_POSITION_PCT", "MAX_CONCURRENT", "ACCOUNT_TYPE",
+        "LEVERAGE", "MAX_DAILY_DRAWDOWN", "COOLDOWN_HOURS", "MIN_RR_RATIO",
+        "MAX_SL_PCT", "BREAKEVEN_ACTIVATION_RR", "TRAILING_ACTIVATION_RR",
+        "MAX_HOLD_HOURS", "STALE_CLOSE_BELOW_RR",
+    ]:
+        monkeypatch.delenv(key, raising=False)
     config = Settings(
-        kraken_api_key="test",
-        kraken_api_secret="test",
         supabase_url="https://test.supabase.co",
         supabase_key="test",
         dashboard_password_hash="test",
+        account_type="futures",
+        leverage=10,
+        max_risk_pct=0.02,
+        max_position_pct=0.05,
+        max_concurrent=10,
     )
     return RiskManager(config)
 
@@ -21,10 +32,10 @@ class TestPositionSizing:
     def test_normal_sizing(self, risk_manager):
         """Position sizing respects max_position_pct cap.
 
-        With $100 balance, 10% risk, entry=50, SL=48:
-        - risk_amount = $10, uncapped qty = 5, cost = $250
-        - max_position = $25 (25% of $100), so position is capped
-        - capped qty ≈ 0.498, risk ≈ $1.00
+        With $100 balance, 2% risk, 10x leverage, entry=50, SL=48:
+        - risk_amount = $2, uncapped qty = 1, notional = $50
+        - margin = $5, max_margin = $5 (5% of $100), so just at cap
+        - qty ≈ 0.998, notional ≈ $49.9 (leverage allows larger notional)
         """
         result = risk_manager.calculate_position_size(
             balance=100.0,
@@ -32,8 +43,8 @@ class TestPositionSizing:
             stop_loss_price=48.0,
         )
         assert result.valid
-        # Position is capped by max_position_pct (25%), not by risk budget
-        assert result.cost_usd <= 100.0 * 0.25 + 1  # max 25% of balance + tolerance
+        # With 10x leverage: max_margin = 5% of $100 = $5, max_notional = $50
+        assert result.cost_usd <= 100.0 * 0.05 * 10 + 1  # max notional + tolerance
         assert result.risk_usd > 0
 
     def test_position_capped_by_balance(self, risk_manager):
@@ -156,7 +167,7 @@ class TestTradeValidation:
             signal=signal,
         )
         assert not result.allowed
-        assert "spot" in result.reason.lower()
+        assert "short" in result.reason.lower()
 
     def test_low_balance(self, risk_manager):
         signal = SignalCandidate(score=70, direction="bullish", symbol="BTC/USD")

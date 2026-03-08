@@ -51,16 +51,17 @@ class Settings(BaseSettings):
     trading_mode: Literal["paper", "live"] = "paper"
     initial_balance: float = 10000.0
     entry_threshold: float = 60.0  # Requires sweep + displacement at minimum (pullback is bonus)
-    max_risk_pct: float = 0.10  # Max 10% of balance lost per trade (SL distance)
+    max_risk_pct: float = 0.02  # Max 2% of balance lost per trade (SL distance)
     max_position_pct: float = 0.25  # Max 25% of balance allocated per trade (margin)
     max_exposure_pct: float = 1.0  # Allow full budget deployment across positions
-    max_concurrent: int = 0  # 0 = unlimited
+    max_concurrent: int = 10  # Max concurrent open positions (0 = unlimited)
     max_sector_positions: int = 3  # Max positions per sector/category (0 = unlimited)
     max_daily_drawdown: float = 0.10
     circuit_breaker_pct: float = 0.15
     min_rr_ratio: float = 2.0  # Minimum 2:1 reward-to-risk
     sl_buffer: float = 0.03  # 3% SL buffer beyond sweep level (wick protection)
     min_sl_pct: float = 0.02  # Minimum SL distance = 2% of entry price
+    max_sl_pct: float = 0.05  # Maximum SL distance = 5% of entry (skip trades needing wider stops)
     cooldown_hours: float = 2.0  # Cooldown after stop-loss before re-entering same symbol
     max_daily_trades: int = 15  # Allow more trades to deploy full balance
     min_trade_usd: float = 150.0  # Minimum margin per trade ($150 × leverage = min notional)
@@ -82,8 +83,15 @@ class Settings(BaseSettings):
     pullback_max_retracement: float = 0.78  # Max retracement before setup is invalid
 
     # Trailing stop (Travel phase)
-    trailing_activation_rr: float = 1.0  # Activate trailing after 1R profit
+    trailing_activation_rr: float = 0.5  # Activate trailing after 0.5R profit
     trailing_atr_multiplier: float = 1.5  # Trail at 1.5x ATR from high water mark
+
+    # Early breakeven protection — move SL to entry price once trade is 0.5R in profit
+    breakeven_activation_rr: float = 0.5  # Move SL to entry at 0.5R profit (before TP1)
+
+    # Stale trade auto-close — close losing trades that haven't worked out
+    max_hold_hours: float = 4.0  # Auto-close trades open longer than this IF in negative
+    stale_close_below_rr: float = 0.5  # Only auto-close if unrealized R is below this threshold
 
     # Signal reversal — disabled for Trade Travel Chill (no reversals, accept the loss)
     reversal_enabled: bool = False
