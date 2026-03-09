@@ -1702,6 +1702,67 @@ class TradingEngine:
                 logger.warning("watchlist_risk_check_failed", error=str(e))
                 continue
 
+            # --- AI Agent gate for watchlist signals ---
+            agent_skip = False
+            if self.config.agent_enabled and self.agent_analyst:
+                try:
+                    pre_sl = self.order_executor._calculate_stop_loss(graduated)
+                    pre_tp = None
+                    pre_rr = None
+                    if pre_sl is not None:
+                        pre_tp = self.order_executor._calculate_take_profit(graduated, pre_sl)
+                        sl_dist = abs(graduated.entry_price - pre_sl)
+                        if sl_dist > 0 and pre_tp is not None:
+                            pre_rr = abs(pre_tp - graduated.entry_price) / sl_dist
+
+                    wl_sentiment = await self.sentiment_filter.get_sentiment(graduated.symbol)
+                    wl_headlines = self.sentiment_filter.get_recent_headlines(graduated.symbol)
+
+                    wl_context = {
+                        "sentiment_score": wl_sentiment,
+                        "adjusted_score": graduated.score,
+                        "active_threshold": 60.0,
+                        "sl_price": pre_sl,
+                        "tp_price": pre_tp,
+                        "rr_ratio": round(pre_rr, 2) if pre_rr else None,
+                        "open_position_count": len(self.portfolio.open_positions),
+                        "recent_headlines": wl_headlines,
+                        "ml_win_probability": None,
+                    }
+
+                    wl_agent_result = await self.agent_analyst.analyze_signal(graduated, wl_context)
+                    logger.info(
+                        "watchlist_agent_decision",
+                        symbol=graduated.symbol,
+                        action=wl_agent_result.action,
+                        confidence=wl_agent_result.confidence,
+                        risk=wl_agent_result.risk_assessment,
+                        latency_ms=round(wl_agent_result.latency_ms, 1),
+                        reasoning=wl_agent_result.reasoning[:120],
+                    )
+
+                    if wl_agent_result.action == "SKIP":
+                        agent_skip = True
+                        logger.info(
+                            "watchlist_signal_skipped_by_agent",
+                            symbol=graduated.symbol,
+                            confidence=wl_agent_result.confidence,
+                        )
+                    elif wl_agent_result.action == "WAIT_PULLBACK":
+                        # Agent says wait — don't enter now, let it expire or re-trigger
+                        agent_skip = True
+                        logger.info(
+                            "watchlist_signal_deferred_by_agent",
+                            symbol=graduated.symbol,
+                            target_entry=wl_agent_result.suggested_entry,
+                        )
+                except Exception as e:
+                    logger.warning("watchlist_agent_failed", symbol=graduated.symbol, error=str(e))
+                    # On agent failure, proceed with the trade (fallback)
+
+            if agent_skip:
+                continue
+
             # Execute the trade
             try:
                 position, order_result, trade_record = (
