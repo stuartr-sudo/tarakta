@@ -420,7 +420,7 @@ class MarketFilter:
             cluster = CORRELATION_CLUSTERS.get(base, f"other_{base}")
             current = cluster_counts.get(cluster, 0)
 
-            if current >= self.max_per_cluster:
+            if self.max_per_cluster > 0 and current >= self.max_per_cluster:
                 sig.reasons.append(
                     f"BLOCKED:correlation_cluster ({cluster} has "
                     f"{current}/{self.max_per_cluster} positions)"

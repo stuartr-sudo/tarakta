@@ -54,16 +54,16 @@ class Settings(BaseSettings):
     max_risk_pct: float = 0.02  # Max 2% of balance lost per trade (SL distance)
     max_position_pct: float = 0.25  # Max 25% of balance allocated per trade (margin)
     max_exposure_pct: float = 1.0  # Allow full budget deployment across positions
-    max_concurrent: int = 10  # Max concurrent open positions (0 = unlimited)
-    max_sector_positions: int = 3  # Max positions per sector/category (0 = unlimited)
+    max_concurrent: int = 0  # 0 = unlimited concurrent positions
+    max_sector_positions: int = 0  # 0 = unlimited per sector/category
     max_daily_drawdown: float = 0.10
     circuit_breaker_pct: float = 0.15
     min_rr_ratio: float = 2.0  # Minimum 2:1 reward-to-risk
     sl_buffer: float = 0.03  # 3% SL buffer beyond sweep level (wick protection)
     min_sl_pct: float = 0.02  # Minimum SL distance = 2% of entry price
     max_sl_pct: float = 0.05  # Maximum SL distance = 5% of entry (skip trades needing wider stops)
-    cooldown_hours: float = 2.0  # Cooldown after stop-loss before re-entering same symbol
-    max_daily_trades: int = 15  # Allow more trades to deploy full balance
+    cooldown_hours: float = 0.5  # 30 min cooldown after SL (was 2h — too restrictive)
+    max_daily_trades: int = 50  # High ceiling — agent + drawdown safety will self-regulate
     min_trade_usd: float = 150.0  # Minimum margin per trade ($150 × leverage = min notional)
 
     # Progressive take-profit tiers
@@ -105,8 +105,8 @@ class Settings(BaseSettings):
     market_breadth_threshold: float = 0.70  # 70%+ signals in one direction → filter minority
     funding_gate_enabled: bool = True  # Block signals in crowded funding direction
     funding_gate_threshold: float = 0.0005  # 0.05% per 8h = extreme funding
-    signal_persistence_scans: int = 2  # Signal must appear in N consecutive scans
-    max_per_correlation_cluster: int = 2  # Max positions per correlated coin group
+    signal_persistence_scans: int = 1  # 1 = pass on first sighting (no deploy blackout)
+    max_per_correlation_cluster: int = 0  # 0 = unlimited per correlated group
 
     # Signal reversal — disabled for Trade Travel Chill (no reversals, accept the loss)
     reversal_enabled: bool = False
@@ -173,7 +173,7 @@ class Settings(BaseSettings):
     watchlist_enabled: bool = True
     watchlist_monitor_interval_seconds: int = 150   # Check every 2.5 min
     watchlist_expiry_hours: float = 3.0             # Release after 3 hours
-    watchlist_max_size: int = 10                    # Max symbols to hyper-watch
+    watchlist_max_size: int = 0                     # 0 = unlimited watchlist
     watchlist_min_score: float = 35.0               # Must have at least a sweep (35 pts)
 
     # OTE Entry Refinement — wait for optimal pullback on 5m before entering

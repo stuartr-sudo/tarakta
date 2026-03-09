@@ -80,7 +80,7 @@ class WatchlistMonitor:
         """
         if signal.symbol in self.entries:
             return False
-        if len(self.entries) >= self.config.watchlist_max_size:
+        if self.config.watchlist_max_size > 0 and len(self.entries) >= self.config.watchlist_max_size:
             logger.info(
                 "watchlist_full",
                 rejected=signal.symbol,
