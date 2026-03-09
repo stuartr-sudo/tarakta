@@ -842,27 +842,32 @@ class TradingEngine:
                 position = None
                 sig_type = "breakout" if signal.breakout_result is not None else "sweep"
 
-                # --- Post-sweep entry refinement: queue for 5m monitoring ---
-                # If refiner is active AND signal has a sweep, queue for 5m
-                # confirmation instead of entering at the stale 1H close.
+                # --- OTE Entry Refinement: queue for 5m pullback monitoring ---
+                # Instead of entering at the stale 1H close, queue signals for
+                # 5m monitoring to find a better entry price (OTE zone for sweeps,
+                # level retest for breakouts).
                 if (
                     self.main_entry_refiner
-                    and signal.sweep_result
-                    and signal.sweep_result.sweep_detected
                     and signal.symbol not in self.portfolio.open_positions
                     and signal.symbol not in self.main_entry_refiner.get_queued_symbols()
                 ):
+                    queued = False
                     signal.original_1h_price = signal.entry_price
-                    if self.main_entry_refiner.add(signal):
+
+                    if signal.sweep_result and signal.sweep_result.sweep_detected:
+                        queued = self.main_entry_refiner.add(signal)
+                    elif signal.breakout_result and signal.breakout_result.breakout_detected:
+                        queued = self.main_entry_refiner.add_breakout(signal)
+
+                    if queued:
                         refiner_queued += 1
-                        # Still log the signal (as not acted on)
                         vol_24h = self.exchange.get_24h_volume(signal.symbol)
                         await self.repo.insert_signal(
                             {
                                 "symbol": signal.symbol,
                                 "direction": signal.direction or "none",
                                 "score": signal.score,
-                                "reasons": signal.reasons + ["QUEUED:entry_refiner"],
+                                "reasons": signal.reasons + [f"QUEUED:entry_refiner({sig_type})"],
                                 "components": {"volume_24h": vol_24h, "signal_type": sig_type},
                                 "current_price": signal.entry_price,
                                 "acted_on": False,

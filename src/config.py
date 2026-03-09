@@ -166,11 +166,16 @@ class Settings(BaseSettings):
     watchlist_max_size: int = 10                    # Max symbols to hyper-watch
     watchlist_min_score: float = 35.0               # Must have at least a sweep (35 pts)
 
-    # Post-Sweep Entry Refinement — custom bot drops to 5m after 1H sweep detection
+    # OTE Entry Refinement — wait for optimal pullback on 5m before entering
+    # Sweep signals: wait for price to retrace into OTE zone (50-79% Fib)
+    # Breakout signals: wait for price to retest the breakout level + bounce
     entry_refiner_enabled: bool = True
     entry_refiner_check_interval_seconds: int = 60   # Check every 60s in monitor loop
     entry_refiner_expiry_minutes: float = 30.0       # Max wait for 5m confirmation
     entry_refiner_max_queue: int = 5                  # Max signals queued for refinement
+    ote_min_retracement: float = 0.50   # OTE zone starts at 50% Fibonacci retracement
+    ote_max_retracement: float = 0.79   # OTE zone ends at 79% (beyond = setup failed)
+    ote_skip_on_expiry: bool = True     # No pullback within window = skip trade (don't chase)
 
     # Market Consensus Check — portfolio + BTC alignment before entry
     consensus_enabled: bool = True

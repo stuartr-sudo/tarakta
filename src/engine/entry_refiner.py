@@ -1,17 +1,29 @@
-"""Post-Sweep Entry Refinement — find better entries on 5m after 1H sweep detection.
+"""OTE Entry Refinement — wait for optimal pullback before entering.
 
-When the custom bot's 1H scanner detects a qualifying sweep signal (score >= 60),
-instead of entering at the stale 1H candle close, the signal is queued here.
-The refiner monitors 5-minute candles every 60 seconds looking for the moment
-price *reclaims* the swept level with volume — the actual reversal point.
+Instead of entering at the stale 1H candle close, signals are queued and
+monitored on 5-minute candles for a better entry price.
 
-This gets entries much closer to the real bottom/top of the sweep.
+Sweep Strategy (OTE Zone):
+  After sweep + displacement on 1H, price thrusts in the intended direction.
+  We calculate the OTE (Optimal Trade Entry) zone — the 50-79% Fibonacci
+  retracement of the thrust move from sweep_level → thrust_extreme.
+  Enter only when price pulls back INTO that zone and shows rejection
+  (wick, engulfing, or volume confirmation).
+
+Breakout Strategy (Level Retest):
+  After a breakout is confirmed (price broke + held beyond a level), we
+  wait for price to come back and RETEST the breakout level.  Old resistance
+  becomes new support (or vice versa).  Enter on the bounce.
+
+If price never pulls back within the expiry window, we SKIP the trade.
+The best setups always give you a pullback — V-shaped moves that never
+retrace are typically traps or liquidation cascades.
 
 Flow:
-  1H scan detects sweep signal (score >= 60) → queue in EntryRefiner
-  Every 60s: check 5m candles for sweep reclaim + volume confirmation
-  Reclaim confirmed → return refined signal with better entry price
-  Expired (30 min) → return signal with current price (fallback)
+  1H scan detects signal (score >= threshold) → queue in EntryRefiner
+  Every 60s: check 5m candles for OTE zone entry / breakout retest
+  Pullback confirmed → return refined signal with better entry price
+  Expired (30 min) → SKIP trade (no chase) unless ote_skip_on_expiry=False
 """
 from __future__ import annotations
 
@@ -28,34 +40,57 @@ from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Minimum RVOL on the reclaim candle(s) to confirm institutional interest
-RECLAIM_RVOL_THRESHOLD = 1.3
+# ── Constants ──────────────────────────────────────────────────────
+# Minimum RVOL on the rejection candle to confirm institutional interest
+OTE_REJECTION_RVOL = 1.2
 
-# Minimum wick ratio (wick / body) for rejection wick bonus confirmation
+# Minimum wick ratio (wick / body) for rejection wick confirmation
 REJECTION_WICK_RATIO = 0.5
+
+# Minimum thrust size (% from sweep level) before OTE zone is valid
+# Prevents calculating an OTE zone from noise
+MIN_THRUST_PCT = 0.004  # 0.4%
+
+# Breakout retest tolerance — how close price must get to the breakout level
+BREAKOUT_RETEST_TOLERANCE = 0.003  # 0.3%
 
 
 @dataclass
 class RefinerEntry:
-    """A sweep signal queued for 5m entry refinement."""
+    """A signal queued for 5m entry refinement."""
 
     symbol: str
-    signal: SignalCandidate        # Full signal from 1H scan
+    signal: SignalCandidate
     added_at: datetime
     expires_at: datetime
-    sweep_level: float             # Level that was swept (from SweepResult)
-    sweep_direction: str           # "bullish" (swept lows) or "bearish" (swept highs)
-    original_1h_price: float       # 1H close we're trying to improve on
+    original_1h_price: float
     check_count: int = 0
-    best_5m_price: float | None = None
+
+    # Entry type
+    entry_type: str = "sweep"  # "sweep" or "breakout"
+
+    # Sweep-specific
+    sweep_level: float = 0.0
+    sweep_direction: str = ""  # "bullish" (swept lows) or "bearish" (swept highs)
+
+    # Breakout-specific
+    breakout_level: float = 0.0
+    breakout_direction: str = ""  # "bullish" or "bearish"
+
+    # OTE tracking (dynamically updated from 5m candles)
+    thrust_high: float = 0.0
+    thrust_low: float = 1e18  # Start very high so any real low replaces it
+    ote_zone_top: float = 0.0
+    ote_zone_bottom: float = 0.0
+    ote_zone_valid: bool = False
 
 
 class EntryRefiner:
-    """Monitors queued sweep signals on 5m candles for better entry timing.
+    """Monitors queued signals on 5m candles for better entry timing.
 
-    Not an independent async loop — called from FlippedTrader's _monitor_loop()
-    on each 60-second tick. Lightweight: just fetches 5m candles and checks for
-    sweep reclaim confirmation.
+    Called from the engine's monitor loop on each 60-second tick.
+    Handles both sweep and breakout signals with strategy-specific
+    pullback detection.
     """
 
     def __init__(
@@ -68,10 +103,15 @@ class EntryRefiner:
         self.queue: dict[str, RefinerEntry] = {}
         self.vol_analyzer = VolumeAnalyzer()
 
+        # OTE zone parameters
+        self.ote_min_retrace = getattr(config, "ote_min_retracement", 0.50)
+        self.ote_max_retrace = getattr(config, "ote_max_retracement", 0.79)
+        self.skip_on_expiry = getattr(config, "ote_skip_on_expiry", True)
+
     # ── Public API ──────────────────────────────────────────────
 
     def add(self, signal: SignalCandidate) -> bool:
-        """Queue a sweep signal for 5m entry refinement.
+        """Queue a sweep signal for OTE zone entry refinement.
 
         Returns True if added, False if full or duplicate.
         """
@@ -96,19 +136,67 @@ class EntryRefiner:
             signal=signal,
             added_at=now,
             expires_at=now + timedelta(minutes=self.config.entry_refiner_expiry_minutes),
+            original_1h_price=signal.entry_price,
+            entry_type="sweep",
             sweep_level=sweep_result.sweep_level,
             sweep_direction=sweep_result.sweep_direction,
-            original_1h_price=signal.entry_price,
         )
         self.queue[signal.symbol] = entry
 
         logger.info(
-            "refiner_queued",
+            "refiner_queued_sweep",
             symbol=signal.symbol,
             score=signal.score,
             sweep_level=round(sweep_result.sweep_level, 6),
             sweep_direction=sweep_result.sweep_direction,
             sweep_type=sweep_result.sweep_type,
+            original_1h_price=round(signal.entry_price, 6),
+            ote_zone=f"{self.ote_min_retrace:.0%}-{self.ote_max_retrace:.0%}",
+            expires_at=entry.expires_at.isoformat(),
+            queue_size=len(self.queue),
+        )
+        return True
+
+    def add_breakout(self, signal: SignalCandidate) -> bool:
+        """Queue a breakout signal for level-retest entry refinement.
+
+        Returns True if added, False if full or duplicate.
+        """
+        if signal.symbol in self.queue:
+            return False
+        if len(self.queue) >= self.config.entry_refiner_max_queue:
+            logger.info(
+                "refiner_full",
+                rejected=signal.symbol,
+                score=signal.score,
+                current_size=len(self.queue),
+            )
+            return False
+
+        breakout_result = signal.breakout_result
+        if not breakout_result or not breakout_result.breakout_detected:
+            return False
+
+        now = datetime.now(timezone.utc)
+        entry = RefinerEntry(
+            symbol=signal.symbol,
+            signal=signal,
+            added_at=now,
+            expires_at=now + timedelta(minutes=self.config.entry_refiner_expiry_minutes),
+            original_1h_price=signal.entry_price,
+            entry_type="breakout",
+            breakout_level=breakout_result.breakout_level,
+            breakout_direction=breakout_result.breakout_direction or "",
+        )
+        self.queue[signal.symbol] = entry
+
+        logger.info(
+            "refiner_queued_breakout",
+            symbol=signal.symbol,
+            score=signal.score,
+            breakout_level=round(breakout_result.breakout_level, 6),
+            breakout_direction=breakout_result.breakout_direction,
+            breakout_type=breakout_result.breakout_type,
             original_1h_price=round(signal.entry_price, 6),
             expires_at=entry.expires_at.isoformat(),
             queue_size=len(self.queue),
@@ -118,8 +206,8 @@ class EntryRefiner:
     async def check_all(self) -> list[SignalCandidate]:
         """Check all queued entries on 5m data.
 
-        Returns a list of signals ready to enter (either refined or expired-fallback).
-        Removes completed entries from the queue.
+        Returns a list of signals ready to enter (refined with better price).
+        Removes completed and expired entries from the queue.
         """
         if not self.queue:
             return []
@@ -131,29 +219,24 @@ class EntryRefiner:
             try:
                 # Check expiry first
                 if now >= entry.expires_at:
-                    # Expired — return signal with current price as fallback
-                    expired_signal = self._create_expired_signal(entry)
+                    expired_signal = self._handle_expiry(entry)
                     if expired_signal:
                         ready.append(expired_signal)
                     del self.queue[symbol]
-                    logger.info(
-                        "refiner_expired",
-                        symbol=symbol,
-                        check_count=entry.check_count,
-                        original_1h_price=round(entry.original_1h_price, 6),
-                        duration_seconds=round(
-                            (now - entry.added_at).total_seconds(), 0
-                        ),
-                    )
                     continue
 
-                # Fetch 5m candles and check for reclaim
+                # Fetch 5m candles and check for pullback
                 candles_5m = await self.candles.get_candles(symbol, "5m", limit=30)
                 if candles_5m is None or candles_5m.empty or len(candles_5m) < 10:
                     continue
 
                 entry.check_count += 1
-                result = self._check_entry(entry, candles_5m)
+
+                # Dispatch to strategy-specific check
+                if entry.entry_type == "sweep":
+                    result = self._check_sweep_ote(entry, candles_5m)
+                else:
+                    result = self._check_breakout_retest(entry, candles_5m)
 
                 if result is not None:
                     ready.append(result)
@@ -172,95 +255,329 @@ class EntryRefiner:
         """Return symbols currently being refined."""
         return set(self.queue.keys())
 
-    # ── Reclaim Detection ──────────────────────────────────────
+    # ── Sweep OTE Zone Check ──────────────────────────────────────
 
-    def _check_entry(
+    def _check_sweep_ote(
         self, entry: RefinerEntry, candles_5m: pd.DataFrame
     ) -> SignalCandidate | None:
-        """Check if the swept level has been reclaimed on 5m with volume.
+        """Check if price has pulled back into the OTE zone with rejection.
 
-        For bullish sweep (swept lows, expecting reversal up):
-          - Reclaim = 5m candle close ABOVE the swept level
-          - Volume = RVOL >= 1.3x on recent candles
-          - Rejection wick = lower wick >= 50% of body (buyers stepping in)
+        For bullish sweep (swept lows, expecting reversal UP):
+          - Thrust = highest 5m high since the sweep
+          - OTE zone = 50-79% retracement from thrust_high toward sweep_level
+          - Entry: price pulls back into zone and shows rejection (wick/volume)
 
-        For bearish sweep (swept highs, expecting reversal down):
-          - Mirror: 5m close BELOW swept level, upper wick rejection
+        For bearish sweep (swept highs, expecting reversal DOWN):
+          - Thrust = lowest 5m low since the sweep
+          - OTE zone = 50-79% retracement from thrust_low toward sweep_level
+          - Entry: price pulls back up into zone and shows rejection
         """
+        direction = entry.sweep_direction
         sweep_level = entry.sweep_level
-        direction = entry.sweep_direction  # "bullish" or "bearish"
 
-        # Look at the last 5 candles for reclaim evidence
+        highs = candles_5m["high"].astype(float)
+        lows = candles_5m["low"].astype(float)
+        closes = candles_5m["close"].astype(float)
+        opens = candles_5m["open"].astype(float)
+
+        # Update thrust tracking
+        current_max_high = float(highs.max())
+        current_min_low = float(lows.min())
+
+        if current_max_high > entry.thrust_high:
+            entry.thrust_high = current_max_high
+        if current_min_low < entry.thrust_low:
+            entry.thrust_low = current_min_low
+
+        if direction == "bullish":
+            # Swept lows → expecting reversal UP
+            thrust = entry.thrust_high
+            move_size = thrust - sweep_level
+
+            # Need a meaningful thrust before calculating OTE zone
+            if move_size <= 0 or (move_size / sweep_level) < MIN_THRUST_PCT:
+                if entry.check_count % 5 == 0:
+                    logger.debug(
+                        "refiner_waiting_thrust",
+                        symbol=entry.symbol,
+                        direction=direction,
+                        thrust_high=round(thrust, 6),
+                        sweep_level=round(sweep_level, 6),
+                        move_pct=f"{(move_size / sweep_level * 100) if sweep_level > 0 else 0:.2f}%",
+                    )
+                return None
+
+            # OTE zone: price pulling back DOWN from thrust toward sweep_level
+            # 50% retrace = halfway back
+            # 79% retrace = deep pullback (near sweep level)
+            ote_top = thrust - move_size * self.ote_min_retrace
+            ote_bottom = thrust - move_size * self.ote_max_retrace
+            entry.ote_zone_top = ote_top
+            entry.ote_zone_bottom = ote_bottom
+            entry.ote_zone_valid = True
+
+            # Check last 5 candles for entry into OTE zone + rejection
+            return self._find_rejection_in_zone(
+                entry=entry,
+                candles_5m=candles_5m,
+                zone_top=ote_top,
+                zone_bottom=ote_bottom,
+                direction="bullish",
+            )
+
+        else:  # bearish
+            # Swept highs → expecting reversal DOWN
+            thrust = entry.thrust_low
+            move_size = sweep_level - thrust
+
+            if move_size <= 0 or (move_size / sweep_level) < MIN_THRUST_PCT:
+                if entry.check_count % 5 == 0:
+                    logger.debug(
+                        "refiner_waiting_thrust",
+                        symbol=entry.symbol,
+                        direction=direction,
+                        thrust_low=round(thrust, 6),
+                        sweep_level=round(sweep_level, 6),
+                        move_pct=f"{(move_size / sweep_level * 100) if sweep_level > 0 else 0:.2f}%",
+                    )
+                return None
+
+            # OTE zone: price pulling back UP from thrust toward sweep_level
+            ote_bottom = thrust + move_size * self.ote_min_retrace
+            ote_top = thrust + move_size * self.ote_max_retrace
+            entry.ote_zone_top = ote_top
+            entry.ote_zone_bottom = ote_bottom
+            entry.ote_zone_valid = True
+
+            return self._find_rejection_in_zone(
+                entry=entry,
+                candles_5m=candles_5m,
+                zone_top=ote_top,
+                zone_bottom=ote_bottom,
+                direction="bearish",
+            )
+
+    # ── Breakout Retest Check ─────────────────────────────────────
+
+    def _check_breakout_retest(
+        self, entry: RefinerEntry, candles_5m: pd.DataFrame
+    ) -> SignalCandidate | None:
+        """Check if price has retested the breakout level and bounced.
+
+        For bullish breakout (broke above resistance):
+          - Old resistance = new support
+          - Wait for price to pull back TO the breakout level
+          - Enter when price touches the level and closes above it (bounce)
+
+        For bearish breakout (broke below support):
+          - Old support = new resistance
+          - Wait for price to pull back UP to the breakout level
+          - Enter when price touches the level and closes below it (rejection)
+        """
+        direction = entry.breakout_direction
+        level = entry.breakout_level
+        tolerance = level * BREAKOUT_RETEST_TOLERANCE
+
+        closes = candles_5m["close"].astype(float)
+        highs = candles_5m["high"].astype(float)
+        lows = candles_5m["low"].astype(float)
+        opens = candles_5m["open"].astype(float)
+
+        # Retest zone around the breakout level
+        zone_top = level + tolerance
+        zone_bottom = level - tolerance
+
+        # Check last 5 candles for retest + bounce
         recent = candles_5m.tail(5)
-
-        reclaim_detected = False
-        reclaim_price = None
-        has_rejection_wick = False
 
         for i in range(len(recent)):
             candle = recent.iloc[i]
-            close = float(candle["close"])
-            open_ = float(candle["open"])
-            high = float(candle["high"])
-            low = float(candle["low"])
-            body = abs(close - open_)
+            c_close = float(candle["close"])
+            c_open = float(candle["open"])
+            c_high = float(candle["high"])
+            c_low = float(candle["low"])
+            body = abs(c_close - c_open)
 
             if direction == "bullish":
-                # Swept lows → expecting price to reverse UP
-                # Reclaim = close above the swept low level
-                if close > sweep_level:
-                    reclaim_detected = True
-                    reclaim_price = close
-                    # Rejection wick: long lower wick (buyers stepping in)
-                    lower_wick = min(open_, close) - low
-                    if body > 0 and lower_wick / body >= REJECTION_WICK_RATIO:
-                        has_rejection_wick = True
-                    break
+                # Broke above → wait for pullback to level → bounce
+                # Candle low touched the retest zone AND closed above it
+                if c_low <= zone_top and c_close > level:
+                    # Rejection wick: long lower wick showing buyers at the level
+                    lower_wick = min(c_open, c_close) - c_low
+                    has_wick = body > 0 and lower_wick / body >= REJECTION_WICK_RATIO
+
+                    # Volume check
+                    vol_profile = self.vol_analyzer.analyze(candles_5m)
+                    rvol = vol_profile.relative_volume
+                    has_volume = rvol >= OTE_REJECTION_RVOL
+
+                    if has_wick or has_volume:
+                        return self._create_refined_signal(
+                            entry=entry,
+                            entry_price=c_close,
+                            rejection_type="breakout_retest",
+                            has_wick=has_wick,
+                            rvol=rvol,
+                        )
 
             elif direction == "bearish":
-                # Swept highs → expecting price to reverse DOWN
-                # Reclaim = close below the swept high level
-                if close < sweep_level:
-                    reclaim_detected = True
-                    reclaim_price = close
-                    # Rejection wick: long upper wick (sellers stepping in)
-                    upper_wick = high - max(open_, close)
-                    if body > 0 and upper_wick / body >= REJECTION_WICK_RATIO:
-                        has_rejection_wick = True
-                    break
+                # Broke below → wait for pullback up to level → rejection
+                # Candle high reached the retest zone AND closed below it
+                if c_high >= zone_bottom and c_close < level:
+                    upper_wick = c_high - max(c_open, c_close)
+                    has_wick = body > 0 and upper_wick / body >= REJECTION_WICK_RATIO
 
-        if not reclaim_detected or reclaim_price is None:
-            # Log periodic check status
-            if entry.check_count % 5 == 0:  # Every 5 checks (~5 min)
-                current_price = float(candles_5m["close"].iloc[-1])
-                logger.debug(
-                    "refiner_check",
-                    symbol=entry.symbol,
-                    check_count=entry.check_count,
-                    reclaim_detected=False,
-                    current_price=round(current_price, 6),
-                    sweep_level=round(sweep_level, 6),
-                    direction=direction,
-                )
-            return None
+                    vol_profile = self.vol_analyzer.analyze(candles_5m)
+                    rvol = vol_profile.relative_volume
+                    has_volume = rvol >= OTE_REJECTION_RVOL
 
-        # Volume confirmation — check RVOL on the reclaim candle's neighborhood
-        vol_profile = self.vol_analyzer.analyze(candles_5m)
-        rvol = vol_profile.relative_volume
+                    if has_wick or has_volume:
+                        return self._create_refined_signal(
+                            entry=entry,
+                            entry_price=c_close,
+                            rejection_type="breakout_retest",
+                            has_wick=has_wick,
+                            rvol=rvol,
+                        )
 
-        if rvol < RECLAIM_RVOL_THRESHOLD:
+        # No retest detected yet
+        if entry.check_count % 5 == 0:
+            current_price = float(closes.iloc[-1])
             logger.debug(
-                "refiner_check",
+                "refiner_waiting_retest",
                 symbol=entry.symbol,
+                direction=direction,
+                breakout_level=round(level, 6),
+                current_price=round(current_price, 6),
+                distance_pct=f"{abs(current_price - level) / level * 100:.2f}%",
                 check_count=entry.check_count,
-                reclaim_detected=True,
-                rvol=round(rvol, 2),
-                rvol_threshold=RECLAIM_RVOL_THRESHOLD,
-                rejected_reason="low_volume",
             )
-            return None
+        return None
 
-        # ── Reclaim confirmed with volume ──
+    # ── OTE Zone Rejection Detection ──────────────────────────────
+
+    def _find_rejection_in_zone(
+        self,
+        entry: RefinerEntry,
+        candles_5m: pd.DataFrame,
+        zone_top: float,
+        zone_bottom: float,
+        direction: str,
+    ) -> SignalCandidate | None:
+        """Look for a rejection candle within the OTE zone.
+
+        For bullish: price pulled back down into zone, look for buying rejection
+          (lower wick, bullish close, volume)
+        For bearish: price pulled back up into zone, look for selling rejection
+          (upper wick, bearish close, volume)
+        """
+        recent = candles_5m.tail(5)
+
+        for i in range(len(recent)):
+            candle = recent.iloc[i]
+            c_close = float(candle["close"])
+            c_open = float(candle["open"])
+            c_high = float(candle["high"])
+            c_low = float(candle["low"])
+            body = abs(c_close - c_open)
+
+            if direction == "bullish":
+                # Price pulled back DOWN into zone
+                # Candle low entered the OTE zone (below zone_top)
+                if c_low <= zone_top and c_low >= zone_bottom * 0.995:
+                    # Rejection: closed above zone midpoint (buyers stepped in)
+                    zone_mid = (zone_top + zone_bottom) / 2
+                    closed_above_mid = c_close >= zone_mid
+
+                    # Rejection wick: long lower wick
+                    lower_wick = min(c_open, c_close) - c_low
+                    has_wick = body > 0 and lower_wick / body >= REJECTION_WICK_RATIO
+
+                    # Bullish candle (close > open)
+                    is_bullish_candle = c_close > c_open
+
+                    # Volume
+                    vol_profile = self.vol_analyzer.analyze(candles_5m)
+                    rvol = vol_profile.relative_volume
+                    has_volume = rvol >= OTE_REJECTION_RVOL
+
+                    # Need at least 2 of: wick rejection, bullish close above mid, volume
+                    confirmations = sum([
+                        has_wick,
+                        closed_above_mid and is_bullish_candle,
+                        has_volume,
+                    ])
+
+                    if confirmations >= 2:
+                        return self._create_refined_signal(
+                            entry=entry,
+                            entry_price=c_close,
+                            rejection_type="ote_zone",
+                            has_wick=has_wick,
+                            rvol=rvol,
+                            zone_top=zone_top,
+                            zone_bottom=zone_bottom,
+                        )
+
+            elif direction == "bearish":
+                # Price pulled back UP into zone
+                # Candle high entered the OTE zone (above zone_bottom)
+                if c_high >= zone_bottom and c_high <= zone_top * 1.005:
+                    zone_mid = (zone_top + zone_bottom) / 2
+                    closed_below_mid = c_close <= zone_mid
+
+                    upper_wick = c_high - max(c_open, c_close)
+                    has_wick = body > 0 and upper_wick / body >= REJECTION_WICK_RATIO
+
+                    is_bearish_candle = c_close < c_open
+
+                    vol_profile = self.vol_analyzer.analyze(candles_5m)
+                    rvol = vol_profile.relative_volume
+                    has_volume = rvol >= OTE_REJECTION_RVOL
+
+                    confirmations = sum([
+                        has_wick,
+                        closed_below_mid and is_bearish_candle,
+                        has_volume,
+                    ])
+
+                    if confirmations >= 2:
+                        return self._create_refined_signal(
+                            entry=entry,
+                            entry_price=c_close,
+                            rejection_type="ote_zone",
+                            has_wick=has_wick,
+                            rvol=rvol,
+                            zone_top=zone_top,
+                            zone_bottom=zone_bottom,
+                        )
+
+        # No rejection in zone yet — log periodic status
+        if entry.check_count % 5 == 0:
+            current_price = float(candles_5m["close"].iloc[-1])
+            logger.debug(
+                "refiner_waiting_ote",
+                symbol=entry.symbol,
+                direction=direction,
+                ote_zone=f"{round(zone_bottom, 4)}-{round(zone_top, 4)}",
+                current_price=round(current_price, 6),
+                check_count=entry.check_count,
+            )
+        return None
+
+    # ── Signal Creation ───────────────────────────────────────────
+
+    def _create_refined_signal(
+        self,
+        entry: RefinerEntry,
+        entry_price: float,
+        rejection_type: str,
+        has_wick: bool,
+        rvol: float,
+        zone_top: float = 0.0,
+        zone_bottom: float = 0.0,
+    ) -> SignalCandidate:
+        """Create a refined signal with improved entry price."""
         now = datetime.now(timezone.utc)
         duration = (now - entry.added_at).total_seconds()
 
@@ -268,12 +585,11 @@ class EntryRefiner:
         improvement_pct = 0.0
         if entry.original_1h_price > 0:
             improvement_pct = abs(
-                reclaim_price - entry.original_1h_price
+                entry_price - entry.original_1h_price
             ) / entry.original_1h_price * 100
 
-        # Update signal with refined entry
         signal = entry.signal
-        signal.entry_price = reclaim_price
+        signal.entry_price = entry_price
         signal.refined_entry = True
         signal.refinement_duration_seconds = duration
         signal.original_1h_price = entry.original_1h_price
@@ -281,38 +597,63 @@ class EntryRefiner:
         logger.info(
             "refiner_confirmed",
             symbol=entry.symbol,
-            entry_price=round(reclaim_price, 6),
+            entry_type=entry.entry_type,
+            rejection_type=rejection_type,
+            entry_price=round(entry_price, 6),
             original_1h_price=round(entry.original_1h_price, 6),
             improvement_pct=round(improvement_pct, 2),
             rvol=round(rvol, 2),
-            rejection_wick=has_rejection_wick,
+            rejection_wick=has_wick,
+            ote_zone=f"{round(zone_bottom, 4)}-{round(zone_top, 4)}" if zone_top > 0 else "n/a",
             check_count=entry.check_count,
             duration_seconds=round(duration, 0),
-            direction=direction,
+            direction=entry.sweep_direction or entry.breakout_direction,
         )
 
         return signal
 
-    def _create_expired_signal(self, entry: RefinerEntry) -> SignalCandidate | None:
-        """Create a fallback signal when refinement window expires.
+    def _handle_expiry(self, entry: RefinerEntry) -> SignalCandidate | None:
+        """Handle expired entries — skip or fallback based on config.
 
-        The 1H signal was already validated (score >= 60), so we still enter
-        but at the current 5m close price instead of the stale 1H close.
+        Default: skip the trade (no pullback = likely a trap).
+        If ote_skip_on_expiry=False: enter at current price (legacy behavior).
         """
-        signal = entry.signal
         now = datetime.now(timezone.utc)
         duration = (now - entry.added_at).total_seconds()
 
-        # Mark as non-refined (entered on expiry, not on reclaim)
+        if self.skip_on_expiry:
+            # No pullback within the window → skip the trade entirely
+            logger.info(
+                "refiner_expired_skipped",
+                symbol=entry.symbol,
+                entry_type=entry.entry_type,
+                check_count=entry.check_count,
+                original_1h_price=round(entry.original_1h_price, 6),
+                duration_seconds=round(duration, 0),
+                reason="no_pullback_detected",
+                ote_zone_valid=entry.ote_zone_valid,
+                ote_zone=f"{round(entry.ote_zone_bottom, 4)}-{round(entry.ote_zone_top, 4)}"
+                if entry.ote_zone_valid else "n/a",
+            )
+            return None
+
+        # Legacy fallback: enter at current price (not recommended)
+        signal = entry.signal
         signal.refined_entry = False
         signal.refinement_duration_seconds = duration
         signal.original_1h_price = entry.original_1h_price
-        # entry_price stays as whatever it was (will be updated by _try_enter's
-        # live ticker fetch anyway)
 
+        logger.info(
+            "refiner_expired_fallback",
+            symbol=entry.symbol,
+            entry_type=entry.entry_type,
+            check_count=entry.check_count,
+            original_1h_price=round(entry.original_1h_price, 6),
+            duration_seconds=round(duration, 0),
+        )
         return signal
 
-    # ── State Persistence ──────────────────────────────────────
+    # ── State Persistence ──────────────────────────────────────────
 
     def get_state(self) -> dict:
         """Serialize refiner state for DB persistence."""
@@ -322,13 +663,18 @@ class EntryRefiner:
                 "symbol": entry.symbol,
                 "added_at": entry.added_at.isoformat(),
                 "expires_at": entry.expires_at.isoformat(),
-                "sweep_level": entry.sweep_level,
-                "sweep_direction": entry.sweep_direction,
                 "original_1h_price": entry.original_1h_price,
                 "check_count": entry.check_count,
                 "score": entry.signal.score,
                 "direction": entry.signal.direction,
                 "components": entry.signal.components,
+                "entry_type": entry.entry_type,
+                "sweep_level": entry.sweep_level,
+                "sweep_direction": entry.sweep_direction,
+                "breakout_level": entry.breakout_level,
+                "breakout_direction": entry.breakout_direction,
+                "thrust_high": entry.thrust_high,
+                "thrust_low": entry.thrust_low if entry.thrust_low < 1e17 else 0,
             }
         return {
             "entries": entries_data,
@@ -338,10 +684,8 @@ class EntryRefiner:
     def restore_state(self, data: dict) -> None:
         """Restore refiner state from DB.
 
-        Like WatchlistMonitor, we can't fully reconstruct SignalCandidate objects
-        from serialized state. Restored entries will expire naturally (30 min window
-        is short enough that stale entries are unlikely to survive a restart).
-        We only restore enough to let them either enter on expiry or drop.
+        Restored entries will expire naturally (30 min window is short enough
+        that stale entries are unlikely to survive a restart).
         """
         if not data or "entries" not in data:
             return
@@ -357,7 +701,6 @@ class EntryRefiner:
                     expired += 1
                     continue
 
-                # Create minimal placeholder signal
                 placeholder = SignalCandidate(
                     score=entry_data.get("score", 0),
                     direction=entry_data.get("direction"),
@@ -371,10 +714,15 @@ class EntryRefiner:
                     signal=placeholder,
                     added_at=datetime.fromisoformat(entry_data["added_at"]),
                     expires_at=expires_at,
-                    sweep_level=entry_data.get("sweep_level", 0),
-                    sweep_direction=entry_data.get("sweep_direction", "bullish"),
                     original_1h_price=entry_data.get("original_1h_price", 0),
                     check_count=entry_data.get("check_count", 0),
+                    entry_type=entry_data.get("entry_type", "sweep"),
+                    sweep_level=entry_data.get("sweep_level", 0),
+                    sweep_direction=entry_data.get("sweep_direction", "bullish"),
+                    breakout_level=entry_data.get("breakout_level", 0),
+                    breakout_direction=entry_data.get("breakout_direction", ""),
+                    thrust_high=entry_data.get("thrust_high", 0),
+                    thrust_low=entry_data.get("thrust_low", 1e18),
                 )
                 self.queue[sym] = entry
                 restored += 1
