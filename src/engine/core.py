@@ -27,6 +27,7 @@ from src.strategy.adaptive_threshold import AdaptiveThreshold
 from src.strategy.confluence import WEIGHTS
 from src.strategy.dynamic_weights import DynamicWeightOptimizer
 from src.strategy.llm_analyst import LLMTradeAnalyst
+from src.strategy.market_filter import MarketFilter
 from src.strategy.scanner import AltcoinScanner
 from src.strategy.sentiment import SentimentFilter
 from src.strategy.split_test import SplitTestManager
@@ -67,6 +68,18 @@ class TradingEngine:
             stale_close_below_rr=config.stale_close_below_rr,
         )
         self.scanner = AltcoinScanner(candle_manager, config)
+
+        # Market-level cross-reference filters (BTC gate, breadth, persistence, funding, correlation)
+        self.market_filter = MarketFilter(
+            btc_macro_gate_enabled=getattr(config, "btc_macro_gate_enabled", True),
+            market_breadth_enabled=getattr(config, "market_breadth_enabled", True),
+            market_breadth_threshold=getattr(config, "market_breadth_threshold", 0.70),
+            funding_gate_enabled=getattr(config, "funding_gate_enabled", True),
+            funding_gate_threshold=getattr(config, "funding_gate_threshold", 0.0005),
+            signal_persistence_scans=getattr(config, "signal_persistence_scans", 2),
+            max_per_correlation_cluster=getattr(config, "max_per_correlation_cluster", 2),
+        )
+        self._scan_cycle = 0  # Track scan cycles for signal persistence
 
         # Hyper-Watchlist Monitor — fast 5m monitoring for near-miss signals
         self._watchlist_queue: asyncio.Queue = asyncio.Queue()
@@ -743,6 +756,28 @@ class TradingEngine:
                     watchlist_size=len(self.watchlist_monitor.entries),
                 )
 
+        # ── Market-level cross-reference filters ──
+        # BTC macro gate, market breadth, signal persistence, correlation clustering
+        self._scan_cycle += 1
+        signals, mf_result = await self.market_filter.apply_all(
+            signals=signals,
+            candle_manager=self.candle_manager,
+            scan_cycle=self._scan_cycle,
+            open_positions=(
+                self.portfolio.open_positions if self.portfolio else {}
+            ),
+        )
+        if mf_result.signals_before != mf_result.signals_after:
+            logger.info(
+                "market_filter_applied",
+                before=mf_result.signals_before,
+                after=mf_result.signals_after,
+                btc_trend=mf_result.btc_trend,
+                breadth=mf_result.breadth_direction,
+                blocked_btc=len(mf_result.blocked_by_btc_gate),
+                blocked_breadth=len(mf_result.blocked_by_breadth),
+            )
+
         # Apply adaptive threshold filter
         active_threshold = self.adaptive_threshold.threshold
         if active_threshold != self.config.entry_threshold:
@@ -939,6 +974,24 @@ class TradingEngine:
                             "score": signal.score,
                             "reasons": signal.reasons + [f"adj_score={adjusted_score:.1f}"],
                             "components": {"volume_24h": vol_24h, "sentiment": sentiment_score, "signal_type": sig_type},
+                            "current_price": signal.entry_price,
+                            "acted_on": False,
+                            "scan_cycle": cycle,
+                        }
+                    )
+                    signals_saved += 1
+                    continue
+
+                # --- Funding Rate Gate: block crowded-direction signals ---
+                if self.market_filter.check_funding_gate(signal):
+                    vol_24h = self.exchange.get_24h_volume(signal.symbol)
+                    await self.repo.insert_signal(
+                        {
+                            "symbol": signal.symbol,
+                            "direction": signal.direction or "none",
+                            "score": signal.score,
+                            "reasons": signal.reasons + ["BLOCKED:funding_gate"],
+                            "components": {"volume_24h": vol_24h, "signal_type": sig_type},
                             "current_price": signal.entry_price,
                             "acted_on": False,
                             "scan_cycle": cycle,

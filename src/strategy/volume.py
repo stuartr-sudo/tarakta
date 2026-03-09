@@ -109,6 +109,27 @@ class VolumeAnalyzer:
                     vol_ratio = candle_vol / avg_v
 
                     if body_ratio > 1.5 and vol_ratio > 1.5:
+                        # --- Volume Decay Check ---
+                        # After displacement, check if the next 2-3 candles
+                        # sustained volume.  If volume drops >50% immediately,
+                        # the displacement was a one-off liquidation grab.
+                        decay_failed = False
+                        following_candles = min(3, len(ohlc) - idx - 1)
+                        if following_candles >= 2:
+                            follow_vols = [
+                                float(volume.iloc[idx + k])
+                                for k in range(1, following_candles + 1)
+                                if idx + k < len(ohlc)
+                            ]
+                            if follow_vols:
+                                avg_follow = sum(follow_vols) / len(follow_vols)
+                                if avg_follow < candle_vol * 0.5:
+                                    decay_failed = True  # Volume collapsed
+
+                        if decay_failed:
+                            # Skip this displacement — volume didn't sustain
+                            continue
+
                         displacement = True
                         disp_direction = "bullish" if float(close.iloc[idx]) > float(open_.iloc[idx]) else "bearish"
                         # Strength: how extreme the move was (0-1 scale)

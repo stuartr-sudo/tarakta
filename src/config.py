@@ -99,6 +99,15 @@ class Settings(BaseSettings):
     monday_manipulation_hours: float = 8.0  # Hours after weekly open (Mon 00:00 UTC) to apply penalty
     midweek_reversal_bonus: float = 10.0  # Bonus for counter-trend signals on Wed/Thu
 
+    # Market-level cross-reference filters
+    btc_macro_gate_enabled: bool = True  # Hard gate: only trade with BTC trend
+    market_breadth_enabled: bool = True  # Block minority-direction signals
+    market_breadth_threshold: float = 0.70  # 70%+ signals in one direction → filter minority
+    funding_gate_enabled: bool = True  # Block signals in crowded funding direction
+    funding_gate_threshold: float = 0.0005  # 0.05% per 8h = extreme funding
+    signal_persistence_scans: int = 2  # Signal must appear in N consecutive scans
+    max_per_correlation_cluster: int = 2  # Max positions per correlated coin group
+
     # Signal reversal — disabled for Trade Travel Chill (no reversals, accept the loss)
     reversal_enabled: bool = False
     reversal_min_score: float = 70.0       # Legacy, inactive
