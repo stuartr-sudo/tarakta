@@ -276,7 +276,7 @@ class AgentEntryAnalyst:
             client = self._get_client()
             response = await client.chat.completions.create(
                 model=self._model,
-                max_tokens=600,
+                max_completion_tokens=600,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
