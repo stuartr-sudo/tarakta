@@ -93,6 +93,12 @@ class Settings(BaseSettings):
     max_hold_hours: float = 4.0  # Auto-close trades open longer than this IF in negative
     stale_close_below_rr: float = 0.0  # Only auto-close if trade is in the red (negative PnL)
 
+    # Weekly cycle — Fake Move Monday & Mid-Week Reversal (ICT concepts)
+    weekly_cycle_enabled: bool = True  # Master toggle for weekly cycle features
+    monday_manipulation_penalty: float = 15.0  # Score penalty during Monday manipulation window
+    monday_manipulation_hours: float = 8.0  # Hours after weekly open (Mon 00:00 UTC) to apply penalty
+    midweek_reversal_bonus: float = 10.0  # Bonus for counter-trend signals on Wed/Thu
+
     # Signal reversal — disabled for Trade Travel Chill (no reversals, accept the loss)
     reversal_enabled: bool = False
     reversal_min_score: float = 70.0       # Legacy, inactive

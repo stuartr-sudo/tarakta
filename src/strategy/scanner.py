@@ -38,6 +38,7 @@ from src.strategy.pullback import PullbackAnalyzer
 from src.strategy.sessions import SessionAnalyzer
 from src.strategy.sweep_detector import SweepDetector
 from src.strategy.volume import VolumeAnalyzer
+from src.strategy.weekly_cycle import WeeklyCycleAnalyzer
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -64,6 +65,13 @@ class AltcoinScanner:
         )
         self.confluence = PostSweepEngine(entry_threshold=config.entry_threshold)
         self.leverage_analyzer = LeverageAnalyzer()
+        # Weekly cycle — Fake Move Monday & Mid-Week Reversal
+        self.weekly_cycle_enabled = getattr(config, "weekly_cycle_enabled", True)
+        self.weekly_cycle = WeeklyCycleAnalyzer(
+            monday_penalty_pts=getattr(config, "monday_manipulation_penalty", 15.0),
+            monday_manipulation_hours=getattr(config, "monday_manipulation_hours", 8.0),
+            midweek_reversal_bonus_pts=getattr(config, "midweek_reversal_bonus", 10.0),
+        )
         # Near-misses for hyper-watchlist promotion (populated each scan cycle)
         self.last_near_misses: list[SignalCandidate] = []
 
@@ -332,6 +340,26 @@ class AltcoinScanner:
                     signal.components["breakout_confirmed"] = BREAKOUT_WEIGHTS["breakout_confirmed"]
                     if breakout_result.volume_confirmed:
                         signal.components["volume_confirmed"] = BREAKOUT_WEIGHTS["volume_confirmed"]
+
+        # ── Weekly Cycle: Fake Move Monday & Mid-Week Reversal ──
+        if self.weekly_cycle_enabled and signal.score > 0:
+            weekly_result = self.weekly_cycle.analyze(
+                candles_1d=candles.get("1d"),
+                signal_direction=signal.direction,
+            )
+            if weekly_result.score_adjustment != 0:
+                signal.score = max(0, signal.score + weekly_result.score_adjustment)
+                signal.reasons.extend(weekly_result.reasons)
+                signal.components["weekly_cycle"] = weekly_result.score_adjustment
+                logger.info(
+                    "weekly_cycle_applied",
+                    symbol=symbol,
+                    day=weekly_result.day_name,
+                    adjustment=weekly_result.score_adjustment,
+                    new_score=signal.score,
+                    monday_manipulation=weekly_result.in_monday_manipulation,
+                    midweek_reversal=weekly_result.signal_aligns_with_reversal,
+                )
 
         # Attach sweep data and ATR for order execution
         signal.sweep_result = sweep_result
