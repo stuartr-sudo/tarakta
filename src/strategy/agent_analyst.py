@@ -104,9 +104,33 @@ Classify the current market as: trending, ranging, volatile, choppy
 This helps the bot calibrate its other parameters.
 
 Be decisive. Don't hedge. If it's marginal, SKIP — there will always be another trade. \
-The best traders make money by the trades they DON'T take.
+The best traders make money by the trades they DON'T take."""
 
-Use the record_entry_decision tool to submit your analysis."""
+
+JSON_FORMAT_INSTRUCTION = """
+
+## RESPONSE FORMAT — CRITICAL
+
+You MUST respond with a single JSON object and NOTHING else. No markdown, no explanation, no text before or after.
+
+The JSON object must have exactly these keys:
+{
+  "action": "ENTER_NOW" | "WAIT_PULLBACK" | "SKIP",
+  "confidence": <number 0-100>,
+  "reasoning": "<3-5 sentence analysis>",
+  "suggested_entry": <number or 0>,
+  "suggested_sl": <number or 0>,
+  "suggested_tp": <number or 0>,
+  "market_regime": "trending" | "ranging" | "volatile" | "choppy",
+  "risk_assessment": "low" | "medium" | "high" | "extreme"
+}
+
+Rules for numeric fields:
+- suggested_entry: For WAIT_PULLBACK set the target price. For ENTER_NOW or SKIP set to 0.
+- suggested_sl: Set an alternative stop-loss price, or 0 to keep the formula-calculated SL.
+- suggested_tp: Set an alternative take-profit price, or 0 to keep the formula-calculated TP.
+
+Respond with ONLY the JSON object. No other text."""
 
 
 ENTRY_DECISION_TOOL = {
@@ -279,17 +303,10 @@ class AgentEntryAnalyst:
                 model=self._model,
                 max_completion_tokens=600,
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": SYSTEM_PROMPT + JSON_FORMAT_INSTRUCTION},
                     {"role": "user", "content": user_prompt},
                 ],
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "entry_decision",
-                        "strict": True,
-                        "schema": ENTRY_DECISION_TOOL["function"]["parameters"],
-                    },
-                },
+                response_format={"type": "json_object"},
             )
 
             latency_ms = (time.monotonic() - start) * 1000
@@ -508,7 +525,7 @@ class AgentEntryAnalyst:
 ### Bot Performance
 {perf_section}
 
-Analyze this setup and use record_entry_decision to submit your decision."""
+Analyze this setup and respond with your JSON decision."""
 
     def _parse_response(self, response) -> AgentDecision:
         """Extract structured JSON from OpenAI response."""
