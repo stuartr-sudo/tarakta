@@ -797,4 +797,40 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             logger.error("split_test_stats_failed", error=str(e))
             return {"error": str(e)}
 
+    @router.get("/agent-stats")
+    @login_required
+    async def get_agent_stats(request: Request):
+        """Get AI entry agent usage statistics and performance."""
+        try:
+            result: dict = {"status": "ok"}
+
+            # Agent usage stats (if engine is available)
+            if engine and engine.agent_analyst:
+                result["agent"] = engine.agent_analyst.get_usage_stats()
+                result["agent"]["enabled"] = True
+            else:
+                result["agent"] = {"enabled": False, "total_requests": 0}
+
+            # Agent-tagged trade performance
+            closed_trades = await repo.get_trades(status="closed", per_page=500)
+            agent_trades = [t for t in closed_trades if t.get("test_group") == "agent"]
+            if agent_trades:
+                wins = sum(1 for t in agent_trades if (t.get("pnl_usd") or 0) > 0)
+                pnls = [float(t.get("pnl_usd") or 0) for t in agent_trades]
+                result["performance"] = {
+                    "trade_count": len(agent_trades),
+                    "win_rate": round(wins / len(agent_trades) * 100, 1),
+                    "total_pnl_usd": round(sum(pnls), 2),
+                    "avg_pnl_usd": round(sum(pnls) / len(agent_trades), 2),
+                    "best_trade_usd": round(max(pnls), 2),
+                    "worst_trade_usd": round(min(pnls), 2),
+                }
+            else:
+                result["performance"] = {"trade_count": 0, "message": "No agent trades yet"}
+
+            return result
+        except Exception as e:
+            logger.error("agent_stats_failed", error=str(e))
+            return {"error": str(e)}
+
     return router

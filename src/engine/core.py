@@ -26,6 +26,7 @@ from src.risk.portfolio import PortfolioTracker
 from src.strategy.adaptive_threshold import AdaptiveThreshold
 from src.strategy.confluence import WEIGHTS
 from src.strategy.dynamic_weights import DynamicWeightOptimizer
+from src.strategy.agent_analyst import AgentEntryAnalyst
 from src.strategy.llm_analyst import LLMTradeAnalyst
 from src.strategy.market_filter import MarketFilter
 from src.strategy.scanner import AltcoinScanner
@@ -116,12 +117,22 @@ class TradingEngine:
         self.adaptive_threshold = AdaptiveThreshold(config.entry_threshold)
         self.sentiment_filter = SentimentFilter(hf_api_token=config.hf_api_token)
 
-        # LLM split test components
+        # LLM split test components (legacy Anthropic gate)
         self.split_test = SplitTestManager(config)
         self.llm_analyst: LLMTradeAnalyst | None = None
         if config.llm_api_key:
             self.llm_analyst = LLMTradeAnalyst(config)
             logger.info("llm_analyst_ready", model=config.llm_model, ratio=config.llm_split_ratio)
+
+        # AI entry agent (OpenAI — intelligent decision-maker)
+        self.agent_analyst: AgentEntryAnalyst | None = None
+        if config.agent_api_key:
+            self.agent_analyst = AgentEntryAnalyst(config)
+            logger.info(
+                "agent_analyst_ready",
+                model=config.agent_model,
+                min_score=config.agent_min_score,
+            )
 
         self.state: EngineState | None = None
         self.portfolio: PortfolioTracker | None = None
@@ -791,20 +802,21 @@ class TradingEngine:
                     after=len(signals),
                 )
 
-        # Read LLM runtime toggle ONCE per tick (not per signal)
+        # Read runtime toggles ONCE per tick (not per signal)
         state_dict = await self.repo.get_engine_state() or {}
         llm_runtime_enabled = state_dict.get("llm_enabled", self.config.llm_enabled)
+        agent_runtime_enabled = state_dict.get("agent_enabled", self.config.agent_enabled)
         logger.info(
-            "llm_toggle_check",
+            "ai_toggle_check",
             llm_runtime_enabled=llm_runtime_enabled,
-            db_value=state_dict.get("llm_enabled"),
-            config_default=self.config.llm_enabled,
-            has_analyst=self.llm_analyst is not None,
+            agent_runtime_enabled=agent_runtime_enabled,
+            has_llm=self.llm_analyst is not None,
+            has_agent=self.agent_analyst is not None,
         )
 
-        # Pre-fetch recent performance for LLM context (once per tick)
+        # Pre-fetch recent performance for AI context (once per tick)
         llm_perf_context: dict[str, Any] = {}
-        if llm_runtime_enabled and self.llm_analyst:
+        if (llm_runtime_enabled and self.llm_analyst) or (agent_runtime_enabled and self.agent_analyst):
             try:
                 recent_trades = await self.repo.get_trades(status="closed", mode=self.state.mode, per_page=20)
                 if recent_trades:
@@ -842,33 +854,78 @@ class TradingEngine:
                 position = None
                 sig_type = "breakout" if signal.breakout_result is not None else "sweep"
 
-                # --- OTE Entry Refinement: queue for 5m pullback monitoring ---
-                # Instead of entering at the stale 1H close, queue signals for
-                # 5m monitoring to find a better entry price (OTE zone for sweeps,
-                # level retest for breakouts).
-                if (
-                    self.main_entry_refiner
-                    and signal.symbol not in self.portfolio.open_positions
-                    and signal.symbol not in self.main_entry_refiner.get_queued_symbols()
-                ):
-                    queued = False
-                    signal.original_1h_price = signal.entry_price
+                # --- AI Agent Early Decision (runs BEFORE refiner so agent controls the flow) ---
+                agent_early_decision = None  # None = agent not active, let refiner decide
+                agent_analysis_data = None
+                if agent_runtime_enabled and self.agent_analyst:
+                    # Pre-calculate SL/TP for agent context
+                    pre_sl = self.order_executor._calculate_stop_loss(signal)
+                    pre_tp = None
+                    pre_rr = None
+                    if pre_sl is not None:
+                        pre_tp = self.order_executor._calculate_take_profit(signal, pre_sl)
+                        sl_dist = abs(signal.entry_price - pre_sl)
+                        if sl_dist > 0 and pre_tp is not None:
+                            pre_rr = abs(pre_tp - signal.entry_price) / sl_dist
 
-                    if signal.sweep_result and signal.sweep_result.sweep_detected:
-                        queued = self.main_entry_refiner.add(signal)
-                    elif signal.breakout_result and signal.breakout_result.breakout_detected:
-                        queued = self.main_entry_refiner.add_breakout(signal)
+                    # Get sentiment early for agent context
+                    early_sentiment = await self.sentiment_filter.get_sentiment(signal.symbol)
+                    early_headlines = self.sentiment_filter.get_recent_headlines(signal.symbol)
 
-                    if queued:
-                        refiner_queued += 1
+                    ai_context = {
+                        "sentiment_score": early_sentiment,
+                        "adjusted_score": signal.score,
+                        "active_threshold": active_threshold,
+                        "sl_price": pre_sl,
+                        "tp_price": pre_tp,
+                        "rr_ratio": round(pre_rr, 2) if pre_rr else None,
+                        "open_position_count": len(self.portfolio.open_positions),
+                        "recent_headlines": early_headlines,
+                        "ml_win_probability": None,
+                        **llm_perf_context,
+                    }
+
+                    agent_result = await self.agent_analyst.analyze_signal(signal, ai_context)
+                    agent_early_decision = agent_result.action
+
+                    agent_analysis_data = {
+                        "action": agent_result.action,
+                        "confidence": agent_result.confidence,
+                        "reasoning": agent_result.reasoning,
+                        "market_regime": agent_result.market_regime,
+                        "risk_assessment": agent_result.risk_assessment,
+                        "suggested_entry": agent_result.suggested_entry,
+                        "suggested_sl": agent_result.suggested_sl,
+                        "suggested_tp": agent_result.suggested_tp,
+                        "latency_ms": round(agent_result.latency_ms, 1),
+                        "error": agent_result.error,
+                        "tokens": agent_result.input_tokens + agent_result.output_tokens,
+                    }
+
+                    if agent_result.action == "SKIP":
+                        logger.info(
+                            "trade_skipped_by_agent",
+                            symbol=signal.symbol,
+                            confidence=agent_result.confidence,
+                            risk=agent_result.risk_assessment,
+                            reasoning=agent_result.reasoning[:120],
+                        )
                         vol_24h = self.exchange.get_24h_volume(signal.symbol)
                         await self.repo.insert_signal(
                             {
                                 "symbol": signal.symbol,
                                 "direction": signal.direction or "none",
                                 "score": signal.score,
-                                "reasons": signal.reasons + [f"QUEUED:entry_refiner({sig_type})"],
-                                "components": {"volume_24h": vol_24h, "signal_type": sig_type},
+                                "reasons": signal.reasons + [
+                                    f"AGENT:SKIP(conf={agent_result.confidence:.0f},"
+                                    f"risk={agent_result.risk_assessment})"
+                                ],
+                                "components": {
+                                    "volume_24h": vol_24h,
+                                    "test_group": "agent",
+                                    "agent_analysis": agent_analysis_data,
+                                    "signal_type": sig_type,
+                                },
                                 "current_price": signal.entry_price,
                                 "acted_on": False,
                                 "scan_cycle": cycle,
@@ -876,7 +933,96 @@ class TradingEngine:
                         )
                         signals_saved += 1
                         continue
-                    # If refiner queue is full, fall through to immediate entry
+
+                    elif agent_result.action == "WAIT_PULLBACK":
+                        # Agent wants to wait — queue in entry refiner
+                        if (
+                            self.main_entry_refiner
+                            and signal.symbol not in self.portfolio.open_positions
+                            and signal.symbol not in self.main_entry_refiner.get_queued_symbols()
+                        ):
+                            signal.original_1h_price = signal.entry_price
+                            if agent_result.suggested_entry is not None:
+                                signal.agent_target_entry = agent_result.suggested_entry
+                            queued = self.main_entry_refiner.add(signal)
+                            if queued:
+                                refiner_queued += 1
+                                logger.info(
+                                    "agent_wait_pullback_queued",
+                                    symbol=signal.symbol,
+                                    target_entry=agent_result.suggested_entry,
+                                    confidence=agent_result.confidence,
+                                )
+                                vol_24h = self.exchange.get_24h_volume(signal.symbol)
+                                await self.repo.insert_signal(
+                                    {
+                                        "symbol": signal.symbol,
+                                        "direction": signal.direction or "none",
+                                        "score": signal.score,
+                                        "reasons": signal.reasons + [
+                                            f"AGENT:WAIT_PULLBACK(conf={agent_result.confidence:.0f},"
+                                            f"target={agent_result.suggested_entry})"
+                                        ],
+                                        "components": {
+                                            "volume_24h": vol_24h,
+                                            "test_group": "agent",
+                                            "agent_analysis": agent_analysis_data,
+                                            "signal_type": sig_type,
+                                        },
+                                        "current_price": signal.entry_price,
+                                        "acted_on": False,
+                                        "scan_cycle": cycle,
+                                    }
+                                )
+                                signals_saved += 1
+                                continue
+                        # If refiner unavailable/full, fall through to ENTER_NOW
+
+                    # Agent says ENTER_NOW (or WAIT_PULLBACK fell through)
+                    # Store overrides for later use in the execution path
+                    logger.info(
+                        "agent_enter_now",
+                        symbol=signal.symbol,
+                        confidence=agent_result.confidence,
+                        regime=agent_result.market_regime,
+                        risk=agent_result.risk_assessment,
+                    )
+
+                # --- OTE Entry Refinement (only when agent is NOT active) ---
+                # When agent is active, it already decided whether to use the refiner.
+                # When agent is inactive, use the original formula-based refiner logic.
+                if agent_early_decision is None:
+                    if (
+                        self.main_entry_refiner
+                        and signal.symbol not in self.portfolio.open_positions
+                        and signal.symbol not in self.main_entry_refiner.get_queued_symbols()
+                    ):
+                        queued = False
+                        signal.original_1h_price = signal.entry_price
+
+                        if signal.sweep_result and signal.sweep_result.sweep_detected:
+                            queued = self.main_entry_refiner.add(signal)
+                        elif signal.breakout_result and signal.breakout_result.breakout_detected:
+                            queued = self.main_entry_refiner.add_breakout(signal)
+
+                        if queued:
+                            refiner_queued += 1
+                            vol_24h = self.exchange.get_24h_volume(signal.symbol)
+                            await self.repo.insert_signal(
+                                {
+                                    "symbol": signal.symbol,
+                                    "direction": signal.direction or "none",
+                                    "score": signal.score,
+                                    "reasons": signal.reasons + [f"QUEUED:entry_refiner({sig_type})"],
+                                    "components": {"volume_24h": vol_24h, "signal_type": sig_type},
+                                    "current_price": signal.entry_price,
+                                    "acted_on": False,
+                                    "scan_cycle": cycle,
+                                }
+                            )
+                            signals_saved += 1
+                            continue
+                        # If refiner queue is full, fall through to immediate entry
 
                 # --- Daily trade limit (Chill phase) ---
                 if self.state.daily_trade_count >= self.config.max_daily_trades:
@@ -1055,17 +1201,26 @@ class TradingEngine:
                                 continue
                             # If consensus queue is full, fall through to normal entry
 
-                # --- LLM Split Test: assign group and optionally analyze ---
-                if llm_runtime_enabled:
-                    test_group = self.split_test.assign_group(signal)
-                else:
-                    test_group = "control"
+                # --- AI Entry Agent / Legacy LLM Gate ---
+                # Agent already ran in the early decision block above.
+                # Here we only set up variables for downstream execution.
                 llm_analysis_data = None
                 sl_override = None
                 tp_override = None
 
-                if test_group == "llm" and self.llm_analyst:
-                    # Pre-calculate SL/TP so the LLM can evaluate R:R
+                if agent_early_decision is not None:
+                    # Agent already decided — use its results (no duplicate API call)
+                    test_group = "agent"
+                    sl_override = agent_result.suggested_sl
+                    tp_override = agent_result.suggested_tp
+                elif llm_runtime_enabled:
+                    test_group = self.split_test.assign_group(signal)
+                else:
+                    test_group = "control"
+
+                # --- Legacy LLM Gate (Anthropic) — only when agent is NOT active ---
+                if agent_early_decision is None and test_group == "llm" and self.llm_analyst:
+                    # Pre-calculate SL/TP for LLM context
                     pre_sl = self.order_executor._calculate_stop_loss(signal)
                     pre_tp = None
                     pre_rr = None
@@ -1075,7 +1230,7 @@ class TradingEngine:
                         if sl_dist > 0 and pre_tp is not None:
                             pre_rr = abs(pre_tp - signal.entry_price) / sl_dist
 
-                    llm_context = {
+                    ai_context = {
                         "sentiment_score": sentiment_score,
                         "adjusted_score": adjusted_score,
                         "active_threshold": active_threshold,
@@ -1087,9 +1242,9 @@ class TradingEngine:
                         "ml_win_probability": round((pattern_modifier + 1) / 2 * 100, 1) if pattern_modifier is not None else None,
                         **llm_perf_context,
                     }
-                    llm_result = await self.llm_analyst.analyze_signal(signal, llm_context)
+                    llm_result = await self.llm_analyst.analyze_signal(signal, ai_context)
 
-                    # If LLM errored, demote to control group to preserve split test integrity
+                    # If LLM errored, demote to control group
                     if llm_result.error and llm_result.error != "api_backoff":
                         test_group = "control"
                         logger.info(
@@ -1250,6 +1405,8 @@ class TradingEngine:
                 }
                 if llm_analysis_data:
                     signal_components["llm_analysis"] = llm_analysis_data
+                if agent_analysis_data:
+                    signal_components["agent_analysis"] = agent_analysis_data
                 await self.repo.insert_signal(
                     {
                         "symbol": signal.symbol,
@@ -2478,4 +2635,6 @@ class TradingEngine:
         await self.sentiment_filter.close()
         if self.llm_analyst:
             await self.llm_analyst.close()
+        if self.agent_analyst:
+            await self.agent_analyst.close()
         logger.info("engine_shutdown_complete")

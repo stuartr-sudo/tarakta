@@ -221,6 +221,8 @@ class SignalCandidate:
     refined_entry: bool = False              # True if entry was refined on 5m
     refinement_duration_seconds: float = 0.0 # How long 5m monitoring took
     original_1h_price: float = 0.0           # The stale 1H close we avoided entering at
+    # AI agent fields
+    agent_target_entry: float | None = None  # Target entry price from agent WAIT_PULLBACK
 
 
 @dataclass

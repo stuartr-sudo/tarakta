@@ -126,7 +126,7 @@ class Settings(BaseSettings):
     # Hugging Face Inference API
     hf_api_token: str = ""  # For FinBERT sentiment + zero-shot classification
 
-    # LLM Split Test (Claude trade analyst)
+    # LLM Split Test (Claude trade analyst — legacy, still works)
     llm_enabled: bool = False
     llm_api_key: str = ""  # Anthropic API key
     llm_model: str = "claude-haiku-4-5-20251001"
@@ -134,6 +134,16 @@ class Settings(BaseSettings):
     llm_split_ratio: float = 0.5  # 0.5 = 50% of signals go through LLM
     llm_min_confidence: float = 40.0  # Reject approvals below this confidence (0-100)
     llm_fallback_approve: bool = True  # If API fails, approve trade by default
+
+    # AI Entry Agent (OpenAI — replaces binary LLM gate with intelligent decision-maker)
+    agent_enabled: bool = False
+    agent_api_key: str = ""  # OpenAI API key (set AGENT_API_KEY in .env)
+    agent_model: str = "gpt-5-mini"  # gpt-5-mini ($0.25/M in), gpt-5.4 ($2.50/M in)
+    agent_timeout_seconds: float = 20.0
+    agent_min_score: float = 35.0  # Minimum formula score to send to agent (sweep detected)
+    agent_min_confidence: float = 50.0  # Agent must be >= this confident to approve
+    agent_fallback_approve: bool = False  # If API fails, SKIP trade (conservative)
+    agent_split_ratio: float = 1.0  # 1.0 = ALL qualifying signals go through agent
 
     # Dynamic strategy weights
     dynamic_weights_enabled: bool = False  # Adjust confluence weights based on trade outcomes
