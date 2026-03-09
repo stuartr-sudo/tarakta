@@ -139,25 +139,24 @@ ENTRY_DECISION_TOOL = {
                     "description": "Confidence in the decision, 0-100. 80+ = very confident.",
                 },
                 "suggested_entry": {
-                    "type": ["number", "null"],
+                    "type": "number",
                     "description": (
                         "For WAIT_PULLBACK: the price level to wait for. "
-                        "For ENTER_NOW: null (use current price). "
-                        "For SKIP: null."
+                        "For ENTER_NOW or SKIP: set to 0."
                     ),
                 },
                 "suggested_sl": {
-                    "type": ["number", "null"],
+                    "type": "number",
                     "description": (
                         "Alternative stop-loss price if you see a better structural level. "
-                        "null to keep the formula-calculated SL."
+                        "Set to 0 to keep the formula-calculated SL."
                     ),
                 },
                 "suggested_tp": {
-                    "type": ["number", "null"],
+                    "type": "number",
                     "description": (
                         "Alternative take-profit if you see a better target. "
-                        "null to keep the formula-calculated TP."
+                        "Set to 0 to keep the formula-calculated TP."
                     ),
                 },
                 "market_regime": {
@@ -505,6 +504,8 @@ Analyze this setup and use record_entry_decision to submit your decision."""
 
     def _parse_response(self, response) -> AgentDecision:
         """Extract structured fields from OpenAI's function call response."""
+        import json as _json
+
         choice = response.choices[0]
         message = choice.message
 
@@ -512,25 +513,49 @@ Analyze this setup and use record_entry_decision to submit your decision."""
         if message.tool_calls:
             for tool_call in message.tool_calls:
                 if tool_call.function.name == "record_entry_decision":
-                    import json
-                    data = json.loads(tool_call.function.arguments)
-                    return AgentDecision(
-                        action=data.get("action", "SKIP"),
-                        confidence=float(data.get("confidence", 0)),
-                        reasoning=str(data.get("reasoning", "")),
-                        suggested_entry=data.get("suggested_entry"),
-                        suggested_sl=data.get("suggested_sl"),
-                        suggested_tp=data.get("suggested_tp"),
-                        market_regime=data.get("market_regime", ""),
-                        risk_assessment=data.get("risk_assessment", ""),
-                    )
+                    data = _json.loads(tool_call.function.arguments)
+                    return self._data_to_decision(data)
 
-        # Fallback: no tool call found (shouldn't happen with tool_choice)
-        logger.warning("agent_no_tool_call", finish_reason=choice.finish_reason)
+        # Fallback: try to parse JSON from message content (some models
+        # return JSON in content instead of tool_calls)
+        if message.content:
+            try:
+                text = message.content.strip()
+                # Strip markdown code fences if present
+                if text.startswith("```"):
+                    text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                data = _json.loads(text)
+                logger.info("agent_parsed_from_content", keys=list(data.keys()))
+                return self._data_to_decision(data)
+            except (_json.JSONDecodeError, Exception):
+                pass
+
+        logger.warning(
+            "agent_no_tool_call",
+            finish_reason=choice.finish_reason,
+            has_content=bool(message.content),
+            content_preview=(message.content or "")[:200],
+        )
         return AgentDecision(
             action="SKIP",
             reasoning="No tool call in agent response",
             error="no_tool_call",
+        )
+
+    def _data_to_decision(self, data: dict) -> AgentDecision:
+        """Convert parsed dict to AgentDecision, treating 0 as null for prices."""
+        entry = data.get("suggested_entry")
+        sl = data.get("suggested_sl")
+        tp = data.get("suggested_tp")
+        return AgentDecision(
+            action=data.get("action", "SKIP"),
+            confidence=float(data.get("confidence", 0)),
+            reasoning=str(data.get("reasoning", "")),
+            suggested_entry=entry if entry and entry != 0 else None,
+            suggested_sl=sl if sl and sl != 0 else None,
+            suggested_tp=tp if tp and tp != 0 else None,
+            market_regime=data.get("market_regime", ""),
+            risk_assessment=data.get("risk_assessment", ""),
         )
 
     def _validate_suggestions(
