@@ -172,8 +172,10 @@ ENTRY_DECISION_TOOL = {
             },
             "required": [
                 "reasoning", "action", "confidence",
+                "suggested_entry", "suggested_sl", "suggested_tp",
                 "market_regime", "risk_assessment",
             ],
+            "additionalProperties": False,
         },
     },
 }
@@ -280,8 +282,14 @@ class AgentEntryAnalyst:
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
-                tools=[ENTRY_DECISION_TOOL],
-                tool_choice={"type": "function", "function": {"name": "record_entry_decision"}},
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "entry_decision",
+                        "strict": True,
+                        "schema": ENTRY_DECISION_TOOL["function"]["parameters"],
+                    },
+                },
             )
 
             latency_ms = (time.monotonic() - start) * 1000
@@ -503,21 +511,13 @@ class AgentEntryAnalyst:
 Analyze this setup and use record_entry_decision to submit your decision."""
 
     def _parse_response(self, response) -> AgentDecision:
-        """Extract structured fields from OpenAI's function call response."""
+        """Extract structured JSON from OpenAI response."""
         import json as _json
 
         choice = response.choices[0]
         message = choice.message
 
-        # Check for tool calls
-        if message.tool_calls:
-            for tool_call in message.tool_calls:
-                if tool_call.function.name == "record_entry_decision":
-                    data = _json.loads(tool_call.function.arguments)
-                    return self._data_to_decision(data)
-
-        # Fallback: try to parse JSON from message content (some models
-        # return JSON in content instead of tool_calls)
+        # Primary path: JSON in message content (response_format=json_schema)
         if message.content:
             try:
                 text = message.content.strip()
@@ -525,21 +525,28 @@ Analyze this setup and use record_entry_decision to submit your decision."""
                 if text.startswith("```"):
                     text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
                 data = _json.loads(text)
-                logger.info("agent_parsed_from_content", keys=list(data.keys()))
                 return self._data_to_decision(data)
-            except (_json.JSONDecodeError, Exception):
-                pass
+            except (_json.JSONDecodeError, Exception) as e:
+                logger.warning("agent_json_parse_failed", error=str(e),
+                               content_preview=message.content[:200])
+
+        # Fallback: tool calls (kept for compatibility)
+        if message.tool_calls:
+            for tool_call in message.tool_calls:
+                if tool_call.function.name == "record_entry_decision":
+                    data = _json.loads(tool_call.function.arguments)
+                    return self._data_to_decision(data)
 
         logger.warning(
-            "agent_no_tool_call",
+            "agent_no_response",
             finish_reason=choice.finish_reason,
             has_content=bool(message.content),
             content_preview=(message.content or "")[:200],
         )
         return AgentDecision(
             action="SKIP",
-            reasoning="No tool call in agent response",
-            error="no_tool_call",
+            reasoning="No parseable response from agent",
+            error="no_response",
         )
 
     def _data_to_decision(self, data: dict) -> AgentDecision:
