@@ -173,7 +173,7 @@ class Settings(BaseSettings):
     watchlist_enabled: bool = True
     watchlist_monitor_interval_seconds: int = 150   # Check every 2.5 min
     watchlist_expiry_hours: float = 3.0             # Release after 3 hours
-    watchlist_max_size: int = 0                     # 0 = unlimited watchlist
+    watchlist_max_size: int = 30                    # Top 30 near-miss signals (prevents API flooding)
     watchlist_min_score: float = 35.0               # Must have at least a sweep (35 pts)
 
     # OTE Entry Refinement — wait for optimal pullback on 5m before entering

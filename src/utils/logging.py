@@ -48,7 +48,8 @@ def setup_logging(log_level: str = "INFO", log_format: str = "json") -> None:
     root.setLevel(getattr(logging, log_level.upper(), logging.INFO))
 
     # Suppress noisy third-party loggers
-    logging.getLogger("ccxt").setLevel(logging.WARNING)
+    logging.getLogger("ccxt").setLevel(logging.ERROR)  # Suppress CCXT "Failed to get ticker" warnings
+    logging.getLogger("ccxt.base.exchange").setLevel(logging.ERROR)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)

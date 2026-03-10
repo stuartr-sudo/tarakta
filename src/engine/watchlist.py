@@ -162,8 +162,11 @@ class WatchlistMonitor:
             symbols=[e.symbol for e in self.entries.values()],
         )
 
-        # 2. Check each entry
-        for symbol, entry in list(self.entries.items()):
+        # 2. Check each entry (stagger API calls to avoid rate limits)
+        for idx, (symbol, entry) in enumerate(list(self.entries.items())):
+            # Small delay between symbols to avoid Binance rate limit flooding
+            if idx > 0:
+                await asyncio.sleep(1.0)
             try:
                 graduated = await self._check_entry(entry)
                 if graduated is not None:
