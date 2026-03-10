@@ -1386,11 +1386,10 @@ class TradingEngine:
         if not self.main_entry_refiner or not self.main_entry_refiner.queue:
             return
 
-        ready_signals = await self.main_entry_refiner.check_all()
+        ready_signals = await self.main_entry_refiner.check_all(
+            open_position_symbols=set(self.portfolio.open_positions.keys()),
+        )
         for signal in ready_signals:
-            # Skip if we already have a position in this symbol
-            if signal.symbol in self.portfolio.open_positions:
-                continue
 
             # ── Expired signal re-evaluation ──────────────────────
             # If the refiner expired without a pullback, re-feed to agent

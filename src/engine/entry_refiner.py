@@ -241,11 +241,14 @@ class EntryRefiner:
         )
         return True
 
-    async def check_all(self) -> list[SignalCandidate]:
+    async def check_all(
+        self, open_position_symbols: set[str] | None = None,
+    ) -> list[SignalCandidate]:
         """Check all queued entries on 5m data.
 
         Returns a list of signals ready to enter (refined with better price).
         Removes completed and expired entries from the queue.
+        Evicts entries whose symbol already has an open position.
         """
         # Always update heartbeat — even if queue is empty
         self.last_check_at = datetime.now(timezone.utc)
@@ -253,6 +256,17 @@ class EntryRefiner:
 
         if not self.queue:
             return []
+
+        # Evict entries for symbols that now have open positions
+        if open_position_symbols:
+            for sym in list(self.queue.keys()):
+                if sym in open_position_symbols:
+                    logger.info(
+                        "refiner_evicted_open_position",
+                        symbol=sym,
+                        check_count=self.queue[sym].check_count,
+                    )
+                    del self.queue[sym]
 
         ready: list[SignalCandidate] = []
         now = self.last_check_at
