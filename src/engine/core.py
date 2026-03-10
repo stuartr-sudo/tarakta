@@ -12,7 +12,6 @@ from src.data.candles import CandleManager
 from src.data.repository import Repository
 from src.engine.consensus import ConsensusMonitor
 from src.engine.entry_refiner import EntryRefiner
-from src.engine.flipped import FlippedTrader
 from src.engine.scheduler import Scheduler, TickType
 from src.engine.watchlist import WatchlistMonitor
 from src.engine.state import EngineState
@@ -148,59 +147,6 @@ class TradingEngine:
             self.dynamic_weights = DynamicWeightOptimizer(WEIGHTS)
             logger.info("dynamic_weights_enabled")
 
-        # Flipped shadow trader (independent scanner + loop)
-        self.flipped_trader = FlippedTrader(
-            config, repo, candle_manager=candle_manager, exchange=exchange,
-        )
-        if self.flipped_trader.enabled:
-            logger.info(
-                "flipped_trader_enabled",
-                leverage=config.flipped_leverage,
-                sl_buffer=config.flipped_sl_buffer,
-                scan_interval=config.flipped_scan_interval_minutes,
-            )
-
-        # Custom configurable bot (user can toggle direction + margin via dashboard)
-        self.custom_trader = FlippedTrader(
-            config, repo, candle_manager=candle_manager, exchange=exchange,
-            flip_direction=config.custom_flip_direction,
-            mode_name="custom_paper",
-            state_key="custom_trader",
-        )
-        if config.custom_enabled:
-            self.custom_trader.enabled = True
-            self.custom_trader.scan_interval = config.custom_scan_interval_minutes
-            self.custom_trader.max_position_pct = config.custom_margin_pct
-            self.custom_trader.max_risk_pct = config.custom_margin_pct
-            self.custom_trader._initial_balance = config.custom_initial_balance
-            self.custom_trader.balance = config.custom_initial_balance
-            self.custom_trader.peak_balance = config.custom_initial_balance
-            self.custom_trader.daily_start_balance = config.custom_initial_balance
-            self.custom_trader.leverage = config.custom_leverage
-            # Custom bot starts PAUSED — user must click "Begin" on dashboard
-            self.custom_trader._scanning_active = False
-            # Post-sweep entry refinement: drop to 5m after 1H sweep detection
-            if config.entry_refiner_enabled:
-                self.custom_trader.entry_refiner = EntryRefiner(
-                    candle_manager=candle_manager,
-                    config=config,
-                )
-            # Market consensus monitor for custom bot
-            if config.consensus_enabled:
-                self.custom_trader.consensus_monitor = ConsensusMonitor(
-                    candle_manager=candle_manager,
-                    config=config,
-                )
-            logger.info(
-                "custom_trader_enabled",
-                leverage=config.custom_leverage,
-                flip_direction=config.custom_flip_direction,
-                margin_pct=config.custom_margin_pct,
-                scan_interval=config.custom_scan_interval_minutes,
-                entry_refiner=config.entry_refiner_enabled,
-                consensus=config.consensus_enabled,
-            )
-
         # Background task infrastructure (for async post-mortems)
         self._postmortem_semaphore = asyncio.Semaphore(2)
         self._background_tasks: set[asyncio.Task] = set()
@@ -304,75 +250,6 @@ class TradingEngine:
         # This catches orphaned exchange positions (e.g. manual trades, failed exits)
         await self._reconcile_exchange_positions()
 
-        # Restore flipped trader state (stored in config_overrides JSONB)
-        if self.flipped_trader.enabled:
-            saved_state = await self.repo.get_engine_state() or {}
-            overrides = saved_state.get("config_overrides") or {}
-            flipped_data = overrides.get("flipped_trader") if isinstance(overrides, dict) else None
-            if flipped_data:
-                self.flipped_trader.restore_state(flipped_data)
-            else:
-                # First run or after reset — reconcile from DB
-                flipped_stats = await self.repo.get_trade_stats(mode="flipped_paper")
-                self.flipped_trader.total_pnl = flipped_stats.get("total_pnl", 0)
-            logger.info(
-                "flipped_trader_restored",
-                balance=self.flipped_trader.balance,
-                positions=len(self.flipped_trader.positions),
-                total_pnl=self.flipped_trader.total_pnl,
-            )
-
-        # Restore custom trader state (stored in config_overrides JSONB)
-        if self.custom_trader.enabled:
-            saved_state = await self.repo.get_engine_state() or {}
-            overrides = saved_state.get("config_overrides") or {}
-            # Use dynamic state_key (e.g. "custom_trader" for crypto, "custom_trader_stocks" for stocks)
-            ct_key = self.custom_trader.state_key
-            custom_data = overrides.get(ct_key) if isinstance(overrides, dict) else None
-            if custom_data:
-                self.custom_trader.restore_state(custom_data)
-            else:
-                custom_stats = await self.repo.get_trade_stats(mode="custom_paper")
-                self.custom_trader.total_pnl = custom_stats.get("total_pnl", 0)
-
-            # Apply custom_trader_settings (user's explicit dashboard choices) on top
-            # These are SHARED across all markets (one set of user preferences)
-            custom_settings = overrides.get("custom_trader_settings") if isinstance(overrides, dict) else None
-            if custom_settings and isinstance(custom_settings, dict):
-                if "flip_direction" in custom_settings:
-                    self.custom_trader.flip_direction = bool(custom_settings["flip_direction"])
-                if "margin_pct" in custom_settings:
-                    self.custom_trader.max_position_pct = float(custom_settings["margin_pct"])
-                    self.custom_trader.max_risk_pct = float(custom_settings["margin_pct"])
-                if "flip_mode" in custom_settings:
-                    mode = str(custom_settings["flip_mode"])
-                    if mode in ("always_flip", "smart_flip", "normal"):
-                        self.custom_trader.flip_mode = mode
-                if "flip_threshold" in custom_settings:
-                    self.custom_trader.flip_threshold = max(0.0, min(1.0, float(custom_settings["flip_threshold"])))
-                if "leverage" in custom_settings:
-                    saved_lev = int(custom_settings["leverage"])
-                    self.custom_trader.leverage = saved_lev
-                    if hasattr(self.custom_trader.exchange, "_leverage"):
-                        self.custom_trader.exchange._leverage = saved_lev
-                    logger.info("custom_leverage_restored", leverage=saved_lev)
-                # Restore scanning_active from shared settings (applies to all markets)
-                if "scanning_active" in custom_settings:
-                    self.custom_trader._scanning_active = bool(custom_settings["scanning_active"])
-
-            logger.info(
-                "custom_trader_restored",
-                market=self._market_name,
-                state_key=ct_key,
-                balance=self.custom_trader.balance,
-                positions=len(self.custom_trader.positions),
-                total_pnl=self.custom_trader.total_pnl,
-                flip_direction=self.custom_trader.flip_direction,
-                flip_mode=self.custom_trader.flip_mode,
-                margin_pct=self.custom_trader.max_position_pct,
-                scanning_active=self.custom_trader._scanning_active,
-            )
-
         # Load historical trade data for self-improving components
         await self.trade_analyzer.load_history()
 
@@ -458,27 +335,6 @@ class TradingEngine:
             balance=self.state.current_balance,
             positions=len(self.state.open_positions),
         )
-
-        # Start flipped trader's independent scan loop (runs every 15 min)
-        if self.flipped_trader.enabled:
-            self._flipped_task = asyncio.create_task(self.flipped_trader.run_loop())
-            self._background_tasks.add(self._flipped_task)
-            self._flipped_task.add_done_callback(self._background_tasks.discard)
-            logger.info("flipped_loop_spawned", mode=self.flipped_trader.mode_name)
-
-        # Start custom trader's independent scan loop (runs every 20 min)
-        if self.custom_trader.enabled:
-            self._custom_task = asyncio.create_task(self.custom_trader.run_loop())
-            self._background_tasks.add(self._custom_task)
-            self._custom_task.add_done_callback(self._background_tasks.discard)
-            logger.info(
-                "custom_loop_spawned",
-                mode=self.custom_trader.mode_name,
-                scanning_active=self.custom_trader._scanning_active,
-                flip_mode=self.custom_trader.flip_mode,
-                flip_direction=self.custom_trader.flip_direction,
-                margin_pct=self.custom_trader.max_position_pct,
-            )
 
         # Restore main bot settings from DB state
         db_state = await self.repo.get_engine_state()
@@ -583,8 +439,6 @@ class TradingEngine:
                     self.state.daily_pnl = 0.0
                     self.state.daily_trade_count = 0
                     self.state.last_scan_time = datetime.now(timezone.utc)
-                    if self.flipped_trader.enabled:
-                        self.flipped_trader.reset_daily()
                     logger.info(
                         "daily_reset",
                         daily_start_balance=self.state.daily_start_balance,
@@ -872,6 +726,33 @@ class TradingEngine:
                     # Get sentiment early for agent context
                     early_sentiment = await self.sentiment_filter.get_sentiment(signal.symbol)
                     early_headlines = self.sentiment_filter.get_recent_headlines(signal.symbol)
+
+                    # Calculate Fibonacci retracement levels from sweep displacement
+                    if signal.sweep_result and signal.sweep_result.sweep_detected and signal.sweep_result.sweep_level:
+                        sweep_level = signal.sweep_result.sweep_level
+                        current = signal.entry_price
+                        if signal.direction == "long" and current > sweep_level:
+                            # Bullish: displacement up from sweep low → pullback retraces downward
+                            disp_low, disp_high = sweep_level, current
+                            span = disp_high - disp_low
+                            signal.fibonacci_levels = {
+                                "displacement_low": round(disp_low, 8),
+                                "displacement_high": round(disp_high, 8),
+                                "fib_50": round(disp_high - span * 0.50, 8),
+                                "fib_618": round(disp_high - span * 0.618, 8),
+                                "fib_786": round(disp_high - span * 0.786, 8),
+                            }
+                        elif signal.direction == "short" and current < sweep_level:
+                            # Bearish: displacement down from sweep high → pullback retraces upward
+                            disp_low, disp_high = current, sweep_level
+                            span = disp_high - disp_low
+                            signal.fibonacci_levels = {
+                                "displacement_low": round(disp_low, 8),
+                                "displacement_high": round(disp_high, 8),
+                                "fib_50": round(disp_low + span * 0.50, 8),
+                                "fib_618": round(disp_low + span * 0.618, 8),
+                                "fib_786": round(disp_low + span * 0.786, 8),
+                            }
 
                     ai_context = {
                         "sentiment_score": early_sentiment,
@@ -1482,6 +1363,14 @@ class TradingEngine:
             if signal.symbol in self.portfolio.open_positions:
                 continue
 
+            # ── Expired signal re-evaluation ──────────────────────
+            # If the refiner expired without a pullback, re-feed to agent
+            # with fresh market data for a second opinion.
+            if getattr(signal, "_expired_from_refiner", False):
+                signal._expired_from_refiner = False  # Clear flag
+                await self._re_evaluate_expired_signal(signal)
+                continue
+
             # Skip if in cooldown
             cooldown_until = self._reversal_cooldowns.get(signal.symbol)
             if cooldown_until and datetime.now(timezone.utc) < cooldown_until:
@@ -1515,6 +1404,34 @@ class TradingEngine:
             except Exception as e:
                 logger.warning("refiner_risk_check_failed", error=str(e))
                 continue
+
+            # Validate current price is still near the refined entry
+            # Prevents entering at $2044 when the refiner found $2008
+            try:
+                ticker = await self.exchange.fetch_ticker(signal.symbol)
+                live_price = float(ticker.get("last", 0) or 0)
+                if live_price > 0 and signal.entry_price > 0:
+                    drift_pct = abs(live_price - signal.entry_price) / signal.entry_price
+                    max_drift = 0.005  # 0.5% — reject if price moved >0.5% from refined entry
+                    if drift_pct > max_drift:
+                        logger.info(
+                            "refiner_entry_price_drifted",
+                            symbol=signal.symbol,
+                            refined_price=round(signal.entry_price, 6),
+                            live_price=round(live_price, 6),
+                            drift_pct=f"{drift_pct:.4f}",
+                            max_drift=f"{max_drift:.4f}",
+                        )
+                        # Re-queue if not expired — give it another chance
+                        if self.main_entry_refiner and signal.symbol not in self.main_entry_refiner.queue:
+                            signal.entry_price = signal.original_1h_price  # Reset
+                            self.main_entry_refiner.add(signal)
+                            logger.info("refiner_requeued_after_drift", symbol=signal.symbol)
+                        continue
+                    # Update entry price to the actual live price for accurate execution
+                    signal.entry_price = live_price
+            except Exception as e:
+                logger.warning("refiner_live_price_check_failed", symbol=signal.symbol, error=str(e)[:80])
 
             # Execute the trade
             try:
@@ -1555,12 +1472,174 @@ class TradingEngine:
                         improvement_pct=improvement,
                         duration_seconds=round(signal.refinement_duration_seconds, 0),
                     )
+
+                    # Link the original WAIT_PULLBACK signal to the trade
+                    if position.trade_id:
+                        await self.repo.link_signal_to_trade(
+                            signal.symbol, position.trade_id
+                        )
             except Exception as e:
                 logger.warning(
                     "refiner_entry_failed",
                     symbol=signal.symbol,
                     error=str(e),
                 )
+
+    async def _re_evaluate_expired_signal(self, signal: SignalCandidate) -> None:
+        """Re-feed an expired refiner signal to the agent for a fresh review.
+
+        When the refiner waited for a pullback that never came, instead of
+        silently dropping the signal we ask the agent to look at it again
+        with current market context.  The agent can:
+          - ENTER_NOW  → execute immediately at current price
+          - WAIT_PULLBACK → re-queue in refiner with a new zone
+          - SKIP → drop for real this time
+        """
+        if not self.config.agent_enabled or not self.agent_analyst:
+            logger.info("expired_review_skipped_no_agent", symbol=signal.symbol)
+            return
+
+        if signal.symbol in self.portfolio.open_positions:
+            return
+
+        logger.info(
+            "expired_signal_re_evaluating",
+            symbol=signal.symbol,
+            original_score=signal.score,
+            original_direction=signal.direction,
+        )
+
+        try:
+            # Update signal to current market price
+            ticker = await self.exchange.fetch_ticker(signal.symbol)
+            signal.entry_price = float(ticker.get("last", 0) or 0)
+            if signal.entry_price <= 0:
+                return
+
+            # Recompute Fibonacci levels from the original sweep
+            if signal.sweep_result and signal.sweep_result.sweep_detected and signal.sweep_result.sweep_level:
+                sweep_level = signal.sweep_result.sweep_level
+                current = signal.entry_price
+                if signal.direction == "long" and current > sweep_level:
+                    span = current - sweep_level
+                    signal.fibonacci_levels = {
+                        "displacement_low": round(sweep_level, 8),
+                        "displacement_high": round(current, 8),
+                        "fib_50": round(current - span * 0.50, 8),
+                        "fib_618": round(current - span * 0.618, 8),
+                        "fib_786": round(current - span * 0.786, 8),
+                    }
+                elif signal.direction == "short" and current < sweep_level:
+                    span = sweep_level - current
+                    signal.fibonacci_levels = {
+                        "displacement_low": round(current, 8),
+                        "displacement_high": round(sweep_level, 8),
+                        "fib_50": round(current + span * 0.50, 8),
+                        "fib_618": round(current + span * 0.618, 8),
+                        "fib_786": round(current + span * 0.786, 8),
+                    }
+
+            # Build context for agent
+            pre_sl = self.order_executor._calculate_stop_loss(signal)
+            pre_tp = None
+            pre_rr = None
+            if pre_sl is not None:
+                pre_tp = self.order_executor._calculate_take_profit(signal, pre_sl)
+                sl_dist = abs(signal.entry_price - pre_sl)
+                if sl_dist > 0 and pre_tp is not None:
+                    pre_rr = abs(pre_tp - signal.entry_price) / sl_dist
+
+            sentiment = await self.sentiment_filter.get_sentiment(signal.symbol)
+            headlines = self.sentiment_filter.get_recent_headlines(signal.symbol)
+
+            context = {
+                "sentiment_score": sentiment,
+                "adjusted_score": signal.score,
+                "active_threshold": 60.0,
+                "sl_price": pre_sl,
+                "tp_price": pre_tp,
+                "rr_ratio": round(pre_rr, 2) if pre_rr else None,
+                "open_position_count": len(self.portfolio.open_positions),
+                "recent_headlines": headlines,
+                "ml_win_probability": None,
+                "expired_pullback_review": True,  # Tell agent this is a re-evaluation
+            }
+
+            result = await self.agent_analyst.analyze_signal(signal, context)
+            logger.info(
+                "expired_review_agent_decision",
+                symbol=signal.symbol,
+                action=result.action,
+                confidence=result.confidence,
+                risk=result.risk_assessment,
+                reasoning=result.reasoning[:120],
+            )
+
+            if result.action == "ENTER_NOW":
+                # Agent says enter now — execute immediately
+                position, order_result, trade_record = (
+                    await self.order_executor.execute_entry(
+                        signal=signal,
+                        current_balance=self.portfolio.current_balance,
+                        mode=self.state.mode,
+                    )
+                )
+                if position and trade_record:
+                    position.confluence_score = signal.score
+                    db_trade = await self.repo.insert_trade(trade_record)
+                    if db_trade:
+                        position.trade_id = db_trade.get("id", "")
+                    self.portfolio.record_entry(position)
+                    self.state.open_positions[signal.symbol] = position
+                    self.state.daily_trade_count += 1
+                    logger.info(
+                        "expired_review_trade_entered",
+                        symbol=signal.symbol,
+                        entry=position.entry_price,
+                        sl=position.stop_loss,
+                        tp=position.take_profit,
+                    )
+                    if position.trade_id:
+                        await self.repo.link_signal_to_trade(
+                            signal.symbol, position.trade_id
+                        )
+
+            elif result.action == "WAIT_PULLBACK":
+                # Agent wants another pullback attempt — re-queue with new zone
+                if (
+                    self.main_entry_refiner
+                    and signal.symbol not in self.main_entry_refiner.queue
+                ):
+                    if result.entry_zone_high and result.entry_zone_low:
+                        signal.agent_entry_zone_high = result.entry_zone_high
+                        signal.agent_entry_zone_low = result.entry_zone_low
+                    if result.suggested_entry:
+                        signal.original_1h_price = signal.entry_price
+                    queued = self.main_entry_refiner.add(signal)
+                    if queued:
+                        logger.info(
+                            "expired_review_requeued",
+                            symbol=signal.symbol,
+                            new_zone=f"{result.entry_zone_low}-{result.entry_zone_high}",
+                            confidence=result.confidence,
+                        )
+                    else:
+                        logger.info("expired_review_requeue_failed", symbol=signal.symbol)
+            else:
+                # SKIP — drop for real
+                logger.info(
+                    "expired_review_final_skip",
+                    symbol=signal.symbol,
+                    confidence=result.confidence,
+                    reasoning=result.reasoning[:80],
+                )
+
+        except Exception as e:
+            logger.warning(
+                "expired_review_failed",
+                symbol=signal.symbol,
+                error=str(e)[:120],
+            )
 
     async def _process_consensus_graduations(self) -> None:
         """Process signals that graduated from the consensus monitor.
@@ -1809,17 +1888,6 @@ class TradingEngine:
         # Without this guard, stocks/commodities engines try to fetch crypto tickers
         # from Yahoo Finance → 500 errors + triple API call volume.
         has_main_positions = bool(self.portfolio.open_positions) and self._market_name == "crypto"
-        has_flipped_positions = self.flipped_trader.enabled and bool(self.flipped_trader.positions)
-
-        if not has_main_positions and not has_flipped_positions:
-            return
-
-        # --- Flipped shadow trader: monitor positions every tick (60s) ---
-        if has_flipped_positions:
-            try:
-                await self.flipped_trader.monitor_positions()
-            except Exception as e:
-                logger.warning("flipped_monitor_failed", error=str(e))
 
         if not has_main_positions:
             return
@@ -2082,13 +2150,34 @@ class TradingEngine:
                     # Remove from state
                     self.state.open_positions.pop(exit_signal.symbol, None)
 
+        # Persist SL changes for open positions (catches breakeven moves, trailing SL, etc.)
+        for symbol, pos in self.portfolio.open_positions.items():
+            if not pos.trade_id:
+                continue
+            # Track last persisted SL to avoid redundant DB writes
+            last_sl = getattr(pos, "_last_persisted_sl", None)
+            if last_sl is None:
+                # First tick — initialize tracking without writing
+                pos._last_persisted_sl = pos.stop_loss
+                continue
+            if pos.stop_loss != last_sl:
+                try:
+                    await self.repo.update_trade(pos.trade_id, {"stop_loss": pos.stop_loss})
+                    logger.info(
+                        "sl_persisted_to_db",
+                        symbol=symbol,
+                        old_sl=last_sl,
+                        new_sl=pos.stop_loss,
+                    )
+                except Exception as e:
+                    logger.warning("sl_persist_failed", symbol=symbol, error=str(e))
+                pos._last_persisted_sl = pos.stop_loss
+
         # Sync state
         self.state.current_balance = self.portfolio.current_balance
         self.state.peak_balance = self.portfolio.peak_balance
         self.state.daily_pnl = self.portfolio.daily_pnl
         self.state.total_pnl = self.portfolio.total_pnl
-
-        # Flipped monitoring now handled in _monitor_tick (every 60s)
 
     async def _attempt_reversal(
         self,
@@ -2308,11 +2397,9 @@ class TradingEngine:
         """Save engine state and portfolio snapshot to DB.
 
         Only the primary (crypto) engine writes full portfolio state.
-        Non-crypto engines save their custom trader state independently
-        via FlippedTrader._save_state() to avoid overwriting shared DB row.
         """
         try:
-            # Non-crypto engines: only save custom_trader state, skip full portfolio write
+            # Non-crypto engines: skip full portfolio write
             if self._market_name != "crypto":
                 return
 
@@ -2321,7 +2408,7 @@ class TradingEngine:
                 mode=self.state.mode,
                 cycle_count=self.state.cycle_count,
             )
-            # Read existing overrides first to preserve custom_trader and other engines' state
+            # Read existing overrides first to preserve other engines' state
             existing = await self.repo.get_engine_state()
             overrides = {}
             if existing:
@@ -2333,11 +2420,9 @@ class TradingEngine:
                     if key in existing and key not in state_dict:
                         state_dict[key] = existing[key]
 
-            # Update only the keys this engine manages (preserving custom_trader* keys etc.)
+            # Update only the keys this engine manages
             if self.dynamic_weights:
                 overrides["dynamic_weights"] = self.dynamic_weights.to_state()
-            if self.flipped_trader.enabled:
-                overrides["flipped_trader"] = self.flipped_trader.to_state_dict()
             # Persist hyper-watchlist state
             if self.watchlist_monitor:
                 overrides["watchlist_monitor"] = self.watchlist_monitor.get_state()

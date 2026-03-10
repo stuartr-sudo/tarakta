@@ -404,13 +404,15 @@ async function toggleDetail(row) {
     if (existing) { existing.remove(); return; }
 
     const colCount = row.cells.length;
+    const tableWidth = row.closest('table').offsetWidth;
     const detailRow = document.createElement('tr');
     detailRow.id = 'detail-' + tradeId;
     detailRow.className = 'trade-detail-row';
     const td = document.createElement('td');
     td.colSpan = colCount;
     td.style.padding = '0';
-    td.innerHTML = '<div class="trade-detail-content" style="padding:1rem;color:var(--text-muted);font-size:0.8rem;">Loading...</div>';
+    td.style.overflow = 'hidden';
+    td.innerHTML = '<div class="trade-detail-content" style="padding:1rem;color:var(--text-muted);font-size:0.8rem;max-width:' + tableWidth + 'px;">Loading...</div>';
     detailRow.appendChild(td);
     row.after(detailRow);
 
@@ -477,7 +479,82 @@ async function toggleDetail(row) {
         exitsHtml += '</tbody></table></div>';
     }
 
-    td.innerHTML = '<div class="trade-detail-content">' + meta + reasons + exitsHtml + '</div>';
+    // AI Agent Analysis section
+    let agentHtml = '';
+    const aa = data.agent_analysis;
+    if (aa) {
+        const actionCls = aa.action === 'ENTER_NOW' ? 'positive' : aa.action === 'SKIP' ? 'negative' : 'text-orange';
+        const confPct = aa.confidence != null ? aa.confidence + '%' : '-';
+        const riskCls = aa.risk_assessment === 'low' ? 'positive' : aa.risk_assessment === 'high' || aa.risk_assessment === 'extreme' ? 'negative' : '';
+
+        agentHtml = '<div class="detail-section agent-section">';
+        agentHtml += '<h4>🤖 AI Agent Analysis</h4>';
+
+        // Reasoning block (full width)
+        if (aa.reasoning) {
+            agentHtml += '<div class="agent-reasoning">' + aa.reasoning.replace(/\n/g, '<br>') + '</div>';
+        }
+
+        // Key metrics grid
+        agentHtml += '<dl class="detail-meta agent-meta">';
+        agentHtml += '<dt>Action</dt><dd class="' + actionCls + '">' + (aa.action || '-') + '</dd>';
+        agentHtml += '<dt>Confidence</dt><dd>' + confPct + '</dd>';
+        agentHtml += '<dt>Risk</dt><dd class="' + riskCls + '">' + (aa.risk_assessment || '-') + '</dd>';
+        agentHtml += '<dt>Regime</dt><dd>' + (aa.market_regime || '-') + '</dd>';
+
+        if (aa.suggested_entry) agentHtml += '<dt>Entry</dt><dd class="mono">$' + parseFloat(aa.suggested_entry).toFixed(6) + '</dd>';
+        if (aa.entry_zone_high || aa.entry_zone_low) {
+            const zh = aa.entry_zone_high ? parseFloat(aa.entry_zone_high).toFixed(6) : '-';
+            const zl = aa.entry_zone_low ? parseFloat(aa.entry_zone_low).toFixed(6) : '-';
+            agentHtml += '<dt>Entry Zone</dt><dd class="mono">$' + zl + ' – $' + zh + '</dd>';
+        }
+        if (aa.suggested_sl) agentHtml += '<dt>Suggested SL</dt><dd class="mono negative">$' + parseFloat(aa.suggested_sl).toFixed(6) + '</dd>';
+        if (aa.suggested_tp) agentHtml += '<dt>Suggested TP</dt><dd class="mono positive">$' + parseFloat(aa.suggested_tp).toFixed(6) + '</dd>';
+        agentHtml += '</dl></div>';
+    }
+
+    // Manual close button
+    let closeBtn = '<div class="detail-section" style="grid-column:1/-1;border-top:1px solid rgba(255,255,255,0.06);padding-top:0.75rem;">' +
+        '<button class="btn-close-trade" onclick="closeTrade(\'' + tradeId + '\', this)" ' +
+        'data-symbol="' + (t.symbol || '') + '">' +
+        '✕ Close Position at Market</button></div>';
+
+    td.innerHTML = '<div class="trade-detail-content" style="max-width:' + tableWidth + 'px;">' + meta + reasons + exitsHtml + agentHtml + closeBtn + '</div>';
+}
+
+async function closeTrade(tradeId, btn) {
+    const symbol = btn.getAttribute('data-symbol') || '';
+    if (!confirm('Close ' + symbol + ' at MARKET price?\n\nThis will close the entire remaining position immediately.')) return;
+
+    btn.disabled = true;
+    btn.textContent = 'Closing...';
+
+    try {
+        const resp = await fetch('/api/trades/' + tradeId + '/close', { method: 'POST' });
+        const data = await resp.json();
+        if (data.success) {
+            const pnlSign = data.pnl_usd >= 0 ? '+' : '';
+            btn.textContent = '✓ Closed — ' + pnlSign + '$' + data.pnl_usd.toFixed(2) + ' (' + pnlSign + data.pnl_pct.toFixed(1) + '%)';
+            btn.style.background = data.pnl_usd >= 0 ? 'var(--green)' : 'var(--red)';
+            btn.style.color = '#fff';
+            // Remove the position row after a short delay
+            setTimeout(function() {
+                const detailRow = document.getElementById('detail-' + tradeId);
+                if (detailRow) detailRow.remove();
+                // Remove the main row too
+                const mainRow = document.querySelector('tr[data-trade-id="' + tradeId + '"]');
+                if (mainRow) mainRow.remove();
+                delete _detailCache[tradeId];
+            }, 2000);
+        } else {
+            btn.textContent = '✕ Failed: ' + (data.error || 'Unknown error');
+            btn.style.background = 'var(--red)';
+            btn.disabled = false;
+        }
+    } catch (e) {
+        btn.textContent = '✕ Error: ' + e.message;
+        btn.disabled = false;
+    }
 }
 
 // ── Chart + live data ──────────────────────────────────────

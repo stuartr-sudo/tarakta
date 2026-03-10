@@ -48,7 +48,7 @@ class WatchlistEntry:
 class WatchlistMonitor:
     """Monitors near-miss symbols on 5m candles for missing confirmations.
 
-    Runs as an independent async loop (like FlippedTrader). Checks every 2.5
+    Runs as an independent async loop. Checks every 2.5
     minutes for displacement, pullback, or volume confirmation appearing on 5m
     data. When conditions align, graduates the signal and pushes it to the main
     engine's execution queue.

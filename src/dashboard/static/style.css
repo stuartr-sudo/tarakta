@@ -988,6 +988,8 @@ p { margin: 0 0 0.5rem; }
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 1rem;
+    overflow: hidden;
+    min-width: 0;
 }
 
 @media (max-width: 768px) {
@@ -1057,4 +1059,63 @@ p { margin: 0 0 0.5rem; }
 .llm-bolt {
     font-size: 0.85em;
     cursor: help;
+}
+
+/* AI Agent Analysis in trade detail */
+.agent-section {
+    grid-column: 1 / -1;  /* span full width of the 2-col grid */
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    padding-top: 0.75rem;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.agent-reasoning {
+    background: rgba(139, 92, 246, 0.06);
+    border-left: 3px solid rgba(139, 92, 246, 0.4);
+    padding: 0.6rem 0.8rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    margin-bottom: 0.75rem;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    white-space: normal;
+}
+
+.agent-meta {
+    grid-template-columns: auto 1fr auto 1fr;
+    min-width: 0;
+}
+
+@media (max-width: 768px) {
+    .agent-meta { grid-template-columns: 1fr 1fr; }
+}
+
+/* Manual close trade button */
+.btn-close-trade {
+    background: transparent;
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    color: #ef4444;
+    padding: 0.4rem 1rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.btn-close-trade:hover {
+    background: rgba(239, 68, 68, 0.15);
+    border-color: #ef4444;
+}
+
+.btn-close-trade:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.text-orange {
+    color: #f59e0b;
 }

@@ -325,6 +325,58 @@ class Repository:
             logger.error("insert_signal_failed", error=str(e), symbol=signal.get("symbol"))
             return {}
 
+    async def get_signal_by_trade_id(self, trade_id: str) -> dict | None:
+        """Fetch the signal that resulted in a specific trade (for agent analysis display)."""
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("signals")
+                .select("components")
+                .eq("trade_id", trade_id)
+                .limit(1),
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.debug("get_signal_by_trade_failed", error=str(e), trade_id=trade_id)
+            return None
+
+    async def get_signal_by_symbol_recent(self, symbol: str) -> dict | None:
+        """Fallback: fetch the most recent signal with agent_analysis for a symbol."""
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("signals")
+                .select("components")
+                .eq("symbol", symbol)
+                .not_.is_("components->agent_analysis", "null")
+                .order("created_at", desc=True)
+                .limit(1),
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.debug("get_signal_by_symbol_failed", error=str(e), symbol=symbol)
+            return None
+
+    async def link_signal_to_trade(self, symbol: str, trade_id: str) -> None:
+        """Link the most recent unlinked signal for a symbol to a trade_id.
+
+        Called when the entry refiner opens a trade from a WAIT_PULLBACK signal,
+        so the dashboard can later display the agent analysis.
+        """
+        try:
+            await asyncio.to_thread(
+                _exec,
+                self.db.table("signals")
+                .update({"trade_id": trade_id, "acted_on": True})
+                .eq("symbol", symbol)
+                .is_("trade_id", "null")
+                .not_.is_("components->agent_analysis", "null")
+                .order("created_at", desc=True)
+                .limit(1),
+            )
+        except Exception as e:
+            logger.debug("link_signal_to_trade_failed", error=str(e), symbol=symbol)
+
     async def get_recent_signals(self, limit: int = 10) -> list[dict]:
         result = await asyncio.to_thread(
             _exec,
@@ -406,7 +458,7 @@ class Repository:
             logger.warning("reset_mode_trades_failed", mode=mode, error=str(e))
 
         # Delete portfolio snapshots (shared — only clear if resetting main)
-        if mode != "flipped_paper":
+        if mode not in ("flipped_paper", "custom_paper"):
             try:
                 result = await asyncio.to_thread(
                     _exec,

@@ -69,13 +69,14 @@ class Settings(BaseSettings):
     # Progressive take-profit tiers
     # TP1 hit → close 33%, move SL to breakeven
     # TP2 hit → close 33%, move SL to TP1 price
-    # TP3    → remaining 34% via trailing stop
+    # TP3 hit → close remaining 34% at 3.5R
     tp_tiers_enabled: bool = True
-    tp1_rr: float = 1.0     # TP1 at 1R
-    tp2_rr: float = 2.0     # TP2 at 2R
+    tp1_rr: float = 0.75    # TP1 at 0.75R (tightened — locks profit early)
+    tp2_rr: float = 1.125   # TP2 at 1.5× TP1 = 1.125R
+    tp3_rr: float = 3.5     # TP3 at 3.5R (auto-close, no more infinite trailing)
     tp1_pct: float = 0.33   # close 33% at TP1
     tp2_pct: float = 0.33   # close 33% at TP2
-    tp3_pct: float = 0.34   # remaining 34% via trailing stop
+    tp3_pct: float = 0.34   # remaining 34%
     move_sl_to_be_after_tp1: bool = True  # move SL to breakeven after TP1
 
     # Pullback entry timing
@@ -148,33 +149,22 @@ class Settings(BaseSettings):
     # Dynamic strategy weights
     dynamic_weights_enabled: bool = False  # Adjust confluence weights based on trade outcomes
 
-    # Flipped shadow bot — DISABLED (not producing results)
-    flipped_enabled: bool = False
-    flipped_leverage: int = 5  # Higher leverage for flipped trades
-    flipped_sl_buffer: float = 0.03  # 3% SL buffer — extra room for wicks
-    flipped_min_sl_pct: float = 0.02  # Minimum SL distance = 2% of entry price
-    flipped_initial_balance: float = 10000.0  # Separate paper balance (disabled)
-    flipped_scan_interval_minutes: int = 15  # Independent scan cycle (not tied to main bot)
-    flipped_max_position_pct: float = 0.15  # 15% of balance as margin per trade (bigger than main)
-    flipped_max_risk_pct: float = 0.15  # 15% of balance at risk per trade (bigger than main)
-    flipped_min_rr_ratio: float = 2.0  # Looser R:R for flipped (main uses 3.0)
-
-    # Custom configurable bot — second shadow bot with adjustable direction & margin
-    custom_enabled: bool = True
-    custom_initial_balance: float = 10000.0
-    custom_leverage: int = 10
-    custom_flip_direction: bool = True       # Default starts flipped (user can toggle)
-    custom_margin_pct: float = 0.15          # 15% default (user can slide 5%–40%)
-    custom_flip_mode: str = "smart_flip"     # "always_flip" | "smart_flip" | "normal"
-    custom_flip_threshold: float = 0.50      # 0.0–1.0 — only flip when sweep prob > this
-    custom_scan_interval_minutes: int = 20   # Offset from flipped's 15min
-
     # Hyper-Watchlist Monitor — promotes near-miss signals to a fast 5m monitor
     watchlist_enabled: bool = True
     watchlist_monitor_interval_seconds: int = 150   # Check every 2.5 min
     watchlist_expiry_hours: float = 3.0             # Release after 3 hours
     watchlist_max_size: int = 30                    # Top 30 near-miss signals (prevents API flooding)
     watchlist_min_score: float = 35.0               # Must have at least a sweep (35 pts)
+
+    # Progressive order execution — split large orders into tranches to reduce market impact
+    progressive_entry_enabled: bool = True
+    progressive_exit_enabled: bool = True
+    progressive_max_tranches: int = 5         # Max number of tranches per order
+    progressive_min_tranches: int = 2         # Minimum tranches (when splitting is warranted)
+    progressive_tranche_delay_seconds: float = 8.0  # Delay between tranches (let book replenish)
+    progressive_depth_ratio: float = 0.10     # Split if position > 10% of top-5 OB depth
+    progressive_abort_spread_multiplier: float = 2.0  # Abort if spread widens to 2x original
+    progressive_min_fill_pct: float = 0.30    # Abort if < 30% filled after half the tranches
 
     # OTE Entry Refinement — wait for optimal pullback on 5m before entering
     # Sweep signals: wait for price to retrace into OTE zone (50-79% Fib)

@@ -72,8 +72,9 @@ and HOW — not just yes/no, but the optimal approach.
    Use when: sweep confirmed but no pullback yet, or price ran too far from sweep level, \
    or you see a better entry zone on the structure.
    When choosing WAIT_PULLBACK, you MUST provide an entry_zone_high and entry_zone_low — \
-   the approximate price range where you expect the pullback to reach. Estimate this from \
-   the 50-79% Fibonacci retracement of the displacement move, nearby order blocks, or FVGs.
+   the price range where you expect the pullback to reach. Use the **provided Fibonacci \
+   retracement levels** (especially the 61.8-78.6% OTE zone), nearby order blocks, or FVGs \
+   to set this zone. The Fibonacci levels are pre-calculated from the displacement move.
 
 3. **SKIP** — This trade isn't worth taking despite the formula signal.
    Use when: market regime is wrong, BTC context is dangerous, news risk is elevated, \
@@ -86,30 +87,40 @@ and HOW — not just yes/no, but the optimal approach.
 - Post-kill-zone timing (manipulation is done, distribution begins)
 - Volume spike on displacement (institutional participation)
 - Clean R:R of 3:1 or better with structural SL placement
-- Pullback into 50-79% Fibonacci OTE zone of the displacement move
+- Pullback into the provided 61.8-78.6% Fibonacci OTE zone of the displacement move
 
-## What Makes a BAD Entry (skip aggressively)
-- Sweep without displacement (could be a fake sweep, price may continue)
-- Counter-trend to 4H AND Daily (fighting the tide)
+## What Makes a BAD Entry (SKIP only these)
+- Counter-trend to BOTH 4H AND Daily (fighting the tide on all timeframes)
 - Monday first 8 hours (likely fake move / manipulation)
-- Sweep of a weak/arbitrary level (not session range, not swing high/low)
-- Recent losing streak with similar setups (the pattern isn't working)
-- Extreme funding rate in the same direction as trade (crowded)
 - BTC in freefall or parabolic — altcoin setups become unreliable
+- Extreme funding rate in the same direction as trade (crowded)
+
+## Important: Volatility is Opportunity
+Choppy and volatile markets are NOT reasons to SKIP. Crypto is inherently volatile — \
+that's where the opportunity lies. A sweep in a volatile market is STILL a valid signal. \
+Only SKIP when there is a genuine structural reason (counter-trend on ALL timeframes, \
+manufactured/fake sweep, or extreme macro risk). If a sweep is confirmed and HTF has \
+ANY alignment (even just 4H), lean towards ENTER_NOW or WAIT_PULLBACK — not SKIP.
 
 ## Risk Assessment
 Rate the overall risk as: low, medium, high, extreme
 - low: strong confluence, HTF aligned, clean structure
-- medium: decent setup with 1-2 missing components
-- high: marginal setup, proceed only if other factors are exceptional
-- extreme: too many red flags, should almost always SKIP
+- medium: decent setup with 1-2 missing components — still worth taking
+- high: marginal setup but sweep is real — use WAIT_PULLBACK for better entry
+- extreme: genuine structural red flags — this is the ONLY level that should lead to SKIP
 
 ## Market Regime
 Classify the current market as: trending, ranging, volatile, choppy
-This helps the bot calibrate its other parameters.
+This helps the bot calibrate its other parameters. Ranging and choppy regimes can still \
+produce excellent sweep trades — they often have cleaner liquidity grabs.
 
-Be decisive. Don't hedge. If it's marginal, SKIP — there will always be another trade. \
-The best traders make money by the trades they DON'T take."""
+## ALWAYS Suggest Prices
+For ALL actions (including ENTER_NOW and SKIP), always provide your best estimate for \
+suggested_entry, suggested_sl, and suggested_tp. This helps the trader see your analysis \
+even when you recommend skipping. Only use 0 if you truly cannot estimate a level.
+
+Be decisive. Lean towards taking trades with good sweeps rather than skipping them. \
+The formula system already filters heavily — if a signal reaches you, it has merit."""
 
 
 JSON_FORMAT_INSTRUCTION = """
@@ -132,15 +143,15 @@ The JSON object must have exactly these keys:
   "risk_assessment": "low" | "medium" | "high" | "extreme"
 }
 
-Rules for numeric fields:
-- suggested_entry: For WAIT_PULLBACK set the target price (zone midpoint). For ENTER_NOW or SKIP set to 0.
-- entry_zone_high: For WAIT_PULLBACK, the upper bound of your ideal entry zone. For ENTER_NOW or SKIP set to 0.
-- entry_zone_low: For WAIT_PULLBACK, the lower bound of your ideal entry zone. For ENTER_NOW or SKIP set to 0.
+Rules for numeric fields — ALWAYS provide your best price estimates for ALL actions:
+- suggested_entry: Your ideal entry price. For WAIT_PULLBACK use the zone midpoint. For ENTER_NOW use the current price. For SKIP still provide where you WOULD enter if forced.
+- entry_zone_high: Upper bound of the ideal entry zone. Always provide this based on structure (Fibonacci, order blocks, FVGs).
+- entry_zone_low: Lower bound of the ideal entry zone. Always provide this.
   For a LONG: the zone should be BELOW current price (pullback down to buy).
   For a SHORT: the zone should be ABOVE current price (pullback up to sell).
-  Estimate from 50-79% Fibonacci retracement, order blocks, or fair value gaps.
-- suggested_sl: Set an alternative stop-loss price, or 0 to keep the formula-calculated SL.
-- suggested_tp: Set an alternative take-profit price, or 0 to keep the formula-calculated TP.
+  Use the provided Fibonacci retracement levels, order blocks, or fair value gaps to set this zone.
+- suggested_sl: ALWAYS set a stop-loss price based on structure (below sweep level for longs, above for shorts). Never use 0.
+- suggested_tp: ALWAYS set a take-profit price based on structure. Never use 0.
 
 Respond with ONLY the JSON object. No other text."""
 
@@ -512,6 +523,19 @@ class AgentEntryAnalyst:
         if leverage_bonus is not None:
             leverage_info = f"Leverage alignment bonus: {leverage_bonus} pts"
 
+        # Fibonacci retracement section
+        fib = signal.fibonacci_levels
+        if fib and fib.get("fib_50"):
+            fib_section = (
+                f"Displacement: {fib['displacement_low']:.6g} → {fib['displacement_high']:.6g}\n"
+                f"  50.0% retracement: {fib['fib_50']:.6g}\n"
+                f"  61.8% retracement: {fib['fib_618']:.6g}\n"
+                f"  78.6% retracement: {fib['fib_786']:.6g}\n"
+                f"  OTE Zone (optimal entry): {fib['fib_618']:.6g} – {fib['fib_786']:.6g}"
+            )
+        else:
+            fib_section = "Not available (no displacement data)"
+
         return f"""\
 ## Entry Decision Request
 
@@ -523,6 +547,9 @@ class AgentEntryAnalyst:
 
 ### Sweep Analysis
 {sweep_info}
+
+### Fibonacci Retracement (from displacement move)
+{fib_section}
 
 ### Score Breakdown
 {components_str}
@@ -687,23 +714,24 @@ Analyze this setup and respond with your JSON decision."""
                 and decision.suggested_entry is None and decision.action == "WAIT_PULLBACK"):
             decision.suggested_entry = (decision.entry_zone_high + decision.entry_zone_low) / 2
 
-        # Derive zone from suggested_entry if entry is valid but zone is missing
-        # The model often returns entry_zone_high=0, entry_zone_low=0 — auto-derive zone
-        if (decision.suggested_entry is not None
-                and decision.entry_zone_high is None
+        # Fallback: derive zone from Fibonacci OTE if agent returned zone=0
+        # Uses pre-calculated Fib levels (61.8%-78.6%) instead of generic ±ATR
+        if (decision.entry_zone_high is None
                 and decision.entry_zone_low is None
                 and decision.action == "WAIT_PULLBACK"
-                and signal.atr_1h > 0):
-            # Zone width = 0.5 ATR centered on the suggested entry
-            half_width = signal.atr_1h * 0.25
-            decision.entry_zone_high = decision.suggested_entry + half_width
-            decision.entry_zone_low = decision.suggested_entry - half_width
+                and signal.fibonacci_levels
+                and signal.fibonacci_levels.get("fib_618")):
+            fib = signal.fibonacci_levels
+            decision.entry_zone_high = max(fib["fib_618"], fib["fib_786"])
+            decision.entry_zone_low = min(fib["fib_618"], fib["fib_786"])
+            if decision.suggested_entry is None:
+                decision.suggested_entry = (decision.entry_zone_high + decision.entry_zone_low) / 2
             logger.info(
-                "agent_zone_auto_derived",
+                "agent_zone_fib_fallback",
                 symbol=signal.symbol,
-                suggested_entry=decision.suggested_entry,
                 zone=f"{decision.entry_zone_low:.6f}-{decision.entry_zone_high:.6f}",
-                atr_1h=signal.atr_1h,
+                fib_618=fib["fib_618"],
+                fib_786=fib["fib_786"],
             )
 
         return decision

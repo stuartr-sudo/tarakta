@@ -524,8 +524,11 @@ class EntryRefiner:
           (lower wick, bullish close, volume)
         For bearish: price pulled back up into zone, look for selling rejection
           (upper wick, bearish close, volume)
+
+        Only checks the last 2 candles (most recent 10 minutes) to avoid entering
+        based on stale data where price has already bounced away from the zone.
         """
-        recent = candles_5m.tail(5)
+        recent = candles_5m.tail(2)
 
         for i in range(len(recent)):
             candle = recent.iloc[i]
@@ -667,43 +670,48 @@ class EntryRefiner:
         return signal
 
     def _handle_expiry(self, entry: RefinerEntry) -> SignalCandidate | None:
-        """Handle expired entries — skip or fallback based on config.
+        """Handle expired entries — return for agent re-evaluation.
 
-        Default: skip the trade (no pullback = likely a trap).
-        If ote_skip_on_expiry=False: enter at current price (legacy behavior).
+        Instead of silently dropping the signal, return it with a flag so
+        the engine can re-feed it to the agent with fresh market context.
+        The agent gets one more look and can ENTER_NOW, WAIT_PULLBACK
+        (re-queue with new zone), or SKIP (done for real).
         """
         now = datetime.now(timezone.utc)
         duration = (now - entry.added_at).total_seconds()
 
-        if self.skip_on_expiry:
-            # No pullback within the window → skip the trade entirely
-            logger.info(
-                "refiner_expired_skipped",
-                symbol=entry.symbol,
-                entry_type=entry.entry_type,
-                check_count=entry.check_count,
-                original_1h_price=round(entry.original_1h_price, 6),
-                duration_seconds=round(duration, 0),
-                reason="no_pullback_detected",
-                ote_zone_valid=entry.ote_zone_valid,
-                ote_zone=f"{round(entry.ote_zone_bottom, 4)}-{round(entry.ote_zone_top, 4)}"
-                if entry.ote_zone_valid else "n/a",
-            )
-            return None
-
-        # Legacy fallback: enter at current price (not recommended)
         signal = entry.signal
         signal.refined_entry = False
         signal.refinement_duration_seconds = duration
         signal.original_1h_price = entry.original_1h_price
 
+        # Mark for re-evaluation (only once — prevent infinite loops)
+        already_reviewed = getattr(signal, "_expiry_reviewed", False)
+        if already_reviewed:
+            logger.info(
+                "refiner_expired_final_skip",
+                symbol=entry.symbol,
+                entry_type=entry.entry_type,
+                check_count=entry.check_count,
+                original_1h_price=round(entry.original_1h_price, 6),
+                duration_seconds=round(duration, 0),
+                reason="already_reviewed_on_expiry",
+            )
+            return None
+
+        signal._expiry_reviewed = True
+        signal._expired_from_refiner = True
+
         logger.info(
-            "refiner_expired_fallback",
+            "refiner_expired_for_review",
             symbol=entry.symbol,
             entry_type=entry.entry_type,
             check_count=entry.check_count,
             original_1h_price=round(entry.original_1h_price, 6),
             duration_seconds=round(duration, 0),
+            ote_zone_valid=entry.ote_zone_valid,
+            ote_zone=f"{round(entry.ote_zone_bottom, 4)}-{round(entry.ote_zone_top, 4)}"
+            if entry.ote_zone_valid else "n/a",
         )
         return signal
 

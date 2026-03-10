@@ -263,21 +263,139 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
     @router.get("/trades/{trade_id}/detail")
     @login_required
     async def get_trade_detail(request: Request, trade_id: str):
-        """Full trade record + partial exits for expandable detail row."""
+        """Full trade record + partial exits + agent analysis for expandable detail row."""
         try:
             trades = await repo.get_trades_by_ids([trade_id])
             if not trades:
                 return {"error": "Trade not found"}
             trade = trades[0]
             partial_exits = await repo.get_partial_exits(trade_id)
+
+            # Fetch agent analysis from the signal that produced this trade
+            agent_analysis = None
+            try:
+                signal_row = await repo.get_signal_by_trade_id(trade_id)
+                if not signal_row:
+                    # Fallback: for WAIT_PULLBACK entries where signal wasn't linked yet
+                    symbol = trade.get("symbol", "")
+                    if symbol:
+                        signal_row = await repo.get_signal_by_symbol_recent(symbol)
+                if signal_row:
+                    components = signal_row.get("components") or {}
+                    agent_analysis = components.get("agent_analysis")
+            except Exception:
+                pass  # Non-critical — just won't show agent section
+
             return {
                 "trade": trade,
                 "partial_exits": partial_exits,
                 "account_type": account_type,
+                "agent_analysis": agent_analysis,
             }
         except Exception as e:
             logger.error("trade_detail_failed", trade_id=trade_id, error=str(e))
             return {"error": str(e)}
+
+    @router.post("/trades/{trade_id}/close")
+    @admin_required
+    async def close_single_trade(trade_id: str, request: Request):
+        """Close a single open position at market price (manual close)."""
+        if not _dash_exchange:
+            return {"success": False, "error": "No exchange configured"}
+
+        try:
+            trades = await repo.get_trades_by_ids([trade_id])
+            if not trades:
+                return {"success": False, "error": "Trade not found"}
+            trade = trades[0]
+
+            if trade.get("status") != "open":
+                return {"success": False, "error": "Trade is not open"}
+
+            symbol = trade["symbol"]
+            direction = trade.get("direction", "long")
+            quantity = float(trade.get("remaining_quantity") or trade.get("entry_quantity", 0))
+            close_side = "sell" if direction == "long" else "buy"
+
+            # Get current price
+            price_result = await _fetch_prices_multi_market(_dash_exchange, [symbol])
+            current_price = price_result.get(symbol)
+            if current_price is None:
+                return {"success": False, "error": f"Could not fetch price for {symbol}"}
+
+            # Execute close
+            if _is_crypto_symbol(symbol) and _dash_exchange:
+                result = await _dash_exchange.place_market_order(symbol, close_side, quantity)
+                exit_price = result.avg_price or current_price
+                fee = result.fee
+                order_id = result.order_id
+                filled_qty = result.filled_quantity or quantity
+            else:
+                exit_price = current_price
+                fee = 0.0
+                order_id = f"paper_close_{symbol}"
+                filled_qty = quantity
+
+            entry_price = float(trade.get("entry_price", 0))
+            if direction == "short":
+                pnl = (entry_price - exit_price) * quantity - fee
+            else:
+                pnl = (exit_price - entry_price) * quantity - fee
+
+            # Include partial exit PnLs
+            total_trade_pnl = pnl
+            total_fees = fee
+            try:
+                partial_exits = await repo.get_partial_exits(trade_id)
+                total_trade_pnl += sum(float(pe.get("pnl_usd", 0)) for pe in partial_exits)
+                total_fees += sum(float(pe.get("fees_usd", 0)) for pe in partial_exits)
+            except Exception:
+                pass
+
+            cost = float(trade.get("entry_cost_usd", 0))
+            pnl_pct = (total_trade_pnl / cost * 100) if cost > 0 else 0
+
+            await repo.close_trade(
+                trade_id=trade_id,
+                exit_price=exit_price,
+                exit_quantity=filled_qty,
+                exit_order_id=order_id,
+                exit_reason="manual_close",
+                pnl_usd=round(total_trade_pnl, 4),
+                pnl_percent=round(pnl_pct, 2),
+                fees_usd=round(total_fees, 4),
+            )
+
+            # Remove from engine state
+            try:
+                engine_state = await repo.get_engine_state()
+                if engine_state:
+                    open_positions = engine_state.get("open_positions", {})
+                    open_positions.pop(symbol, None)
+                    engine_state["open_positions"] = open_positions
+                    await repo.upsert_engine_state(engine_state)
+            except Exception as e:
+                logger.error("manual_close_state_update_failed", error=str(e))
+
+            logger.info(
+                "manual_close_position",
+                symbol=symbol,
+                direction=direction,
+                exit_price=exit_price,
+                pnl=round(total_trade_pnl, 4),
+            )
+
+            return {
+                "success": True,
+                "symbol": symbol,
+                "exit_price": exit_price,
+                "pnl_usd": round(total_trade_pnl, 4),
+                "pnl_pct": round(pnl_pct, 2),
+            }
+
+        except Exception as e:
+            logger.error("manual_close_failed", trade_id=trade_id, error=str(e))
+            return {"success": False, "error": str(e)}
 
     @router.post("/nuke")
     @admin_required
@@ -398,85 +516,6 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             "details": closed,
         }
 
-    # --- Flipped Trader API ---
-
-    @router.get("/flipped/unrealized-pnl")
-    @login_required
-    async def get_flipped_unrealized_pnl(request: Request):
-        """Fetch live prices for open flipped positions and compute unrealized P&L."""
-        try:
-            trades = await repo.get_open_trades(mode="flipped_paper")
-        except Exception as e:
-            logger.error("flipped_unrealized_pnl_db_failed", error=str(e))
-            return {"positions": [], "total_unrealized": 0, "error": "DB error"}
-
-        if not trades:
-            return {"positions": [], "total_unrealized": 0}
-
-        positions = []
-        total_unrealized = 0.0
-        unique_symbols = list({t["symbol"] for t in trades})
-
-        # Multi-market price fetch: crypto via Binance, stocks/commodities via yfinance
-        price_map = await _fetch_prices_multi_market(_dash_exchange, unique_symbols)
-
-        for trade in trades:
-            symbol = trade["symbol"]
-            current_price = price_map.get(symbol)
-            entry_price = float(trade.get("entry_price", 0))
-            quantity = float(trade.get("entry_quantity", 0))
-            direction = trade.get("direction", "long")
-            cost_usd = float(trade.get("entry_cost_usd", 0))
-
-            if current_price is not None:
-                if direction == "short":
-                    unrealized = (entry_price - current_price) * quantity
-                else:
-                    unrealized = (current_price - entry_price) * quantity
-            else:
-                unrealized = 0
-
-            leverage = int(trade.get("leverage", 1) or 1)
-            current_notional = quantity * entry_price
-            effective_cost = current_notional / leverage if leverage > 1 else current_notional
-
-            positions.append({
-                "symbol": symbol,
-                "direction": direction,
-                "entry_price": entry_price,
-                "current_price": current_price,
-                "quantity": quantity,
-                "cost_usd": cost_usd,
-                "stop_loss": float(trade.get("stop_loss", 0)),
-                "take_profit": float(trade.get("take_profit", 0)) if trade.get("take_profit") else None,
-                "margin_used": round(effective_cost, 4),
-                "unrealized_pnl": round(unrealized, 4),
-                "unrealized_pct": round(unrealized / effective_cost * 100, 2) if effective_cost > 0 else 0,
-                "leverage": leverage,
-                "trade_id": trade.get("id"),
-                "confluence_score": float(trade.get("confluence_score", 0) or 0),
-                "entry_time": trade.get("entry_time"),
-                "signal_reasons": trade.get("signal_reasons", []),
-                "sector": CATEGORY_LABELS.get(get_symbol_category(symbol), "Other"),
-            })
-            total_unrealized += unrealized
-
-        return {
-            "positions": positions,
-            "total_unrealized": round(total_unrealized, 4),
-        }
-
-    @router.get("/flipped/trades/open")
-    @login_required
-    async def get_flipped_open_trades(request: Request):
-        trades = await repo.get_open_trades(mode="flipped_paper")
-        return {"trades": trades}
-
-    @router.get("/flipped/stats")
-    @login_required
-    async def get_flipped_stats(request: Request):
-        return await repo.get_trade_stats(mode="flipped_paper")
-
     @router.post("/reset/main")
     @admin_required
     async def reset_main_data(request: Request):
@@ -529,57 +568,6 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         except Exception as e:
             logger.error("reset_main_failed", error=str(e))
             return {"success": False, "error": str(e)}
-
-    @router.post("/reset/flipped")
-    @admin_required
-    async def reset_flipped_data(request: Request):
-        """Reset flipped bot: delete trades, reset in-memory state, reset DB state."""
-        from src.config import Settings
-        _cfg = Settings()
-        try:
-            deleted = await repo.reset_mode_data(mode="flipped_paper")
-
-            # Reset flipped state in engine_state config_overrides
-            state = await repo.get_engine_state()
-            if state:
-                overrides = state.get("config_overrides", {})
-                if not isinstance(overrides, dict):
-                    overrides = {}
-                overrides["flipped_trader"] = {
-                    "balance": _cfg.flipped_initial_balance,
-                    "peak_balance": _cfg.flipped_initial_balance,
-                    "total_pnl": 0,
-                    "daily_pnl": 0,
-                    "positions": {},
-                    "last_scan_time": None,
-                    "cooldowns": {},
-                }
-                state["config_overrides"] = overrides
-                await repo.upsert_engine_state(state)
-
-            # Signal the running FlippedTrader to reset its in-memory state
-            # This prevents the stale in-memory state from overwriting
-            # the clean DB state on the next _save_state() call.
-            if engine and hasattr(engine, "flipped_trader") and engine.flipped_trader:
-                engine.flipped_trader.request_reset()
-                logger.info("reset_flipped_signaled_engine")
-
-            logger.info("reset_flipped_complete", deleted=deleted)
-            return {"success": True, "deleted": deleted, "balance_reset": _cfg.flipped_initial_balance}
-        except Exception as e:
-            logger.error("reset_flipped_failed", error=str(e))
-            return {"success": False, "error": str(e)}
-
-    @router.post("/flipped/trigger-scan")
-    @admin_required
-    async def trigger_flipped_scan(request: Request):
-        """Trigger an immediate scan cycle on the flipped bot."""
-        if not engine or not hasattr(engine, "flipped_trader") or not engine.flipped_trader:
-            return JSONResponse({"success": False, "error": "Flipped trader not available"}, status_code=503)
-
-        engine.flipped_trader.request_scan()
-        logger.info("flipped_scan_triggered_via_api")
-        return {"success": True, "message": "Scan triggered — will start within ~5 seconds"}
 
     # ── Main Bot Settings ────────────────────────────────────────────
     @router.post("/main/settings")

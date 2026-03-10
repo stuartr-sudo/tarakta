@@ -16,6 +16,33 @@ class OrderResult:
 
 
 @dataclass
+class TrancheFill:
+    """Result of a single tranche in progressive order execution."""
+    tranche_num: int
+    order_id: str
+    price: float           # fill price for this tranche
+    quantity_requested: float
+    quantity_filled: float
+    fee: float
+    status: str            # "filled", "partial", "missed", "aborted"
+
+
+@dataclass
+class ProgressiveFillResult:
+    """Aggregated result of a progressive (multi-tranche) order."""
+    total_requested: float
+    total_filled: float
+    total_missed: float
+    vwap: float               # volume-weighted average fill price
+    tranches: list[TrancheFill] = field(default_factory=list)
+    total_fees: float = 0.0
+    fully_filled: bool = False
+    num_tranches_attempted: int = 0
+    num_tranches_filled: int = 0
+    abort_reason: str = ""    # "" if completed normally
+
+
+@dataclass
 class TakeProfitTier:
     """One tier of a progressive take-profit plan."""
     level: int              # 1, 2, or 3
@@ -225,6 +252,8 @@ class SignalCandidate:
     agent_target_entry: float | None = None  # Target entry price from agent WAIT_PULLBACK
     agent_entry_zone_high: float | None = None  # Agent-suggested entry zone upper bound
     agent_entry_zone_low: float | None = None   # Agent-suggested entry zone lower bound
+    # Fibonacci retracement levels (computed from displacement move for agent context)
+    fibonacci_levels: dict = field(default_factory=dict)
 
 
 @dataclass

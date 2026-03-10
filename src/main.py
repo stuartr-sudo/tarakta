@@ -103,15 +103,6 @@ async def main() -> None:
             )
             engine._market_name = market_name
 
-            # Flipped bot only runs on crypto — disable for stocks/commodities
-            # Custom bot runs on ALL markets so it can pick up stocks/commodities signals
-            if market_name != "crypto":
-                engine.flipped_trader.enabled = False
-                # Give non-crypto custom traders unique state keys to avoid DB conflicts
-                engine.custom_trader.state_key = f"custom_trader_{market_name}"
-                logger.info("market_flipped_disabled", market=market_name,
-                            reason="only_crypto", custom_state_key=engine.custom_trader.state_key)
-
             engines[market_name] = engine
             logger.info("market_engine_created", market=market_name, connector=market_config.connector)
 

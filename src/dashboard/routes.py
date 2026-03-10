@@ -121,30 +121,6 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx["current_page"] = page
         return templates.TemplateResponse("signals.html", ctx)
 
-    @router.get("/flipped", response_class=HTMLResponse)
-    @login_required
-    async def flipped_page(request: Request):
-        ctx = await _base_context(request)
-        status = request.query_params.get("status", "all")
-        ctx["flipped_trades"] = await repo.get_trades(status=status, mode="flipped_paper", per_page=50)
-        ctx["flipped_open"] = await repo.get_open_trades(mode="flipped_paper")
-        ctx["flipped_stats"] = await repo.get_trade_stats(mode="flipped_paper")
-        ctx["main_stats"] = await repo.get_trade_stats(mode=config.trading_mode)
-        # Flipped balance from engine state (stored in config_overrides JSONB)
-        state = ctx.get("state") or {}
-        overrides = state.get("config_overrides") or {}
-        flipped_data = overrides.get("flipped_trader", {}) if isinstance(overrides, dict) else {}
-        ctx["flipped_balance"] = flipped_data.get("balance", config.flipped_initial_balance)
-        ctx["flipped_peak"] = flipped_data.get("peak_balance", config.flipped_initial_balance)
-        ctx["flipped_total_pnl"] = flipped_data.get("total_pnl", 0)
-        ctx["flipped_daily_pnl"] = flipped_data.get("daily_pnl", 0)
-        ctx["flipped_last_scan"] = flipped_data.get("last_scan_time")
-        ctx["flipped_scan_interval"] = config.flipped_scan_interval_minutes
-        ctx["flipped_initial_balance"] = config.flipped_initial_balance
-        ctx["flipped_leverage"] = config.flipped_leverage
-        ctx["current_status"] = status
-        return templates.TemplateResponse("flipped.html", ctx)
-
     @router.get("/chart", response_class=HTMLResponse)
     @login_required
     async def chart_page(request: Request):
