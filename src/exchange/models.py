@@ -223,6 +223,8 @@ class SignalCandidate:
     original_1h_price: float = 0.0           # The stale 1H close we avoided entering at
     # AI agent fields
     agent_target_entry: float | None = None  # Target entry price from agent WAIT_PULLBACK
+    agent_entry_zone_high: float | None = None  # Agent-suggested entry zone upper bound
+    agent_entry_zone_low: float | None = None   # Agent-suggested entry zone lower bound
 
 
 @dataclass

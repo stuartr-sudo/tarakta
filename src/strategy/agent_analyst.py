@@ -41,6 +41,8 @@ class AgentDecision:
     confidence: float = 0.0  # 0-100
     reasoning: str = ""
     suggested_entry: float | None = None  # For WAIT_PULLBACK: target price
+    entry_zone_high: float | None = None  # Approximate entry zone upper bound
+    entry_zone_low: float | None = None   # Approximate entry zone lower bound
     suggested_sl: float | None = None
     suggested_tp: float | None = None
     market_regime: str = ""  # trending/ranging/volatile/choppy
@@ -69,6 +71,9 @@ and HOW — not just yes/no, but the optimal approach.
    to pull back to a specific level before entering.
    Use when: sweep confirmed but no pullback yet, or price ran too far from sweep level, \
    or you see a better entry zone on the structure.
+   When choosing WAIT_PULLBACK, you MUST provide an entry_zone_high and entry_zone_low — \
+   the approximate price range where you expect the pullback to reach. Estimate this from \
+   the 50-79% Fibonacci retracement of the displacement move, nearby order blocks, or FVGs.
 
 3. **SKIP** — This trade isn't worth taking despite the formula signal.
    Use when: market regime is wrong, BTC context is dangerous, news risk is elevated, \
@@ -119,6 +124,8 @@ The JSON object must have exactly these keys:
   "confidence": <number 0-100>,
   "reasoning": "<3-5 sentence analysis>",
   "suggested_entry": <number or 0>,
+  "entry_zone_high": <number or 0>,
+  "entry_zone_low": <number or 0>,
   "suggested_sl": <number or 0>,
   "suggested_tp": <number or 0>,
   "market_regime": "trending" | "ranging" | "volatile" | "choppy",
@@ -126,7 +133,12 @@ The JSON object must have exactly these keys:
 }
 
 Rules for numeric fields:
-- suggested_entry: For WAIT_PULLBACK set the target price. For ENTER_NOW or SKIP set to 0.
+- suggested_entry: For WAIT_PULLBACK set the target price (zone midpoint). For ENTER_NOW or SKIP set to 0.
+- entry_zone_high: For WAIT_PULLBACK, the upper bound of your ideal entry zone. For ENTER_NOW or SKIP set to 0.
+- entry_zone_low: For WAIT_PULLBACK, the lower bound of your ideal entry zone. For ENTER_NOW or SKIP set to 0.
+  For a LONG: the zone should be BELOW current price (pullback down to buy).
+  For a SHORT: the zone should be ABOVE current price (pullback up to sell).
+  Estimate from 50-79% Fibonacci retracement, order blocks, or fair value gaps.
 - suggested_sl: Set an alternative stop-loss price, or 0 to keep the formula-calculated SL.
 - suggested_tp: Set an alternative take-profit price, or 0 to keep the formula-calculated TP.
 
@@ -165,7 +177,21 @@ ENTRY_DECISION_TOOL = {
                 "suggested_entry": {
                     "type": "number",
                     "description": (
-                        "For WAIT_PULLBACK: the price level to wait for. "
+                        "For WAIT_PULLBACK: the price level to wait for (zone midpoint). "
+                        "For ENTER_NOW or SKIP: set to 0."
+                    ),
+                },
+                "entry_zone_high": {
+                    "type": "number",
+                    "description": (
+                        "For WAIT_PULLBACK: upper bound of ideal entry zone. "
+                        "For ENTER_NOW or SKIP: set to 0."
+                    ),
+                },
+                "entry_zone_low": {
+                    "type": "number",
+                    "description": (
+                        "For WAIT_PULLBACK: lower bound of ideal entry zone. "
                         "For ENTER_NOW or SKIP: set to 0."
                     ),
                 },
@@ -196,7 +222,8 @@ ENTRY_DECISION_TOOL = {
             },
             "required": [
                 "reasoning", "action", "confidence",
-                "suggested_entry", "suggested_sl", "suggested_tp",
+                "suggested_entry", "entry_zone_high", "entry_zone_low",
+                "suggested_sl", "suggested_tp",
                 "market_regime", "risk_assessment",
             ],
             "additionalProperties": False,
@@ -301,7 +328,7 @@ class AgentEntryAnalyst:
             client = self._get_client()
             response = await client.chat.completions.create(
                 model=self._model,
-                max_completion_tokens=1500,
+                max_completion_tokens=4000,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT + JSON_FORMAT_INSTRUCTION},
                     {"role": "user", "content": user_prompt},
@@ -571,11 +598,15 @@ Analyze this setup and respond with your JSON decision."""
         entry = data.get("suggested_entry")
         sl = data.get("suggested_sl")
         tp = data.get("suggested_tp")
+        zone_high = data.get("entry_zone_high")
+        zone_low = data.get("entry_zone_low")
         return AgentDecision(
             action=data.get("action", "SKIP"),
             confidence=float(data.get("confidence", 0)),
             reasoning=str(data.get("reasoning", "")),
             suggested_entry=entry if entry and entry != 0 else None,
+            entry_zone_high=zone_high if zone_high and zone_high != 0 else None,
+            entry_zone_low=zone_low if zone_low and zone_low != 0 else None,
             suggested_sl=sl if sl and sl != 0 else None,
             suggested_tp=tp if tp and tp != 0 else None,
             market_regime=data.get("market_regime", ""),
@@ -627,6 +658,53 @@ Analyze this setup and respond with your JSON decision."""
             elif not is_long and target <= entry:
                 logger.warning("agent_entry_below_current", symbol=signal.symbol)
                 decision.suggested_entry = None
+
+        # Validate entry zone
+        zh = decision.entry_zone_high
+        zl = decision.entry_zone_low
+        if zh is not None and zl is not None and decision.action == "WAIT_PULLBACK":
+            if zh <= zl:
+                logger.warning("agent_zone_inverted", symbol=signal.symbol,
+                               zone_high=zh, zone_low=zl)
+                decision.entry_zone_high = None
+                decision.entry_zone_low = None
+            elif entry > 0 and (zh - zl) / entry > 0.10:
+                logger.warning("agent_zone_too_wide", symbol=signal.symbol,
+                               width_pct=f"{(zh - zl) / entry:.2%}")
+                decision.entry_zone_high = None
+                decision.entry_zone_low = None
+            elif is_long and zl >= entry:
+                logger.warning("agent_zone_above_entry_for_long", symbol=signal.symbol)
+                decision.entry_zone_high = None
+                decision.entry_zone_low = None
+            elif not is_long and zh <= entry:
+                logger.warning("agent_zone_below_entry_for_short", symbol=signal.symbol)
+                decision.entry_zone_high = None
+                decision.entry_zone_low = None
+
+        # Derive suggested_entry from zone midpoint if zone is valid but entry is missing
+        if (decision.entry_zone_high is not None and decision.entry_zone_low is not None
+                and decision.suggested_entry is None and decision.action == "WAIT_PULLBACK"):
+            decision.suggested_entry = (decision.entry_zone_high + decision.entry_zone_low) / 2
+
+        # Derive zone from suggested_entry if entry is valid but zone is missing
+        # The model often returns entry_zone_high=0, entry_zone_low=0 — auto-derive zone
+        if (decision.suggested_entry is not None
+                and decision.entry_zone_high is None
+                and decision.entry_zone_low is None
+                and decision.action == "WAIT_PULLBACK"
+                and signal.atr_1h > 0):
+            # Zone width = 0.5 ATR centered on the suggested entry
+            half_width = signal.atr_1h * 0.25
+            decision.entry_zone_high = decision.suggested_entry + half_width
+            decision.entry_zone_low = decision.suggested_entry - half_width
+            logger.info(
+                "agent_zone_auto_derived",
+                symbol=signal.symbol,
+                suggested_entry=decision.suggested_entry,
+                zone=f"{decision.entry_zone_low:.6f}-{decision.entry_zone_high:.6f}",
+                atr_1h=signal.atr_1h,
+            )
 
         return decision
 

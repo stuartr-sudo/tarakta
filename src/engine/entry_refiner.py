@@ -108,6 +108,54 @@ class EntryRefiner:
         self.ote_max_retrace = getattr(config, "ote_max_retracement", 0.79)
         self.skip_on_expiry = getattr(config, "ote_skip_on_expiry", True)
 
+    # ── Agent Zone Comparison ─────────────────────────────────
+
+    def _compare_agent_zone(
+        self,
+        entry: RefinerEntry,
+        ote_top: float,
+        ote_bottom: float,
+    ) -> tuple[float, float]:
+        """Compare OTE zone with agent's suggested entry zone.
+
+        Returns (possibly tightened) ote_top, ote_bottom.
+        If the zones overlap and the overlap is >= 30% of OTE width,
+        tightens the OTE to the intersection (agent + OTE agreement zone).
+        """
+        signal = entry.signal
+        agent_high = getattr(signal, "agent_entry_zone_high", None)
+        agent_low = getattr(signal, "agent_entry_zone_low", None)
+
+        if agent_high is None or agent_low is None or agent_high <= agent_low:
+            return ote_top, ote_bottom
+
+        # Check overlap
+        overlap_top = min(ote_top, agent_high)
+        overlap_bottom = max(ote_bottom, agent_low)
+        has_overlap = overlap_top > overlap_bottom
+
+        logger.info(
+            "refiner_agent_zone_comparison",
+            symbol=entry.symbol,
+            ote_zone=f"{round(ote_bottom, 6)}-{round(ote_top, 6)}",
+            agent_zone=f"{round(agent_low, 6)}-{round(agent_high, 6)}",
+            overlap=has_overlap,
+        )
+
+        if has_overlap:
+            ote_width = ote_top - ote_bottom
+            overlap_width = overlap_top - overlap_bottom
+            if ote_width > 0 and overlap_width / ote_width >= 0.30:
+                logger.info(
+                    "refiner_zone_tightened",
+                    symbol=entry.symbol,
+                    original_ote=f"{round(ote_bottom, 6)}-{round(ote_top, 6)}",
+                    tightened_to=f"{round(overlap_bottom, 6)}-{round(overlap_top, 6)}",
+                )
+                return overlap_top, overlap_bottom
+
+        return ote_top, ote_bottom
+
     # ── Public API ──────────────────────────────────────────────
 
     def add(self, signal: SignalCandidate) -> bool:
@@ -312,9 +360,12 @@ class EntryRefiner:
             # 79% retrace = deep pullback (near sweep level)
             ote_top = thrust - move_size * self.ote_min_retrace
             ote_bottom = thrust - move_size * self.ote_max_retrace
+            entry.ote_zone_valid = True
+
+            # Tighten OTE with agent zone if available and overlapping
+            ote_top, ote_bottom = self._compare_agent_zone(entry, ote_top, ote_bottom)
             entry.ote_zone_top = ote_top
             entry.ote_zone_bottom = ote_bottom
-            entry.ote_zone_valid = True
 
             # Check last 5 candles for entry into OTE zone + rejection
             return self._find_rejection_in_zone(
@@ -345,9 +396,12 @@ class EntryRefiner:
             # OTE zone: price pulling back UP from thrust toward sweep_level
             ote_bottom = thrust + move_size * self.ote_min_retrace
             ote_top = thrust + move_size * self.ote_max_retrace
+            entry.ote_zone_valid = True
+
+            # Tighten OTE with agent zone if available and overlapping
+            ote_top, ote_bottom = self._compare_agent_zone(entry, ote_top, ote_bottom)
             entry.ote_zone_top = ote_top
             entry.ote_zone_bottom = ote_bottom
-            entry.ote_zone_valid = True
 
             return self._find_rejection_in_zone(
                 entry=entry,
@@ -675,6 +729,8 @@ class EntryRefiner:
                 "breakout_direction": entry.breakout_direction,
                 "thrust_high": entry.thrust_high,
                 "thrust_low": entry.thrust_low if entry.thrust_low < 1e17 else 0,
+                "agent_zone_high": entry.signal.agent_entry_zone_high,
+                "agent_zone_low": entry.signal.agent_entry_zone_low,
             }
         return {
             "entries": entries_data,

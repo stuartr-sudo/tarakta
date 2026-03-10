@@ -234,7 +234,7 @@
                 </thead>
                 <tbody id="positions-tbody">
                     {% for t in trades %}
-                    <tr data-symbol="{{ t.symbol }}" data-trade-id="{{ t.id }}">
+                    <tr data-symbol="{{ t.symbol }}" data-trade-id="{{ t.id }}" class="clickable-row" onclick="toggleDetail(this)">
                         <td><strong>{{ t.symbol|replace(':USDT', '') }}</strong>{% if t.test_group == 'llm' %} <span class="llm-bolt" title="LLM Analyst trade">&#9889;</span>{% endif %}</td>
                         <td>
                             <span class="dir-badge {{ t.direction | default('long') }}">
@@ -394,6 +394,93 @@
 
 {% block scripts %}
 <script>
+// ── Expandable trade detail rows ──────────────────────────
+const _detailCache = {};
+
+async function toggleDetail(row) {
+    const tradeId = row.getAttribute('data-trade-id');
+    if (!tradeId) return;
+    const existing = document.getElementById('detail-' + tradeId);
+    if (existing) { existing.remove(); return; }
+
+    const colCount = row.cells.length;
+    const detailRow = document.createElement('tr');
+    detailRow.id = 'detail-' + tradeId;
+    detailRow.className = 'trade-detail-row';
+    const td = document.createElement('td');
+    td.colSpan = colCount;
+    td.style.padding = '0';
+    td.innerHTML = '<div class="trade-detail-content" style="padding:1rem;color:var(--text-muted);font-size:0.8rem;">Loading...</div>';
+    detailRow.appendChild(td);
+    row.after(detailRow);
+
+    if (!_detailCache[tradeId]) {
+        try {
+            const resp = await fetch('/api/trades/' + tradeId + '/detail');
+            _detailCache[tradeId] = await resp.json();
+        } catch (e) {
+            td.innerHTML = '<div style="padding:1rem;color:var(--red);">Failed to load</div>';
+            return;
+        }
+    }
+
+    const data = _detailCache[tradeId];
+    if (data.error) { td.innerHTML = '<div style="padding:1rem;color:var(--red);">' + data.error + '</div>'; return; }
+
+    const t = data.trade;
+    const exits = data.partial_exits || [];
+    const lev = parseInt(t.leverage || 1);
+    const margin = parseFloat(t.margin_used || 0);
+    const liqPrice = parseFloat(t.liquidation_price || 0);
+    const riskUsd = parseFloat(t.risk_usd || 0);
+    const rr = t.risk_reward || '-';
+    const feesUsd = parseFloat(t.fees_usd || 0);
+    const entryTime = (t.entry_time || '').replace('T', ' ').substring(0, 19) + ' UTC';
+
+    let meta = '<div class="detail-section"><h4>Trade Details</h4><dl class="detail-meta">';
+    meta += '<dt>Entry Time</dt><dd>' + entryTime + '</dd>';
+    meta += '<dt>Leverage</dt><dd>' + lev + 'x</dd>';
+    if (lev > 1) {
+        meta += '<dt>Margin</dt><dd>$' + margin.toFixed(2) + '</dd>';
+        meta += '<dt>Liquidation</dt><dd class="mono">$' + liqPrice.toFixed(4) + '</dd>';
+    }
+    meta += '<dt>Risk</dt><dd>$' + riskUsd.toFixed(2) + '</dd>';
+    meta += '<dt>R:R</dt><dd>' + rr + '</dd>';
+    meta += '<dt>Fees</dt><dd>$' + feesUsd.toFixed(4) + '</dd>';
+    meta += '</dl></div>';
+
+    let reasons = '<div class="detail-section"><h4>Signal Reasons</h4>';
+    const sr = t.signal_reasons || [];
+    if (sr.length > 0) {
+        reasons += '<div style="display:flex;flex-wrap:wrap;gap:4px;">';
+        sr.forEach(function(r) { reasons += '<span class="reason-pill">' + r + '</span>'; });
+        reasons += '</div>';
+    } else {
+        reasons += '<p class="text-muted" style="font-size:0.75rem;">No reasons recorded</p>';
+    }
+    reasons += '</div>';
+
+    let exitsHtml = '';
+    if (exits.length > 0) {
+        exitsHtml = '<div class="detail-section"><h4>Partial Exits</h4><table class="detail-table">' +
+            '<thead><tr><th>Tier</th><th>Price</th><th>Qty</th><th>P&L</th><th>Time</th></tr></thead><tbody>';
+        exits.forEach(function(e) {
+            const pnl = parseFloat(e.pnl_usd || 0);
+            const cls = pnl >= 0 ? 'positive' : 'negative';
+            const sign = pnl >= 0 ? '+' : '';
+            exitsHtml += '<tr><td>TP' + (e.tier || '-') + '</td>' +
+                '<td class="mono">$' + parseFloat(e.exit_price || 0).toFixed(4) + '</td>' +
+                '<td class="mono">' + parseFloat(e.quantity || 0).toFixed(4) + '</td>' +
+                '<td class="' + cls + '">' + sign + '$' + pnl.toFixed(2) + '</td>' +
+                '<td>' + (e.created_at || '').replace('T', ' ').substring(0, 16) + '</td></tr>';
+        });
+        exitsHtml += '</tbody></table></div>';
+    }
+
+    td.innerHTML = '<div class="trade-detail-content">' + meta + reasons + exitsHtml + '</div>';
+}
+
+// ── Chart + live data ──────────────────────────────────────
 async function loadChart() {
     try {
         const resp = await fetch('/api/portfolio');

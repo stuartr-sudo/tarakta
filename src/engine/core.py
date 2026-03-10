@@ -896,6 +896,8 @@ class TradingEngine:
                         "market_regime": agent_result.market_regime,
                         "risk_assessment": agent_result.risk_assessment,
                         "suggested_entry": agent_result.suggested_entry,
+                        "entry_zone_high": agent_result.entry_zone_high,
+                        "entry_zone_low": agent_result.entry_zone_low,
                         "suggested_sl": agent_result.suggested_sl,
                         "suggested_tp": agent_result.suggested_tp,
                         "latency_ms": round(agent_result.latency_ms, 1),
@@ -945,6 +947,10 @@ class TradingEngine:
                             signal.original_1h_price = signal.entry_price
                             if agent_result.suggested_entry is not None:
                                 signal.agent_target_entry = agent_result.suggested_entry
+                            if agent_result.entry_zone_high is not None:
+                                signal.agent_entry_zone_high = agent_result.entry_zone_high
+                            if agent_result.entry_zone_low is not None:
+                                signal.agent_entry_zone_low = agent_result.entry_zone_low
                             queued = self.main_entry_refiner.add(signal)
                             if queued:
                                 refiner_queued += 1
@@ -952,6 +958,8 @@ class TradingEngine:
                                     "agent_wait_pullback_queued",
                                     symbol=signal.symbol,
                                     target_entry=agent_result.suggested_entry,
+                                    entry_zone=f"{agent_result.entry_zone_low}-{agent_result.entry_zone_high}"
+                                    if agent_result.entry_zone_high else "none",
                                     confidence=agent_result.confidence,
                                 )
                                 vol_24h = self.exchange.get_24h_volume(signal.symbol)
