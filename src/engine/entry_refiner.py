@@ -476,9 +476,11 @@ class EntryRefiner:
                     has_volume = rvol >= OTE_REJECTION_RVOL
 
                     if has_wick or has_volume:
+                        # Target = the breakout level (where support is)
+                        target_entry = min(c_close, zone_top)
                         return self._create_refined_signal(
                             entry=entry,
-                            entry_price=c_close,
+                            entry_price=target_entry,
                             rejection_type="breakout_retest",
                             has_wick=has_wick,
                             rvol=rvol,
@@ -496,9 +498,11 @@ class EntryRefiner:
                     has_volume = rvol >= OTE_REJECTION_RVOL
 
                     if has_wick or has_volume:
+                        # Target = the breakout level (where resistance is)
+                        target_entry = max(c_close, zone_bottom)
                         return self._create_refined_signal(
                             entry=entry,
-                            entry_price=c_close,
+                            entry_price=target_entry,
                             rejection_type="breakout_retest",
                             has_wick=has_wick,
                             rvol=rvol,
@@ -576,9 +580,14 @@ class EntryRefiner:
                     ])
 
                     if confirmations >= 2:
+                        # Target entry = zone top (best we can get on the pullback).
+                        # If close is inside the zone, use the close (even better).
+                        # The drift check in core.py will only execute when live
+                        # price is near this target, preventing entries far from zone.
+                        target_entry = min(c_close, zone_top)
                         return self._create_refined_signal(
                             entry=entry,
-                            entry_price=c_close,
+                            entry_price=target_entry,
                             rejection_type="ote_zone",
                             has_wick=has_wick,
                             rvol=rvol,
@@ -609,9 +618,12 @@ class EntryRefiner:
                     ])
 
                     if confirmations >= 2:
+                        # Target entry = zone bottom (best short entry on pullback).
+                        # If close is inside the zone, use the close (even better).
+                        target_entry = max(c_close, zone_bottom)
                         return self._create_refined_signal(
                             entry=entry,
-                            entry_price=c_close,
+                            entry_price=target_entry,
                             rejection_type="ote_zone",
                             has_wick=has_wick,
                             rvol=rvol,

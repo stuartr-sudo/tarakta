@@ -1456,6 +1456,42 @@ class TradingEngine:
                             self.main_entry_refiner.add(signal)
                             logger.info("refiner_requeued_after_drift", symbol=signal.symbol)
                         continue
+
+                    # Also verify live price is near the OTE zone boundary
+                    # (safety net — the refiner already checks this, but the
+                    # live price may have moved since the refiner graduated it)
+                    zone_max_overshoot = 0.005  # 0.5%
+                    zone_high = getattr(signal, "agent_entry_zone_high", None)
+                    zone_low = getattr(signal, "agent_entry_zone_low", None)
+                    if zone_high and zone_low:
+                        direction = signal.direction or ""
+                        if direction in ("long", "bullish") and live_price > zone_high * (1 + zone_max_overshoot):
+                            logger.info(
+                                "refiner_live_price_beyond_zone",
+                                symbol=signal.symbol,
+                                live_price=round(live_price, 6),
+                                zone_high=round(zone_high, 6),
+                                direction=direction,
+                            )
+                            if self.main_entry_refiner and signal.symbol not in self.main_entry_refiner.queue:
+                                signal.entry_price = signal.original_1h_price
+                                self.main_entry_refiner.add(signal)
+                                logger.info("refiner_requeued_beyond_zone", symbol=signal.symbol)
+                            continue
+                        if direction in ("short", "bearish") and live_price < zone_low * (1 - zone_max_overshoot):
+                            logger.info(
+                                "refiner_live_price_beyond_zone",
+                                symbol=signal.symbol,
+                                live_price=round(live_price, 6),
+                                zone_low=round(zone_low, 6),
+                                direction=direction,
+                            )
+                            if self.main_entry_refiner and signal.symbol not in self.main_entry_refiner.queue:
+                                signal.entry_price = signal.original_1h_price
+                                self.main_entry_refiner.add(signal)
+                                logger.info("refiner_requeued_beyond_zone", symbol=signal.symbol)
+                            continue
+
                     # Update entry price to the actual live price for accurate execution
                     signal.entry_price = live_price
             except Exception as e:
@@ -1611,6 +1647,35 @@ class TradingEngine:
             )
 
             if result.action == "ENTER_NOW":
+                # Re-check: another path may have opened this symbol while agent was thinking
+                if signal.symbol in self.portfolio.open_positions:
+                    logger.info(
+                        "expired_review_skip_already_open",
+                        symbol=signal.symbol,
+                    )
+                    return
+
+                # Validate through risk manager (same as all other entry paths)
+                total_exposure = sum(
+                    pos.cost_usd for pos in self.portfolio.open_positions.values()
+                )
+                validation = self.risk_manager.validate_trade(
+                    open_position_count=len(self.portfolio.open_positions),
+                    open_position_symbols=set(self.portfolio.open_positions.keys()),
+                    current_balance=self.portfolio.current_balance,
+                    daily_start_balance=self.portfolio.daily_start_balance,
+                    daily_pnl=self.portfolio.daily_pnl,
+                    signal=signal,
+                    total_exposure_usd=total_exposure,
+                )
+                if not validation.allowed:
+                    logger.info(
+                        "expired_review_rejected",
+                        symbol=signal.symbol,
+                        reason=validation.reason,
+                    )
+                    return
+
                 # Agent says enter now — execute immediately
                 position, order_result, trade_record = (
                     await self.order_executor.execute_entry(
