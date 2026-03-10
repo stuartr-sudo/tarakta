@@ -167,17 +167,9 @@ class EntryRefiner:
     def add(self, signal: SignalCandidate) -> bool:
         """Queue a sweep signal for OTE zone entry refinement.
 
-        Returns True if added, False if full or duplicate.
+        Returns True if added, False if duplicate.
         """
         if signal.symbol in self.queue:
-            return False
-        if len(self.queue) >= self.config.entry_refiner_max_queue:
-            logger.info(
-                "refiner_full",
-                rejected=signal.symbol,
-                score=signal.score,
-                current_size=len(self.queue),
-            )
             return False
 
         sweep_result = signal.sweep_result
@@ -214,17 +206,9 @@ class EntryRefiner:
     def add_breakout(self, signal: SignalCandidate) -> bool:
         """Queue a breakout signal for level-retest entry refinement.
 
-        Returns True if added, False if full or duplicate.
+        Returns True if added, False if duplicate.
         """
         if signal.symbol in self.queue:
-            return False
-        if len(self.queue) >= self.config.entry_refiner_max_queue:
-            logger.info(
-                "refiner_full",
-                rejected=signal.symbol,
-                score=signal.score,
-                current_size=len(self.queue),
-            )
             return False
 
         breakout_result = signal.breakout_result

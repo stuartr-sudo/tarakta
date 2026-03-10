@@ -172,7 +172,7 @@ class Settings(BaseSettings):
     entry_refiner_enabled: bool = True
     entry_refiner_check_interval_seconds: int = 60   # Check every 60s in monitor loop
     entry_refiner_expiry_minutes: float = 30.0       # Max wait for 5m confirmation
-    entry_refiner_max_queue: int = 8                  # Max signals queued for refinement
+    entry_refiner_max_queue: int = 0                   # 0 = unlimited queue
     ote_min_retracement: float = 0.50   # OTE zone starts at 50% Fibonacci retracement
     ote_max_retracement: float = 0.79   # OTE zone ends at 79% (beyond = setup failed)
     ote_skip_on_expiry: bool = True     # No pullback within window = skip trade (don't chase)
