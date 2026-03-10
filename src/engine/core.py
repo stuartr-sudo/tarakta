@@ -503,8 +503,9 @@ class TradingEngine:
 
         # Start hyper-watchlist monitor loop (checks every 2.5 min on 5m candles)
         if self.watchlist_monitor:
-            # Restore watchlist state from DB
-            if db_state:
+            # Restore watchlist state from DB (crypto engine only — other engines
+            # share the same DB state and would incorrectly load crypto symbols)
+            if db_state and self._market_name == "crypto":
                 wl_overrides = (db_state.get("config_overrides") or {})
                 wl_data = wl_overrides.get("watchlist_monitor")
                 if wl_data:

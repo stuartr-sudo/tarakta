@@ -449,11 +449,27 @@ class WatchlistMonitor:
                     error=str(e),
                 )
 
-        if restored > 0 or expired > 0:
+        # Trim to max_size: keep the highest-scored entries
+        trimmed = 0
+        if self.config.watchlist_max_size > 0 and len(self.entries) > self.config.watchlist_max_size:
+            sorted_entries = sorted(
+                self.entries.items(),
+                key=lambda kv: kv[1].initial_score,
+                reverse=True,
+            )
+            keep = {sym for sym, _ in sorted_entries[: self.config.watchlist_max_size]}
+            to_remove = [sym for sym in self.entries if sym not in keep]
+            for sym in to_remove:
+                del self.entries[sym]
+                trimmed += 1
+
+        if restored > 0 or expired > 0 or trimmed > 0:
             logger.info(
                 "watchlist_restored",
                 restored=restored,
                 expired_on_restore=expired,
+                trimmed_to_max=trimmed,
+                final_size=len(self.entries),
             )
 
     def stop(self) -> None:
