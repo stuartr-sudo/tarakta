@@ -866,10 +866,39 @@ class TradingEngine:
                                 )
                                 signals_saved += 1
                                 continue
-                        # If refiner unavailable/full, fall through to ENTER_NOW
+                        # If refiner unavailable/full, skip instead of forcing
+                        # entry — the agent said to WAIT, so respect that.
+                        logger.info(
+                            "agent_wait_pullback_skipped_refiner_full",
+                            symbol=signal.symbol,
+                            confidence=agent_result.confidence,
+                            refiner_size=len(self.main_entry_refiner.queue) if self.main_entry_refiner else 0,
+                        )
+                        vol_24h = self.exchange.get_24h_volume(signal.symbol)
+                        await self.repo.insert_signal(
+                            {
+                                "symbol": signal.symbol,
+                                "direction": signal.direction or "none",
+                                "score": signal.score,
+                                "reasons": signal.reasons + [
+                                    f"AGENT:WAIT_PULLBACK(conf={agent_result.confidence:.0f},"
+                                    f"refiner_full)"
+                                ],
+                                "components": {
+                                    "volume_24h": vol_24h,
+                                    "test_group": "agent",
+                                    "agent_analysis": agent_analysis_data,
+                                    "signal_type": sig_type,
+                                },
+                                "current_price": signal.entry_price,
+                                "acted_on": False,
+                                "scan_cycle": cycle,
+                            }
+                        )
+                        signals_saved += 1
+                        continue
 
-                    # Agent says ENTER_NOW (or WAIT_PULLBACK fell through)
-                    # Store overrides for later use in the execution path
+                    # Agent says ENTER_NOW
                     logger.info(
                         "agent_enter_now",
                         symbol=signal.symbol,
@@ -1512,6 +1541,13 @@ class TradingEngine:
         try:
             # Update signal to current market price
             ticker = await self.exchange.fetch_ticker(signal.symbol)
+            if not isinstance(ticker, dict):
+                logger.warning(
+                    "expired_review_bad_ticker",
+                    symbol=signal.symbol,
+                    ticker_type=type(ticker).__name__,
+                )
+                return
             signal.entry_price = float(ticker.get("last", 0) or 0)
             if signal.entry_price <= 0:
                 return
