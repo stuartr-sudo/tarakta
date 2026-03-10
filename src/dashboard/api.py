@@ -709,7 +709,15 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         entries = []
         for sym, data in state.get("entries", {}).items():
             entries.append(data)
-        return {"entries": entries, "total_queued": state.get("total_queued", 0), "enabled": True}
+        return {
+            "entries": entries,
+            "total_queued": state.get("total_queued", 0),
+            "enabled": True,
+            "last_check_at": state.get("last_check_at"),
+            "total_checks": state.get("total_checks", 0),
+            "total_confirmed": state.get("total_confirmed", 0),
+            "total_expired": state.get("total_expired", 0),
+        }
 
     # ── Consensus Monitor Queue ────────────────────────────────────────
     @router.get("/consensus/main")

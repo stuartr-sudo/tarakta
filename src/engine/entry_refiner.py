@@ -108,6 +108,12 @@ class EntryRefiner:
         self.ote_max_retrace = getattr(config, "ote_max_retracement", 0.79)
         self.skip_on_expiry = getattr(config, "ote_skip_on_expiry", True)
 
+        # Heartbeat tracking — lets the dashboard confirm the loop is alive
+        self.last_check_at: datetime | None = None
+        self.total_checks: int = 0
+        self.total_confirmed: int = 0
+        self.total_expired: int = 0
+
     # ── Agent Zone Comparison ─────────────────────────────────
 
     def _compare_agent_zone(
@@ -257,11 +263,15 @@ class EntryRefiner:
         Returns a list of signals ready to enter (refined with better price).
         Removes completed and expired entries from the queue.
         """
+        # Always update heartbeat — even if queue is empty
+        self.last_check_at = datetime.now(timezone.utc)
+        self.total_checks += 1
+
         if not self.queue:
             return []
 
         ready: list[SignalCandidate] = []
-        now = datetime.now(timezone.utc)
+        now = self.last_check_at
 
         for symbol, entry in list(self.queue.items()):
             try:
@@ -270,6 +280,7 @@ class EntryRefiner:
                     expired_signal = self._handle_expiry(entry)
                     if expired_signal:
                         ready.append(expired_signal)
+                    self.total_expired += 1
                     del self.queue[symbol]
                     continue
 
@@ -288,6 +299,7 @@ class EntryRefiner:
 
                 if result is not None:
                     ready.append(result)
+                    self.total_confirmed += 1
                     del self.queue[symbol]
 
             except Exception as e:
@@ -743,6 +755,10 @@ class EntryRefiner:
         return {
             "entries": entries_data,
             "total_queued": len(entries_data),
+            "last_check_at": self.last_check_at.isoformat() if self.last_check_at else None,
+            "total_checks": self.total_checks,
+            "total_confirmed": self.total_confirmed,
+            "total_expired": self.total_expired,
         }
 
     def restore_state(self, data: dict) -> None:

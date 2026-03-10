@@ -172,8 +172,12 @@
     <div class="panel-header">
         <h2>Entry Refiner Queue
             <span id="refiner-badge" class="badge" style="background:#f59e0b; color:#000; font-size:0.75rem;">0</span>
+            <span id="refiner-heartbeat" style="font-size:0.65rem; margin-left:8px; color:var(--text-muted);"></span>
         </h2>
-        <span style="font-size:0.7rem; color:var(--text-muted);">Sweep signals waiting for 5m reclaim confirmation</span>
+        <div style="font-size:0.7rem; color:var(--text-muted); display:flex; justify-content:space-between; align-items:center;">
+            <span>Sweep signals waiting for 5m reclaim confirmation</span>
+            <span id="refiner-stats" style="font-size:0.65rem;"></span>
+        </div>
     </div>
     <div id="refiner-body" class="panel-body no-pad">
         <div class="overflow-x">
@@ -1066,6 +1070,19 @@ async function loadRefinerQueue() {
         if (!data.enabled) { panel.style.display = 'none'; return; }
         panel.style.display = 'block';
         badge.textContent = data.total_queued;
+
+        // Heartbeat indicator — shows the refiner loop is alive
+        const hb = document.getElementById('refiner-heartbeat');
+        const stats = document.getElementById('refiner-stats');
+        if (hb && data.last_check_at) {
+            const ago = Math.round((Date.now() - new Date(data.last_check_at).getTime()) / 1000);
+            const alive = ago < 120;
+            hb.innerHTML = (alive ? '&#9679;' : '&#9675;') + ' ' + (ago < 60 ? ago + 's ago' : Math.floor(ago/60) + 'm ago');
+            hb.style.color = alive ? '#22c55e' : '#ef4444';
+        }
+        if (stats) {
+            stats.textContent = (data.total_confirmed || 0) + ' confirmed / ' + (data.total_expired || 0) + ' expired / ' + (data.total_checks || 0) + ' cycles';
+        }
 
         if (data.entries.length === 0) {
             body.style.display = 'none';

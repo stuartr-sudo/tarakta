@@ -1088,6 +1088,55 @@ class OrderExecutor:
 
         return None
 
+    @staticmethod
+    def _nudge_past_round(price: float, is_long: bool) -> float:
+        """Push SL past nearby round/psychological price levels.
+
+        Market makers hunt clustered stops sitting at round numbers like
+        $60,000 or $0.50.  If our calculated SL lands within 0.4% of a
+        round level, we nudge it *further away* from entry so the MM
+        sweep is less likely to clip us.
+
+        Round-level granularity scales with price magnitude:
+          price >= 10000  → round to nearest 1000  (e.g. 60000, 61000)
+          price >= 1000   → round to nearest 100   (e.g. 3500, 3600)
+          price >= 100    → round to nearest 10     (e.g. 150, 160)
+          price >= 10     → round to nearest 1      (e.g. 50, 51)
+          price >= 1      → round to nearest 0.1    (e.g. 0.5, 0.6)
+          price < 1       → round to nearest 0.01   (e.g. 0.05, 0.06)
+        """
+        if price <= 0:
+            return price
+
+        # Determine the round-number granularity for this price range
+        if price >= 10_000:
+            step = 1000
+        elif price >= 1000:
+            step = 100
+        elif price >= 100:
+            step = 10
+        elif price >= 10:
+            step = 1
+        elif price >= 1:
+            step = 0.1
+        else:
+            step = 0.01
+
+        nearest_round = round(price / step) * step
+        proximity_pct = abs(price - nearest_round) / price
+
+        # If within 0.4% of a round level, nudge past it
+        if proximity_pct < 0.004:
+            nudge = step * 0.15  # Push 15% of one step beyond the round
+            if is_long:
+                # SL is below entry — push it further down
+                price = nearest_round - nudge
+            else:
+                # SL is above entry — push it further up
+                price = nearest_round + nudge
+
+        return price
+
     def _calculate_stop_loss(self, signal: SignalCandidate) -> float | None:
         """SL behind the sweep extreme + configurable buffer (default 3%).
 
@@ -1097,6 +1146,7 @@ class OrderExecutor:
 
         Falls back to ATR-based SL if no sweep data available.
         Enforces a minimum SL distance floor (default 2% of entry).
+        Nudges final SL away from round psychological levels.
         """
         entry = signal.entry_price
         is_long = signal.direction == "bullish"
@@ -1138,7 +1188,7 @@ class OrderExecutor:
                     )
                     return None
 
-            return sl
+            return self._nudge_past_round(sl, is_long)
 
         # No sweep data or invalid — ATR fallback
         sl = self._atr_fallback_sl(signal, entry, is_long, min_distance)
@@ -1157,7 +1207,7 @@ class OrderExecutor:
                 )
                 return None
 
-        return sl
+        return self._nudge_past_round(sl, is_long) if sl is not None else None
 
     def _atr_fallback_sl(
         self, signal: SignalCandidate, entry: float, is_long: bool,
