@@ -252,6 +252,9 @@ class SignalCandidate:
     agent_target_entry: float | None = None  # Target entry price from agent WAIT_PULLBACK
     agent_entry_zone_high: float | None = None  # Agent-suggested entry zone upper bound
     agent_entry_zone_low: float | None = None   # Agent-suggested entry zone lower bound
+    # 1H thrust data for refiner (persisted from scanner's PullbackResult)
+    thrust_extreme_1h: float | None = None      # highest 1H high (bullish) or lowest 1H low (bearish) after displacement
+    displacement_open_1h: float | None = None    # open of the 1H displacement candle
     # Fibonacci retracement levels (computed from displacement move for agent context)
     fibonacci_levels: dict = field(default_factory=dict)
     # Extended ICT/SMC context for AI agent (populated post-scoring, not used in formula)

@@ -629,6 +629,12 @@ class AltcoinScanner:
                 logger.warning("agent_context_enrichment_failed", symbol=signal.symbol, error=str(e))
 
             finally:
+                # Persist 1H thrust data for the entry refiner (survives cleanup)
+                _pb = getattr(signal, "_scan_pullback_result", None)
+                if _pb is not None:
+                    signal.thrust_extreme_1h = _pb.thrust_extreme
+                    signal.displacement_open_1h = _pb.displacement_open
+
                 # Clean up stashed data to free memory
                 for attr in ("_scan_candles_1h", "_scan_ms_results", "_scan_vol_profile", "_scan_pullback_result"):
                     if hasattr(signal, attr):

@@ -50,6 +50,7 @@ REJECTION_WICK_RATIO = 0.5
 # Minimum thrust size (% from sweep level) before OTE zone is valid
 # Prevents calculating an OTE zone from noise
 MIN_THRUST_PCT = 0.004  # 0.4%
+MIN_THRUST_PCT_1H = 0.008  # 0.8% — higher threshold for 1H scale
 
 # Breakout retest tolerance — how close price must get to the breakout level
 BREAKOUT_RETEST_TOLERANCE = 0.003  # 0.3%
@@ -83,6 +84,7 @@ class RefinerEntry:
     ote_zone_top: float = 0.0
     ote_zone_bottom: float = 0.0
     ote_zone_valid: bool = False
+    zone_source: str = ""  # "agent", "1h_thrust", "5m_thrust" — for logging/dashboard
 
 
 class EntryRefiner:
@@ -114,52 +116,27 @@ class EntryRefiner:
         self.total_confirmed: int = 0
         self.total_expired: int = 0
 
-    # ── Agent Zone Comparison ─────────────────────────────────
+    # ── OTE Zone Computation ─────────────────────────────────
 
-    def _compare_agent_zone(
+    def _compute_ote_from_thrust(
         self,
-        entry: RefinerEntry,
-        ote_top: float,
-        ote_bottom: float,
+        thrust_extreme: float,
+        origin: float,
+        direction: str,
     ) -> tuple[float, float]:
-        """Compare OTE zone with agent's suggested entry zone.
+        """Compute OTE zone boundaries from a thrust move.
 
-        Returns (possibly tightened) ote_top, ote_bottom.
-        If the zones overlap and the overlap is >= 30% of OTE width,
-        tightens the OTE to the intersection (agent + OTE agreement zone).
+        Returns (ote_top, ote_bottom) based on Fibonacci retracement
+        of the thrust from origin → thrust_extreme.
         """
-        signal = entry.signal
-        agent_high = getattr(signal, "agent_entry_zone_high", None)
-        agent_low = getattr(signal, "agent_entry_zone_low", None)
-
-        if agent_high is None or agent_low is None or agent_high <= agent_low:
-            return ote_top, ote_bottom
-
-        # Check overlap
-        overlap_top = min(ote_top, agent_high)
-        overlap_bottom = max(ote_bottom, agent_low)
-        has_overlap = overlap_top > overlap_bottom
-
-        logger.info(
-            "refiner_agent_zone_comparison",
-            symbol=entry.symbol,
-            ote_zone=f"{round(ote_bottom, 6)}-{round(ote_top, 6)}",
-            agent_zone=f"{round(agent_low, 6)}-{round(agent_high, 6)}",
-            overlap=has_overlap,
-        )
-
-        if has_overlap:
-            ote_width = ote_top - ote_bottom
-            overlap_width = overlap_top - overlap_bottom
-            if ote_width > 0 and overlap_width / ote_width >= 0.30:
-                logger.info(
-                    "refiner_zone_tightened",
-                    symbol=entry.symbol,
-                    original_ote=f"{round(ote_bottom, 6)}-{round(ote_top, 6)}",
-                    tightened_to=f"{round(overlap_bottom, 6)}-{round(overlap_top, 6)}",
-                )
-                return overlap_top, overlap_bottom
-
+        if direction == "bullish":
+            move_size = thrust_extreme - origin
+            ote_top = thrust_extreme - move_size * self.ote_min_retrace
+            ote_bottom = thrust_extreme - move_size * self.ote_max_retrace
+        else:
+            move_size = origin - thrust_extreme
+            ote_bottom = thrust_extreme + move_size * self.ote_min_retrace
+            ote_top = thrust_extreme + move_size * self.ote_max_retrace
         return ote_top, ote_bottom
 
     # ── Public API ──────────────────────────────────────────────
@@ -320,106 +297,147 @@ class EntryRefiner:
     ) -> SignalCandidate | None:
         """Check if price has pulled back into the OTE zone with rejection.
 
-        For bullish sweep (swept lows, expecting reversal UP):
-          - Thrust = highest 5m high since the sweep
-          - OTE zone = 50-79% retracement from thrust_high toward sweep_level
-          - Entry: price pulls back into zone and shows rejection (wick/volume)
+        Three-tier zone resolution (priority order):
+          Tier 1 — Agent zone: AI-provided entry_zone_high/low (1H/4H/1D analysis)
+          Tier 2 — 1H thrust: OTE from scanner's 1H thrust_extreme + displacement_open
+          Tier 3 — 5m thrust: Original logic, OTE from 5m candle thrust (fallback)
 
-        For bearish sweep (swept highs, expecting reversal DOWN):
-          - Thrust = lowest 5m low since the sweep
-          - OTE zone = 50-79% retracement from thrust_low toward sweep_level
-          - Entry: price pulls back up into zone and shows rejection
+        5m candles are always used for ENTRY TIMING (rejection candle detection)
+        regardless of which tier sets the zone boundaries.
         """
         direction = entry.sweep_direction
         sweep_level = entry.sweep_level
+        signal = entry.signal
 
-        highs = candles_5m["high"].astype(float)
-        lows = candles_5m["low"].astype(float)
-        closes = candles_5m["close"].astype(float)
-        opens = candles_5m["open"].astype(float)
+        # ── Resolve zone boundaries (three-tier priority) ──
 
-        # Update thrust tracking
-        current_max_high = float(highs.max())
-        current_min_low = float(lows.min())
+        agent_high = getattr(signal, "agent_entry_zone_high", None)
+        agent_low = getattr(signal, "agent_entry_zone_low", None)
+        thrust_1h = getattr(signal, "thrust_extreme_1h", None)
+        disp_open_1h = getattr(signal, "displacement_open_1h", None)
 
-        if current_max_high > entry.thrust_high:
-            entry.thrust_high = current_max_high
-        if current_min_low < entry.thrust_low:
-            entry.thrust_low = current_min_low
+        ote_top = 0.0
+        ote_bottom = 0.0
+        zone_resolved = False
 
-        if direction == "bullish":
-            # Swept lows → expecting reversal UP
-            thrust = entry.thrust_high
-            move_size = thrust - sweep_level
+        # ── Tier 1: Agent zone (highest priority) ──
+        if agent_high is not None and agent_low is not None and agent_high > agent_low:
+            ote_top = agent_high
+            ote_bottom = agent_low
+            entry.zone_source = "agent"
+            zone_resolved = True
+            if entry.check_count == 0:
+                logger.info(
+                    "refiner_zone_from_agent",
+                    symbol=entry.symbol,
+                    direction=direction,
+                    agent_zone=f"{round(agent_low, 6)}-{round(agent_high, 6)}",
+                )
 
-            # Need a meaningful thrust before calculating OTE zone
-            if move_size <= 0 or (move_size / sweep_level) < MIN_THRUST_PCT:
-                if entry.check_count % 5 == 0:
-                    logger.debug(
-                        "refiner_waiting_thrust",
-                        symbol=entry.symbol,
-                        direction=direction,
-                        thrust_high=round(thrust, 6),
-                        sweep_level=round(sweep_level, 6),
-                        move_pct=f"{(move_size / sweep_level * 100) if sweep_level > 0 else 0:.2f}%",
+        # ── Tier 2: 1H thrust ──
+        if not zone_resolved and thrust_1h is not None and disp_open_1h is not None:
+            if direction == "bullish":
+                move = thrust_1h - disp_open_1h
+                if move > 0 and disp_open_1h > 0 and (move / disp_open_1h) >= MIN_THRUST_PCT_1H:
+                    ote_top, ote_bottom = self._compute_ote_from_thrust(
+                        thrust_1h, disp_open_1h, "bullish"
                     )
-                return None
-
-            # OTE zone: price pulling back DOWN from thrust toward sweep_level
-            # 50% retrace = halfway back
-            # 79% retrace = deep pullback (near sweep level)
-            ote_top = thrust - move_size * self.ote_min_retrace
-            ote_bottom = thrust - move_size * self.ote_max_retrace
-            entry.ote_zone_valid = True
-
-            # Tighten OTE with agent zone if available and overlapping
-            ote_top, ote_bottom = self._compare_agent_zone(entry, ote_top, ote_bottom)
-            entry.ote_zone_top = ote_top
-            entry.ote_zone_bottom = ote_bottom
-
-            # Check last 5 candles for entry into OTE zone + rejection
-            return self._find_rejection_in_zone(
-                entry=entry,
-                candles_5m=candles_5m,
-                zone_top=ote_top,
-                zone_bottom=ote_bottom,
-                direction="bullish",
-            )
-
-        else:  # bearish
-            # Swept highs → expecting reversal DOWN
-            thrust = entry.thrust_low
-            move_size = sweep_level - thrust
-
-            if move_size <= 0 or (move_size / sweep_level) < MIN_THRUST_PCT:
-                if entry.check_count % 5 == 0:
-                    logger.debug(
-                        "refiner_waiting_thrust",
-                        symbol=entry.symbol,
-                        direction=direction,
-                        thrust_low=round(thrust, 6),
-                        sweep_level=round(sweep_level, 6),
-                        move_pct=f"{(move_size / sweep_level * 100) if sweep_level > 0 else 0:.2f}%",
+                    entry.zone_source = "1h_thrust"
+                    zone_resolved = True
+                    if entry.check_count == 0:
+                        logger.info(
+                            "refiner_zone_from_1h_thrust",
+                            symbol=entry.symbol,
+                            direction=direction,
+                            thrust_extreme=round(thrust_1h, 6),
+                            displacement_open=round(disp_open_1h, 6),
+                            ote_zone=f"{round(ote_bottom, 6)}-{round(ote_top, 6)}",
+                        )
+            else:  # bearish
+                move = disp_open_1h - thrust_1h
+                if move > 0 and disp_open_1h > 0 and (move / disp_open_1h) >= MIN_THRUST_PCT_1H:
+                    ote_top, ote_bottom = self._compute_ote_from_thrust(
+                        thrust_1h, disp_open_1h, "bearish"
                     )
-                return None
+                    entry.zone_source = "1h_thrust"
+                    zone_resolved = True
+                    if entry.check_count == 0:
+                        logger.info(
+                            "refiner_zone_from_1h_thrust",
+                            symbol=entry.symbol,
+                            direction=direction,
+                            thrust_extreme=round(thrust_1h, 6),
+                            displacement_open=round(disp_open_1h, 6),
+                            ote_zone=f"{round(ote_bottom, 6)}-{round(ote_top, 6)}",
+                        )
 
-            # OTE zone: price pulling back UP from thrust toward sweep_level
-            ote_bottom = thrust + move_size * self.ote_min_retrace
-            ote_top = thrust + move_size * self.ote_max_retrace
-            entry.ote_zone_valid = True
+        # ── Tier 3: 5m thrust (fallback) ──
+        if not zone_resolved:
+            entry.zone_source = "5m_thrust"
+            highs = candles_5m["high"].astype(float)
+            lows = candles_5m["low"].astype(float)
 
-            # Tighten OTE with agent zone if available and overlapping
-            ote_top, ote_bottom = self._compare_agent_zone(entry, ote_top, ote_bottom)
-            entry.ote_zone_top = ote_top
-            entry.ote_zone_bottom = ote_bottom
+            # Update 5m thrust tracking
+            current_max_high = float(highs.max())
+            current_min_low = float(lows.min())
+            if current_max_high > entry.thrust_high:
+                entry.thrust_high = current_max_high
+            if current_min_low < entry.thrust_low:
+                entry.thrust_low = current_min_low
 
-            return self._find_rejection_in_zone(
-                entry=entry,
-                candles_5m=candles_5m,
-                zone_top=ote_top,
-                zone_bottom=ote_bottom,
-                direction="bearish",
-            )
+            if direction == "bullish":
+                thrust = entry.thrust_high
+                move_size = thrust - sweep_level
+                if move_size <= 0 or (sweep_level > 0 and (move_size / sweep_level) < MIN_THRUST_PCT):
+                    if entry.check_count % 5 == 0:
+                        logger.debug(
+                            "refiner_waiting_thrust",
+                            symbol=entry.symbol,
+                            direction=direction,
+                            thrust_high=round(thrust, 6),
+                            sweep_level=round(sweep_level, 6),
+                            move_pct=f"{(move_size / sweep_level * 100) if sweep_level > 0 else 0:.2f}%",
+                        )
+                    return None
+                ote_top = thrust - move_size * self.ote_min_retrace
+                ote_bottom = thrust - move_size * self.ote_max_retrace
+            else:  # bearish
+                thrust = entry.thrust_low
+                move_size = sweep_level - thrust
+                if move_size <= 0 or (sweep_level > 0 and (move_size / sweep_level) < MIN_THRUST_PCT):
+                    if entry.check_count % 5 == 0:
+                        logger.debug(
+                            "refiner_waiting_thrust",
+                            symbol=entry.symbol,
+                            direction=direction,
+                            thrust_low=round(thrust, 6),
+                            sweep_level=round(sweep_level, 6),
+                            move_pct=f"{(move_size / sweep_level * 100) if sweep_level > 0 else 0:.2f}%",
+                        )
+                    return None
+                ote_bottom = thrust + move_size * self.ote_min_retrace
+                ote_top = thrust + move_size * self.ote_max_retrace
+
+            if entry.check_count == 0:
+                logger.info(
+                    "refiner_zone_from_5m_thrust",
+                    symbol=entry.symbol,
+                    direction=direction,
+                    ote_zone=f"{round(ote_bottom, 6)}-{round(ote_top, 6)}",
+                )
+
+        # ── Store zone and check for rejection ──
+        entry.ote_zone_valid = True
+        entry.ote_zone_top = ote_top
+        entry.ote_zone_bottom = ote_bottom
+
+        return self._find_rejection_in_zone(
+            entry=entry,
+            candles_5m=candles_5m,
+            zone_top=ote_top,
+            zone_bottom=ote_bottom,
+            direction=direction,
+        )
 
     # ── Breakout Retest Check ─────────────────────────────────────
 
@@ -684,6 +702,7 @@ class EntryRefiner:
             rvol=round(rvol, 2),
             rejection_wick=has_wick,
             ote_zone=f"{round(zone_bottom, 4)}-{round(zone_top, 4)}" if zone_top > 0 else "n/a",
+            zone_source=entry.zone_source or "n/a",
             check_count=entry.check_count,
             duration_seconds=round(duration, 0),
             direction=entry.sweep_direction or entry.breakout_direction,
@@ -761,6 +780,7 @@ class EntryRefiner:
                 "thrust_low": entry.thrust_low if entry.thrust_low < 1e17 else 0,
                 "agent_zone_high": entry.signal.agent_entry_zone_high,
                 "agent_zone_low": entry.signal.agent_entry_zone_low,
+                "zone_source": entry.zone_source,
             }
         return {
             "entries": entries_data,
