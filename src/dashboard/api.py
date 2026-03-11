@@ -298,7 +298,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
 
     @router.post("/trades/{trade_id}/close")
     @admin_required
-    async def close_single_trade(trade_id: str, request: Request):
+    async def close_single_trade(request: Request, trade_id: str):
         """Close a single open position at market price (manual close)."""
         if not _dash_exchange:
             return {"success": False, "error": "No exchange configured"}
