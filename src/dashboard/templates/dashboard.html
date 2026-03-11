@@ -107,61 +107,13 @@
 <!-- Main Bot Controls -->
 {% if role == 'admin' %}
 <div class="panel" style="border-left: 3px solid #8b5cf6;">
-    <div class="panel-header">
+    <div class="panel-header" style="padding-bottom:0.75rem;">
         <h2>Main Bot
             <span id="main-config-badge" class="account-badge" style="background:#8b5cf6;">{{ main_leverage }}x &bull; {{ (main_margin_pct * 100)|round(0)|int }}%</span>
             <span id="main-status-badge" class="account-badge" style="background:#ef4444;">STOPPED</span>
         </h2>
         <div style="display:flex; align-items:center; gap:8px;">
             <button id="main-start-btn" class="btn" style="background:#22c55e; color:#fff; border:none; padding:6px 16px; border-radius:4px; font-weight:600;" onclick="toggleMainBot()">▶ Start</button>
-        </div>
-    </div>
-    <div class="panel-body" style="display:flex; gap:2rem; align-items:flex-start; flex-wrap:wrap;">
-        <!-- Leverage Slider -->
-        <div style="display:flex; flex-direction:column; gap:0.5rem; min-width:180px;">
-            <label style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">
-                Leverage:
-                <span id="main-leverage-value" style="color:var(--accent); font-size:1rem;">{{ main_leverage }}x</span>
-            </label>
-            <div style="display:flex; align-items:center; gap:0.5rem;">
-                <span style="font-size:0.7rem; color:var(--text-muted);">5x</span>
-                <input type="range" id="main-leverage-slider" min="5" max="100" step="5"
-                       value="{{ main_leverage }}"
-                       style="flex:1; accent-color:#8b5cf6; cursor:pointer;">
-                <span style="font-size:0.7rem; color:var(--text-muted);">100x</span>
-            </div>
-            <div style="display:flex; justify-content:space-between; font-size:0.65rem; color:var(--text-muted);">
-                <span>Safer</span>
-                <span>Aggressive</span>
-            </div>
-        </div>
-        <div style="width:1px; height:70px; background:var(--border-color);"></div>
-        <!-- Margin % Slider -->
-        <div style="display:flex; flex-direction:column; gap:0.5rem; min-width:180px;">
-            <label style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">
-                Margin per Trade:
-                <span id="main-margin-value" style="color:var(--accent); font-size:1rem;">{{ (main_margin_pct * 100)|round(0)|int }}%</span>
-            </label>
-            <div style="display:flex; align-items:center; gap:0.5rem;">
-                <span style="font-size:0.7rem; color:var(--text-muted);">5%</span>
-                <input type="range" id="main-margin-slider" min="5" max="40" step="1"
-                       value="{{ (main_margin_pct * 100)|round(0)|int }}"
-                       style="flex:1; accent-color:#8b5cf6; cursor:pointer;">
-                <span style="font-size:0.7rem; color:var(--text-muted);">40%</span>
-            </div>
-            <div style="display:flex; justify-content:space-between; font-size:0.65rem; color:var(--text-muted);">
-                <span>Conservative</span>
-                <span>Aggressive</span>
-            </div>
-        </div>
-        <div style="width:1px; height:70px; background:var(--border-color);"></div>
-        <!-- Trade Size Preview -->
-        <div style="display:flex; flex-direction:column; gap:0.25rem; align-items:center; justify-content:center;">
-            <span style="font-size:0.7rem; color:var(--text-muted);">Est. trade size</span>
-            <span id="main-trade-preview" class="badge" style="font-size:0.85rem; padding:4px 12px; background:#8b5cf6; color:#fff; border-radius:12px;">
-                ${{ "%.0f" | format((main_margin_pct * (balance - allocated) * main_leverage)) }}
-            </span>
-            <span style="font-size:0.6rem; color:var(--text-muted);">of available cash</span>
         </div>
     </div>
 </div>
@@ -175,7 +127,7 @@
             <span id="refiner-heartbeat" style="font-size:0.65rem; margin-left:8px; color:var(--text-muted);"></span>
         </h2>
         <div style="font-size:0.7rem; color:var(--text-muted); display:flex; justify-content:space-between; align-items:center;">
-            <span>Sweep signals waiting for 5m reclaim confirmation</span>
+            <span>Signals waiting for 5m pullback confirmation</span>
             <span id="refiner-stats" style="font-size:0.65rem;"></span>
         </div>
     </div>
@@ -187,7 +139,7 @@
                         <th>Symbol</th>
                         <th>Dir</th>
                         <th>Score</th>
-                        <th>Sweep Level</th>
+                        <th>Entry Level</th>
                         <th>1H Price</th>
                         <th>Checks</th>
                         <th>Expires</th>
@@ -972,58 +924,6 @@ async function toggleMainBot() {
 loadMainStatus();
 setInterval(loadMainStatus, 15000);
 
-// --- Main Bot Settings Sliders ---
-let _mainSettingsDebounce = null;
-let _mainAvailCash = parseFloat((document.getElementById('available-value') || {}).textContent.replace(/[^0-9.\-]/g, '')) || 0;
-
-function updateMainSettingsUI() {
-    const levSlider = document.getElementById('main-leverage-slider');
-    const marginSlider = document.getElementById('main-margin-slider');
-    if (!levSlider || !marginSlider) return;
-    const lev = parseInt(levSlider.value);
-    const marginPct = parseInt(marginSlider.value);
-    document.getElementById('main-leverage-value').textContent = lev + 'x';
-    document.getElementById('main-margin-value').textContent = marginPct + '%';
-    const tradeSize = Math.round(_mainAvailCash * (marginPct / 100) * lev);
-    document.getElementById('main-trade-preview').textContent = '$' + tradeSize.toLocaleString();
-    document.getElementById('main-config-badge').innerHTML = lev + 'x &bull; ' + marginPct + '%';
-}
-
-async function saveMainSettings(settings) {
-    try {
-        const resp = await fetch('/api/main/settings', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(settings),
-        });
-        const data = await resp.json();
-        if (!data.success) console.error('Main settings save failed:', data.error);
-    } catch (e) {
-        console.error('Main settings save error:', e);
-    }
-}
-
-const mainLevSlider = document.getElementById('main-leverage-slider');
-const mainMarginSlider = document.getElementById('main-margin-slider');
-if (mainLevSlider) {
-    mainLevSlider.addEventListener('input', updateMainSettingsUI);
-    mainLevSlider.addEventListener('change', function() {
-        clearTimeout(_mainSettingsDebounce);
-        _mainSettingsDebounce = setTimeout(() => {
-            saveMainSettings({ leverage: parseInt(this.value) });
-        }, 500);
-    });
-}
-if (mainMarginSlider) {
-    mainMarginSlider.addEventListener('input', updateMainSettingsUI);
-    mainMarginSlider.addEventListener('change', function() {
-        clearTimeout(_mainSettingsDebounce);
-        _mainSettingsDebounce = setTimeout(() => {
-            saveMainSettings({ margin_pct: parseInt(this.value) / 100 });
-        }, 300);
-    });
-}
-
 // Soft-refresh stat cards every 30s. Full reload if position count changes.
 let _knownPositionCount = document.querySelectorAll('#positions-tbody tr[data-trade-id]').length;
 const _tradingMode = '{{ config.trading_mode | default("live") }}';
@@ -1100,6 +1000,8 @@ async function softRefreshStats() {
 setInterval(softRefreshStats, 30000);
 
 // --- Entry Refiner Queue ---
+const _refinerCache = {};
+
 async function loadRefinerQueue() {
     try {
         const resp = await fetch('/api/refiner/main');
@@ -1136,8 +1038,19 @@ async function loadRefinerQueue() {
         body.style.display = 'block';
         empty.style.display = 'none';
 
+        // Remember which symbols are expanded before re-rendering
+        const expandedSymbols = new Set();
+        document.querySelectorAll('#refiner-tbody .trade-detail-row').forEach(dr => {
+            const sym = dr.id.replace('refiner-detail-', '');
+            expandedSymbols.add(sym);
+        });
+
         tbody.innerHTML = '';
         data.entries.forEach(e => {
+            const sym = e.symbol || '';
+            const symKey = sym.replace(/[^a-zA-Z0-9]/g, '_');
+            _refinerCache[symKey] = e;
+
             const now = Date.now();
             const expires = new Date(e.expires_at).getTime();
             const remaining = Math.max(0, Math.round((expires - now) / 1000));
@@ -1150,16 +1063,27 @@ async function loadRefinerQueue() {
             const dirClass = dir === 'bullish' ? 'long' : 'short';
             const dirLabel = dir === 'bullish' ? 'LONG' : 'SHORT';
 
+            const entryLevel = e.entry_type === 'breakout' ? (e.breakout_level || 0) : (e.sweep_level || 0);
+            const entryTag = e.entry_type === 'breakout' ? 'BRK' : 'SWP';
+
             const row = document.createElement('tr');
+            row.className = 'clickable-row';
+            row.setAttribute('data-refiner-symbol', symKey);
+            row.setAttribute('onclick', 'toggleRefinerDetail(this)');
             row.innerHTML =
-                '<td><strong>' + (e.symbol || '').replace(':USDT', '') + '</strong></td>' +
+                '<td><strong>' + sym.replace(':USDT', '') + '</strong></td>' +
                 '<td><span class="dir-badge ' + dirClass + '">' + dirLabel + '</span></td>' +
                 '<td><div class="score-bar"><span class="score-num ' + (e.score >= 65 ? 'positive' : (e.score >= 50 ? 'text-orange' : 'negative')) + '">' + (e.score || 0) + '</span></div></td>' +
-                '<td class="mono">$' + (e.sweep_level || 0).toFixed(6) + '</td>' +
+                '<td class="mono"><span class="reason-pill" style="font-size:0.55rem;margin-right:3px;">' + entryTag + '</span>$' + entryLevel.toFixed(6) + '</td>' +
                 '<td class="mono">$' + (e.original_1h_price || 0).toFixed(6) + '</td>' +
                 '<td class="mono">' + (e.check_count || 0) + '</td>' +
                 '<td class="mono ' + timeClass + '">' + timeStr + '</td>';
             tbody.appendChild(row);
+
+            // Re-expand if it was open before refresh
+            if (expandedSymbols.has(symKey)) {
+                toggleRefinerDetail(row);
+            }
         });
     } catch (e) {
         console.error('Refiner queue load failed:', e);
@@ -1167,6 +1091,119 @@ async function loadRefinerQueue() {
 }
 loadRefinerQueue();
 setInterval(loadRefinerQueue, 15000);
+
+// ── Expandable refiner detail rows ──────────────────────────
+function toggleRefinerDetail(row) {
+    const symKey = row.getAttribute('data-refiner-symbol');
+    if (!symKey) return;
+
+    // Toggle: if detail row exists, remove it
+    const existing = document.getElementById('refiner-detail-' + symKey);
+    if (existing) { existing.remove(); return; }
+
+    const e = _refinerCache[symKey];
+    if (!e) return;
+
+    const colCount = row.cells.length;
+    const detailRow = document.createElement('tr');
+    detailRow.id = 'refiner-detail-' + symKey;
+    detailRow.className = 'trade-detail-row';
+    const td = document.createElement('td');
+    td.colSpan = colCount;
+    td.style.padding = '0';
+
+    // --- Section 1: Queue Status ---
+    const now = Date.now();
+    const addedAt = new Date(e.added_at);
+    const expiresAt = new Date(e.expires_at);
+    const remaining = Math.max(0, Math.round((expiresAt.getTime() - now) / 1000));
+    const remMins = Math.floor(remaining / 60);
+    const remSecs = remaining % 60;
+    const timeRemaining = remaining > 0 ? remMins + 'm ' + String(remSecs).padStart(2, '0') + 's' : 'Expired';
+    const addedStr = addedAt.toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+
+    let statusHtml = '<div class="detail-section"><h4>Queue Status</h4>';
+    statusHtml += '<dl class="detail-meta">';
+    statusHtml += '<dt>Added</dt><dd>' + addedStr + '</dd>';
+    statusHtml += '<dt>Time Remaining</dt><dd class="' + (remaining < 300 ? 'text-orange' : remaining > 0 ? 'positive' : 'negative') + '">' + timeRemaining + '</dd>';
+    statusHtml += '<dt>Checks Performed</dt><dd>' + (e.check_count || 0) + '</dd>';
+    statusHtml += '<dt>Entry Type</dt><dd>' + (e.entry_type === 'breakout' ? 'Breakout Retest' : 'Sweep OTE') + '</dd>';
+    statusHtml += '</dl></div>';
+
+    // --- Section 2: Price Zones ---
+    let zonesHtml = '<div class="detail-section"><h4>Price Zones</h4>';
+    zonesHtml += '<dl class="detail-meta">';
+    if (e.entry_type === 'breakout') {
+        zonesHtml += '<dt>Breakout Level</dt><dd class="mono">$' + (e.breakout_level || 0).toFixed(6) + '</dd>';
+        zonesHtml += '<dt>Breakout Dir</dt><dd>' + (e.breakout_direction || e.direction || '-') + '</dd>';
+    } else {
+        zonesHtml += '<dt>Sweep Level</dt><dd class="mono">$' + (e.sweep_level || 0).toFixed(6) + '</dd>';
+        zonesHtml += '<dt>Sweep Dir</dt><dd>' + (e.sweep_direction || '-') + '</dd>';
+    }
+    zonesHtml += '<dt>Original 1H Price</dt><dd class="mono">$' + (e.original_1h_price || 0).toFixed(6) + '</dd>';
+    if (e.thrust_high && e.thrust_low) {
+        zonesHtml += '<dt>Thrust Range</dt><dd class="mono">$' + (e.thrust_low || 0).toFixed(6) + ' &ndash; $' + (e.thrust_high || 0).toFixed(6) + '</dd>';
+    }
+    if (e.agent_zone_low || e.agent_zone_high) {
+        const azl = e.agent_zone_low ? '$' + parseFloat(e.agent_zone_low).toFixed(6) : '-';
+        const azh = e.agent_zone_high ? '$' + parseFloat(e.agent_zone_high).toFixed(6) : '-';
+        zonesHtml += '<dt>Agent Zone</dt><dd class="mono">' + azl + ' &ndash; ' + azh + '</dd>';
+    }
+    zonesHtml += '</dl></div>';
+
+    // --- Section 3: Score Breakdown ---
+    const comps = e.components || {};
+    const compKeys = Object.keys(comps).filter(k => k !== 'agent_analysis' && k !== 'test_group' && k !== 'volume_24h' && k !== 'signal_type');
+    let componentsHtml = '<div class="detail-section"><h4>Score Breakdown</h4>';
+    if (compKeys.length > 0) {
+        componentsHtml += '<dl class="detail-meta">';
+        compKeys.forEach(k => {
+            const val = comps[k];
+            const label = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+            if (typeof val === 'number') {
+                const cls = val > 0 ? 'positive' : val < 0 ? 'negative' : '';
+                componentsHtml += '<dt>' + label + '</dt><dd class="' + cls + '">' + (Number.isInteger(val) ? (val > 0 ? '+' + val : val) : val.toFixed(1)) + '</dd>';
+            } else if (typeof val === 'string') {
+                componentsHtml += '<dt>' + label + '</dt><dd>' + val + '</dd>';
+            }
+        });
+        componentsHtml += '</dl>';
+    } else {
+        componentsHtml += '<p style="font-size:0.75rem;color:var(--text-muted);">No component data</p>';
+    }
+    componentsHtml += '</div>';
+
+    // --- Section 4: AI Agent Analysis ---
+    let agentHtml = '';
+    const aa = comps.agent_analysis || null;
+    if (aa) {
+        const actionCls = aa.action === 'ENTER_NOW' ? 'positive' : aa.action === 'SKIP' ? 'negative' : 'text-orange';
+        const confPct = aa.confidence != null ? aa.confidence + '%' : '-';
+        const riskCls = (aa.risk_assessment === 'low') ? 'positive' : (aa.risk_assessment === 'high' || aa.risk_assessment === 'extreme') ? 'negative' : '';
+
+        agentHtml = '<div class="detail-section agent-section"><h4>AI Agent Analysis</h4>';
+        if (aa.reasoning) {
+            agentHtml += '<div class="agent-reasoning">' + aa.reasoning.replace(/\n/g, '<br>') + '</div>';
+        }
+        agentHtml += '<dl class="detail-meta agent-meta">';
+        agentHtml += '<dt>Action</dt><dd class="' + actionCls + '">' + (aa.action || '-') + '</dd>';
+        agentHtml += '<dt>Confidence</dt><dd>' + confPct + '</dd>';
+        agentHtml += '<dt>Risk</dt><dd class="' + riskCls + '">' + (aa.risk_assessment || '-') + '</dd>';
+        agentHtml += '<dt>Regime</dt><dd>' + (aa.market_regime || '-') + '</dd>';
+        if (aa.suggested_entry) agentHtml += '<dt>Suggested Entry</dt><dd class="mono">$' + parseFloat(aa.suggested_entry).toFixed(6) + '</dd>';
+        if (aa.entry_zone_high || aa.entry_zone_low) {
+            const zh = aa.entry_zone_high ? parseFloat(aa.entry_zone_high).toFixed(6) : '-';
+            const zl = aa.entry_zone_low ? parseFloat(aa.entry_zone_low).toFixed(6) : '-';
+            agentHtml += '<dt>Entry Zone</dt><dd class="mono">$' + zl + ' &ndash; $' + zh + '</dd>';
+        }
+        agentHtml += '</dl></div>';
+    }
+
+    // Assemble
+    td.innerHTML = '<div class="trade-detail-content">' + statusHtml + zonesHtml + componentsHtml + agentHtml + '</div>';
+    detailRow.appendChild(td);
+    row.after(detailRow);
+}
 
 // --- AI Agent Stats ---
 async function loadAgentStats() {

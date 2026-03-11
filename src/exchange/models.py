@@ -254,6 +254,8 @@ class SignalCandidate:
     agent_entry_zone_low: float | None = None   # Agent-suggested entry zone lower bound
     # Fibonacci retracement levels (computed from displacement move for agent context)
     fibonacci_levels: dict = field(default_factory=dict)
+    # Extended ICT/SMC context for AI agent (populated post-scoring, not used in formula)
+    agent_context: dict = field(default_factory=dict)
 
 
 @dataclass

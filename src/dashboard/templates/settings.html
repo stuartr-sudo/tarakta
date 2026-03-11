@@ -149,6 +149,43 @@
         <span id="settings-save-status" class="badge" style="font-size:0.7rem; color:var(--text-muted);">Live</span>
     </div>
     <div class="panel-body">
+        <!-- Leverage & Position Sizing -->
+        <div style="display:flex; gap:2rem; align-items:flex-start; flex-wrap:wrap; margin-bottom:1.5rem; padding-bottom:1.25rem; border-bottom:1px solid var(--border-color);">
+            <div style="display:flex; flex-direction:column; gap:0.5rem; min-width:200px; flex:1;">
+                <label style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">
+                    Leverage:
+                    <span id="val-leverage" style="color:#a855f7; font-size:1rem;">{{ main_leverage }}x</span>
+                </label>
+                <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <span style="font-size:0.65rem; color:var(--text-muted);">5x</span>
+                    <input type="range" id="slider-leverage" min="5" max="100" step="5"
+                           value="{{ main_leverage }}"
+                           style="flex:1; accent-color:#8b5cf6; cursor:pointer;" data-key="leverage">
+                    <span style="font-size:0.65rem; color:var(--text-muted);">100x</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; font-size:0.6rem; color:var(--text-muted);">
+                    <span>Safer</span>
+                    <span>Aggressive</span>
+                </div>
+            </div>
+            <div style="display:flex; flex-direction:column; gap:0.5rem; min-width:200px; flex:1;">
+                <label style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">
+                    Margin per Trade:
+                    <span id="val-margin_pct" style="color:#a855f7; font-size:1rem;">{{ (main_margin_pct * 100)|round(0)|int }}%</span>
+                </label>
+                <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <span style="font-size:0.65rem; color:var(--text-muted);">5%</span>
+                    <input type="range" id="slider-margin_pct" min="5" max="40" step="1"
+                           value="{{ (main_margin_pct * 100)|round(0)|int }}"
+                           style="flex:1; accent-color:#8b5cf6; cursor:pointer;" data-key="margin_pct">
+                    <span style="font-size:0.65rem; color:var(--text-muted);">40%</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; font-size:0.6rem; color:var(--text-muted);">
+                    <span>Conservative</span>
+                    <span>Aggressive</span>
+                </div>
+            </div>
+        </div>
         <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:1.5rem;">
             {% macro slider(id, label, val, min, max, step, suffix, desc) %}
             <div style="display:flex; flex-direction:column; gap:0.4rem;">
@@ -246,6 +283,8 @@
 <script>
 // Settings definition: key, divisor (slider→API), suffix, display function
 const SETTINGS = {
+    leverage:                    { divisor: 1,   suffix: 'x',    display: v => v },
+    margin_pct:                  { divisor: 100, suffix: '%',    display: v => v },
     entry_threshold:             { divisor: 1,   suffix: '/100', display: v => v },
     max_risk_pct:                { divisor: 100, suffix: '%',    display: v => v },
     min_rr_ratio:                { divisor: 10,  suffix: '',     display: v => (v/10).toFixed(1) + ':1' },

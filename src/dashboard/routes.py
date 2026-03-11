@@ -121,6 +121,12 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx["current_page"] = page
         return templates.TemplateResponse("signals.html", ctx)
 
+    @router.get("/analytics", response_class=HTMLResponse)
+    @login_required
+    async def analytics_page(request: Request):
+        ctx = await _base_context(request)
+        return templates.TemplateResponse("analytics.html", ctx)
+
     @router.get("/chart", response_class=HTMLResponse)
     @login_required
     async def chart_page(request: Request):
@@ -141,6 +147,11 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx = await _base_context(request)
         state = ctx.get("state") or {}
         ctx["llm_enabled"] = state.get("llm_enabled", config.llm_enabled)
+        # Leverage & margin (same source as dashboard)
+        overrides = state.get("config_overrides") or {}
+        main_settings = overrides.get("main_bot_settings", {}) if isinstance(overrides, dict) else {}
+        ctx["main_leverage"] = main_settings.get("leverage", config.leverage)
+        ctx["main_margin_pct"] = main_settings.get("margin_pct", config.max_position_pct)
         return templates.TemplateResponse("settings.html", ctx)
 
     @router.post("/settings/toggle-mode")

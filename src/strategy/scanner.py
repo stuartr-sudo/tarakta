@@ -32,7 +32,10 @@ from src.exchange.models import BreakoutResult, SignalCandidate
 from src.exchange.protocol import FuturesCapable
 from src.strategy.breakout_detector import BreakoutDetector
 from src.strategy.confluence import BREAKOUT_THRESHOLD, BREAKOUT_WEIGHTS, PostSweepEngine
+from src.strategy.fair_value_gaps import FairValueGapAnalyzer
 from src.strategy.leverage import LeverageAnalyzer
+from src.strategy.liquidity import LiquidityAnalyzer
+from src.strategy.order_blocks import OrderBlockAnalyzer
 from src.strategy.market_structure import MarketStructureAnalyzer
 from src.strategy.pullback import PullbackAnalyzer
 from src.strategy.sessions import SessionAnalyzer
@@ -65,6 +68,10 @@ class AltcoinScanner:
         )
         self.confluence = PostSweepEngine(entry_threshold=config.entry_threshold)
         self.leverage_analyzer = LeverageAnalyzer()
+        # ICT/SMC context analyzers (for agent prompt enrichment only, not scoring)
+        self.ob_analyzer = OrderBlockAnalyzer()
+        self.fvg_analyzer = FairValueGapAnalyzer()
+        self.liquidity_analyzer = LiquidityAnalyzer()
         # Weekly cycle — Fake Move Monday & Mid-Week Reversal
         self.weekly_cycle_enabled = getattr(config, "weekly_cycle_enabled", True)
         self.weekly_cycle = WeeklyCycleAnalyzer(
@@ -164,6 +171,10 @@ class AltcoinScanner:
         # Leverage enrichment pass — only for qualifying signals on futures (minimal API calls)
         if all_signals and isinstance(self.candles.exchange, FuturesCapable):
             await self._enrich_with_leverage(all_signals)
+
+        # ICT/SMC context enrichment — attaches OB/FVG/liquidity/structure data for agent
+        if all_signals:
+            self._enrich_agent_context(all_signals)
 
         # Sort by score descending (re-sort after leverage bonus)
         all_signals.sort(key=lambda s: s.score, reverse=True)
@@ -367,6 +378,12 @@ class AltcoinScanner:
         signal.session_result = session_result
         signal.htf_direction_cache = htf_direction  # Preserved for hyper-watchlist
 
+        # Stash intermediate data for agent context enrichment (cleaned up after use)
+        signal._scan_candles_1h = candles["1h"]
+        signal._scan_ms_results = ms_results
+        signal._scan_vol_profile = vol_profile
+        signal._scan_pullback_result = pullback_result
+
         # Log qualifying signals (sweep threshold=60, breakout threshold=45)
         log_threshold = (
             BREAKOUT_THRESHOLD
@@ -467,6 +484,155 @@ class AltcoinScanner:
             bonus += 2.0
 
         return min(bonus, 10.0)
+
+    def _enrich_agent_context(self, signals: list[SignalCandidate]) -> None:
+        """Attach ICT/SMC context data to signals for the AI agent prompt.
+
+        Runs AFTER scoring — this data is contextual only, it does NOT affect the
+        formula score. Reads stashed intermediate data from _analyze_pair and cleans
+        it up after use.
+        """
+        for signal in signals:
+            try:
+                candles_1h = getattr(signal, "_scan_candles_1h", None)
+                ms_results = getattr(signal, "_scan_ms_results", None)
+                vol_profile = getattr(signal, "_scan_vol_profile", None)
+                pullback_result = getattr(signal, "_scan_pullback_result", None)
+
+                if candles_1h is None or ms_results is None:
+                    continue
+
+                ctx: dict = {}
+                current_price = signal.entry_price
+
+                # ── Order Blocks (top 5 nearest by distance) ──
+                swing_hl = ms_results["1h"].swing_highs_lows if ms_results.get("1h") else None
+                ob_result = self.ob_analyzer.analyze(candles_1h, swing_hl)
+                nearest_obs = sorted(
+                    ob_result.active_order_blocks,
+                    key=lambda ob: abs((ob.top + ob.bottom) / 2 - current_price),
+                )[:5]
+                ctx["order_blocks"] = [
+                    {
+                        "direction": ob.direction,
+                        "top": ob.top,
+                        "bottom": ob.bottom,
+                        "strength": round(ob.strength, 3),
+                        "distance_pct": round(
+                            abs((ob.top + ob.bottom) / 2 - current_price) / current_price * 100, 2
+                        ) if current_price > 0 else 0,
+                    }
+                    for ob in nearest_obs
+                ]
+                ctx["price_in_ob"] = ob_result.price_in_order_block is not None
+
+                # ── Fair Value Gaps (top 5 nearest) ──
+                fvg_result = self.fvg_analyzer.analyze(candles_1h)
+                nearest_fvgs = sorted(
+                    fvg_result.active_fvgs,
+                    key=lambda f: abs(f.midpoint - current_price),
+                )[:5]
+                ctx["fair_value_gaps"] = [
+                    {
+                        "direction": fvg.direction,
+                        "top": fvg.top,
+                        "bottom": fvg.bottom,
+                        "midpoint": fvg.midpoint,
+                        "distance_pct": round(
+                            abs(fvg.midpoint - current_price) / current_price * 100, 2
+                        ) if current_price > 0 else 0,
+                    }
+                    for fvg in nearest_fvgs
+                ]
+                ctx["price_in_fvg"] = fvg_result.price_in_fvg is not None
+
+                # ── Liquidity Pools ──
+                liq_result = self.liquidity_analyzer.analyze(candles_1h, swing_hl)
+                ctx["liquidity"] = {
+                    "nearest_buy": liq_result.nearest_buy_liquidity,
+                    "nearest_sell": liq_result.nearest_sell_liquidity,
+                    "buy_distance_pct": round(
+                        abs(liq_result.nearest_buy_liquidity - current_price) / current_price * 100, 2
+                    ) if liq_result.nearest_buy_liquidity and current_price > 0 else None,
+                    "sell_distance_pct": round(
+                        abs(liq_result.nearest_sell_liquidity - current_price) / current_price * 100, 2
+                    ) if liq_result.nearest_sell_liquidity and current_price > 0 else None,
+                    "active_pool_count": len(liq_result.active_pools),
+                    "recent_sweeps": len(liq_result.recent_sweeps),
+                }
+
+                # ── Market Structure per TF ──
+                ms_context = {}
+                for tf in ["1h", "4h", "1d"]:
+                    ms = ms_results.get(tf)
+                    if ms:
+                        bos_dir = "bullish" if ms.last_bos_direction == 1 else (
+                            "bearish" if ms.last_bos_direction == -1 else "none"
+                        )
+                        choch_dir = "bullish" if ms.last_choch_direction == 1 else (
+                            "bearish" if ms.last_choch_direction == -1 else "none"
+                        )
+                        ms_context[tf] = {
+                            "trend": ms.trend,
+                            "strength": round(ms.structure_strength, 2),
+                            "last_bos": bos_dir,
+                            "last_choch": choch_dir,
+                        }
+                ctx["market_structure"] = ms_context
+
+                # ── Volume Profile ──
+                if vol_profile:
+                    ctx["volume"] = {
+                        "relative_volume": round(vol_profile.relative_volume, 2),
+                        "volume_trend": vol_profile.volume_trend,
+                        "displacement_detected": vol_profile.displacement_detected,
+                        "displacement_strength": round(vol_profile.displacement_strength, 2),
+                        "displacement_direction": vol_profile.displacement_direction,
+                    }
+
+                # ── Pullback Metrics ──
+                if pullback_result and pullback_result.pullback_detected:
+                    ctx["pullback"] = {
+                        "retracement_pct": round(pullback_result.retracement_pct * 100, 1),
+                        "thrust_extreme": pullback_result.thrust_extreme,
+                        "optimal_entry": pullback_result.optimal_entry,
+                        "pullback_status": pullback_result.pullback_status,
+                        "displacement_open": pullback_result.displacement_open,
+                    }
+
+                # ── Leverage Profile (already attached by _enrich_with_leverage) ──
+                lp = signal.leverage_profile
+                if lp:
+                    ctx["leverage"] = {
+                        "open_interest_usd": lp.open_interest_usd,
+                        "funding_rate": lp.funding_rate,
+                        "long_short_ratio": lp.long_short_ratio,
+                        "crowded_side": lp.crowded_side,
+                        "crowding_intensity": round(lp.crowding_intensity, 2),
+                        "funding_bias": lp.funding_bias,
+                        "nearest_long_liq": lp.nearest_long_liq,
+                        "nearest_short_liq": lp.nearest_short_liq,
+                        "judas_swing_probability": round(lp.judas_swing_probability, 2),
+                    }
+
+                signal.agent_context = ctx
+
+                logger.info(
+                    "agent_context_enriched",
+                    symbol=signal.symbol,
+                    obs=len(ctx.get("order_blocks", [])),
+                    fvgs=len(ctx.get("fair_value_gaps", [])),
+                    liq_pools=ctx.get("liquidity", {}).get("active_pool_count", 0),
+                )
+
+            except Exception as e:
+                logger.warning("agent_context_enrichment_failed", symbol=signal.symbol, error=str(e))
+
+            finally:
+                # Clean up stashed data to free memory
+                for attr in ("_scan_candles_1h", "_scan_ms_results", "_scan_vol_profile", "_scan_pullback_result"):
+                    if hasattr(signal, attr):
+                        delattr(signal, attr)
 
     def _resolve_htf_direction(self, ms_results: dict) -> str | None:
         """Quick pre-pass to determine HTF directional bias."""

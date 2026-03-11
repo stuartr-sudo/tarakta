@@ -1,0 +1,549 @@
+{% extends "base.html" %}
+{% block title %}Tarakta - Analytics{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+.analytics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+.chart-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem;
+}
+.chart-card h3 {
+    color: #fff;
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin: 0 0 1rem 0;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.chart-wrap {
+    position: relative;
+    height: 220px;
+}
+.refiner-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.75rem;
+}
+.refiner-stat {
+    text-align: center;
+    padding: 0.75rem;
+    border-radius: 8px;
+    background: var(--bg-surface);
+}
+.refiner-stat .label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    letter-spacing: 0.05em;
+    margin-bottom: 0.25rem;
+}
+.refiner-stat .value {
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: #fff;
+}
+.refiner-stat .value.green { color: var(--green); }
+.refiner-stat .value.orange { color: var(--orange); }
+.refiner-stat .value.red { color: var(--red); }
+.refiner-stat .value.blue { color: var(--blue); }
+
+/* Trade journal */
+.journal-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+}
+.journal-table th {
+    text-align: left;
+    padding: 0.6rem 0.75rem;
+    color: var(--text-muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+    border-bottom: 1px solid var(--border);
+}
+.journal-table td {
+    padding: 0.6rem 0.75rem;
+    color: var(--text-secondary);
+    border-bottom: 1px solid rgba(42,45,53,0.5);
+    vertical-align: top;
+}
+.journal-table tr.expandable { cursor: pointer; }
+.journal-table tr.expandable:hover td { background: rgba(255,255,255,0.03); }
+
+.trade-detail {
+    display: none;
+    animation: fadeIn 0.2s ease;
+}
+.trade-detail.open { display: table-row; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+.detail-cell {
+    padding: 1rem 0.75rem !important;
+    background: var(--bg-surface);
+}
+.detail-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+}
+.detail-section h4 {
+    color: var(--blue);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    margin: 0 0 0.5rem 0;
+    letter-spacing: 0.04em;
+}
+.detail-section .detail-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.2rem 0;
+    font-size: 0.78rem;
+}
+.detail-section .detail-row .dlabel { color: var(--text-muted); }
+.detail-section .detail-row .dvalue { color: #e5e7eb; font-weight: 500; }
+.agent-reasoning {
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    line-height: 1.5;
+    background: rgba(0,0,0,0.2);
+    padding: 0.75rem;
+    border-radius: 6px;
+    margin-top: 0.5rem;
+    max-height: 200px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.badge-sm {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+.badge-long { background: var(--green-dim); color: var(--green); }
+.badge-short { background: var(--red-dim); color: var(--red); }
+.pnl-pos { color: var(--green); font-weight: 600; }
+.pnl-neg { color: var(--red); font-weight: 600; }
+.journal-pagination {
+    display: flex;
+    justify-content: center;
+    gap: 0.75rem;
+    margin-top: 1rem;
+}
+.journal-pagination button {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    padding: 0.4rem 1rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
+}
+.journal-pagination button:hover { background: rgba(255,255,255,0.06); color: #fff; }
+.journal-pagination button:disabled { opacity: 0.3; cursor: default; }
+.loading-msg {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 2rem;
+    font-size: 0.85rem;
+}
+.ict-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-top: 0.4rem;
+}
+.ict-tag {
+    display: inline-block;
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    background: var(--purple-dim);
+    color: var(--purple);
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Analytics</h1>
+</div>
+
+<div id="loadingMsg" class="loading-msg">Loading analytics data...</div>
+
+<!-- Summary Charts -->
+<div class="analytics-grid" id="chartsSection" style="display:none;">
+    <div class="chart-card">
+        <h3>Win Rate by Confidence</h3>
+        <div class="chart-wrap"><canvas id="chartConfidence"></canvas></div>
+    </div>
+    <div class="chart-card">
+        <h3>Win Rate by Risk Level</h3>
+        <div class="chart-wrap"><canvas id="chartRisk"></canvas></div>
+    </div>
+    <div class="chart-card">
+        <h3>Win Rate by Direction</h3>
+        <div class="chart-wrap"><canvas id="chartDirection"></canvas></div>
+    </div>
+    <div class="chart-card">
+        <h3>Exit Reasons</h3>
+        <div class="chart-wrap"><canvas id="chartExitReason"></canvas></div>
+    </div>
+</div>
+
+<!-- Refiner Effectiveness -->
+<div class="chart-card" id="refinerSection" style="display:none; margin-bottom:1.5rem;">
+    <h3>Refiner Effectiveness</h3>
+    <div class="refiner-stats" id="refinerStats"></div>
+</div>
+
+<!-- Trade Journal -->
+<div class="chart-card" id="journalSection" style="display:none;">
+    <h3>Trade Journal</h3>
+    <div style="overflow-x:auto;">
+        <table class="journal-table">
+            <thead>
+                <tr>
+                    <th></th>
+                    <th>Symbol</th>
+                    <th>Dir</th>
+                    <th>Score</th>
+                    <th>Entry</th>
+                    <th>Exit</th>
+                    <th>P&L %</th>
+                    <th>P&L $</th>
+                    <th>Exit Reason</th>
+                    <th>Agent</th>
+                </tr>
+            </thead>
+            <tbody id="journalBody"></tbody>
+        </table>
+    </div>
+    <div class="journal-pagination">
+        <button id="prevPage" onclick="changePage(-1)">Prev</button>
+        <span id="pageInfo" style="color:var(--text-muted);font-size:0.8rem;line-height:2;"></span>
+        <button id="nextPage" onclick="changePage(1)">Next</button>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    const CHART_COLORS = {
+        green: 'rgba(34, 197, 94, 0.8)',
+        red: 'rgba(239, 68, 68, 0.8)',
+        blue: 'rgba(59, 130, 246, 0.8)',
+        orange: 'rgba(245, 158, 11, 0.8)',
+        purple: 'rgba(168, 85, 247, 0.8)',
+        teal: 'rgba(20, 184, 166, 0.8)',
+        pink: 'rgba(236, 72, 153, 0.8)',
+    };
+    const BAR_COLORS = [CHART_COLORS.blue, CHART_COLORS.green, CHART_COLORS.orange, CHART_COLORS.purple, CHART_COLORS.teal, CHART_COLORS.pink, CHART_COLORS.red];
+
+    let currentPage = 1;
+
+    // ── Load summary ──────────────────────────────
+    async function loadSummary() {
+        try {
+            const res = await fetch('/api/analytics/summary');
+            const data = await res.json();
+            if (!data.total) {
+                document.getElementById('loadingMsg').textContent = 'No closed trades yet. Analytics will appear after your first closed trade.';
+                return;
+            }
+            document.getElementById('loadingMsg').style.display = 'none';
+            document.getElementById('chartsSection').style.display = '';
+            document.getElementById('refinerSection').style.display = '';
+            document.getElementById('journalSection').style.display = '';
+
+            renderBarChart('chartConfidence', data.confidence, 'Win Rate %');
+            renderBarChart('chartRisk', data.risk, 'Win Rate %');
+            renderBarChart('chartDirection', data.direction, 'Win Rate %');
+            renderBarChart('chartExitReason', data.exit_reason, 'Win Rate %');
+            renderRefiner(data.refiner, data.agent_accuracy);
+        } catch (e) {
+            document.getElementById('loadingMsg').textContent = 'Failed to load analytics.';
+            console.error(e);
+        }
+    }
+
+    function renderBarChart(canvasId, bucketData, label) {
+        const canvas = document.getElementById(canvasId);
+        if (!canvas || !bucketData) return;
+        const labels = Object.keys(bucketData);
+        const winRates = labels.map(k => bucketData[k].win_rate || 0);
+        const counts = labels.map(k => bucketData[k].total || 0);
+
+        new Chart(canvas, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: label,
+                    data: winRates,
+                    backgroundColor: labels.map((_, i) => BAR_COLORS[i % BAR_COLORS.length]),
+                    borderRadius: 4,
+                    maxBarThickness: 40,
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => {
+                                const idx = ctx.dataIndex;
+                                return `Win Rate: ${winRates[idx]}% (${counts[idx]} trades)`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true, max: 100,
+                        ticks: { color: '#6b7280', callback: v => v + '%' },
+                        grid: { color: 'rgba(42,45,53,0.5)' }
+                    },
+                    x: {
+                        ticks: { color: '#9ca3af', font: { size: 11 } },
+                        grid: { display: false }
+                    }
+                }
+            }
+        });
+    }
+
+    function renderRefiner(refiner, agentAcc) {
+        if (!refiner) return;
+        const o = refiner.outcomes || {};
+        const html = `
+            <div class="refiner-stat">
+                <div class="label">Confirmed</div>
+                <div class="value green">${o.confirmed || 0}</div>
+            </div>
+            <div class="refiner-stat">
+                <div class="label">Expired</div>
+                <div class="value orange">${o.expired || 0}</div>
+            </div>
+            <div class="refiner-stat">
+                <div class="label">Invalidated</div>
+                <div class="value red">${o.invalidated || 0}</div>
+            </div>
+            <div class="refiner-stat">
+                <div class="label">Avg Improvement</div>
+                <div class="value blue">${refiner.avg_improvement_pct || 0}%</div>
+            </div>
+            <div class="refiner-stat">
+                <div class="label">Avg Wait</div>
+                <div class="value">${refiner.avg_duration_minutes || 0}m</div>
+            </div>
+            <div class="refiner-stat">
+                <div class="label">Avg Entry Distance</div>
+                <div class="value">${agentAcc ? agentAcc.avg_entry_distance_pct + '%' : 'N/A'}</div>
+            </div>
+        `;
+        document.getElementById('refinerStats').innerHTML = html;
+    }
+
+    // ── Load trade journal ────────────────────────
+    async function loadJournal(page) {
+        currentPage = page;
+        try {
+            const res = await fetch(`/api/analytics/trades?page=${page}`);
+            const data = await res.json();
+            const trades = data.trades || [];
+            const tbody = document.getElementById('journalBody');
+            tbody.innerHTML = '';
+
+            if (!trades.length) {
+                tbody.innerHTML = '<tr><td colspan="10" class="loading-msg">No closed trades.</td></tr>';
+                return;
+            }
+
+            trades.forEach((row, idx) => {
+                const t = row.trade || {};
+                const agent = row.agent || {};
+                const refiner = row.refiner || {};
+                const context = row.context || {};
+                const pnl = parseFloat(t.pnl_usd || 0);
+                const pnlPct = parseFloat(t.pnl_percent || 0);
+                const dir = t.direction || '';
+                const rowId = `detail-${page}-${idx}`;
+
+                // Main row
+                const tr = document.createElement('tr');
+                tr.className = 'expandable';
+                tr.onclick = () => toggleDetail(rowId);
+                tr.innerHTML = `
+                    <td style="width:20px;color:var(--text-muted);">&#9654;</td>
+                    <td style="color:#fff;font-weight:600;">${t.symbol || ''}</td>
+                    <td><span class="badge-sm badge-${dir === 'short' ? 'short' : 'long'}">${dir}</span></td>
+                    <td>${t.confluence_score || '-'}</td>
+                    <td>$${fmtPrice(t.entry_price)}</td>
+                    <td>$${fmtPrice(t.exit_price)}</td>
+                    <td class="${pnlPct >= 0 ? 'pnl-pos' : 'pnl-neg'}">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%</td>
+                    <td class="${pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
+                    <td>${t.exit_reason || '-'}</td>
+                    <td>${agent.confidence ? agent.confidence + '%' : '-'}</td>
+                `;
+                tbody.appendChild(tr);
+
+                // Detail row
+                const detailTr = document.createElement('tr');
+                detailTr.className = 'trade-detail';
+                detailTr.id = rowId;
+                detailTr.innerHTML = `<td colspan="10" class="detail-cell">${buildDetail(t, agent, refiner, context, row.signal_type)}</td>`;
+                tbody.appendChild(detailTr);
+            });
+
+            // Pagination
+            document.getElementById('pageInfo').textContent = `Page ${page}`;
+            document.getElementById('prevPage').disabled = page <= 1;
+            document.getElementById('nextPage').disabled = trades.length < data.per_page;
+        } catch (e) {
+            console.error('Journal load failed', e);
+        }
+    }
+
+    function buildDetail(t, agent, refiner, context, sigType) {
+        let html = '<div class="detail-grid">';
+
+        // Agent section
+        html += '<div class="detail-section">';
+        html += '<h4>Agent Analysis</h4>';
+        if (agent && agent.action) {
+            html += drow('Action', agent.action);
+            html += drow('Confidence', agent.confidence ? agent.confidence + '%' : '-');
+            html += drow('Risk', agent.risk || '-');
+            html += drow('Signal Type', sigType || '-');
+            html += drow('Suggested Entry', agent.suggested_entry ? '$' + fmtPrice(agent.suggested_entry) : '-');
+            html += drow('Entry Zone', agent.entry_zone ? '$' + fmtPrice(agent.entry_zone[0]) + ' - $' + fmtPrice(agent.entry_zone[1]) : '-');
+            html += drow('Suggested SL', agent.suggested_sl ? '$' + fmtPrice(agent.suggested_sl) : '-');
+            html += drow('Suggested TP', agent.suggested_tp ? '$' + fmtPrice(agent.suggested_tp) : '-');
+            if (agent.reasoning) {
+                html += '<div class="agent-reasoning">' + escHtml(agent.reasoning) + '</div>';
+            }
+        } else {
+            html += '<div style="color:var(--text-muted);font-size:0.8rem;">No agent data available</div>';
+        }
+        html += '</div>';
+
+        // Trade + Refiner section
+        html += '<div class="detail-section">';
+        html += '<h4>Trade Details</h4>';
+        html += drow('Entry Time', fmtTime(t.entry_time));
+        html += drow('Exit Time', fmtTime(t.exit_time));
+        html += drow('Leverage', t.leverage ? t.leverage + 'x' : '-');
+        html += drow('Stop Loss', t.stop_loss ? '$' + fmtPrice(t.stop_loss) : '-');
+        html += drow('Take Profit', t.take_profit ? '$' + fmtPrice(t.take_profit) : '-');
+        html += drow('Cost', t.entry_cost_usd ? '$' + parseFloat(t.entry_cost_usd).toFixed(2) : '-');
+
+        if (refiner && refiner.outcome) {
+            html += '<h4 style="margin-top:0.75rem;">Refiner Journey</h4>';
+            html += drow('Outcome', refiner.outcome);
+            html += drow('Entry Type', refiner.entry_type || '-');
+            html += drow('Checks', refiner.check_count || '-');
+            const dur = refiner.duration_seconds ? (refiner.duration_seconds / 60).toFixed(1) + 'm' : '-';
+            html += drow('Wait Time', dur);
+            if (refiner.improvement_pct !== undefined && refiner.improvement_pct !== null) {
+                html += drow('Price Improvement', refiner.improvement_pct + '%');
+            }
+            if (refiner.rejection_type) {
+                html += drow('Rejection Type', refiner.rejection_type);
+            }
+            if (refiner.zone_top && refiner.zone_bottom) {
+                html += drow('Zone', '$' + fmtPrice(refiner.zone_bottom) + ' - $' + fmtPrice(refiner.zone_top));
+            }
+        }
+        html += '</div>';
+        html += '</div>';
+
+        // ICT Context
+        if (context && (context.order_blocks || context.fvgs || context.market_structure)) {
+            html += '<div class="detail-section" style="margin-top:0.75rem;">';
+            html += '<h4>ICT/SMC Context</h4>';
+            html += '<div class="ict-tags">';
+            if (context.market_structure) {
+                const ms = context.market_structure;
+                if (ms.trend) html += `<span class="ict-tag">Trend: ${ms.trend}</span>`;
+                if (ms.bos_detected) html += '<span class="ict-tag">BOS</span>';
+                if (ms.choch_detected) html += '<span class="ict-tag">CHoCH</span>';
+            }
+            if (context.order_blocks && context.order_blocks.length) {
+                context.order_blocks.forEach(ob => {
+                    html += `<span class="ict-tag">OB ${ob.type || ''} $${fmtPrice(ob.low)}-$${fmtPrice(ob.high)}</span>`;
+                });
+            }
+            if (context.fvgs && context.fvgs.length) {
+                context.fvgs.forEach(fvg => {
+                    html += `<span class="ict-tag">FVG ${fvg.type || ''} $${fmtPrice(fvg.low)}-$${fmtPrice(fvg.high)}</span>`;
+                });
+            }
+            html += '</div></div>';
+        }
+
+        return html;
+    }
+
+    function drow(label, value) {
+        return `<div class="detail-row"><span class="dlabel">${label}</span><span class="dvalue">${value}</span></div>`;
+    }
+
+    function fmtPrice(v) {
+        if (v === null || v === undefined) return '-';
+        const n = parseFloat(v);
+        if (isNaN(n)) return '-';
+        if (n >= 100) return n.toFixed(2);
+        if (n >= 1) return n.toFixed(4);
+        return n.toFixed(6);
+    }
+
+    function fmtTime(iso) {
+        if (!iso) return '-';
+        try {
+            const d = new Date(iso);
+            return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) + ' ' +
+                   d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+        } catch { return iso; }
+    }
+
+    function escHtml(s) {
+        const div = document.createElement('div');
+        div.textContent = s;
+        return div.innerHTML;
+    }
+
+    window.toggleDetail = function(id) {
+        const el = document.getElementById(id);
+        if (el) el.classList.toggle('open');
+    };
+
+    window.changePage = function(delta) {
+        const newPage = currentPage + delta;
+        if (newPage < 1) return;
+        loadJournal(newPage);
+    };
+
+    // ── Init ──
+    loadSummary();
+    loadJournal(1);
+})();
+</script>
+{% endblock %}

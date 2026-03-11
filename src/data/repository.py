@@ -341,8 +341,25 @@ class Repository:
             return None
 
     async def get_signal_by_symbol_recent(self, symbol: str) -> dict | None:
-        """Fallback: fetch the most recent signal with agent_analysis for a symbol."""
+        """Fallback: fetch the most recent acted-on signal with agent_analysis for a symbol.
+
+        Only returns signals where acted_on=True to avoid showing SKIP analysis
+        from a later scan cycle that didn't produce the trade.
+        """
         try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("signals")
+                .select("components")
+                .eq("symbol", symbol)
+                .eq("acted_on", True)
+                .not_.is_("components->agent_analysis", "null")
+                .order("created_at", desc=True)
+                .limit(1),
+            )
+            if result.data:
+                return result.data[0]
+            # If no acted-on signal found, fall back to any signal (backward compat)
             result = await asyncio.to_thread(
                 _exec,
                 self.db.table("signals")
@@ -376,6 +393,82 @@ class Repository:
             )
         except Exception as e:
             logger.debug("link_signal_to_trade_failed", error=str(e), symbol=symbol)
+
+    async def update_signal_components(self, symbol: str, trade_id: str, extra: dict) -> None:
+        """Merge extra data (e.g. refiner_journey) into an existing signal's components JSON.
+
+        Finds the signal linked to trade_id, reads its current components,
+        merges `extra` into it, and writes back.
+        """
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("signals")
+                .select("id, components")
+                .eq("trade_id", trade_id)
+                .limit(1),
+            )
+            if not result.data:
+                return
+            row = result.data[0]
+            components = row.get("components") or {}
+            components.update(extra)
+            await asyncio.to_thread(
+                _exec,
+                self.db.table("signals")
+                .update({"components": components})
+                .eq("id", row["id"]),
+            )
+        except Exception as e:
+            logger.debug("update_signal_components_failed", error=str(e), trade_id=trade_id)
+
+    async def get_closed_trades_with_signals(
+        self, mode: str, limit: int = 50, offset: int = 0
+    ) -> list[dict]:
+        """Fetch closed trades joined with their signal data for the analytics page.
+
+        Returns trades with embedded signal components (agent_analysis, refiner_journey, etc.).
+        """
+        try:
+            # Fetch closed trades
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("trades")
+                .select("*")
+                .eq("status", "closed")
+                .eq("mode", mode)
+                .order("exit_time", desc=True)
+                .range(offset, offset + limit - 1),
+            )
+            trades = result.data or []
+            if not trades:
+                return []
+
+            # Fetch signals for these trades in one batch
+            trade_ids = [t["id"] for t in trades if t.get("id")]
+            signal_map: dict[str, dict] = {}
+            if trade_ids:
+                sig_result = await asyncio.to_thread(
+                    _exec,
+                    self.db.table("signals")
+                    .select("trade_id, components, signal_type, action, created_at")
+                    .in_("trade_id", trade_ids),
+                )
+                for s in (sig_result.data or []):
+                    signal_map[s["trade_id"]] = s
+
+            # Merge
+            merged = []
+            for t in trades:
+                sig = signal_map.get(t.get("id"), {})
+                merged.append({
+                    "trade": t,
+                    "signal": sig,
+                })
+            return merged
+        except Exception as e:
+            logger.error("get_closed_trades_with_signals_failed", error=str(e))
+            return []
 
     async def get_recent_signals(self, limit: int = 10) -> list[dict]:
         result = await asyncio.to_thread(

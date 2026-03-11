@@ -890,4 +890,169 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             logger.error("agent_model_switch_failed", error=str(e))
             return {"error": str(e)}
 
+    # ── Analytics ──────────────────────────────────────────────────────
+    @router.get("/analytics/trades")
+    @login_required
+    async def get_analytics_trades(request: Request):
+        """Closed trades with full signal journey for the analytics page."""
+        from src.config import Settings
+        _cfg = Settings()
+        page = int(request.query_params.get("page", 1))
+        per_page = 25
+        offset = (page - 1) * per_page
+        rows = await repo.get_closed_trades_with_signals(
+            mode=_cfg.trading_mode, limit=per_page, offset=offset,
+        )
+
+        results = []
+        for row in rows:
+            trade = row.get("trade", {})
+            sig = row.get("signal", {})
+            components = sig.get("components") or {}
+
+            results.append({
+                "trade": {
+                    "id": trade.get("id"),
+                    "symbol": trade.get("symbol"),
+                    "direction": trade.get("direction"),
+                    "entry_price": trade.get("entry_price"),
+                    "exit_price": trade.get("exit_price"),
+                    "pnl_usd": trade.get("pnl_usd"),
+                    "pnl_percent": trade.get("pnl_percent"),
+                    "exit_reason": trade.get("exit_reason"),
+                    "confluence_score": trade.get("confluence_score"),
+                    "signal_reasons": trade.get("signal_reasons"),
+                    "leverage": trade.get("leverage"),
+                    "entry_time": trade.get("entry_time"),
+                    "exit_time": trade.get("exit_time"),
+                    "stop_loss": trade.get("stop_loss"),
+                    "take_profit": trade.get("take_profit"),
+                    "entry_cost_usd": trade.get("entry_cost_usd"),
+                },
+                "agent": components.get("agent_analysis"),
+                "refiner": components.get("refiner_journey"),
+                "context": components.get("agent_context"),
+                "signal_type": sig.get("signal_type") or components.get("signal_type"),
+            })
+
+        return {"trades": results, "page": page, "per_page": per_page}
+
+    @router.get("/analytics/summary")
+    @login_required
+    async def get_analytics_summary(request: Request):
+        """Aggregated stats for analytics charts — computed in Python from closed trades."""
+        from src.config import Settings
+        _cfg = Settings()
+        rows = await repo.get_closed_trades_with_signals(
+            mode=_cfg.trading_mode, limit=500, offset=0,
+        )
+
+        if not rows:
+            return {"total": 0}
+
+        # ── Win rate by confidence bucket ──
+        confidence_buckets = {"60-70": [0, 0], "70-80": [0, 0], "80-90": [0, 0], "90+": [0, 0]}
+        # ── Win rate by risk level ──
+        risk_buckets: dict[str, list[int]] = {}
+        # ── Win rate by signal type ──
+        type_buckets: dict[str, list[int]] = {}
+        # ── Win rate by direction ──
+        dir_buckets: dict[str, list[int]] = {}
+        # ── Win rate by exit reason ──
+        exit_buckets: dict[str, list[int]] = {}
+        # ── Refiner stats ──
+        refiner_outcomes: dict[str, int] = {"confirmed": 0, "expired": 0, "invalidated": 0}
+        improvement_pcts: list[float] = []
+        refiner_durations: list[float] = []
+        # ── Agent accuracy ──
+        entry_distances: list[float] = []
+
+        for row in rows:
+            trade = row.get("trade", {})
+            components = (row.get("signal", {}).get("components") or {})
+            agent = components.get("agent_analysis") or {}
+            refiner = components.get("refiner_journey") or {}
+            pnl = float(trade.get("pnl_usd", 0) or 0)
+            is_win = 1 if pnl >= 0 else 0
+
+            # Confidence buckets
+            conf = agent.get("confidence")
+            if conf is not None:
+                conf = float(conf)
+                if conf >= 90:
+                    k = "90+"
+                elif conf >= 80:
+                    k = "80-90"
+                elif conf >= 70:
+                    k = "70-80"
+                else:
+                    k = "60-70"
+                confidence_buckets[k][0] += is_win
+                confidence_buckets[k][1] += 1
+
+            # Risk level
+            risk = agent.get("risk", "unknown")
+            if risk:
+                risk_buckets.setdefault(risk, [0, 0])
+                risk_buckets[risk][0] += is_win
+                risk_buckets[risk][1] += 1
+
+            # Signal type
+            sig_type = row.get("signal_type") or "unknown"
+            type_buckets.setdefault(sig_type, [0, 0])
+            type_buckets[sig_type][0] += is_win
+            type_buckets[sig_type][1] += 1
+
+            # Direction
+            direction = trade.get("direction", "unknown")
+            dir_buckets.setdefault(direction, [0, 0])
+            dir_buckets[direction][0] += is_win
+            dir_buckets[direction][1] += 1
+
+            # Exit reason
+            exit_reason = trade.get("exit_reason", "unknown") or "unknown"
+            exit_buckets.setdefault(exit_reason, [0, 0])
+            exit_buckets[exit_reason][0] += is_win
+            exit_buckets[exit_reason][1] += 1
+
+            # Refiner journey
+            outcome = refiner.get("outcome")
+            if outcome and outcome in refiner_outcomes:
+                refiner_outcomes[outcome] += 1
+            if refiner.get("improvement_pct") is not None:
+                improvement_pcts.append(float(refiner["improvement_pct"]))
+            if refiner.get("duration_seconds") is not None:
+                refiner_durations.append(float(refiner["duration_seconds"]))
+
+            # Agent accuracy: distance between suggested entry and actual entry
+            suggested = agent.get("suggested_entry")
+            actual = trade.get("entry_price")
+            if suggested and actual:
+                try:
+                    dist = abs(float(suggested) - float(actual)) / float(actual) * 100
+                    entry_distances.append(dist)
+                except (ValueError, ZeroDivisionError):
+                    pass
+
+        def _wr(bucket: list[int]) -> float:
+            return round(bucket[0] / bucket[1] * 100, 1) if bucket[1] > 0 else 0
+
+        return {
+            "total": len(rows),
+            "confidence": {k: {"wins": v[0], "total": v[1], "win_rate": _wr(v)} for k, v in confidence_buckets.items()},
+            "risk": {k: {"wins": v[0], "total": v[1], "win_rate": _wr(v)} for k, v in risk_buckets.items()},
+            "signal_type": {k: {"wins": v[0], "total": v[1], "win_rate": _wr(v)} for k, v in type_buckets.items()},
+            "direction": {k: {"wins": v[0], "total": v[1], "win_rate": _wr(v)} for k, v in dir_buckets.items()},
+            "exit_reason": {k: {"wins": v[0], "total": v[1], "win_rate": _wr(v)} for k, v in exit_buckets.items()},
+            "refiner": {
+                "outcomes": refiner_outcomes,
+                "avg_improvement_pct": round(sum(improvement_pcts) / len(improvement_pcts), 2) if improvement_pcts else 0,
+                "avg_duration_minutes": round(sum(refiner_durations) / len(refiner_durations) / 60, 1) if refiner_durations else 0,
+            },
+            "agent_accuracy": {
+                "avg_entry_distance_pct": round(sum(entry_distances) / len(entry_distances), 3) if entry_distances else 0,
+                "samples": len(entry_distances),
+            },
+        }
+
     return router
