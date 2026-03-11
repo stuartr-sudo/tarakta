@@ -398,18 +398,21 @@ class AgentEntryAnalyst:
             decision.input_tokens = input_tokens
             decision.output_tokens = output_tokens
 
-            # Enforce minimum confidence
+            # Enforce minimum confidence — demote to WAIT_PULLBACK instead
+            # of SKIP so the signal gets a second chance at a better entry price
             if decision.action == "ENTER_NOW" and decision.confidence < self._min_confidence:
-                decision.action = "SKIP"
+                decision.action = "WAIT_PULLBACK"
                 decision.reasoning = (
                     f"ENTER_NOW but confidence {decision.confidence:.0f} "
-                    f"< threshold {self._min_confidence:.0f}: {decision.reasoning}"
+                    f"< threshold {self._min_confidence:.0f}, waiting for pullback: "
+                    f"{decision.reasoning}"
                 )
                 logger.info(
                     "agent_low_confidence_override",
                     symbol=signal.symbol,
                     confidence=decision.confidence,
                     threshold=self._min_confidence,
+                    override_to="WAIT_PULLBACK",
                 )
 
             # Validate SL/TP suggestions

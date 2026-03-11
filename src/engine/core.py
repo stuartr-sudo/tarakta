@@ -921,7 +921,13 @@ class TradingEngine:
                                 signal.agent_entry_zone_high = agent_result.entry_zone_high
                             if agent_result.entry_zone_low is not None:
                                 signal.agent_entry_zone_low = agent_result.entry_zone_low
-                            queued = self.main_entry_refiner.add(signal)
+                            # Dispatch to correct refiner method based on signal type
+                            if signal.sweep_result and signal.sweep_result.sweep_detected:
+                                queued = self.main_entry_refiner.add(signal)
+                            elif signal.breakout_result and signal.breakout_result.breakout_detected:
+                                queued = self.main_entry_refiner.add_breakout(signal)
+                            else:
+                                queued = False
                             if queued:
                                 refiner_queued += 1
                                 logger.info(
@@ -1542,7 +1548,10 @@ class TradingEngine:
                         # Re-queue if not expired — give it another chance
                         if self.main_entry_refiner and signal.symbol not in self.main_entry_refiner.queue:
                             signal.entry_price = signal.original_1h_price  # Reset
-                            self.main_entry_refiner.add(signal)
+                            if signal.sweep_result and signal.sweep_result.sweep_detected:
+                                self.main_entry_refiner.add(signal)
+                            elif signal.breakout_result and signal.breakout_result.breakout_detected:
+                                self.main_entry_refiner.add_breakout(signal)
                             logger.info("refiner_requeued_after_drift", symbol=signal.symbol)
                         continue
 
@@ -1564,7 +1573,10 @@ class TradingEngine:
                             )
                             if self.main_entry_refiner and signal.symbol not in self.main_entry_refiner.queue:
                                 signal.entry_price = signal.original_1h_price
-                                self.main_entry_refiner.add(signal)
+                                if signal.sweep_result and signal.sweep_result.sweep_detected:
+                                    self.main_entry_refiner.add(signal)
+                                elif signal.breakout_result and signal.breakout_result.breakout_detected:
+                                    self.main_entry_refiner.add_breakout(signal)
                                 logger.info("refiner_requeued_beyond_zone", symbol=signal.symbol)
                             continue
                         if direction in ("short", "bearish") and live_price < zone_low * (1 - zone_max_overshoot):
@@ -1577,7 +1589,10 @@ class TradingEngine:
                             )
                             if self.main_entry_refiner and signal.symbol not in self.main_entry_refiner.queue:
                                 signal.entry_price = signal.original_1h_price
-                                self.main_entry_refiner.add(signal)
+                                if signal.sweep_result and signal.sweep_result.sweep_detected:
+                                    self.main_entry_refiner.add(signal)
+                                elif signal.breakout_result and signal.breakout_result.breakout_detected:
+                                    self.main_entry_refiner.add_breakout(signal)
                                 logger.info("refiner_requeued_beyond_zone", symbol=signal.symbol)
                             continue
 
@@ -1804,7 +1819,13 @@ class TradingEngine:
                         signal.agent_entry_zone_low = result.entry_zone_low
                     if result.suggested_entry:
                         signal.original_1h_price = signal.entry_price
-                    queued = self.main_entry_refiner.add(signal)
+                    # Dispatch to correct refiner method based on signal type
+                    if signal.sweep_result and signal.sweep_result.sweep_detected:
+                        queued = self.main_entry_refiner.add(signal)
+                    elif signal.breakout_result and signal.breakout_result.breakout_detected:
+                        queued = self.main_entry_refiner.add_breakout(signal)
+                    else:
+                        queued = False
                     if queued:
                         logger.info(
                             "expired_review_requeued",

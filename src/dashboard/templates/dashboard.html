@@ -1146,8 +1146,9 @@ async function loadRefinerQueue() {
             const timeStr = remaining > 0 ? mins + ':' + String(secs).padStart(2, '0') : 'Expired';
             const timeClass = remaining < 300 ? 'text-orange' : '';
 
-            const dirClass = e.sweep_direction === 'bullish' ? 'long' : 'short';
-            const dirLabel = e.sweep_direction === 'bullish' ? 'LONG' : 'SHORT';
+            const dir = e.direction || e.sweep_direction || '';
+            const dirClass = dir === 'bullish' ? 'long' : 'short';
+            const dirLabel = dir === 'bullish' ? 'LONG' : 'SHORT';
 
             const row = document.createElement('tr');
             row.innerHTML =

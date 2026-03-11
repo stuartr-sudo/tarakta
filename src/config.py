@@ -143,7 +143,7 @@ class Settings(BaseSettings):
     agent_model: str = "gpt-5-mini"  # gpt-5-mini ($0.25/M in), gpt-5.4 ($2.50/M in)
     agent_timeout_seconds: float = 60.0  # 60s — gpt-5-mini needs time with large prompts
     agent_min_score: float = 35.0  # Minimum formula score to send to agent (sweep detected)
-    agent_min_confidence: float = 50.0  # Agent must be >= this confident to approve
+    agent_min_confidence: float = 60.0  # Agent must be >= this confident to approve (demoted to WAIT_PULLBACK)
     agent_fallback_approve: bool = True  # If API fails, ENTER trade (don't block on agent downtime)
     agent_split_ratio: float = 1.0  # 1.0 = ALL qualifying signals go through agent
 
