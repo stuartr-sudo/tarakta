@@ -737,7 +737,7 @@ function renderPnlData(data) {
     const avEl = document.getElementById('available-value');
     if (avEl) avEl.textContent = '$' + newAvail.toFixed(2);
     _mainAvailCash = newAvail;
-    updateMainSettingsUI();
+    if (typeof updateMainSettingsUI === 'function') updateMainSettingsUI();
 
     // 5. Price error indicator
     const errCount = data.positions.filter(p => p.current_price === null).length;
@@ -991,7 +991,7 @@ async function softRefreshStats() {
             const avEl = document.getElementById('available-value');
             if (avEl) avEl.textContent = '$' + newAvail.toFixed(2);
             _mainAvailCash = newAvail;
-            updateMainSettingsUI();
+            if (typeof updateMainSettingsUI === 'function') updateMainSettingsUI();
         }
     } catch (e) {
         console.error('Soft refresh failed:', e);
