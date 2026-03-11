@@ -323,8 +323,10 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             if current_price is None:
                 return {"success": False, "error": f"Could not fetch price for {symbol}"}
 
-            # Execute close
-            if _is_crypto_symbol(symbol) and _dash_exchange:
+            # Execute close — only hit exchange in live mode
+            from src.config import Settings
+            _close_cfg = Settings()
+            if _close_cfg.trading_mode == "live" and _is_crypto_symbol(symbol) and _dash_exchange:
                 result = await _dash_exchange.place_market_order(symbol, close_side, quantity)
                 exit_price = result.avg_price or current_price
                 fee = result.fee
