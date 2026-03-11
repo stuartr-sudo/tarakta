@@ -431,8 +431,8 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                     errors.append({"symbol": symbol, "error": "Could not fetch current price"})
                     continue
 
-                # For crypto: execute real market order. For stocks/commodities: paper close only.
-                if _is_crypto_symbol(symbol) and _dash_exchange:
+                # Only hit exchange in live mode
+                if _cfg.trading_mode == "live" and _is_crypto_symbol(symbol) and _dash_exchange:
                     result = await _dash_exchange.place_market_order(symbol, close_side, quantity)
                     exit_price = result.avg_price or current_price
                     fee = result.fee
