@@ -921,6 +921,10 @@ class TradingEngine:
                                 signal.agent_entry_zone_high = agent_result.entry_zone_high
                             if agent_result.entry_zone_low is not None:
                                 signal.agent_entry_zone_low = agent_result.entry_zone_low
+                            # Attach agent analysis to signal components so
+                            # the refiner queue dashboard can display reasoning
+                            if agent_analysis_data:
+                                signal.components["agent_analysis"] = agent_analysis_data
                             queued = self.main_entry_refiner.add(signal)
                             if queued:
                                 refiner_queued += 1
