@@ -114,26 +114,6 @@ Classify the current market as: trending, ranging, volatile, choppy
 This helps the bot calibrate its other parameters. Ranging and choppy regimes can still \
 produce excellent sweep trades — they often have cleaner liquidity grabs.
 
-## Bot Performance Context
-You receive recent win rate, streak data, and trade statistics. This is background context only — \
-do NOT use losing or winning streaks as a primary factor in your decision. Each trade stands on \
-its own structural merit. A 4-trade losing streak does NOT mean you should SKIP a structurally \
-sound setup. Only factor performance if it reveals extreme drawdown risk (e.g., 10+ consecutive \
-losses suggesting a regime mismatch). Never cite recent losses as a reason to SKIP a good sweep.
-
-## ICT/SMC Context Data
-You receive Order Blocks, Fair Value Gaps, market structure (BOS/CHoCH per timeframe), \
-volume profile (RVOL, displacement strength), pullback metrics, and liquidity pool levels. \
-Use these to:
-- Set entry zones using confluence of OBs, FVGs, and Fibonacci OTE levels
-- Validate sweep quality against nearby liquidity pools
-- Assess structure health via BOS/CHoCH across timeframes (aligned BOS = strong trend)
-- Factor pullback depth into WAIT_PULLBACK vs ENTER_NOW decisions
-- Consider volume sustainability (RVOL > 1.5 = institutional, declining trend = caution)
-- Use leverage/funding data to identify crowded trades and Judas swing setups
-Note: OBs and FVGs are NOT used in the formula score — they are contextual data for your \
-entry zone precision. Weight them as supporting evidence, not primary signals.
-
 ## ALWAYS Suggest Prices
 For ALL actions (including ENTER_NOW and SKIP), always provide your best estimate for \
 suggested_entry, suggested_sl, and suggested_tp. This helps the trader see your analysis \
@@ -418,21 +398,18 @@ class AgentEntryAnalyst:
             decision.input_tokens = input_tokens
             decision.output_tokens = output_tokens
 
-            # Enforce minimum confidence — demote to WAIT_PULLBACK instead
-            # of SKIP so the signal gets a second chance at a better entry price
+            # Enforce minimum confidence
             if decision.action == "ENTER_NOW" and decision.confidence < self._min_confidence:
-                decision.action = "WAIT_PULLBACK"
+                decision.action = "SKIP"
                 decision.reasoning = (
                     f"ENTER_NOW but confidence {decision.confidence:.0f} "
-                    f"< threshold {self._min_confidence:.0f}, waiting for pullback: "
-                    f"{decision.reasoning}"
+                    f"< threshold {self._min_confidence:.0f}: {decision.reasoning}"
                 )
                 logger.info(
                     "agent_low_confidence_override",
                     symbol=signal.symbol,
                     confidence=decision.confidence,
                     threshold=self._min_confidence,
-                    override_to="WAIT_PULLBACK",
                 )
 
             # Validate SL/TP suggestions
@@ -543,9 +520,9 @@ class AgentEntryAnalyst:
         if context.get("recent_avg_rr") is not None:
             perf_parts.append(f"Avg R:R: {context['recent_avg_rr']:.2f}")
         if context.get("losing_streak", 0) >= 2:
-            perf_parts.append(f"Recent losses: {context['losing_streak']} in a row")
+            perf_parts.append(f"LOSING STREAK: {context['losing_streak']} trades")
         if context.get("winning_streak", 0) >= 2:
-            perf_parts.append(f"Recent wins: {context['winning_streak']} in a row")
+            perf_parts.append(f"Winning Streak: {context['winning_streak']} trades")
         perf_section = " | ".join(perf_parts) if perf_parts else "No recent data"
 
         # Headlines
@@ -596,118 +573,6 @@ class AgentEntryAnalyst:
         else:
             fib_section = "Not available (no displacement data)"
 
-        # ── ICT/SMC Context from agent_context ──
-        ac = getattr(signal, "agent_context", {}) or {}
-
-        # Order Blocks (top 5 nearest)
-        obs = ac.get("order_blocks", [])
-        if obs:
-            ob_lines = []
-            for ob in obs:
-                ob_lines.append(
-                    f"  - {ob['direction']} OB [{ob['bottom']:.6g} – {ob['top']:.6g}], "
-                    f"strength={ob['strength']:.3f}, dist={ob['distance_pct']:.2f}%"
-                )
-            if ac.get("price_in_ob"):
-                ob_lines.append("  ** Price is currently INSIDE an order block **")
-            ob_section = "\n".join(ob_lines)
-        else:
-            ob_section = "  None detected"
-
-        # Fair Value Gaps (top 5 nearest)
-        fvgs = ac.get("fair_value_gaps", [])
-        if fvgs:
-            fvg_lines = []
-            for fvg_item in fvgs:
-                fvg_lines.append(
-                    f"  - {fvg_item['direction']} FVG [{fvg_item['bottom']:.6g} – {fvg_item['top']:.6g}], "
-                    f"mid={fvg_item['midpoint']:.6g}, dist={fvg_item['distance_pct']:.2f}%"
-                )
-            if ac.get("price_in_fvg"):
-                fvg_lines.append("  ** Price is currently INSIDE a fair value gap **")
-            fvg_section = "\n".join(fvg_lines)
-        else:
-            fvg_section = "  None detected"
-
-        # Market Structure per TF
-        ms_data = ac.get("market_structure", {})
-        if ms_data:
-            ms_lines = []
-            for tf in ["1h", "4h", "1d"]:
-                ms = ms_data.get(tf)
-                if ms:
-                    ms_lines.append(
-                        f"  - {tf.upper()}: trend={ms['trend']}, strength={ms['strength']:.2f}, "
-                        f"last_BOS={ms['last_bos']}, last_CHoCH={ms['last_choch']}"
-                    )
-            ms_section = "\n".join(ms_lines) if ms_lines else "  Not available"
-        else:
-            ms_section = "  Not available"
-
-        # Volume Profile
-        vol_data = ac.get("volume", {})
-        if vol_data:
-            disp_detail = ""
-            if vol_data["displacement_detected"]:
-                d_str = vol_data["displacement_strength"]
-                d_dir = vol_data["displacement_direction"]
-                disp_detail = f" (strength={d_str:.2f}, dir={d_dir})"
-            vol_section = (
-                f"  RVOL: {vol_data['relative_volume']:.2f}x (1.0 = average)\n"
-                f"  Trend: {vol_data['volume_trend']}\n"
-                f"  Displacement: {'YES' if vol_data['displacement_detected'] else 'no'}{disp_detail}"
-            )
-        else:
-            vol_section = "  Not available"
-
-        # Pullback Metrics
-        pb_data = ac.get("pullback", {})
-        if pb_data:
-            pullback_section = (
-                f"  Retracement: {pb_data['retracement_pct']:.1f}% of displacement\n"
-                f"  Thrust extreme: {pb_data['thrust_extreme']:.6g}\n"
-                f"  Optimal entry: {pb_data['optimal_entry']:.6g}\n"
-                f"  Status: {pb_data['pullback_status']}\n"
-                f"  Displacement origin: {pb_data['displacement_open']:.6g}"
-            )
-        else:
-            pullback_section = "  No pullback detected"
-
-        # Liquidity Pools
-        liq_data = ac.get("liquidity", {})
-        if liq_data and (liq_data.get("nearest_buy") or liq_data.get("nearest_sell")):
-            liq_lines = [f"  Active pools: {liq_data['active_pool_count']}, Recent sweeps: {liq_data['recent_sweeps']}"]
-            if liq_data.get("nearest_buy"):
-                liq_lines.append(f"  Nearest buy-side liquidity (below): {liq_data['nearest_buy']:.6g} ({liq_data['buy_distance_pct']:.2f}% away)")
-            if liq_data.get("nearest_sell"):
-                liq_lines.append(f"  Nearest sell-side liquidity (above): {liq_data['nearest_sell']:.6g} ({liq_data['sell_distance_pct']:.2f}% away)")
-            liquidity_section = "\n".join(liq_lines)
-        else:
-            liquidity_section = "  No liquidity pools detected"
-
-        # Leverage & Funding (expanded)
-        lev_data = ac.get("leverage", {})
-        if lev_data:
-            ls_ratio = lev_data.get("long_short_ratio")
-            ls_str = f"{ls_ratio:.2f}" if ls_ratio else "N/A"
-            funding_bias = lev_data.get("funding_bias") or "neutral"
-            leverage_section = (
-                f"  OI: ${lev_data['open_interest_usd']:,.0f}\n"
-                f"  Funding: {lev_data['funding_rate']:.4%} ({funding_bias})\n"
-                f"  L/S Ratio: {ls_str}"
-            )
-            if lev_data.get("crowded_side"):
-                crowding = lev_data["crowding_intensity"]
-                judas = lev_data["judas_swing_probability"]
-                leverage_section += (
-                    f"\n  Crowded: {lev_data['crowded_side']}s (intensity={crowding:.0%})"
-                    f"\n  Judas swing probability: {judas:.0%}"
-                )
-            if lev_data.get("nearest_long_liq") or lev_data.get("nearest_short_liq"):
-                leverage_section += f"\n  Liquidation clusters: long@{lev_data['nearest_long_liq']:.6g}, short@{lev_data['nearest_short_liq']:.6g}"
-        else:
-            leverage_section = f"  {leverage_info}" if leverage_info else "  Not available"
-
         return f"""\
 ## Entry Decision Request
 
@@ -735,32 +600,15 @@ class AgentEntryAnalyst:
 ### Key Structural Levels
 {key_levels_str}
 
-### Order Blocks (nearest to price)
-{ob_section}
-
-### Fair Value Gaps (nearest to price)
-{fvg_section}
-
-### Market Structure (per timeframe)
-{ms_section}
-
-### Volume Profile
-{vol_section}
-
-### Pullback Analysis
-{pullback_section}
-
-### Liquidity Pools
-{liquidity_section}
-
-### Leverage & Funding
-{leverage_section}
+### Order Block: {ob_info}
+### Fair Value Gap: {fvg_info}
 
 ### Market Context
 - BTC: {btc_section}
 - Sentiment: {sentiment:.1f} (range: -10 to +10, positive = bullish)
 - ML Win Probability: {ml_section}
-{f"- {weekly_info}" if weekly_info else ""}
+{f"- {weekly_info}" if weekly_info else ""}\
+{f"- {leverage_info}" if leverage_info else ""}
 
 ### Recent Headlines
 {headlines_section}

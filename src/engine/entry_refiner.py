@@ -23,7 +23,7 @@ Flow:
   1H scan detects signal (score >= threshold) → queue in EntryRefiner
   Every 60s: check 5m candles for OTE zone entry / breakout retest
   Pullback confirmed → return refined signal with better entry price
-  Expired (4 hours) → SKIP trade (no chase) unless ote_skip_on_expiry=False
+  Expired (30 min) → SKIP trade (no chase) unless ote_skip_on_expiry=False
 """
 from __future__ import annotations
 
@@ -53,10 +53,6 @@ MIN_THRUST_PCT = 0.004  # 0.4%
 
 # Breakout retest tolerance — how close price must get to the breakout level
 BREAKOUT_RETEST_TOLERANCE = 0.003  # 0.3%
-
-# Structure invalidation — if price moves this far beyond the sweep/breakout
-# level in the WRONG direction, the setup is dead (structure broken)
-INVALIDATION_PCT = 0.025  # 2.5% beyond the key level = invalidated
 
 
 @dataclass
@@ -129,16 +125,8 @@ class EntryRefiner:
         """Compare OTE zone with agent's suggested entry zone.
 
         Returns (possibly tightened) ote_top, ote_bottom.
-
-        Three-tier logic (agent-preferred):
-        1. Agent zone is ENTIRELY inside OTE → always use agent zone.
-           The agent is being more precise, not contradicting the formula.
-        2. Agent zone partially overlaps OTE (any overlap) → tighten to
-           the intersection. Even a narrow overlap represents agreement
-           between formula and AI on where the best entry lives.
-        3. No overlap → use agent zone if within max_divergence of OTE
-           midpoint. The agent has structural context (OBs, FVGs, liquidity)
-           that a Fibonacci formula doesn't. Trust it unless it's wildly off.
+        If the zones overlap and the overlap is >= 30% of OTE width,
+        tightens the OTE to the intersection (agent + OTE agreement zone).
         """
         signal = entry.signal
         agent_high = getattr(signal, "agent_entry_zone_high", None)
@@ -146,9 +134,6 @@ class EntryRefiner:
 
         if agent_high is None or agent_low is None or agent_high <= agent_low:
             return ote_top, ote_bottom
-
-        # Check if agent zone is entirely contained within OTE
-        agent_inside_ote = agent_low >= ote_bottom and agent_high <= ote_top
 
         # Check overlap
         overlap_top = min(ote_top, agent_high)
@@ -160,58 +145,21 @@ class EntryRefiner:
             symbol=entry.symbol,
             ote_zone=f"{round(ote_bottom, 6)}-{round(ote_top, 6)}",
             agent_zone=f"{round(agent_low, 6)}-{round(agent_high, 6)}",
-            agent_inside_ote=agent_inside_ote,
             overlap=has_overlap,
         )
 
-        # Tier 1: Agent zone is entirely inside OTE — trust the precision
-        if agent_inside_ote:
-            logger.info(
-                "refiner_zone_tightened_agent_precision",
-                symbol=entry.symbol,
-                original_ote=f"{round(ote_bottom, 6)}-{round(ote_top, 6)}",
-                tightened_to=f"{round(agent_low, 6)}-{round(agent_high, 6)}",
-                reason="agent_zone_inside_ote",
-            )
-            return agent_high, agent_low
-
-        # Tier 2: Partial overlap — use the intersection (agreement zone)
         if has_overlap:
-            logger.info(
-                "refiner_zone_tightened",
-                symbol=entry.symbol,
-                original_ote=f"{round(ote_bottom, 6)}-{round(ote_top, 6)}",
-                tightened_to=f"{round(overlap_bottom, 6)}-{round(overlap_top, 6)}",
-                reason="partial_overlap_intersection",
-            )
-            return overlap_top, overlap_bottom
+            ote_width = ote_top - ote_bottom
+            overlap_width = overlap_top - overlap_bottom
+            if ote_width > 0 and overlap_width / ote_width >= 0.30:
+                logger.info(
+                    "refiner_zone_tightened",
+                    symbol=entry.symbol,
+                    original_ote=f"{round(ote_bottom, 6)}-{round(ote_top, 6)}",
+                    tightened_to=f"{round(overlap_bottom, 6)}-{round(overlap_top, 6)}",
+                )
+                return overlap_top, overlap_bottom
 
-        # Tier 3: No overlap — trust agent zone if within 7% of OTE midpoint.
-        # The agent sees order blocks, FVGs, and liquidity pools that a simple
-        # Fibonacci retracement doesn't. When it wants a deeper pullback,
-        # that's usually a better entry — not a mistake.
-        ote_mid = (ote_top + ote_bottom) / 2
-        agent_mid = (agent_high + agent_low) / 2
-        divergence_pct = abs(agent_mid - ote_mid) / ote_mid * 100 if ote_mid > 0 else 999
-
-        if divergence_pct <= 7.0:
-            logger.info(
-                "refiner_zone_agent_preferred",
-                symbol=entry.symbol,
-                original_ote=f"{round(ote_bottom, 6)}-{round(ote_top, 6)}",
-                using_agent=f"{round(agent_low, 6)}-{round(agent_high, 6)}",
-                divergence_pct=round(divergence_pct, 2),
-                reason="no_overlap_trust_agent",
-            )
-            return agent_high, agent_low
-
-        # Beyond 7% divergence — agent and formula wildly disagree, keep OTE
-        logger.info(
-            "refiner_agent_zone_ignored",
-            symbol=entry.symbol,
-            divergence_pct=round(divergence_pct, 2),
-            reason="divergence_too_large",
-        )
         return ote_top, ote_bottom
 
     # ── Public API ──────────────────────────────────────────────
@@ -295,13 +243,11 @@ class EntryRefiner:
 
     async def check_all(
         self, open_position_symbols: set[str] | None = None,
-    ) -> tuple[list[SignalCandidate], list[SignalCandidate]]:
+    ) -> list[SignalCandidate]:
         """Check all queued entries on 5m data.
 
-        Returns:
-            (ready, invalidated) — ready signals to enter (refined with better price),
-            and invalidated signals to persist in DB for analytics.
-        Removes completed, expired, and invalidated entries from the queue.
+        Returns a list of signals ready to enter (refined with better price).
+        Removes completed and expired entries from the queue.
         Evicts entries whose symbol already has an open position.
         """
         # Always update heartbeat — even if queue is empty
@@ -309,7 +255,7 @@ class EntryRefiner:
         self.total_checks += 1
 
         if not self.queue:
-            return [], []
+            return []
 
         # Evict entries for symbols that now have open positions
         if open_position_symbols:
@@ -323,7 +269,6 @@ class EntryRefiner:
                     del self.queue[sym]
 
         ready: list[SignalCandidate] = []
-        invalidated: list[SignalCandidate] = []
         now = self.last_check_at
 
         for symbol, entry in list(self.queue.items()):
@@ -344,39 +289,6 @@ class EntryRefiner:
 
                 entry.check_count += 1
 
-                # Structure invalidation — if price has blown through the
-                # key level in the wrong direction, the setup is dead.
-                # No point waiting 4 hours for a pullback that will never come.
-                if self._is_invalidated(entry, candles_5m):
-                    inv_duration = (now - entry.added_at).total_seconds()
-                    current_price = float(candles_5m["close"].iloc[-1])
-                    key_level = entry.sweep_level if entry.entry_type == "sweep" else entry.breakout_level
-                    breach_pct = abs(current_price - key_level) / key_level * 100 if key_level > 0 else 0
-
-                    # Persist journey for analytics
-                    entry.signal.components["refiner_journey"] = {
-                        "outcome": "invalidated",
-                        "check_count": entry.check_count,
-                        "duration_seconds": round(inv_duration, 0),
-                        "entry_type": entry.entry_type,
-                        "breach_pct": round(breach_pct, 2),
-                        "key_level": round(key_level, 6),
-                        "invalidation_price": round(current_price, 6),
-                    }
-                    invalidated.append(entry.signal)
-
-                    logger.info(
-                        "refiner_invalidated",
-                        symbol=entry.symbol,
-                        entry_type=entry.entry_type,
-                        direction=entry.sweep_direction or entry.breakout_direction,
-                        check_count=entry.check_count,
-                        duration_seconds=round(inv_duration, 0),
-                    )
-                    self.total_expired += 1
-                    del self.queue[symbol]
-                    continue
-
                 # Dispatch to strategy-specific check
                 if entry.entry_type == "sweep":
                     result = self._check_sweep_ote(entry, candles_5m)
@@ -395,73 +307,11 @@ class EntryRefiner:
                     error=str(e)[:100],
                 )
 
-        return ready, invalidated
+        return ready
 
     def get_queued_symbols(self) -> set[str]:
         """Return symbols currently being refined."""
         return set(self.queue.keys())
-
-    # ── Structure Invalidation ─────────────────────────────────────
-
-    def _is_invalidated(
-        self, entry: RefinerEntry, candles_5m: pd.DataFrame
-    ) -> bool:
-        """Check if the setup structure has been broken.
-
-        For sweep signals:
-          Bullish (swept lows, expect UP): invalidated if price drops >2.5%
-            BELOW the sweep level — structure has broken down.
-          Bearish (swept highs, expect DOWN): invalidated if price rises >2.5%
-            ABOVE the sweep level — structure has broken up.
-
-        For breakout signals:
-          Bullish (broke above): invalidated if price drops >2.5% below
-            the breakout level — false breakout confirmed.
-          Bearish (broke below): invalidated if price rises >2.5% above
-            the breakout level — false breakout confirmed.
-        """
-        current_price = float(candles_5m["close"].iloc[-1])
-
-        if entry.entry_type == "sweep":
-            level = entry.sweep_level
-            direction = entry.sweep_direction
-        else:
-            level = entry.breakout_level
-            direction = entry.breakout_direction
-
-        if level <= 0:
-            return False
-
-        threshold = level * INVALIDATION_PCT
-
-        if direction == "bullish":
-            # Setup expects price to go UP — invalidate if price is far BELOW key level
-            if current_price < level - threshold:
-                logger.info(
-                    "refiner_structure_broken",
-                    symbol=entry.symbol,
-                    direction=direction,
-                    key_level=round(level, 6),
-                    current_price=round(current_price, 6),
-                    breach_pct=f"{(level - current_price) / level * 100:.2f}%",
-                    reason="price_below_key_level",
-                )
-                return True
-        elif direction == "bearish":
-            # Setup expects price to go DOWN — invalidate if price is far ABOVE key level
-            if current_price > level + threshold:
-                logger.info(
-                    "refiner_structure_broken",
-                    symbol=entry.symbol,
-                    direction=direction,
-                    key_level=round(level, 6),
-                    current_price=round(current_price, 6),
-                    breach_pct=f"{(current_price - level) / level * 100:.2f}%",
-                    reason="price_above_key_level",
-                )
-                return True
-
-        return False
 
     # ── Sweep OTE Zone Check ──────────────────────────────────────
 
@@ -576,7 +426,7 @@ class EntryRefiner:
     def _check_breakout_retest(
         self, entry: RefinerEntry, candles_5m: pd.DataFrame
     ) -> SignalCandidate | None:
-        """Check if price has retested the breakout level (or agent zone) and bounced.
+        """Check if price has retested the breakout level and bounced.
 
         For bullish breakout (broke above resistance):
           - Old resistance = new support
@@ -587,12 +437,6 @@ class EntryRefiner:
           - Old support = new resistance
           - Wait for price to pull back UP to the breakout level
           - Enter when price touches the level and closes below it (rejection)
-
-        Agent zone integration:
-          When the agent provides an entry zone that's BETWEEN current price and
-          the breakout level, use it as an alternative (closer) retest zone.
-          The agent's zone is based on FVG/OB confluence and is often more precise
-          than waiting for a full retrace to the breakout level.
         """
         direction = entry.breakout_direction
         level = entry.breakout_level
@@ -603,39 +447,9 @@ class EntryRefiner:
         lows = candles_5m["low"].astype(float)
         opens = candles_5m["open"].astype(float)
 
-        # Primary retest zone around the breakout level
+        # Retest zone around the breakout level
         zone_top = level + tolerance
         zone_bottom = level - tolerance
-
-        # Agent zone — use as an alternative retest zone when available
-        # and positioned between current price and breakout level
-        agent_high = getattr(entry.signal, "agent_entry_zone_high", None)
-        agent_low = getattr(entry.signal, "agent_entry_zone_low", None)
-        use_agent_zone = False
-
-        if agent_high and agent_low and agent_high > agent_low:
-            current_price = float(closes.iloc[-1])
-            if direction == "bearish":
-                # Short: agent zone should be ABOVE current price but BELOW breakout level
-                if agent_low > current_price and agent_high < level:
-                    use_agent_zone = True
-            elif direction == "bullish":
-                # Long: agent zone should be BELOW current price but ABOVE breakout level
-                if agent_high < current_price and agent_low > level:
-                    use_agent_zone = True
-
-            if use_agent_zone:
-                agent_tol = (agent_high - agent_low) * 0.1  # 10% tolerance around agent zone
-                agent_zone_top = agent_high + agent_tol
-                agent_zone_bottom = agent_low - agent_tol
-                logger.info(
-                    "refiner_breakout_using_agent_zone",
-                    symbol=entry.symbol,
-                    direction=direction,
-                    breakout_level=round(level, 6),
-                    agent_zone=f"{round(agent_low, 6)}-{round(agent_high, 6)}",
-                    current_price=round(current_price, 6),
-                )
 
         # Check last 5 candles for retest + bounce
         recent = candles_5m.tail(5)
@@ -650,47 +464,32 @@ class EntryRefiner:
 
             if direction == "bullish":
                 # Broke above → wait for pullback to level → bounce
-                # Check BOTH breakout level retest AND agent zone retest
-                hit_breakout = c_low <= zone_top and c_close > level
-                hit_agent = (
-                    use_agent_zone
-                    and c_low <= agent_zone_top
-                    and c_low >= agent_zone_bottom * 0.995
-                    and c_close > agent_low
-                )
-
-                if hit_breakout or hit_agent:
+                # Candle low touched the retest zone AND closed above it
+                if c_low <= zone_top and c_close > level:
+                    # Rejection wick: long lower wick showing buyers at the level
                     lower_wick = min(c_open, c_close) - c_low
                     has_wick = body > 0 and lower_wick / body >= REJECTION_WICK_RATIO
 
+                    # Volume check
                     vol_profile = self.vol_analyzer.analyze(candles_5m)
                     rvol = vol_profile.relative_volume
                     has_volume = rvol >= OTE_REJECTION_RVOL
 
                     if has_wick or has_volume:
-                        rejection_type = "agent_zone_retest" if (hit_agent and not hit_breakout) else "breakout_retest"
-                        target_zone_top = agent_zone_top if (hit_agent and not hit_breakout) else zone_top
-                        target_entry = min(c_close, target_zone_top)
+                        # Target = the breakout level (where support is)
+                        target_entry = min(c_close, zone_top)
                         return self._create_refined_signal(
                             entry=entry,
                             entry_price=target_entry,
-                            rejection_type=rejection_type,
+                            rejection_type="breakout_retest",
                             has_wick=has_wick,
                             rvol=rvol,
                         )
 
             elif direction == "bearish":
                 # Broke below → wait for pullback up to level → rejection
-                # Check BOTH breakout level retest AND agent zone retest
-                hit_breakout = c_high >= zone_bottom and c_close < level
-                hit_agent = (
-                    use_agent_zone
-                    and c_high >= agent_zone_bottom
-                    and c_high <= agent_zone_top * 1.005
-                    and c_close < agent_high
-                )
-
-                if hit_breakout or hit_agent:
+                # Candle high reached the retest zone AND closed below it
+                if c_high >= zone_bottom and c_close < level:
                     upper_wick = c_high - max(c_open, c_close)
                     has_wick = body > 0 and upper_wick / body >= REJECTION_WICK_RATIO
 
@@ -699,13 +498,12 @@ class EntryRefiner:
                     has_volume = rvol >= OTE_REJECTION_RVOL
 
                     if has_wick or has_volume:
-                        rejection_type = "agent_zone_retest" if (hit_agent and not hit_breakout) else "breakout_retest"
-                        target_zone_bottom = agent_zone_bottom if (hit_agent and not hit_breakout) else zone_bottom
-                        target_entry = max(c_close, target_zone_bottom)
+                        # Target = the breakout level (where resistance is)
+                        target_entry = max(c_close, zone_bottom)
                         return self._create_refined_signal(
                             entry=entry,
                             entry_price=target_entry,
-                            rejection_type=rejection_type,
+                            rejection_type="breakout_retest",
                             has_wick=has_wick,
                             rvol=rvol,
                         )
@@ -718,7 +516,6 @@ class EntryRefiner:
                 symbol=entry.symbol,
                 direction=direction,
                 breakout_level=round(level, 6),
-                agent_zone=f"{round(agent_low, 6)}-{round(agent_high, 6)}" if use_agent_zone else "n/a",
                 current_price=round(current_price, 6),
                 distance_pct=f"{abs(current_price - level) / level * 100:.2f}%",
                 check_count=entry.check_count,
@@ -876,22 +673,6 @@ class EntryRefiner:
         signal.refinement_duration_seconds = duration
         signal.original_1h_price = entry.original_1h_price
 
-        # Persist refiner journey for analytics
-        signal.components["refiner_journey"] = {
-            "outcome": "confirmed",
-            "rejection_type": rejection_type,
-            "entry_price": round(entry_price, 6),
-            "original_1h_price": round(entry.original_1h_price, 6),
-            "improvement_pct": round(improvement_pct, 2),
-            "zone_top": round(zone_top, 6) if zone_top > 0 else None,
-            "zone_bottom": round(zone_bottom, 6) if zone_bottom > 0 else None,
-            "rvol": round(rvol, 2),
-            "has_wick": has_wick,
-            "check_count": entry.check_count,
-            "duration_seconds": round(duration, 0),
-            "entry_type": entry.entry_type,
-        }
-
         logger.info(
             "refiner_confirmed",
             symbol=entry.symbol,
@@ -925,17 +706,6 @@ class EntryRefiner:
         signal.refined_entry = False
         signal.refinement_duration_seconds = duration
         signal.original_1h_price = entry.original_1h_price
-
-        # Persist refiner journey for analytics
-        signal.components["refiner_journey"] = {
-            "outcome": "expired",
-            "check_count": entry.check_count,
-            "duration_seconds": round(duration, 0),
-            "ote_zone_valid": entry.ote_zone_valid,
-            "zone_top": round(entry.ote_zone_top, 6) if entry.ote_zone_valid else None,
-            "zone_bottom": round(entry.ote_zone_bottom, 6) if entry.ote_zone_valid else None,
-            "entry_type": entry.entry_type,
-        }
 
         # Mark for re-evaluation (only once — prevent infinite loops)
         already_reviewed = getattr(signal, "_expiry_reviewed", False)
@@ -1004,7 +774,7 @@ class EntryRefiner:
     def restore_state(self, data: dict) -> None:
         """Restore refiner state from DB.
 
-        Restored entries will expire naturally (60 min window is short enough
+        Restored entries will expire naturally (30 min window is short enough
         that stale entries are unlikely to survive a restart).
         """
         if not data or "entries" not in data:

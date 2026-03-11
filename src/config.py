@@ -143,7 +143,7 @@ class Settings(BaseSettings):
     agent_model: str = "gpt-5-mini"  # gpt-5-mini ($0.25/M in), gpt-5.4 ($2.50/M in)
     agent_timeout_seconds: float = 60.0  # 60s — gpt-5-mini needs time with large prompts
     agent_min_score: float = 35.0  # Minimum formula score to send to agent (sweep detected)
-    agent_min_confidence: float = 60.0  # Agent must be >= this confident to approve (demoted to WAIT_PULLBACK)
+    agent_min_confidence: float = 50.0  # Agent must be >= this confident to approve
     agent_fallback_approve: bool = True  # If API fails, ENTER trade (don't block on agent downtime)
     agent_split_ratio: float = 1.0  # 1.0 = ALL qualifying signals go through agent
 
@@ -172,7 +172,7 @@ class Settings(BaseSettings):
     # Breakout signals: wait for price to retest the breakout level + bounce
     entry_refiner_enabled: bool = True
     entry_refiner_check_interval_seconds: int = 60   # Check every 60s in monitor loop
-    entry_refiner_expiry_minutes: float = 240.0      # Max wait for 5m confirmation (4 hours)
+    entry_refiner_expiry_minutes: float = 30.0       # Max wait for 5m confirmation
     entry_refiner_max_queue: int = 0                   # 0 = unlimited queue
     ote_min_retracement: float = 0.50   # OTE zone starts at 50% Fibonacci retracement
     ote_max_retracement: float = 0.79   # OTE zone ends at 79% (beyond = setup failed)

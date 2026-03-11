@@ -921,17 +921,7 @@ class TradingEngine:
                                 signal.agent_entry_zone_high = agent_result.entry_zone_high
                             if agent_result.entry_zone_low is not None:
                                 signal.agent_entry_zone_low = agent_result.entry_zone_low
-                            # Attach agent analysis to signal components so the
-                            # refiner queue detail view can display it
-                            if agent_analysis_data:
-                                signal.components["agent_analysis"] = agent_analysis_data
-                            # Dispatch to correct refiner method based on signal type
-                            if signal.sweep_result and signal.sweep_result.sweep_detected:
-                                queued = self.main_entry_refiner.add(signal)
-                            elif signal.breakout_result and signal.breakout_result.breakout_detected:
-                                queued = self.main_entry_refiner.add_breakout(signal)
-                            else:
-                                queued = False
+                            queued = self.main_entry_refiner.add(signal)
                             if queued:
                                 refiner_queued += 1
                                 logger.info(
@@ -1485,25 +1475,9 @@ class TradingEngine:
         if not self.main_entry_refiner or not self.main_entry_refiner.queue:
             return
 
-        ready_signals, invalidated_signals = await self.main_entry_refiner.check_all(
+        ready_signals = await self.main_entry_refiner.check_all(
             open_position_symbols=set(self.portfolio.open_positions.keys()),
         )
-
-        # Persist invalidated signals for analytics (setup broke before entry)
-        for inv_signal in invalidated_signals:
-            try:
-                await self.repo.insert_signal({
-                    "symbol": inv_signal.symbol,
-                    "direction": inv_signal.direction or "none",
-                    "score": inv_signal.score,
-                    "reasons": (inv_signal.reasons or []) + ["INVALIDATED:structure_breach"],
-                    "components": inv_signal.components or {},
-                    "current_price": inv_signal.entry_price,
-                    "acted_on": False,
-                })
-            except Exception as e:
-                logger.debug("invalidated_signal_persist_failed", symbol=inv_signal.symbol, error=str(e)[:80])
-
         for signal in ready_signals:
 
             # ── Expired signal re-evaluation ──────────────────────
@@ -1568,10 +1542,7 @@ class TradingEngine:
                         # Re-queue if not expired — give it another chance
                         if self.main_entry_refiner and signal.symbol not in self.main_entry_refiner.queue:
                             signal.entry_price = signal.original_1h_price  # Reset
-                            if signal.sweep_result and signal.sweep_result.sweep_detected:
-                                self.main_entry_refiner.add(signal)
-                            elif signal.breakout_result and signal.breakout_result.breakout_detected:
-                                self.main_entry_refiner.add_breakout(signal)
+                            self.main_entry_refiner.add(signal)
                             logger.info("refiner_requeued_after_drift", symbol=signal.symbol)
                         continue
 
@@ -1593,10 +1564,7 @@ class TradingEngine:
                             )
                             if self.main_entry_refiner and signal.symbol not in self.main_entry_refiner.queue:
                                 signal.entry_price = signal.original_1h_price
-                                if signal.sweep_result and signal.sweep_result.sweep_detected:
-                                    self.main_entry_refiner.add(signal)
-                                elif signal.breakout_result and signal.breakout_result.breakout_detected:
-                                    self.main_entry_refiner.add_breakout(signal)
+                                self.main_entry_refiner.add(signal)
                                 logger.info("refiner_requeued_beyond_zone", symbol=signal.symbol)
                             continue
                         if direction in ("short", "bearish") and live_price < zone_low * (1 - zone_max_overshoot):
@@ -1609,10 +1577,7 @@ class TradingEngine:
                             )
                             if self.main_entry_refiner and signal.symbol not in self.main_entry_refiner.queue:
                                 signal.entry_price = signal.original_1h_price
-                                if signal.sweep_result and signal.sweep_result.sweep_detected:
-                                    self.main_entry_refiner.add(signal)
-                                elif signal.breakout_result and signal.breakout_result.breakout_detected:
-                                    self.main_entry_refiner.add_breakout(signal)
+                                self.main_entry_refiner.add(signal)
                                 logger.info("refiner_requeued_beyond_zone", symbol=signal.symbol)
                             continue
 
@@ -1666,12 +1631,6 @@ class TradingEngine:
                         await self.repo.link_signal_to_trade(
                             signal.symbol, position.trade_id
                         )
-                        # Persist refiner journey data on the linked signal
-                        journey = signal.components.get("refiner_journey") if signal.components else None
-                        if journey:
-                            await self.repo.update_signal_components(
-                                signal.symbol, position.trade_id, {"refiner_journey": journey}
-                            )
             except Exception as e:
                 logger.warning(
                     "refiner_entry_failed",
@@ -1845,13 +1804,7 @@ class TradingEngine:
                         signal.agent_entry_zone_low = result.entry_zone_low
                     if result.suggested_entry:
                         signal.original_1h_price = signal.entry_price
-                    # Dispatch to correct refiner method based on signal type
-                    if signal.sweep_result and signal.sweep_result.sweep_detected:
-                        queued = self.main_entry_refiner.add(signal)
-                    elif signal.breakout_result and signal.breakout_result.breakout_detected:
-                        queued = self.main_entry_refiner.add_breakout(signal)
-                    else:
-                        queued = False
+                    queued = self.main_entry_refiner.add(signal)
                     if queued:
                         logger.info(
                             "expired_review_requeued",
