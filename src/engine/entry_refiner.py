@@ -130,14 +130,15 @@ class EntryRefiner:
 
         Returns (possibly tightened) ote_top, ote_bottom.
 
-        Three-tier logic:
+        Three-tier logic (agent-preferred):
         1. Agent zone is ENTIRELY inside OTE → always use agent zone.
            The agent is being more precise, not contradicting the formula.
         2. Agent zone partially overlaps OTE (any overlap) → tighten to
            the intersection. Even a narrow overlap represents agreement
            between formula and AI on where the best entry lives.
-        3. No overlap at all → keep OTE unchanged (agent disagrees with
-           formula on direction/level).
+        3. No overlap → use agent zone if within max_divergence of OTE
+           midpoint. The agent has structural context (OBs, FVGs, liquidity)
+           that a Fibonacci formula doesn't. Trust it unless it's wildly off.
         """
         signal = entry.signal
         agent_high = getattr(signal, "agent_entry_zone_high", None)
@@ -185,11 +186,31 @@ class EntryRefiner:
             )
             return overlap_top, overlap_bottom
 
-        # Tier 3: No overlap — agent and formula disagree, keep OTE
+        # Tier 3: No overlap — trust agent zone if within 7% of OTE midpoint.
+        # The agent sees order blocks, FVGs, and liquidity pools that a simple
+        # Fibonacci retracement doesn't. When it wants a deeper pullback,
+        # that's usually a better entry — not a mistake.
+        ote_mid = (ote_top + ote_bottom) / 2
+        agent_mid = (agent_high + agent_low) / 2
+        divergence_pct = abs(agent_mid - ote_mid) / ote_mid * 100 if ote_mid > 0 else 999
+
+        if divergence_pct <= 7.0:
+            logger.info(
+                "refiner_zone_agent_preferred",
+                symbol=entry.symbol,
+                original_ote=f"{round(ote_bottom, 6)}-{round(ote_top, 6)}",
+                using_agent=f"{round(agent_low, 6)}-{round(agent_high, 6)}",
+                divergence_pct=round(divergence_pct, 2),
+                reason="no_overlap_trust_agent",
+            )
+            return agent_high, agent_low
+
+        # Beyond 7% divergence — agent and formula wildly disagree, keep OTE
         logger.info(
             "refiner_agent_zone_ignored",
             symbol=entry.symbol,
-            reason="no_overlap_with_ote",
+            divergence_pct=round(divergence_pct, 2),
+            reason="divergence_too_large",
         )
         return ote_top, ote_bottom
 
