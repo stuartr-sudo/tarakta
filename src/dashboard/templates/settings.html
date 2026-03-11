@@ -141,79 +141,186 @@
     </div>
 </div>
 
-<!-- Configuration -->
+<!-- Risk & Trading Settings (editable for admin) -->
+{% if role == 'admin' %}
+<div class="panel" style="border-left: 3px solid #8b5cf6;">
+    <div class="panel-header">
+        <h2>Risk & Trading Settings</h2>
+        <span id="settings-save-status" class="badge" style="font-size:0.7rem; color:var(--text-muted);">Live</span>
+    </div>
+    <div class="panel-body">
+        <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:1.5rem;">
+            {% macro slider(id, label, val, min, max, step, suffix, desc) %}
+            <div style="display:flex; flex-direction:column; gap:0.4rem;">
+                <label style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">
+                    {{ label }}:
+                    <span id="val-{{ id }}" style="color:#a855f7; font-size:1rem;">{{ val }}{{ suffix }}</span>
+                </label>
+                <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <span style="font-size:0.65rem; color:var(--text-muted);">{{ min }}</span>
+                    <input type="range" id="slider-{{ id }}" min="{{ min }}" max="{{ max }}" step="{{ step }}" value="{{ val }}"
+                           style="flex:1; accent-color:#8b5cf6; cursor:pointer;" data-key="{{ id }}">
+                    <span style="font-size:0.65rem; color:var(--text-muted);">{{ max }}</span>
+                </div>
+                <div style="font-size:0.6rem; color:var(--text-muted);">{{ desc }}</div>
+            </div>
+            {% endmacro %}
+
+            {{ slider("entry_threshold", "Entry Threshold", (config.entry_threshold|int), 30, 90, 5, "/100", "Minimum confluence score to enter a trade") }}
+            {{ slider("max_risk_pct", "Max Risk/Trade", (config.max_risk_pct * 100)|round(0)|int, 1, 10, 1, "%", "% of balance risked per trade (max loss if SL hits)") }}
+            {{ slider("min_rr_ratio", "Min R:R Ratio", (config.min_rr_ratio * 10)|round(0)|int, 10, 50, 5, "", "Minimum reward-to-risk ratio for entries") }}
+            {{ slider("max_concurrent", "Max Concurrent", config.max_concurrent, 0, 50, 1, "", "Max open positions (0 = unlimited)") }}
+            {{ slider("max_exposure_pct", "Max Exposure", (config.max_exposure_pct * 100)|round(0)|int, 50, 300, 10, "%", "Max total $ in open positions as % of balance") }}
+            {{ slider("max_hold_hours", "Max Hold Hours", config.max_hold_hours|int, 1, 24, 1, "h", "Close stale trades after this many hours") }}
+            {{ slider("max_sl_pct", "Max SL %", (config.max_sl_pct * 100)|round(0)|int, 2, 10, 1, "%", "Maximum stop-loss distance from entry price") }}
+            {{ slider("max_daily_drawdown", "Daily Drawdown Limit", (config.max_daily_drawdown * 100)|round(0)|int, 5, 30, 1, "%", "Pause trading if daily loss exceeds this") }}
+            {{ slider("circuit_breaker_pct", "Circuit Breaker", (config.circuit_breaker_pct * 100)|round(0)|int, 5, 30, 1, "%", "Halt engine if total drawdown exceeds this") }}
+            {{ slider("cooldown_hours", "Cooldown Hours", config.cooldown_hours|int, 0, 24, 1, "h", "Pause after a stop-out loss before trading again") }}
+        </div>
+    </div>
+</div>
+
+<!-- Weekly Cycle Settings -->
+<div class="panel" style="border-left: 3px solid #f59e0b;">
+    <div class="panel-header">
+        <h2>Weekly Cycle
+            <span id="weekly-toggle-badge" class="badge" style="font-size:0.7rem; background:{{ '#22c55e' if config.weekly_cycle_enabled else '#ef4444' }}; color:#fff;">
+                {{ 'ON' if config.weekly_cycle_enabled else 'OFF' }}
+            </span>
+        </h2>
+        <button id="weekly-toggle-btn" class="btn" onclick="toggleWeeklyCycle()" style="font-size:0.75rem; padding:3px 10px;">
+            {{ 'Disable' if config.weekly_cycle_enabled else 'Enable' }}
+        </button>
+    </div>
+    <div class="panel-body" id="weekly-settings-body">
+        <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:1.5rem;">
+            {{ slider("monday_manipulation_penalty", "Monday Penalty", (config.monday_manipulation_penalty|int), 0, 30, 1, " pts", "Score penalty during Monday manipulation window (tapers over time)") }}
+            {{ slider("monday_manipulation_hours", "Monday Window", (config.monday_manipulation_hours|int), 2, 16, 1, "h", "Hours after Mon 00:00 UTC to apply penalty") }}
+            {{ slider("midweek_reversal_bonus", "Mid-Week Bonus", (config.midweek_reversal_bonus|int), 0, 25, 1, " pts", "Score bonus for counter-trend signals on Wed/Thu") }}
+            {{ slider("midweek_reversal_delay_hours", "Mid-Week Delay", (config.midweek_reversal_delay_hours|default(4)|int), 0, 12, 1, "h", "Hours into Wed/Thu before bonus applies (confirmation delay)") }}
+        </div>
+    </div>
+</div>
+{% else %}
+<!-- Viewer: read-only config table -->
 <div class="panel">
     <div class="panel-header">
         <h2>Configuration</h2>
-        <span class="badge text-muted">Read-only (edit .env to change)</span>
+        <span class="badge text-muted">Read-only</span>
     </div>
     <div class="panel-body no-pad">
         <table class="data-table">
-            <thead>
-                <tr>
-                    <th>Parameter</th>
-                    <th>Value</th>
-                    <th>Description</th>
-                </tr>
-            </thead>
+            <thead><tr><th>Parameter</th><th>Value</th><th>Description</th></tr></thead>
             <tbody>
-                <tr>
-                    <td>Entry Threshold</td>
-                    <td><strong>{{ config.entry_threshold }}</strong>/100</td>
-                    <td class="text-muted">Minimum confluence score to enter a trade</td>
-                </tr>
-                <tr>
-                    <td>Max Risk Per Trade</td>
-                    <td><strong>{{ "%.0f" | format(config.max_risk_pct * 100) }}%</strong></td>
-                    <td class="text-muted">Percentage of balance risked per trade (max loss if SL hits)</td>
-                </tr>
-                <tr>
-                    <td>Max Position Size</td>
-                    <td><strong>{{ "%.0f" | format(config.max_position_pct * 100) }}%</strong></td>
-                    <td class="text-muted">Max cost of a single trade as % of balance</td>
-                </tr>
-                <tr>
-                    <td>Max Total Exposure</td>
-                    <td><strong>{{ "%.0f" | format(config.max_exposure_pct * 100) }}%</strong></td>
-                    <td class="text-muted">Max total $ in open positions as % of balance</td>
-                </tr>
-                <tr>
-                    <td>Max Concurrent Positions</td>
-                    <td><strong>{{ config.max_concurrent }}</strong></td>
-                    <td class="text-muted">Maximum open positions at once</td>
-                </tr>
-                <tr>
-                    <td>Max Daily Drawdown</td>
-                    <td><strong>{{ "%.0f" | format(config.max_daily_drawdown * 100) }}%</strong></td>
-                    <td class="text-muted">Pause trading if daily loss exceeds this</td>
-                </tr>
-                <tr>
-                    <td>Circuit Breaker</td>
-                    <td><strong>{{ "%.0f" | format(config.circuit_breaker_pct * 100) }}%</strong></td>
-                    <td class="text-muted">Halt engine if total drawdown exceeds this</td>
-                </tr>
-                <tr>
-                    <td>Min R:R Ratio</td>
-                    <td><strong>{{ config.min_rr_ratio }}</strong></td>
-                    <td class="text-muted">Minimum reward-to-risk ratio for entries</td>
-                </tr>
-                <tr>
-                    <td>Scan Interval</td>
-                    <td><strong>{{ config.scan_interval_minutes }} min</strong></td>
-                    <td class="text-muted">Time between market scans</td>
-                </tr>
-                <tr>
-                    <td>Min Volume</td>
-                    <td><strong>${{ "{:,.0f}".format(config.min_volume_usd) }}</strong></td>
-                    <td class="text-muted">Minimum 24h volume to consider a pair</td>
-                </tr>
-                <tr>
-                    <td>Quote Currencies</td>
-                    <td><strong>{{ config.quote_currencies | join(', ') }}</strong></td>
-                    <td class="text-muted">Only trade pairs quoted in these currencies</td>
-                </tr>
+                <tr><td>Entry Threshold</td><td><strong>{{ config.entry_threshold }}</strong>/100</td><td class="text-muted">Minimum confluence score</td></tr>
+                <tr><td>Max Risk/Trade</td><td><strong>{{ "%.0f"|format(config.max_risk_pct*100) }}%</strong></td><td class="text-muted">Max loss per trade</td></tr>
+                <tr><td>Max Exposure</td><td><strong>{{ "%.0f"|format(config.max_exposure_pct*100) }}%</strong></td><td class="text-muted">Total open exposure</td></tr>
+                <tr><td>Max Concurrent</td><td><strong>{{ config.max_concurrent or 'Unlimited' }}</strong></td><td class="text-muted">Max open positions</td></tr>
+                <tr><td>Circuit Breaker</td><td><strong>{{ "%.0f"|format(config.circuit_breaker_pct*100) }}%</strong></td><td class="text-muted">Emergency halt threshold</td></tr>
+                <tr><td>Min R:R Ratio</td><td><strong>{{ config.min_rr_ratio }}</strong></td><td class="text-muted">Minimum reward:risk</td></tr>
             </tbody>
         </table>
     </div>
 </div>
+{% endif %}
+
+<!-- Static Config (read-only for everyone) -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>Static Config</h2>
+        <span class="badge text-muted">Edit .env to change</span>
+    </div>
+    <div class="panel-body no-pad">
+        <table class="data-table">
+            <thead><tr><th>Parameter</th><th>Value</th><th>Description</th></tr></thead>
+            <tbody>
+                <tr><td>Scan Interval</td><td><strong>{{ config.scan_interval_minutes }} min</strong></td><td class="text-muted">Time between market scans</td></tr>
+                <tr><td>Min Volume</td><td><strong>${{ "{:,.0f}".format(config.min_volume_usd) }}</strong></td><td class="text-muted">Minimum 24h volume</td></tr>
+                <tr><td>Quote Currencies</td><td><strong>{{ config.quote_currencies|join(', ') }}</strong></td><td class="text-muted">Quote currency filter</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% if role == 'admin' %}
+<script>
+// Settings definition: key, divisor (slider→API), suffix, display function
+const SETTINGS = {
+    entry_threshold:             { divisor: 1,   suffix: '/100', display: v => v },
+    max_risk_pct:                { divisor: 100, suffix: '%',    display: v => v },
+    min_rr_ratio:                { divisor: 10,  suffix: '',     display: v => (v/10).toFixed(1) + ':1' },
+    max_concurrent:              { divisor: 1,   suffix: '',     display: v => v == 0 ? 'Unlimited' : v },
+    max_exposure_pct:            { divisor: 100, suffix: '%',    display: v => v },
+    max_hold_hours:              { divisor: 1,   suffix: 'h',    display: v => v },
+    max_sl_pct:                  { divisor: 100, suffix: '%',    display: v => v },
+    max_daily_drawdown:          { divisor: 100, suffix: '%',    display: v => v },
+    circuit_breaker_pct:         { divisor: 100, suffix: '%',    display: v => v },
+    cooldown_hours:              { divisor: 1,   suffix: 'h',    display: v => v },
+    monday_manipulation_penalty: { divisor: 1,   suffix: ' pts', display: v => v },
+    monday_manipulation_hours:   { divisor: 1,   suffix: 'h',    display: v => v },
+    midweek_reversal_bonus:      { divisor: 1,   suffix: ' pts', display: v => v },
+    midweek_reversal_delay_hours:{ divisor: 1,   suffix: 'h',    display: v => v },
+};
+
+let _debounce = null;
+
+Object.entries(SETTINGS).forEach(([key, s]) => {
+    const slider = document.getElementById('slider-' + key);
+    const valEl = document.getElementById('val-' + key);
+    if (!slider || !valEl) return;
+
+    slider.addEventListener('input', () => {
+        const raw = parseInt(slider.value);
+        valEl.textContent = s.display(raw) + (s.display(raw).toString().includes(':') ? '' : s.suffix);
+    });
+
+    slider.addEventListener('change', () => {
+        clearTimeout(_debounce);
+        _debounce = setTimeout(() => {
+            const raw = parseInt(slider.value);
+            const apiVal = s.divisor === 1 ? raw : parseFloat((raw / s.divisor).toFixed(4));
+            const payload = {};
+            payload[key] = apiVal;
+            saveSetting(payload);
+        }, 400);
+    });
+});
+
+async function saveSetting(payload) {
+    const st = document.getElementById('settings-save-status');
+    st.textContent = 'Saving...';
+    st.style.color = '#f59e0b';
+    try {
+        const resp = await fetch('/api/main/settings', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (data.success) {
+            st.textContent = 'Saved';
+            st.style.color = '#22c55e';
+        } else {
+            st.textContent = data.error || 'Error';
+            st.style.color = '#ef4444';
+        }
+    } catch (e) {
+        st.textContent = 'Failed';
+        st.style.color = '#ef4444';
+    }
+    setTimeout(() => { st.textContent = 'Live'; st.style.color = 'var(--text-muted)'; }, 3000);
+}
+
+async function toggleWeeklyCycle() {
+    const badge = document.getElementById('weekly-toggle-badge');
+    const btn = document.getElementById('weekly-toggle-btn');
+    const isOn = badge.textContent.trim() === 'ON';
+    const newVal = !isOn;
+    await saveSetting({weekly_cycle_enabled: newVal});
+    badge.textContent = newVal ? 'ON' : 'OFF';
+    badge.style.background = newVal ? '#22c55e' : '#ef4444';
+    btn.textContent = newVal ? 'Disable' : 'Enable';
+}
+</script>
+{% endif %}
 {% endblock %}

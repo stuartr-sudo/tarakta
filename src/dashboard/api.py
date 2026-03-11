@@ -570,36 +570,60 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             return {"success": False, "error": str(e)}
 
     # ── Main Bot Settings ────────────────────────────────────────────
+    # Validation rules: (type, min, max)
+    _SETTINGS_VALIDATION: dict = {
+        "margin_pct":                  (float, 0.05, 0.40),
+        "leverage":                    (int,   1,    100),
+        "max_concurrent":              (int,   0,    50),
+        "max_risk_pct":                (float, 0.01, 0.10),
+        "max_daily_drawdown":          (float, 0.05, 0.30),
+        "entry_threshold":             (float, 30.0, 90.0),
+        "min_rr_ratio":                (float, 1.0,  5.0),
+        "max_hold_hours":              (float, 1.0,  24.0),
+        "circuit_breaker_pct":         (float, 0.05, 0.30),
+        "max_sl_pct":                  (float, 0.02, 0.10),
+        "cooldown_hours":              (float, 0.0,  24.0),
+        "max_exposure_pct":            (float, 0.5,  3.0),
+        "monday_manipulation_penalty": (float, 0.0,  30.0),
+        "monday_manipulation_hours":   (float, 2.0,  16.0),
+        "midweek_reversal_bonus":      (float, 0.0,  25.0),
+        "midweek_reversal_delay_hours":(float, 0.0,  12.0),
+        "weekly_cycle_enabled":        (bool,  None, None),
+    }
+
     @router.post("/main/settings")
     @admin_required
     async def update_main_settings(request: Request):
-        """Update main bot margin % and leverage at runtime (takes effect on next trade)."""
+        """Update trading settings at runtime (takes effect on next trade/cycle)."""
         try:
             body = await request.json()
         except Exception:
             return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
-        margin_pct = body.get("margin_pct")
-        leverage = body.get("leverage")
+        # Parse and validate all provided settings
+        parsed: dict = {}
+        for key, (typ, lo, hi) in _SETTINGS_VALIDATION.items():
+            if key not in body:
+                continue
+            raw = body[key]
+            if typ is bool:
+                parsed[key] = bool(raw)
+                continue
+            val = typ(raw)
+            if lo is not None and val < lo:
+                return JSONResponse({"error": f"{key} must be >= {lo}"}, status_code=400)
+            if hi is not None and val > hi:
+                return JSONResponse({"error": f"{key} must be <= {hi}"}, status_code=400)
+            parsed[key] = val
 
-        # Validate margin_pct range (5% to 40%)
-        if margin_pct is not None:
-            margin_pct = float(margin_pct)
-            if margin_pct < 0.05 or margin_pct > 0.40:
-                return JSONResponse({"error": "margin_pct must be between 0.05 and 0.40"}, status_code=400)
+        if not parsed:
+            return JSONResponse({"error": "No valid settings provided"}, status_code=400)
 
-        # Validate leverage range (1x to 100x)
-        if leverage is not None:
-            leverage = int(leverage)
-            if leverage < 1 or leverage > 100:
-                return JSONResponse({"error": "leverage must be between 1 and 100"}, status_code=400)
-
-        # Update in-memory settings on ALL engines' main bots
+        # Update in-memory settings on ALL engines
         for eng in _all_engines.values():
-            eng.update_settings(margin_pct=margin_pct, leverage=leverage)
-        # Also update the primary engine
+            eng.update_settings(**parsed)
         if engine:
-            engine.update_settings(margin_pct=margin_pct, leverage=leverage)
+            engine.update_settings(**parsed)
 
         # Persist to DB
         try:
@@ -611,33 +635,46 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 main_settings = overrides.get("main_bot_settings", {}) or {}
                 if not isinstance(main_settings, dict):
                     main_settings = {}
-                if margin_pct is not None:
-                    main_settings["margin_pct"] = margin_pct
-                if leverage is not None:
-                    main_settings["leverage"] = leverage
+                main_settings.update(parsed)
                 overrides["main_bot_settings"] = main_settings
                 state["config_overrides"] = overrides
                 await repo.upsert_engine_state(state)
         except Exception as e:
             logger.warning("main_settings_db_save_failed", error=str(e))
 
-        current = {
-            "margin_pct": engine.config.max_position_pct if engine else 0.05,
-            "leverage": engine.config.leverage if engine else 10,
+        return {"success": True, "settings": _read_all_settings()}
+
+    def _read_all_settings() -> dict:
+        """Read current values of all editable settings from engine config."""
+        if not engine:
+            return {}
+        c = engine.config
+        return {
+            "margin_pct": c.max_position_pct,
+            "leverage": c.leverage,
+            "scanning_active": engine._scanning_active,
+            "max_concurrent": c.max_concurrent,
+            "max_risk_pct": c.max_risk_pct,
+            "max_daily_drawdown": c.max_daily_drawdown,
+            "entry_threshold": c.entry_threshold,
+            "min_rr_ratio": c.min_rr_ratio,
+            "max_hold_hours": c.max_hold_hours,
+            "circuit_breaker_pct": c.circuit_breaker_pct,
+            "max_sl_pct": c.max_sl_pct,
+            "cooldown_hours": c.cooldown_hours,
+            "max_exposure_pct": c.max_exposure_pct,
+            "monday_manipulation_penalty": c.monday_manipulation_penalty,
+            "monday_manipulation_hours": c.monday_manipulation_hours,
+            "midweek_reversal_bonus": c.midweek_reversal_bonus,
+            "midweek_reversal_delay_hours": getattr(c, "midweek_reversal_delay_hours", 4.0),
+            "weekly_cycle_enabled": c.weekly_cycle_enabled,
         }
-        return {"success": True, "settings": current}
 
     @router.get("/main/settings")
     @login_required
     async def get_main_settings(request: Request):
-        """Get current main bot settings."""
-        if not engine:
-            return {"margin_pct": 0.05, "leverage": 10}
-        return {
-            "margin_pct": engine.config.max_position_pct,
-            "leverage": engine.config.leverage,
-            "scanning_active": engine._scanning_active,
-        }
+        """Get current trading settings."""
+        return _read_all_settings()
 
     # ── Main Bot Start/Stop ───────────────────────────────────────────
     @router.post("/main/begin")
@@ -804,6 +841,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             if engine and engine.agent_analyst:
                 result["agent"] = engine.agent_analyst.get_usage_stats()
                 result["agent"]["enabled"] = True
+                result["agent"]["available_models"] = engine.agent_analyst.available_models
             else:
                 result["agent"] = {"enabled": False, "total_requests": 0}
 
@@ -827,6 +865,29 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             return result
         except Exception as e:
             logger.error("agent_stats_failed", error=str(e))
+            return {"error": str(e)}
+
+    @router.post("/agent-model")
+    @login_required
+    async def set_agent_model(request: Request):
+        """Switch the agent model at runtime (no redeploy needed)."""
+        try:
+            body = await request.json()
+            model = body.get("model", "").strip()
+            if not model:
+                return {"error": "model is required"}
+            if not engine or not engine.agent_analyst:
+                return {"error": "agent not enabled"}
+            active = engine.agent_analyst.set_model(model)
+            return {
+                "status": "ok",
+                "model": active,
+                "available_models": engine.agent_analyst.available_models,
+            }
+        except ValueError as e:
+            return {"error": str(e)}
+        except Exception as e:
+            logger.error("agent_model_switch_failed", error=str(e))
             return {"error": str(e)}
 
     return router

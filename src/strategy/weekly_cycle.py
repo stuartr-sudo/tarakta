@@ -69,10 +69,12 @@ class WeeklyCycleAnalyzer:
         monday_penalty_pts: float = 15.0,
         monday_manipulation_hours: float = 8.0,
         midweek_reversal_bonus_pts: float = 10.0,
+        midweek_delay_hours: float = 4.0,
     ) -> None:
         self.monday_penalty = monday_penalty_pts
         self.monday_hours = monday_manipulation_hours
         self.midweek_bonus = midweek_reversal_bonus_pts
+        self.midweek_delay_hours = midweek_delay_hours
 
     # ------------------------------------------------------------------
     # Public API
@@ -115,44 +117,89 @@ class WeeklyCycleAnalyzer:
             hours_since_weekly_open=hours_since_open,
         )
 
-        # ── Monday Manipulation ──────────────────────────────────────
+        # ── Monday Manipulation (tapering penalty) ──────────────────
         if hours_since_open < self.monday_hours:
             result.in_monday_manipulation = True
-            result.score_adjustment -= self.monday_penalty
+            # Linear taper: full penalty at hour 0, zero at window boundary
+            taper = 1.0 - (hours_since_open / self.monday_hours)
+            penalty = round(self.monday_penalty * taper, 1)
+            result.score_adjustment -= penalty
             result.reasons.append(
                 f"Monday manipulation window "
                 f"({hours_since_open:.1f}h into week, "
-                f"penalty −{self.monday_penalty:.0f} pts)"
+                f"penalty −{penalty:.1f} pts, tapers to 0 at {self.monday_hours:.0f}h)"
             )
             logger.info(
                 "weekly_cycle_monday_manipulation",
                 hours_into_week=f"{hours_since_open:.1f}",
-                penalty=self.monday_penalty,
+                base_penalty=self.monday_penalty,
+                tapered_penalty=penalty,
+                taper_pct=f"{taper:.0%}",
             )
 
         # ── Mid-Week Reversal (Wednesday & Thursday) ─────────────────
+        # Delay: only apply bonus after N hours into the day (confirmation)
+        # Strength: scale bonus by how strong the early-week fake move was
         if day in (2, 3):  # Wednesday=2, Thursday=3
-            early_dir = self._get_early_week_direction(candles_1d, now)
+            early_dir, move_pct = self._get_early_week_direction_with_magnitude(
+                candles_1d, now
+            )
             result.early_week_direction = early_dir
+
+            # Hours into the current day (Wed or Thu)
+            hours_into_day = now.hour + now.minute / 60
 
             if early_dir and signal_direction:
                 if signal_direction != early_dir:
-                    # Signal opposes the Monday move → mid-week reversal
+                    # Signal opposes the Monday move → potential mid-week reversal
                     result.in_midweek_reversal_window = True
-                    result.signal_aligns_with_reversal = True
-                    result.score_adjustment += self.midweek_bonus
-                    result.reasons.append(
-                        f"Mid-week reversal: early week was {early_dir}, "
-                        f"signal is {signal_direction} → "
-                        f"+{self.midweek_bonus:.0f} pts bonus"
-                    )
-                    logger.info(
-                        "weekly_cycle_midweek_reversal",
-                        day=day_name,
-                        early_week=early_dir,
-                        signal=signal_direction,
-                        bonus=self.midweek_bonus,
-                    )
+
+                    # Delay gate: wait N hours into the day for confirmation
+                    if hours_into_day < self.midweek_delay_hours:
+                        result.signal_aligns_with_reversal = False
+                        result.reasons.append(
+                            f"Mid-week reversal detected but too early "
+                            f"({hours_into_day:.1f}h into {day_name}, "
+                            f"need {self.midweek_delay_hours:.0f}h confirmation)"
+                        )
+                        logger.info(
+                            "weekly_cycle_midweek_reversal_delayed",
+                            day=day_name,
+                            hours_into_day=f"{hours_into_day:.1f}",
+                            delay_required=self.midweek_delay_hours,
+                            early_week=early_dir,
+                            signal=signal_direction,
+                        )
+                    else:
+                        # Delay passed — apply strength-scaled bonus
+                        strength_mult = self._strength_multiplier(move_pct)
+                        bonus = round(self.midweek_bonus * strength_mult, 1)
+
+                        if bonus > 0:
+                            result.signal_aligns_with_reversal = True
+                            result.score_adjustment += bonus
+                            result.reasons.append(
+                                f"Mid-week reversal: early week was {early_dir} "
+                                f"({abs(move_pct):.2%} move, "
+                                f"{strength_mult:.1f}x strength), "
+                                f"signal is {signal_direction} → "
+                                f"+{bonus:.1f} pts bonus"
+                            )
+                            logger.info(
+                                "weekly_cycle_midweek_reversal",
+                                day=day_name,
+                                early_week=early_dir,
+                                signal=signal_direction,
+                                move_pct=f"{move_pct:.4f}",
+                                strength_mult=strength_mult,
+                                bonus=bonus,
+                            )
+                        else:
+                            result.signal_aligns_with_reversal = False
+                            result.reasons.append(
+                                f"Mid-week reversal: early-week move too small "
+                                f"({abs(move_pct):.2%}) for bonus"
+                            )
                 else:
                     # Signal continues the Monday direction — no bonus,
                     # but no penalty either (could be genuine continuation)
@@ -173,25 +220,48 @@ class WeeklyCycleAnalyzer:
     # Internals
     # ------------------------------------------------------------------
 
-    def _get_early_week_direction(
+    @staticmethod
+    def _strength_multiplier(move_pct: float) -> float:
+        """Scale mid-week reversal bonus by early-week move magnitude.
+
+        Bigger fake move = more conviction the reversal is real.
+
+        Returns:
+            0.0  if move < 0.3% (too small to classify)
+            0.5  if 0.3% – 1%  (weak move → half bonus)
+            1.0  if 1% – 2%    (moderate move → full bonus)
+            1.5  if > 2%       (strong fake move → 1.5× bonus)
+        """
+        abs_move = abs(move_pct)
+        if abs_move < 0.003:
+            return 0.0
+        elif abs_move < 0.01:
+            return 0.5
+        elif abs_move < 0.02:
+            return 1.0
+        else:
+            return 1.5
+
+    def _get_early_week_direction_with_magnitude(
         self,
         candles_1d: pd.DataFrame,
         now: datetime,
-    ) -> str | None:
-        """Determine the direction of the early-week move for this coin.
+    ) -> tuple[str | None, float]:
+        """Determine direction AND magnitude of the early-week move.
 
         Compares Monday's daily open price to Monday's close (or Tuesday's
         close if available).  A clear move up = "bullish", down = "bearish".
 
-        Returns None if daily candles don't contain Monday data for this
-        week, or if the move is too small to classify (<0.3%).
+        Returns:
+            (direction, move_pct) where direction is "bullish"/"bearish"/None
+            and move_pct is the raw signed percentage change.
         """
         if candles_1d is None or candles_1d.empty:
-            return None
+            return None, 0.0
 
         idx = candles_1d.index
         if not isinstance(idx, pd.DatetimeIndex):
-            return None
+            return None, 0.0
 
         # Ensure UTC
         if idx.tz is None:
@@ -218,7 +288,7 @@ class WeeklyCycleAnalyzer:
         ]
 
         if early_week.empty:
-            return None
+            return None, 0.0
 
         # Monday open = first candle's open
         week_open = float(early_week["open"].iloc[0])
@@ -228,7 +298,7 @@ class WeeklyCycleAnalyzer:
         week_early_close = float(early_week["close"].iloc[-1])
 
         if week_open <= 0:
-            return None
+            return None, 0.0
 
         # Calculate move percentage
         move_pct = (week_early_close - week_open) / week_open
@@ -238,8 +308,8 @@ class WeeklyCycleAnalyzer:
         MIN_MOVE_PCT = 0.003
 
         if move_pct > MIN_MOVE_PCT:
-            return "bullish"
+            return "bullish", move_pct
         elif move_pct < -MIN_MOVE_PCT:
-            return "bearish"
+            return "bearish", move_pct
 
-        return None  # Too small to classify
+        return None, move_pct  # Too small to classify

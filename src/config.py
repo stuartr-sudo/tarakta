@@ -99,6 +99,7 @@ class Settings(BaseSettings):
     monday_manipulation_penalty: float = 15.0  # Score penalty during Monday manipulation window
     monday_manipulation_hours: float = 8.0  # Hours after weekly open (Mon 00:00 UTC) to apply penalty
     midweek_reversal_bonus: float = 10.0  # Bonus for counter-trend signals on Wed/Thu
+    midweek_reversal_delay_hours: float = 4.0  # Hours into Wed/Thu before bonus applies (confirmation delay)
 
     # Market-level cross-reference filters
     btc_macro_gate_enabled: bool = True  # Hard gate: only trade with BTC trend

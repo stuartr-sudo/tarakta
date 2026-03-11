@@ -202,6 +202,50 @@
     </div>
 </div>
 
+<!-- AI Agent Stats -->
+{% if role == 'admin' %}
+<div class="panel" id="agent-panel" style="border-left: 3px solid #8b5cf6; display:none;">
+    <div class="panel-header">
+        <h2>AI Entry Agent
+            <span id="agent-model-badge" class="badge" style="background:#8b5cf6; color:#fff; font-size:0.75rem;">--</span>
+        </h2>
+        <div style="display:flex; align-items:center; gap:10px;">
+            <select id="agent-model-select" style="font-size:0.8rem; padding:3px 8px; background:var(--bg-card); color:var(--text-primary); border:1px solid var(--border); border-radius:4px;">
+            </select>
+            <button id="agent-model-btn" class="btn" style="font-size:0.75rem; padding:3px 10px;" onclick="switchAgentModel()">Switch</button>
+        </div>
+    </div>
+    <div class="panel-body" style="padding:12px 16px;">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); gap:12px; font-size:0.8rem;">
+            <div>
+                <div style="color:var(--text-muted); font-size:0.7rem;">Requests</div>
+                <div id="agent-requests" class="mono" style="font-size:1rem; font-weight:600;">0</div>
+            </div>
+            <div>
+                <div style="color:var(--text-muted); font-size:0.7rem;">ENTER / WAIT / SKIP</div>
+                <div id="agent-actions" class="mono" style="font-size:0.9rem;">0 / 0 / 0</div>
+            </div>
+            <div>
+                <div style="color:var(--text-muted); font-size:0.7rem;">Total Cost</div>
+                <div id="agent-cost" class="mono" style="font-size:1rem; font-weight:600; color:#f59e0b;">$0.00</div>
+            </div>
+            <div>
+                <div style="color:var(--text-muted); font-size:0.7rem;">Avg / Call</div>
+                <div id="agent-avg-cost" class="mono" style="font-size:0.9rem;">$0.00</div>
+            </div>
+            <div>
+                <div style="color:var(--text-muted); font-size:0.7rem;">Tokens (In / Out)</div>
+                <div id="agent-tokens" class="mono" style="font-size:0.9rem;">0 / 0</div>
+            </div>
+            <div>
+                <div style="color:var(--text-muted); font-size:0.7rem;">Errors</div>
+                <div id="agent-errors" class="mono" style="font-size:0.9rem;">0</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
 <!-- Open Positions (full width) -->
 <div class="panel">
     <div class="panel-header">
@@ -1122,5 +1166,73 @@ async function loadRefinerQueue() {
 }
 loadRefinerQueue();
 setInterval(loadRefinerQueue, 15000);
+
+// --- AI Agent Stats ---
+async function loadAgentStats() {
+    try {
+        const resp = await fetch('/api/agent-stats');
+        const data = await resp.json();
+        const panel = document.getElementById('agent-panel');
+        if (!panel) return;
+        if (!data.agent || !data.agent.enabled) { panel.style.display = 'none'; return; }
+        panel.style.display = 'block';
+
+        const a = data.agent;
+        document.getElementById('agent-model-badge').textContent = a.model || '--';
+        document.getElementById('agent-requests').textContent = a.total_requests;
+        document.getElementById('agent-actions').textContent = a.total_enter_now + ' / ' + a.total_wait_pullback + ' / ' + a.total_skip;
+        document.getElementById('agent-cost').textContent = '$' + (a.total_cost_usd || 0).toFixed(4);
+        document.getElementById('agent-avg-cost').textContent = '$' + (a.avg_cost_per_call_usd || 0).toFixed(4);
+        document.getElementById('agent-tokens').textContent = (a.total_input_tokens || 0).toLocaleString() + ' / ' + (a.total_output_tokens || 0).toLocaleString();
+        document.getElementById('agent-errors').textContent = a.total_errors || 0;
+
+        // Populate model selector
+        const sel = document.getElementById('agent-model-select');
+        if (sel && sel.options.length === 0 && a.available_models) {
+            a.available_models.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m;
+                opt.textContent = m;
+                if (m === a.model) opt.selected = true;
+                sel.appendChild(opt);
+            });
+        } else if (sel) {
+            sel.value = a.model;
+        }
+    } catch (e) {
+        console.error('Agent stats load failed:', e);
+    }
+}
+
+async function switchAgentModel() {
+    const sel = document.getElementById('agent-model-select');
+    const btn = document.getElementById('agent-model-btn');
+    if (!sel) return;
+    const model = sel.value;
+    btn.disabled = true;
+    btn.textContent = 'Switching...';
+    try {
+        const resp = await fetch('/api/agent-model', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({model: model})
+        });
+        const data = await resp.json();
+        if (data.error) {
+            alert('Switch failed: ' + data.error);
+        } else {
+            document.getElementById('agent-model-badge').textContent = data.model;
+            btn.textContent = 'Switched!';
+            setTimeout(() => { btn.textContent = 'Switch'; }, 2000);
+        }
+    } catch (e) {
+        alert('Switch failed: ' + e);
+    }
+    btn.disabled = false;
+    if (btn.textContent === 'Switching...') btn.textContent = 'Switch';
+}
+
+loadAgentStats();
+setInterval(loadAgentStats, 30000);
 </script>
 {% endblock %}

@@ -165,19 +165,95 @@ class TradingEngine:
         self,
         margin_pct: float | None = None,
         leverage: int | None = None,
+        max_concurrent: int | None = None,
+        max_risk_pct: float | None = None,
+        max_daily_drawdown: float | None = None,
+        entry_threshold: float | None = None,
+        min_rr_ratio: float | None = None,
+        max_hold_hours: float | None = None,
+        circuit_breaker_pct: float | None = None,
+        max_sl_pct: float | None = None,
+        cooldown_hours: float | None = None,
+        max_exposure_pct: float | None = None,
+        # Weekly cycle settings
+        monday_manipulation_penalty: float | None = None,
+        monday_manipulation_hours: float | None = None,
+        midweek_reversal_bonus: float | None = None,
+        midweek_reversal_delay_hours: float | None = None,
+        weekly_cycle_enabled: bool | None = None,
     ) -> None:
-        """Update main bot margin % and leverage at runtime (takes effect on next trade)."""
+        """Update trading settings at runtime (takes effect on next trade/cycle)."""
         if margin_pct is not None:
             self.config.max_position_pct = margin_pct
             self.risk_manager.max_position_pct = margin_pct
-            logger.info("main_bot_margin_updated", margin_pct=margin_pct)
+            logger.info("setting_updated", key="margin_pct", value=margin_pct)
         if leverage is not None:
             self.config.leverage = leverage
             self.risk_manager._leverage = leverage
-            # Also update PaperExchange leverage if paper trading
             if hasattr(self.exchange, "_leverage"):
                 self.exchange._leverage = leverage
-            logger.info("main_bot_leverage_updated", leverage=leverage)
+            logger.info("setting_updated", key="leverage", value=leverage)
+        if max_concurrent is not None:
+            self.config.max_concurrent = max_concurrent
+            self.risk_manager.max_concurrent = max_concurrent
+            logger.info("setting_updated", key="max_concurrent", value=max_concurrent)
+        if max_risk_pct is not None:
+            self.config.max_risk_pct = max_risk_pct
+            self.risk_manager.max_risk_pct = max_risk_pct
+            logger.info("setting_updated", key="max_risk_pct", value=max_risk_pct)
+        if max_daily_drawdown is not None:
+            self.config.max_daily_drawdown = max_daily_drawdown
+            self.risk_manager.max_daily_drawdown = max_daily_drawdown
+            self.circuit_breaker.daily_limit = max_daily_drawdown
+            logger.info("setting_updated", key="max_daily_drawdown", value=max_daily_drawdown)
+        if entry_threshold is not None:
+            self.config.entry_threshold = entry_threshold
+            self.adaptive_threshold.base_threshold = entry_threshold
+            logger.info("setting_updated", key="entry_threshold", value=entry_threshold)
+        if min_rr_ratio is not None:
+            self.config.min_rr_ratio = min_rr_ratio
+            self.risk_manager.min_rr_ratio = min_rr_ratio
+            logger.info("setting_updated", key="min_rr_ratio", value=min_rr_ratio)
+        if max_hold_hours is not None:
+            self.config.max_hold_hours = max_hold_hours
+            self.position_monitor.max_hold_hours = max_hold_hours
+            logger.info("setting_updated", key="max_hold_hours", value=max_hold_hours)
+        if circuit_breaker_pct is not None:
+            self.config.circuit_breaker_pct = circuit_breaker_pct
+            self.circuit_breaker.total_limit = circuit_breaker_pct
+            logger.info("setting_updated", key="circuit_breaker_pct", value=circuit_breaker_pct)
+        if max_sl_pct is not None:
+            self.config.max_sl_pct = max_sl_pct
+            logger.info("setting_updated", key="max_sl_pct", value=max_sl_pct)
+        if cooldown_hours is not None:
+            self.config.cooldown_hours = cooldown_hours
+            self.risk_manager.cooldown_hours = cooldown_hours
+            logger.info("setting_updated", key="cooldown_hours", value=cooldown_hours)
+        if max_exposure_pct is not None:
+            self.config.max_exposure_pct = max_exposure_pct
+            self.risk_manager.max_exposure_pct = max_exposure_pct
+            logger.info("setting_updated", key="max_exposure_pct", value=max_exposure_pct)
+        # Weekly cycle settings
+        if monday_manipulation_penalty is not None:
+            self.config.monday_manipulation_penalty = monday_manipulation_penalty
+            self.scanner.weekly_cycle.monday_penalty = monday_manipulation_penalty
+            logger.info("setting_updated", key="monday_manipulation_penalty", value=monday_manipulation_penalty)
+        if monday_manipulation_hours is not None:
+            self.config.monday_manipulation_hours = monday_manipulation_hours
+            self.scanner.weekly_cycle.monday_hours = monday_manipulation_hours
+            logger.info("setting_updated", key="monday_manipulation_hours", value=monday_manipulation_hours)
+        if midweek_reversal_bonus is not None:
+            self.config.midweek_reversal_bonus = midweek_reversal_bonus
+            self.scanner.weekly_cycle.midweek_bonus = midweek_reversal_bonus
+            logger.info("setting_updated", key="midweek_reversal_bonus", value=midweek_reversal_bonus)
+        if midweek_reversal_delay_hours is not None:
+            self.config.midweek_reversal_delay_hours = midweek_reversal_delay_hours
+            self.scanner.weekly_cycle.midweek_delay_hours = midweek_reversal_delay_hours
+            logger.info("setting_updated", key="midweek_reversal_delay_hours", value=midweek_reversal_delay_hours)
+        if weekly_cycle_enabled is not None:
+            self.config.weekly_cycle_enabled = weekly_cycle_enabled
+            self.scanner.weekly_cycle_enabled = weekly_cycle_enabled
+            logger.info("setting_updated", key="weekly_cycle_enabled", value=weekly_cycle_enabled)
 
     async def startup(self) -> None:
         """Initialize engine state from DB or create fresh."""
@@ -302,7 +378,7 @@ class TradingEngine:
                 margin_mode=getattr(self.config, "margin_mode", "isolated"),
                 max_position_pct=self.config.max_position_pct,
                 min_trade_usd=self.config.min_trade_usd,
-                max_concurrent=self.config.max_concurrent_positions,
+                max_concurrent=self.config.max_concurrent,
             )
             # Fetch and log actual exchange balance
             try:
@@ -356,6 +432,19 @@ class TradingEngine:
                 if hasattr(self.exchange, "_leverage"):
                     self.exchange._leverage = saved_leverage
                 logger.info("main_bot_leverage_restored", leverage=saved_leverage)
+            # Restore all other runtime settings via update_settings()
+            _restore_keys = [
+                "max_concurrent", "max_risk_pct", "max_daily_drawdown",
+                "entry_threshold", "min_rr_ratio", "max_hold_hours",
+                "circuit_breaker_pct", "max_sl_pct", "cooldown_hours",
+                "max_exposure_pct", "monday_manipulation_penalty",
+                "monday_manipulation_hours", "midweek_reversal_bonus",
+                "midweek_reversal_delay_hours", "weekly_cycle_enabled",
+            ]
+            restore_kwargs = {k: main_settings[k] for k in _restore_keys if k in main_settings}
+            if restore_kwargs:
+                self.update_settings(**restore_kwargs)
+                logger.info("runtime_settings_restored", keys=list(restore_kwargs.keys()))
 
         # Start hyper-watchlist monitor loop (checks every 2.5 min on 5m candles)
         if self.watchlist_monitor:
@@ -2063,8 +2152,11 @@ class TradingEngine:
             except Exception as e:
                 logger.debug("atr_fetch_failed", symbol=symbol, error=str(e))
 
+        market_info = getattr(self.exchange, "market_info", None)
+        trading_hours = market_info.trading_hours if market_info else None
         exits = await self.position_monitor.check_positions(
-            self.portfolio.open_positions, self.exchange, atr_values=atr_values
+            self.portfolio.open_positions, self.exchange,
+            atr_values=atr_values, trading_hours=trading_hours,
         )
 
         for exit_signal in exits:

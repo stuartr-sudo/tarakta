@@ -4,6 +4,8 @@ import asyncio
 from datetime import datetime, timezone
 
 from src.exchange.models import ExitSignal, Position
+from src.exchange.protocol import TradingHours
+from src.exchange.trading_hours import TradingHoursManager
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -28,12 +30,14 @@ class PositionMonitor:
         self.breakeven_activation_rr = breakeven_activation_rr
         self.max_hold_hours = max_hold_hours
         self.stale_close_below_rr = stale_close_below_rr
+        self._trading_hours_mgr = TradingHoursManager()
         # Throttle repeated ticker errors: only log per symbol once per 5 min
         self._ticker_error_last_logged: dict[str, datetime] = {}
         self._ticker_error_throttle_seconds = 300
 
     async def check_positions(
         self, positions: dict[str, Position], exchange, atr_values: dict[str, float] | None = None,
+        trading_hours: TradingHours | None = None,
     ) -> list[ExitSignal]:
         """Check all open positions against current prices.
 
@@ -65,7 +69,7 @@ class PositionMonitor:
                 continue
 
             atr = atr_values.get(symbol, 0.0)
-            exit_signal = self._evaluate_position(symbol, pos, current_price, atr)
+            exit_signal = self._evaluate_position(symbol, pos, current_price, atr, trading_hours)
             if exit_signal:
                 exits.append(exit_signal)
 
@@ -73,15 +77,17 @@ class PositionMonitor:
 
     def _evaluate_position(
         self, symbol: str, pos: Position, current_price: float, atr: float,
+        trading_hours: TradingHours | None = None,
     ) -> ExitSignal | None:
         """Evaluate a single position for exit conditions."""
         if pos.direction == "long":
-            return self._evaluate_long(symbol, pos, current_price, atr)
+            return self._evaluate_long(symbol, pos, current_price, atr, trading_hours)
         else:
-            return self._evaluate_short(symbol, pos, current_price, atr)
+            return self._evaluate_short(symbol, pos, current_price, atr, trading_hours)
 
     def _evaluate_long(
         self, symbol: str, pos: Position, current_price: float, atr: float,
+        trading_hours: TradingHours | None = None,
     ) -> ExitSignal | None:
         # Update high water mark
         if current_price > pos.high_water_mark:
@@ -144,8 +150,12 @@ class PositionMonitor:
                 )
 
         # 4. Stale trade auto-close — close losing trades open too long
+        #    Uses market-open hours only (overnight/weekend doesn't count for stocks/commodities)
         if self.max_hold_hours > 0 and pos.entry_time:
-            hours_open = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 3600
+            now_utc = datetime.now(timezone.utc)
+            hours_open = self._trading_hours_mgr.market_open_hours_between(
+                pos.entry_time, now_utc, trading_hours,
+            )
             if hours_open >= self.max_hold_hours:
                 stale_rr = (current_price - pos.entry_price) / sl_distance if sl_distance > 0 else 0
                 if stale_rr < self.stale_close_below_rr:
@@ -189,6 +199,7 @@ class PositionMonitor:
 
     def _evaluate_short(
         self, symbol: str, pos: Position, current_price: float, atr: float,
+        trading_hours: TradingHours | None = None,
     ) -> ExitSignal | None:
         # Update low water mark (for shorts, lower is better)
         if current_price < pos.high_water_mark:
@@ -250,8 +261,12 @@ class PositionMonitor:
                 )
 
         # 4. Stale trade auto-close — close losing trades open too long
+        #    Uses market-open hours only (overnight/weekend doesn't count for stocks/commodities)
         if self.max_hold_hours > 0 and pos.entry_time:
-            hours_open = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 3600
+            now_utc = datetime.now(timezone.utc)
+            hours_open = self._trading_hours_mgr.market_open_hours_between(
+                pos.entry_time, now_utc, trading_hours,
+            )
             if hours_open >= self.max_hold_hours:
                 stale_rr = (pos.entry_price - current_price) / sl_distance if sl_distance > 0 else 0
                 if stale_rr < self.stale_close_below_rr:

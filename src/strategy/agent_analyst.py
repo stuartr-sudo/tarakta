@@ -271,6 +271,25 @@ class AgentEntryAnalyst:
         self.total_wait_pullback = 0
         self.total_skip = 0
         self.total_errors = 0
+        self.total_cost_usd = 0.0
+
+        # Pricing per 1M tokens by model (input, cached_input, output)
+        self._pricing: dict[str, tuple[float, float, float]] = {
+            "gpt-5-mini": (0.25, 0.025, 2.00),
+            "gpt-5.4": (2.50, 0.25, 15.00),
+        }
+
+        # Available models for runtime switching
+        self.available_models = list(self._pricing.keys())
+
+    def set_model(self, model: str) -> str:
+        """Switch model at runtime. Returns the active model name."""
+        if model not in self._pricing:
+            raise ValueError(f"Unknown model: {model}. Available: {self.available_models}")
+        old = self._model
+        self._model = model
+        logger.info("agent_model_switched", old_model=old, new_model=model)
+        return self._model
 
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
@@ -350,13 +369,29 @@ class AgentEntryAnalyst:
             latency_ms = (time.monotonic() - start) * 1000
             self._record_success()
 
-            # Track token usage
+            # Track token usage & cost
             usage = response.usage
             input_tokens = usage.prompt_tokens if usage else 0
+            cached_tokens = getattr(usage, "prompt_tokens_details", None)
+            cached_tokens = (
+                getattr(cached_tokens, "cached_tokens", 0) if cached_tokens else 0
+            )
             output_tokens = usage.completion_tokens if usage else 0
             self.total_input_tokens += input_tokens
             self.total_output_tokens += output_tokens
             self.total_requests += 1
+
+            # Calculate cost in USD
+            price_in, price_cached, price_out = self._pricing.get(
+                self._model, (2.50, 0.25, 15.00)
+            )
+            non_cached = input_tokens - cached_tokens
+            call_cost = (
+                non_cached * price_in / 1_000_000
+                + cached_tokens * price_cached / 1_000_000
+                + output_tokens * price_out / 1_000_000
+            )
+            self.total_cost_usd += call_cost
 
             decision = self._parse_response(response)
             decision.latency_ms = latency_ms
@@ -399,6 +434,8 @@ class AgentEntryAnalyst:
                 latency_ms=round(latency_ms, 1),
                 reasoning=decision.reasoning[:150],
                 tokens=input_tokens + output_tokens,
+                cost_usd=round(call_cost, 6),
+                total_cost_usd=round(self.total_cost_usd, 4),
             )
             return decision
 
@@ -738,6 +775,11 @@ Analyze this setup and respond with your JSON decision."""
 
     def get_usage_stats(self) -> dict[str, Any]:
         """Return cumulative usage stats for monitoring/dashboard."""
+        avg_cost = (
+            round(self.total_cost_usd / self.total_requests, 6)
+            if self.total_requests > 0
+            else 0.0
+        )
         return {
             "total_requests": self.total_requests,
             "total_enter_now": self.total_enter_now,
@@ -752,6 +794,8 @@ Analyze this setup and respond with your JSON decision."""
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
             "total_tokens": self.total_input_tokens + self.total_output_tokens,
+            "total_cost_usd": round(self.total_cost_usd, 4),
+            "avg_cost_per_call_usd": avg_cost,
             "total_errors": self.total_errors,
             "fail_count": self._fail_count,
             "model": self._model,

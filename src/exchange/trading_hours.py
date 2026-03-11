@@ -74,6 +74,40 @@ class TradingHoursManager:
         )
         return close.astimezone(timezone.utc)
 
+    def market_open_hours_between(
+        self, start_utc: datetime, end_utc: datetime, trading_hours: TradingHours | None,
+    ) -> float:
+        """Calculate hours the market was open between two UTC timestamps.
+
+        For 24/7 markets (trading_hours is None), returns wall-clock hours.
+        For scheduled markets, sums only time within trading sessions.
+        """
+        if trading_hours is None:
+            return (end_utc - start_utc).total_seconds() / 3600
+
+        tz = ZoneInfo(trading_hours.timezone)
+        start_local = start_utc.astimezone(tz)
+        end_local = end_utc.astimezone(tz)
+
+        total_seconds = 0.0
+        current_date = start_local.date()
+        end_date = end_local.date()
+
+        while current_date <= end_date:
+            if current_date.weekday() in trading_hours.trading_days:
+                session_open = datetime.combine(current_date, trading_hours.open_time, tzinfo=tz)
+                session_close = datetime.combine(current_date, trading_hours.close_time, tzinfo=tz)
+
+                overlap_start = max(start_local, session_open)
+                overlap_end = min(end_local, session_close)
+
+                if overlap_start < overlap_end:
+                    total_seconds += (overlap_end - overlap_start).total_seconds()
+
+            current_date += timedelta(days=1)
+
+        return total_seconds / 3600
+
     def should_scan(self, market_info: MarketInfo | None) -> bool:
         """Should we run a scan cycle? False if market is closed."""
         return self.is_market_open(market_info)
