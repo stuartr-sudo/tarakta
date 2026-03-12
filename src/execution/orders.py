@@ -207,6 +207,45 @@ class OrderExecutor:
                 volume_24h=f"{quote_vol_24h:,.0f}",
             )
 
+            # ── Hard zone gate for PullbackPlan entries ──
+            plan = getattr(signal, "pullback_plan", None)
+            if plan is not None:
+                ob_price = best_bid if is_long else best_ask
+                reject_reason = ""
+                if plan.is_expired:
+                    reject_reason = "plan_expired"
+                elif plan.invalidation_hit(ob_price):
+                    reject_reason = "invalidation_hit"
+                elif not plan.price_in_zone(ob_price):
+                    reject_reason = "price_outside_zone"
+                elif not plan.slippage_ok(ob_price):
+                    reject_reason = "slippage_exceeded"
+
+                if reject_reason:
+                    logger.info(
+                        "pullback_plan_entry_rejected",
+                        symbol=signal.symbol,
+                        reject_reason=reject_reason,
+                        decision_price=round(signal.entry_price, 6),
+                        live_price=round(ob_price, 6),
+                        zone=plan.zone_str(),
+                        invalidation=round(plan.invalidation_level, 6),
+                        age_seconds=round(plan.age_seconds, 1),
+                        path_taken="orders_hard_gate",
+                    )
+                    return None, None, None
+
+                logger.info(
+                    "pullback_plan_entry_accepted",
+                    symbol=signal.symbol,
+                    ob_price=round(ob_price, 6),
+                    zone=plan.zone_str(),
+                    limit_price=round(plan.limit_price, 6),
+                    age_seconds=round(plan.age_seconds, 1),
+                    zone_updates=plan.zone_updates,
+                    path_taken="orders_hard_gate",
+                )
+
             # --- Determine progressive vs single-order entry ---
             position_notional = pos_size.quantity * signal.entry_price
             num_tranches = self._calculate_tranche_count(position_notional, relevant_depth)
@@ -256,11 +295,27 @@ class OrderExecutor:
                     status="closed",
                 )
             else:
-                # Single order — original behavior
-                if is_long:
-                    limit_price = best_bid
+                # Single order — zone-aware pricing for PullbackPlan entries
+                if plan is not None and plan.limit_price > 0 and self.config.pullback_use_limit_in_zone:
+                    # Longs: buy at lower quarter of zone, but never worse than book
+                    # Shorts: sell at upper quarter of zone, but never worse than book
+                    if is_long:
+                        limit_price = min(plan.limit_price, best_bid)
+                    else:
+                        limit_price = max(plan.limit_price, best_ask)
+                    logger.info(
+                        "pullback_plan_limit_price",
+                        symbol=signal.symbol,
+                        zone_limit=round(plan.limit_price, 6),
+                        book_price=round(best_bid if is_long else best_ask, 6),
+                        final_limit=round(limit_price, 6),
+                    )
                 else:
-                    limit_price = best_ask
+                    # Standard best-bid/ask pricing
+                    if is_long:
+                        limit_price = best_bid
+                    else:
+                        limit_price = best_ask
 
                 result = await self.exchange.place_limit_order(
                     symbol=signal.symbol,

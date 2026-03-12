@@ -85,11 +85,12 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx["signals"] = await repo.get_recent_signals(limit=10)
         ctx["stats"] = await repo.get_trade_stats(mode=config.trading_mode)
 
-        # Override snapshot P&L with fresh DB-computed values
-        # so the dashboard shows ground truth, not stale in-memory values
+        # Override snapshot values with fresh DB-computed ground truth
         stats = ctx["stats"]
         ctx["snapshot"]["daily_pnl_usd"] = stats.get("daily_pnl", 0)
         ctx["snapshot"]["total_pnl_usd"] = stats.get("total_pnl", 0)
+        # Equity = initial balance + total realized P&L (from DB, not in-memory state)
+        ctx["snapshot"]["balance_usd"] = config.initial_balance + stats.get("total_pnl", 0)
 
         # Main bot settings (margin_pct, leverage) from saved state
         state = ctx.get("state") or {}

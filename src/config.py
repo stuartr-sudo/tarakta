@@ -150,6 +150,12 @@ class Settings(BaseSettings):
     position_agent_model: str = "gpt-5-mini"  # Fast/cheap model for frequent checks
     position_agent_check_interval_minutes: float = 15.0  # How often to check each position
 
+    # Feature rollback toggles — disable individual AI enhancements without redeploying
+    symbol_history_enabled: bool = True     # Agent 1 per-symbol trade feedback loop
+    order_book_enabled: bool = True         # Agent 2 order book context
+    agent2_shadow_mode: bool = False        # Agent 2 logs decisions but does NOT act on them
+    agent3_shadow_mode: bool = False        # Agent 3 logs decisions but does NOT act on them
+
     # Dynamic strategy weights
     dynamic_weights_enabled: bool = False  # Adjust confluence weights based on trade outcomes
 
@@ -180,6 +186,12 @@ class Settings(BaseSettings):
     ote_min_retracement: float = 0.50   # OTE zone starts at 50% Fibonacci retracement
     ote_max_retracement: float = 0.79   # OTE zone ends at 79% (beyond = setup failed)
     ote_skip_on_expiry: bool = True     # No pullback within window = skip trade (don't chase)
+
+    # WAIT_PULLBACK pending order plan — formal zone enforcement for pullback entries
+    pullback_zone_tolerance_bps: float = 2.0    # Basis points tolerance for zone boundary check
+    pullback_max_chase_bps: float = 3.0         # Max basis points slippage beyond zone edge
+    pullback_valid_candles: int = 6             # Number of 5m candles before expiry (6 = 30min)
+    pullback_use_limit_in_zone: bool = True     # Place limit orders at zone levels (not best bid/ask)
 
     # Market Consensus Check — portfolio + BTC alignment before entry
     consensus_enabled: bool = True

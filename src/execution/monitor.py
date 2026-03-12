@@ -41,6 +41,8 @@ class PositionMonitor:
         self._position_agent = position_agent
         self._agent3_interval = position_agent_interval_minutes * 60  # seconds
         self._agent3_last_check: dict[str, float] = {}  # symbol → timestamp
+        self._agent3_locks: dict[str, asyncio.Lock] = {}  # Req 7: per-symbol concurrency lock
+        self._agent3_shadow_mode: bool = False  # Req 8: set from config at runtime
 
     async def check_positions(
         self, positions: dict[str, Position], exchange, atr_values: dict[str, float] | None = None,
@@ -103,13 +105,32 @@ class PositionMonitor:
                     continue
 
                 self._agent3_last_check[symbol] = now_ts
+
+                # Req 7: per-symbol concurrency lock — prevent overlapping evaluations
+                if symbol not in self._agent3_locks:
+                    self._agent3_locks[symbol] = asyncio.Lock()
+                lock = self._agent3_locks[symbol]
+                if lock.locked():
+                    logger.debug("agent3_skipped_locked", symbol=symbol)
+                    continue
+
                 try:
-                    agent3_exit = await self._run_agent3(
-                        symbol, pos, current_prices[symbol],
-                        atr_values.get(symbol, 0.0), market_filter,
-                    )
-                    if agent3_exit:
-                        exits.append(agent3_exit)
+                    async with lock:
+                        agent3_exit = await self._run_agent3(
+                            symbol, pos, current_prices[symbol],
+                            atr_values.get(symbol, 0.0), market_filter,
+                        )
+                        if agent3_exit:
+                            # Req 8: shadow mode — log but don't act
+                            if self._agent3_shadow_mode:
+                                logger.info(
+                                    "agent3_shadow_mode_decision",
+                                    symbol=symbol,
+                                    reason=agent3_exit.reason,
+                                    price=agent3_exit.price,
+                                )
+                            else:
+                                exits.append(agent3_exit)
                 except Exception as e:
                     logger.warning("agent3_check_failed", symbol=symbol, error=str(e))
 

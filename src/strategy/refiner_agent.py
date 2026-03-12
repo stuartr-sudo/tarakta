@@ -688,6 +688,23 @@ class RefinerMonitorAgent:
         else:
             sweep_section = "Not available"
 
+        # ── Section 13b: PullbackPlan context ──
+        plan_ctx = ctx.get("pullback_plan")
+        if plan_ctx:
+            time_left = plan_ctx.get("time_remaining_seconds", 0)
+            minutes_left = time_left / 60
+            plan_section = (
+                f"### Pending Order Plan\n"
+                f"- **Zone:** {plan_ctx.get('zone_low', 0):.6g} – {plan_ctx.get('zone_high', 0):.6g}\n"
+                f"- **Limit price:** {plan_ctx.get('limit_price', 0):.6g}\n"
+                f"- **Invalidation:** {plan_ctx.get('invalidation_level', 0):.6g}\n"
+                f"- **Time remaining:** {minutes_left:.1f} min\n"
+                f"- **Max chase:** {plan_ctx.get('max_chase_bps', 0):.1f} bps\n"
+                f"- **Zone updates:** {plan_ctx.get('zone_updates', 0)}\n\n"
+            )
+        else:
+            plan_section = ""
+
         # ── Section 13: Pre-computed SL/TP from Agent 1 ──
         a1_sl = ctx.get("agent1_sl")
         a1_tp = ctx.get("agent1_tp")
@@ -738,7 +755,7 @@ class RefinerMonitorAgent:
 - **Distance from zone:** {distance_pct:.2f}%
 - **Price change since queued:** {price_change:+.2f}%
 
-### Pullback / Displacement Metrics
+{plan_section}### Pullback / Displacement Metrics
 {pullback_section}
 
 ### Last 15 Five-Minute Candles (newest first)

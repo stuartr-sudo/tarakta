@@ -35,7 +35,7 @@ import pandas as pd
 
 from src.config import Settings
 from src.data.candles import CandleManager
-from src.exchange.models import SignalCandidate
+from src.exchange.models import PullbackPlan, SignalCandidate
 from src.strategy.volume import VolumeAnalyzer
 from src.utils.logging import get_logger
 
@@ -86,6 +86,9 @@ class RefinerEntry:
     ote_zone_bottom: float = 0.0
     ote_zone_valid: bool = False
     zone_source: str = ""  # "agent", "1h_thrust", "5m_thrust", "agent2_adjusted"
+
+    # PullbackPlan — formal pending order contract for WAIT_PULLBACK entries
+    pullback_plan: PullbackPlan | None = None
 
     # Agent 2 (Refiner Monitor) reasoning continuity
     last_agent2_action: str = ""       # Previous Agent 2 decision (WAIT, ADJUST_ZONE, etc.)
@@ -177,15 +180,19 @@ class EntryRefiner:
             return False
 
         now = datetime.now(timezone.utc)
+        plan = getattr(signal, "pullback_plan", None)
+        # Use plan expiry if present (30min default), else refiner default (4h)
+        expiry = plan.expires_at if plan else now + timedelta(minutes=self.config.entry_refiner_expiry_minutes)
         entry = RefinerEntry(
             symbol=signal.symbol,
             signal=signal,
             added_at=now,
-            expires_at=now + timedelta(minutes=self.config.entry_refiner_expiry_minutes),
+            expires_at=expiry,
             original_1h_price=signal.entry_price,
             entry_type="sweep",
             sweep_level=sweep_result.sweep_level,
             sweep_direction=sweep_result.sweep_direction,
+            pullback_plan=plan,
         )
         self.queue[signal.symbol] = entry
 
@@ -216,15 +223,18 @@ class EntryRefiner:
             return False
 
         now = datetime.now(timezone.utc)
+        plan = getattr(signal, "pullback_plan", None)
+        expiry = plan.expires_at if plan else now + timedelta(minutes=self.config.entry_refiner_expiry_minutes)
         entry = RefinerEntry(
             symbol=signal.symbol,
             signal=signal,
             added_at=now,
-            expires_at=now + timedelta(minutes=self.config.entry_refiner_expiry_minutes),
+            expires_at=expiry,
             original_1h_price=signal.entry_price,
             entry_type="breakout",
             breakout_level=breakout_result.breakout_level,
             breakout_direction=breakout_result.breakout_direction or "",
+            pullback_plan=plan,
         )
         self.queue[signal.symbol] = entry
 
@@ -281,6 +291,29 @@ class EntryRefiner:
                     self.total_expired += 1
                     del self.queue[symbol]
                     continue
+
+                # PullbackPlan invalidation check — if price broke invalidation level, expire
+                if entry.pullback_plan is not None:
+                    try:
+                        ticker = await self.candles.get_candles(symbol, "5m", limit=1)
+                        if ticker is not None and not ticker.empty:
+                            last_close = float(ticker["close"].iloc[-1])
+                            if entry.pullback_plan.invalidation_hit(last_close):
+                                logger.info(
+                                    "pullback_plan_invalidated",
+                                    symbol=symbol,
+                                    last_close=round(last_close, 6),
+                                    invalidation=round(entry.pullback_plan.invalidation_level, 6),
+                                    zone=entry.pullback_plan.zone_str(),
+                                    age_seconds=round(entry.pullback_plan.age_seconds, 1),
+                                    path_taken="refiner_invalidation",
+                                )
+                                self.total_expired += 1
+                                del self.queue[symbol]
+                                self._last_agent_check.pop(symbol, None)
+                                continue
+                    except Exception:
+                        pass  # Non-critical — the pre-dispatch gate will catch it
 
                 # Fetch 5m candles and check for pullback
                 candles_5m = await self.candles.get_candles(symbol, "5m", limit=30)
@@ -775,39 +808,59 @@ class EntryRefiner:
             None if WAIT/ADJUST_ZONE/ABANDON (stays in queue or gets removed).
         """
         # Fetch order book for Agent 2 context (non-critical, best-effort)
+        # Req 6: robustness — toggle, staleness check, rate-limit safety, sanity checks
         order_book_data = {"status": "unavailable"}
-        if self._exchange:
+        ob_enabled = getattr(self.config, "order_book_enabled", True) if self.config else True
+        if self._exchange and ob_enabled:
             try:
+                import time as _time
+                ob_fetch_start = _time.time()
                 ob = await self._exchange.fetch_order_book(entry.symbol, limit=20)
+                ob_fetch_ms = (_time.time() - ob_fetch_start) * 1000
+
                 if ob and ob.get("bids") and ob.get("asks"):
                     bids = ob["bids"][:10]  # Top 10 bid levels
                     asks = ob["asks"][:10]  # Top 10 ask levels
-                    bid_vol = sum(b[1] for b in bids)
-                    ask_vol = sum(a[1] for a in asks)
-                    total_vol = bid_vol + ask_vol
-                    spread = asks[0][0] - bids[0][0] if asks and bids else 0
-                    spread_pct = (spread / bids[0][0] * 100) if bids and bids[0][0] > 0 else 0
-                    imbalance = (bid_vol - ask_vol) / total_vol if total_vol > 0 else 0
-                    # Wall detection: any level with volume > 3x the average
-                    all_levels = bids + asks
-                    avg_vol = total_vol / len(all_levels) if all_levels else 0
-                    walls = []
-                    for price, vol in all_levels:
-                        if avg_vol > 0 and vol > avg_vol * 3:
-                            side = "bid" if [price, vol] in bids else "ask"
-                            walls.append({"price": price, "volume": vol, "side": side})
-                    order_book_data = {
-                        "status": "available",
-                        "spread_pct": round(spread_pct, 4),
-                        "bid_volume_top10": round(bid_vol, 2),
-                        "ask_volume_top10": round(ask_vol, 2),
-                        "imbalance_ratio": round(imbalance, 3),  # +1 = all bids, -1 = all asks
-                        "walls": walls[:3],  # Top 3 walls only
-                        "best_bid": bids[0][0] if bids else 0,
-                        "best_ask": asks[0][0] if asks else 0,
-                    }
-            except Exception:
-                pass  # Order book not available for this market/exchange
+
+                    # Sanity check: bids/asks must have prices > 0
+                    if not bids or not asks or bids[0][0] <= 0 or asks[0][0] <= 0:
+                        logger.debug("order_book_invalid_prices", symbol=entry.symbol)
+                    else:
+                        bid_vol = sum(b[1] for b in bids)
+                        ask_vol = sum(a[1] for a in asks)
+                        total_vol = bid_vol + ask_vol
+                        spread = asks[0][0] - bids[0][0]
+                        spread_pct = (spread / bids[0][0] * 100) if bids[0][0] > 0 else 0
+
+                        # Staleness guard: if spread is negative or fetch was very slow, skip
+                        if spread < 0:
+                            logger.debug("order_book_crossed_spread", symbol=entry.symbol)
+                        elif ob_fetch_ms > 10000:
+                            # Fetch took >10s — data may be stale
+                            logger.debug("order_book_stale", symbol=entry.symbol, fetch_ms=round(ob_fetch_ms))
+                        else:
+                            imbalance = (bid_vol - ask_vol) / total_vol if total_vol > 0 else 0
+                            # Wall detection: any level with volume > 3x the average
+                            all_levels = bids + asks
+                            avg_vol = total_vol / len(all_levels) if all_levels else 0
+                            walls = []
+                            for price, vol in all_levels:
+                                if avg_vol > 0 and vol > avg_vol * 3:
+                                    side = "bid" if [price, vol] in bids else "ask"
+                                    walls.append({"price": price, "volume": vol, "side": side})
+                            order_book_data = {
+                                "status": "available",
+                                "spread_pct": round(spread_pct, 4),
+                                "bid_volume_top10": round(bid_vol, 2),
+                                "ask_volume_top10": round(ask_vol, 2),
+                                "imbalance_ratio": round(imbalance, 3),
+                                "walls": walls[:3],
+                                "best_bid": bids[0][0] if bids else 0,
+                                "best_ask": asks[0][0] if asks else 0,
+                                "fetch_ms": round(ob_fetch_ms, 1),
+                            }
+            except Exception as e:
+                logger.debug("order_book_fetch_error", symbol=entry.symbol, error=str(e))
 
         context = self._build_agent_context(
             entry, candles_5m, zone_top, zone_bottom, direction, order_book_data,
@@ -821,6 +874,9 @@ class EntryRefiner:
         entry.last_agent2_urgency = decision.urgency
         entry.agent2_check_count += 1
 
+        # Req 8: shadow mode — log all decisions but don't act on them
+        shadow = getattr(self.config, "agent2_shadow_mode", False) if self.config else False
+
         if decision.action == "ENTER":
             logger.info(
                 "refiner_agent2_enter",
@@ -831,20 +887,40 @@ class EntryRefiner:
                 size_modifier=decision.position_size_modifier,
                 confidence=decision.confidence,
                 agent2_check=entry.agent2_check_count,
+                shadow=shadow,
             )
+            if shadow:
+                return None  # Shadow mode: log only, don't create signal
             return self._create_refined_signal_from_agent(entry, decision)
 
         elif decision.action == "ADJUST_ZONE":
-            entry.ote_zone_top = decision.adjusted_zone_high
-            entry.ote_zone_bottom = decision.adjusted_zone_low
-            entry.zone_source = "agent2_adjusted"
             logger.info(
                 "refiner_agent2_adjust_zone",
                 symbol=entry.symbol,
                 new_zone=f"{round(decision.adjusted_zone_low, 6)}-{round(decision.adjusted_zone_high, 6)}",
                 confidence=decision.confidence,
                 agent2_check=entry.agent2_check_count,
+                shadow=shadow,
             )
+            if not shadow:
+                # Only adjust zone in live mode, not shadow
+                entry.ote_zone_top = decision.adjusted_zone_high
+                entry.ote_zone_bottom = decision.adjusted_zone_low
+                entry.zone_source = "agent2_adjusted"
+                # Sync PullbackPlan — update zone but do NOT reset expiry
+                if entry.pullback_plan is not None:
+                    entry.pullback_plan.zone_high = decision.adjusted_zone_high
+                    entry.pullback_plan.zone_low = decision.adjusted_zone_low
+                    entry.pullback_plan.limit_price = entry.pullback_plan.compute_limit_price()
+                    entry.pullback_plan.zone_updates += 1
+                    logger.info(
+                        "pullback_plan_zone_adjusted",
+                        symbol=entry.symbol,
+                        new_zone=entry.pullback_plan.zone_str(),
+                        new_limit=round(entry.pullback_plan.limit_price, 6),
+                        zone_updates=entry.pullback_plan.zone_updates,
+                        age_seconds=round(entry.pullback_plan.age_seconds, 1),
+                    )
             return None
 
         elif decision.action == "ABANDON":
@@ -1025,6 +1101,17 @@ class EntryRefiner:
             "agent1_tp": agent1_tp,
             "agent1_rr": agent1_rr,
             "order_book": order_book or {"status": "unavailable"},
+            # PullbackPlan context — helps Agent 2 make time-aware decisions
+            "pullback_plan": {
+                "zone_low": entry.pullback_plan.zone_low,
+                "zone_high": entry.pullback_plan.zone_high,
+                "invalidation_level": entry.pullback_plan.invalidation_level,
+                "limit_price": entry.pullback_plan.limit_price,
+                "time_remaining_seconds": max(0, (entry.pullback_plan.expires_at - datetime.now(timezone.utc)).total_seconds()),
+                "age_seconds": entry.pullback_plan.age_seconds,
+                "zone_updates": entry.pullback_plan.zone_updates,
+                "max_chase_bps": entry.pullback_plan.max_chase_bps,
+            } if entry.pullback_plan else None,
         }
 
     def _create_refined_signal_from_agent(
@@ -1195,6 +1282,21 @@ class EntryRefiner:
                 "last_agent2_reasoning": entry.last_agent2_reasoning,
                 "last_agent2_urgency": entry.last_agent2_urgency,
                 "agent2_check_count": entry.agent2_check_count,
+                # PullbackPlan persistence
+                "pullback_plan": {
+                    "zone_low": entry.pullback_plan.zone_low,
+                    "zone_high": entry.pullback_plan.zone_high,
+                    "created_at": entry.pullback_plan.created_at.isoformat(),
+                    "expires_at": entry.pullback_plan.expires_at.isoformat(),
+                    "invalidation_level": entry.pullback_plan.invalidation_level,
+                    "max_chase_bps": entry.pullback_plan.max_chase_bps,
+                    "zone_tolerance_bps": entry.pullback_plan.zone_tolerance_bps,
+                    "valid_for_candles": entry.pullback_plan.valid_for_candles,
+                    "direction": entry.pullback_plan.direction,
+                    "limit_price": entry.pullback_plan.limit_price,
+                    "original_suggested_entry": entry.pullback_plan.original_suggested_entry,
+                    "zone_updates": entry.pullback_plan.zone_updates,
+                } if entry.pullback_plan else None,
             }
         return {
             "entries": entries_data,
@@ -1258,6 +1360,28 @@ class EntryRefiner:
                 entry.last_agent2_action = entry_data.get("last_agent2_action", "")
                 entry.last_agent2_reasoning = entry_data.get("last_agent2_reasoning", "")
                 entry.last_agent2_urgency = entry_data.get("last_agent2_urgency", "")
+                # Restore PullbackPlan if present
+                plan_data = entry_data.get("pullback_plan")
+                if plan_data and isinstance(plan_data, dict):
+                    try:
+                        entry.pullback_plan = PullbackPlan(
+                            zone_low=plan_data["zone_low"],
+                            zone_high=plan_data["zone_high"],
+                            created_at=datetime.fromisoformat(plan_data["created_at"]),
+                            expires_at=datetime.fromisoformat(plan_data["expires_at"]),
+                            invalidation_level=plan_data.get("invalidation_level", 0.0),
+                            max_chase_bps=plan_data.get("max_chase_bps", 3.0),
+                            zone_tolerance_bps=plan_data.get("zone_tolerance_bps", 2.0),
+                            valid_for_candles=plan_data.get("valid_for_candles", 6),
+                            direction=plan_data.get("direction", ""),
+                            limit_price=plan_data.get("limit_price", 0.0),
+                            original_suggested_entry=plan_data.get("original_suggested_entry", 0.0),
+                            zone_updates=plan_data.get("zone_updates", 0),
+                        )
+                        # Also restore plan on the signal
+                        entry.signal.pullback_plan = entry.pullback_plan
+                    except Exception as pe:
+                        logger.warning("refiner_restore_plan_failed", symbol=sym, error=str(pe)[:80])
                 self.queue[sym] = entry
                 restored += 1
             except Exception as e:

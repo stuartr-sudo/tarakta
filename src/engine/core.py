@@ -15,7 +15,7 @@ from src.engine.entry_refiner import EntryRefiner
 from src.engine.scheduler import Scheduler, TickType
 from src.engine.watchlist import WatchlistMonitor
 from src.engine.state import EngineState
-from src.exchange.models import Position, TakeProfitTier
+from src.exchange.models import Position, PullbackPlan, TakeProfitTier
 from src.exchange.trading_hours import TradingHoursManager
 from src.execution.monitor import PositionMonitor
 from src.execution.orders import OrderExecutor
@@ -75,6 +75,10 @@ class TradingEngine:
             position_agent_interval_minutes=getattr(
                 config, "position_agent_check_interval_minutes", 15.0
             ),
+        )
+        # Req 8: wire shadow mode from config
+        self.position_monitor._agent3_shadow_mode = getattr(
+            config, "agent3_shadow_mode", False
         )
         self.scanner = AltcoinScanner(candle_manager, config)
 
@@ -826,12 +830,21 @@ class TradingEngine:
 
                     # Fetch per-symbol trade history for Agent 1 feedback loop
                     symbol_history = []
-                    try:
-                        symbol_history = await self.repo.get_recent_trades_for_symbol(
-                            signal.symbol, limit=5, mode=self.state.mode
-                        )
-                    except Exception:
-                        pass  # Non-critical — agent works without history
+                    if getattr(self.config, "symbol_history_enabled", True):
+                        try:
+                            symbol_history = await self.repo.get_recent_trades_for_symbol(
+                                signal.symbol, limit=5, mode=self.state.mode
+                            )
+                            # No-lookahead: exclude trades closed < 5 min ago (Req 5)
+                            if symbol_history:
+                                from datetime import timedelta
+                                cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+                                symbol_history = [
+                                    t for t in symbol_history
+                                    if datetime.fromisoformat(t.get("exit_time", "2000-01-01T00:00:00+00:00")) < cutoff
+                                ]
+                        except Exception:
+                            pass  # Non-critical — agent works without history
 
                     ai_context = {
                         "sentiment_score": early_sentiment,
@@ -899,7 +912,7 @@ class TradingEngine:
                         continue
 
                     elif agent_result.action == "WAIT_PULLBACK":
-                        # Agent wants to wait — queue in entry refiner
+                        # Agent wants to wait — queue in entry refiner with formal PullbackPlan
                         if (
                             self.main_entry_refiner
                             and signal.symbol not in self.portfolio.open_positions
@@ -912,6 +925,43 @@ class TradingEngine:
                                 signal.agent_entry_zone_high = agent_result.entry_zone_high
                             if agent_result.entry_zone_low is not None:
                                 signal.agent_entry_zone_low = agent_result.entry_zone_low
+
+                            # ── Fail-safe: reject if zone is missing or inverted ──
+                            zone_h = agent_result.entry_zone_high
+                            zone_l = agent_result.entry_zone_low
+                            if not zone_h or not zone_l or zone_h <= zone_l or zone_h <= 0:
+                                logger.warning(
+                                    "wait_pullback_rejected_invalid_zone",
+                                    symbol=signal.symbol,
+                                    zone_high=zone_h,
+                                    zone_low=zone_l,
+                                    reason="zone missing, inverted, or zero",
+                                )
+                                continue
+
+                            # ── Build PullbackPlan ──
+                            now = datetime.now(timezone.utc)
+                            expiry_seconds = self.config.pullback_valid_candles * 5 * 60  # candles × 5m
+                            # Invalidation level = sweep level (the wick extreme that must hold)
+                            invalidation = 0.0
+                            if signal.sweep_result and signal.sweep_result.sweep_detected:
+                                invalidation = signal.sweep_result.sweep_level
+
+                            plan = PullbackPlan(
+                                zone_low=zone_l,
+                                zone_high=zone_h,
+                                created_at=now,
+                                expires_at=now + timedelta(seconds=expiry_seconds),
+                                invalidation_level=invalidation,
+                                max_chase_bps=self.config.pullback_max_chase_bps,
+                                zone_tolerance_bps=self.config.pullback_zone_tolerance_bps,
+                                valid_for_candles=self.config.pullback_valid_candles,
+                                direction=signal.direction or "",
+                                original_suggested_entry=agent_result.suggested_entry or 0.0,
+                            )
+                            plan.limit_price = plan.compute_limit_price()
+                            signal.pullback_plan = plan
+
                             # Store pre-computed SL/TP for Agent 2 to reference
                             signal._pre_sl = pre_sl
                             signal._pre_tp = pre_tp
@@ -933,8 +983,10 @@ class TradingEngine:
                                     "agent_wait_pullback_queued",
                                     symbol=signal.symbol,
                                     target_entry=agent_result.suggested_entry,
-                                    entry_zone=f"{agent_result.entry_zone_low}-{agent_result.entry_zone_high}"
-                                    if agent_result.entry_zone_high else "none",
+                                    entry_zone=plan.zone_str(),
+                                    limit_price=round(plan.limit_price, 6),
+                                    invalidation=round(plan.invalidation_level, 6),
+                                    expires_in_seconds=expiry_seconds,
                                     confidence=agent_result.confidence,
                                 )
                                 vol_24h = self.exchange.get_24h_volume(signal.symbol)
@@ -1462,66 +1514,101 @@ class TradingEngine:
                 logger.warning("refiner_risk_check_failed", error=str(e))
                 continue
 
-            # Validate current price is still near the refined entry
-            # Prevents entering at $2044 when the refiner found $2008
+            # ── Pre-dispatch revalidation ──
+            # Two paths: PullbackPlan signals get structured zone enforcement,
+            # ENTER_NOW signals get the legacy drift check.
             try:
                 ticker = await self.exchange.fetch_ticker(signal.symbol)
                 live_price = float(ticker.get("last", 0) or 0)
-                if live_price > 0 and signal.entry_price > 0:
-                    drift_pct = abs(live_price - signal.entry_price) / signal.entry_price
-                    max_drift = 0.005  # 0.5% — reject if price moved >0.5% from refined entry
-                    if drift_pct > max_drift:
+                if live_price <= 0:
+                    logger.warning("refiner_live_price_zero", symbol=signal.symbol)
+                    continue
+
+                plan = getattr(signal, "pullback_plan", None)
+
+                if plan is not None:
+                    # ── PullbackPlan structured enforcement ──
+                    reject_reason = ""
+                    if plan.is_expired:
+                        reject_reason = "plan_expired"
+                    elif plan.invalidation_hit(live_price):
+                        reject_reason = "invalidation_hit"
+                    elif not plan.price_in_zone(live_price):
+                        reject_reason = "price_outside_zone"
+                    elif not plan.slippage_ok(live_price):
+                        reject_reason = "slippage_exceeded"
+
+                    if reject_reason:
                         logger.info(
-                            "refiner_entry_price_drifted",
+                            "pullback_plan_entry_rejected",
                             symbol=signal.symbol,
-                            refined_price=round(signal.entry_price, 6),
+                            reject_reason=reject_reason,
+                            decision_price=round(signal.entry_price, 6),
                             live_price=round(live_price, 6),
-                            drift_pct=f"{drift_pct:.4f}",
-                            max_drift=f"{max_drift:.4f}",
+                            zone=plan.zone_str(),
+                            invalidation=round(plan.invalidation_level, 6),
+                            age_seconds=round(plan.age_seconds, 1),
+                            path_taken="pre_dispatch",
                         )
-                        # Re-queue if not expired — give it another chance
-                        if self.main_entry_refiner and signal.symbol not in self.main_entry_refiner.queue:
-                            signal.entry_price = signal.original_1h_price  # Reset
-                            self.main_entry_refiner.add(signal)
-                            logger.info("refiner_requeued_after_drift", symbol=signal.symbol)
-                        continue
+                        continue  # DO_NOT_ENTER — no re-queue, no market fallback
 
-                    # Also verify live price is near the OTE zone boundary
-                    # (safety net — the refiner already checks this, but the
-                    # live price may have moved since the refiner graduated it)
-                    zone_max_overshoot = 0.005  # 0.5%
-                    zone_high = getattr(signal, "agent_entry_zone_high", None)
-                    zone_low = getattr(signal, "agent_entry_zone_low", None)
-                    if zone_high and zone_low:
-                        direction = signal.direction or ""
-                        if direction in ("long", "bullish") and live_price > zone_high * (1 + zone_max_overshoot):
+                    # Plan passed all checks — update entry to live price
+                    signal.entry_price = live_price
+
+                else:
+                    # ── Legacy drift check for ENTER_NOW signals ──
+                    if signal.entry_price > 0:
+                        drift_pct = abs(live_price - signal.entry_price) / signal.entry_price
+                        max_drift = 0.005  # 0.5%
+                        if drift_pct > max_drift:
                             logger.info(
-                                "refiner_live_price_beyond_zone",
+                                "refiner_entry_price_drifted",
                                 symbol=signal.symbol,
+                                refined_price=round(signal.entry_price, 6),
                                 live_price=round(live_price, 6),
-                                zone_high=round(zone_high, 6),
-                                direction=direction,
+                                drift_pct=f"{drift_pct:.4f}",
+                                max_drift=f"{max_drift:.4f}",
                             )
                             if self.main_entry_refiner and signal.symbol not in self.main_entry_refiner.queue:
                                 signal.entry_price = signal.original_1h_price
                                 self.main_entry_refiner.add(signal)
-                                logger.info("refiner_requeued_beyond_zone", symbol=signal.symbol)
-                            continue
-                        if direction in ("short", "bearish") and live_price < zone_low * (1 - zone_max_overshoot):
-                            logger.info(
-                                "refiner_live_price_beyond_zone",
-                                symbol=signal.symbol,
-                                live_price=round(live_price, 6),
-                                zone_low=round(zone_low, 6),
-                                direction=direction,
-                            )
-                            if self.main_entry_refiner and signal.symbol not in self.main_entry_refiner.queue:
-                                signal.entry_price = signal.original_1h_price
-                                self.main_entry_refiner.add(signal)
-                                logger.info("refiner_requeued_beyond_zone", symbol=signal.symbol)
+                                logger.info("refiner_requeued_after_drift", symbol=signal.symbol)
                             continue
 
-                    # Update entry price to the actual live price for accurate execution
+                        # Zone boundary check for non-plan signals
+                        zone_max_overshoot = 0.005
+                        zone_high = getattr(signal, "agent_entry_zone_high", None)
+                        zone_low = getattr(signal, "agent_entry_zone_low", None)
+                        if zone_high and zone_low:
+                            direction = signal.direction or ""
+                            if direction in ("long", "bullish") and live_price > zone_high * (1 + zone_max_overshoot):
+                                logger.info(
+                                    "refiner_live_price_beyond_zone",
+                                    symbol=signal.symbol,
+                                    live_price=round(live_price, 6),
+                                    zone_high=round(zone_high, 6),
+                                    direction=direction,
+                                )
+                                if self.main_entry_refiner and signal.symbol not in self.main_entry_refiner.queue:
+                                    signal.entry_price = signal.original_1h_price
+                                    self.main_entry_refiner.add(signal)
+                                    logger.info("refiner_requeued_beyond_zone", symbol=signal.symbol)
+                                continue
+                            if direction in ("short", "bearish") and live_price < zone_low * (1 - zone_max_overshoot):
+                                logger.info(
+                                    "refiner_live_price_beyond_zone",
+                                    symbol=signal.symbol,
+                                    live_price=round(live_price, 6),
+                                    zone_low=round(zone_low, 6),
+                                    direction=direction,
+                                )
+                                if self.main_entry_refiner and signal.symbol not in self.main_entry_refiner.queue:
+                                    signal.entry_price = signal.original_1h_price
+                                    self.main_entry_refiner.add(signal)
+                                    logger.info("refiner_requeued_beyond_zone", symbol=signal.symbol)
+                                continue
+
+                    # Update entry price to live for accurate execution
                     signal.entry_price = live_price
             except Exception as e:
                 logger.warning("refiner_live_price_check_failed", symbol=signal.symbol, error=str(e)[:80])
@@ -1665,12 +1752,21 @@ class TradingEngine:
 
             # Fetch per-symbol trade history for Agent 1 feedback loop
             expired_symbol_history = []
-            try:
-                expired_symbol_history = await self.repo.get_recent_trades_for_symbol(
-                    signal.symbol, limit=5, mode=self.state.mode
-                )
-            except Exception:
-                pass
+            if getattr(self.config, "symbol_history_enabled", True):
+                try:
+                    expired_symbol_history = await self.repo.get_recent_trades_for_symbol(
+                        signal.symbol, limit=5, mode=self.state.mode
+                    )
+                    # No-lookahead: exclude trades closed < 5 min ago (Req 5)
+                    if expired_symbol_history:
+                        from datetime import timedelta
+                        cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+                        expired_symbol_history = [
+                            t for t in expired_symbol_history
+                            if datetime.fromisoformat(t.get("exit_time", "2000-01-01T00:00:00+00:00")) < cutoff
+                        ]
+                except Exception:
+                    pass
 
             context = {
                 "sentiment_score": sentiment,
@@ -1755,16 +1851,45 @@ class TradingEngine:
                         )
 
             elif result.action == "WAIT_PULLBACK":
-                # Agent wants another pullback attempt — re-queue with new zone
+                # Agent wants another pullback attempt — re-queue with fresh PullbackPlan
                 if (
                     self.main_entry_refiner
                     and signal.symbol not in self.main_entry_refiner.queue
                 ):
-                    if result.entry_zone_high and result.entry_zone_low:
-                        signal.agent_entry_zone_high = result.entry_zone_high
-                        signal.agent_entry_zone_low = result.entry_zone_low
+                    zone_h = result.entry_zone_high
+                    zone_l = result.entry_zone_low
+                    if zone_h and zone_l and zone_h > zone_l and zone_h > 0:
+                        signal.agent_entry_zone_high = zone_h
+                        signal.agent_entry_zone_low = zone_l
+                    else:
+                        # Fall back to existing zone on signal (from previous plan)
+                        zone_h = signal.agent_entry_zone_high
+                        zone_l = signal.agent_entry_zone_low
                     if result.suggested_entry:
                         signal.original_1h_price = signal.entry_price
+
+                    # Build fresh PullbackPlan (never reuse stale plan)
+                    if zone_h and zone_l and zone_h > zone_l:
+                        now = datetime.now(timezone.utc)
+                        expiry_seconds = self.config.pullback_valid_candles * 5 * 60
+                        invalidation = 0.0
+                        if signal.sweep_result and signal.sweep_result.sweep_detected:
+                            invalidation = signal.sweep_result.sweep_level
+                        plan = PullbackPlan(
+                            zone_low=zone_l,
+                            zone_high=zone_h,
+                            created_at=now,
+                            expires_at=now + timedelta(seconds=expiry_seconds),
+                            invalidation_level=invalidation,
+                            max_chase_bps=self.config.pullback_max_chase_bps,
+                            zone_tolerance_bps=self.config.pullback_zone_tolerance_bps,
+                            valid_for_candles=self.config.pullback_valid_candles,
+                            direction=signal.direction or "",
+                            original_suggested_entry=result.suggested_entry or 0.0,
+                        )
+                        plan.limit_price = plan.compute_limit_price()
+                        signal.pullback_plan = plan
+
                     queued = self.main_entry_refiner.add(signal)
                     if not queued and signal.breakout_result and signal.breakout_result.breakout_detected:
                         queued = self.main_entry_refiner.add_breakout(signal)
@@ -1772,7 +1897,8 @@ class TradingEngine:
                         logger.info(
                             "expired_review_requeued",
                             symbol=signal.symbol,
-                            new_zone=f"{result.entry_zone_low}-{result.entry_zone_high}",
+                            new_zone=f"{zone_l}-{zone_h}" if zone_h and zone_l else "inherited",
+                            has_plan=signal.pullback_plan is not None,
                             confidence=result.confidence,
                         )
                     else:
@@ -1960,12 +2086,21 @@ class TradingEngine:
 
                     # Fetch per-symbol trade history for Agent 1 feedback loop
                     wl_symbol_history = []
-                    try:
-                        wl_symbol_history = await self.repo.get_recent_trades_for_symbol(
-                            graduated.symbol, limit=5, mode=self.state.mode
-                        )
-                    except Exception:
-                        pass
+                    if getattr(self.config, "symbol_history_enabled", True):
+                        try:
+                            wl_symbol_history = await self.repo.get_recent_trades_for_symbol(
+                                graduated.symbol, limit=5, mode=self.state.mode
+                            )
+                            # No-lookahead: exclude trades closed < 5 min ago (Req 5)
+                            if wl_symbol_history:
+                                from datetime import timedelta
+                                cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+                                wl_symbol_history = [
+                                    t for t in wl_symbol_history
+                                    if datetime.fromisoformat(t.get("exit_time", "2000-01-01T00:00:00+00:00")) < cutoff
+                                ]
+                        except Exception:
+                            pass
 
                     wl_context = {
                         "sentiment_score": wl_sentiment,
@@ -2013,6 +2148,14 @@ class TradingEngine:
             if agent_skip:
                 continue
 
+            # Idempotency guard: skip if symbol already in open positions (Req 2)
+            if graduated.symbol in self.state.open_positions:
+                logger.warning(
+                    "watchlist_duplicate_entry_blocked",
+                    symbol=graduated.symbol,
+                )
+                continue
+
             # Execute the trade
             try:
                 position, order_result, trade_record = (
@@ -2024,6 +2167,14 @@ class TradingEngine:
                 )
 
                 if position and order_result.filled_quantity > 0:
+                    # Second idempotency check after async execution gap
+                    if graduated.symbol in self.state.open_positions:
+                        logger.warning(
+                            "watchlist_duplicate_post_exec_blocked",
+                            symbol=graduated.symbol,
+                        )
+                        continue
+
                     # Match all other entry paths: confluence score, DB persistence, portfolio, state
                     position.confluence_score = graduated.score
 
@@ -2598,12 +2749,13 @@ class TradingEngine:
             overrides["main_bot_settings"] = main_settings
             state_dict["config_overrides"] = overrides
             await self.repo.upsert_engine_state(state_dict)
-            await self.repo.insert_snapshot(
-                self.portfolio.to_snapshot_dict(
-                    cycle_number=self.state.cycle_count,
-                    mode=self.state.mode,
-                )
+            snapshot = self.portfolio.to_snapshot_dict(
+                cycle_number=self.state.cycle_count,
+                mode=self.state.mode,
             )
+            # Equity = initial balance + total realized P&L (ground truth)
+            snapshot["balance_usd"] = self.config.initial_balance + self.portfolio.total_pnl
+            await self.repo.insert_snapshot(snapshot)
         except Exception as e:
             logger.error("state_persist_failed", error=str(e))
 

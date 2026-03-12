@@ -259,6 +259,82 @@ class SignalCandidate:
     fibonacci_levels: dict = field(default_factory=dict)
     # Extended ICT/SMC context for AI agent (populated post-scoring, not used in formula)
     agent_context: dict = field(default_factory=dict)
+    # Pullback plan for WAIT_PULLBACK entries (formal pending order contract)
+    pullback_plan: PullbackPlan | None = None
+
+
+@dataclass
+class PullbackPlan:
+    """Formal pending order plan for WAIT_PULLBACK entries.
+
+    Created when Agent 1 returns WAIT_PULLBACK. Enforces zone boundaries,
+    expiry, invalidation, and slippage limits at all entry paths.
+    No fallback to market order — if any check fails, DO_NOT_ENTER.
+    """
+
+    zone_low: float
+    zone_high: float
+    created_at: datetime
+    expires_at: datetime
+    invalidation_level: float = 0.0   # Price that kills the setup (e.g., sweep low break)
+    max_chase_bps: float = 3.0        # Max basis points of slippage beyond zone edge
+    zone_tolerance_bps: float = 2.0   # Tiny tolerance for zone boundary check
+    valid_for_candles: int = 6         # Number of 5m candles (6 = 30 min)
+    direction: str = ""                # "bullish" or "bearish"
+    limit_price: float = 0.0          # Computed zone-aware limit price
+    original_suggested_entry: float = 0.0  # Agent 1's suggested_entry
+    zone_updates: int = 0              # How many times Agent 2 adjusted zone
+
+    @property
+    def is_expired(self) -> bool:
+        return datetime.now(timezone.utc) >= self.expires_at
+
+    @property
+    def age_seconds(self) -> float:
+        return (datetime.now(timezone.utc) - self.created_at).total_seconds()
+
+    def price_in_zone(self, price: float) -> bool:
+        """Check if price is inside zone with tolerance."""
+        tol = self.zone_high * (self.zone_tolerance_bps / 10000)
+        return (self.zone_low - tol) <= price <= (self.zone_high + tol)
+
+    def slippage_ok(self, price: float) -> bool:
+        """Check if price slippage from zone is within max_chase_bps."""
+        if self.direction in ("bullish", "long"):
+            # For longs, slippage = buying above zone_high
+            if price <= self.zone_high:
+                return True
+            slip_bps = (price - self.zone_high) / self.zone_high * 10000
+        else:
+            # For shorts, slippage = selling below zone_low
+            if price >= self.zone_low:
+                return True
+            slip_bps = (self.zone_low - price) / self.zone_low * 10000
+        return slip_bps <= self.max_chase_bps
+
+    def invalidation_hit(self, price: float) -> bool:
+        """Check if price has broken the invalidation level."""
+        if self.invalidation_level <= 0:
+            return False
+        if self.direction in ("bullish", "long"):
+            return price < self.invalidation_level
+        else:
+            return price > self.invalidation_level
+
+    def compute_limit_price(self) -> float:
+        """Compute optimal limit price within zone.
+
+        Longs: lower quarter of zone (buy low).
+        Shorts: upper quarter of zone (sell high).
+        """
+        zone_range = self.zone_high - self.zone_low
+        if self.direction in ("bullish", "long"):
+            return self.zone_low + 0.25 * zone_range
+        else:
+            return self.zone_high - 0.25 * zone_range
+
+    def zone_str(self) -> str:
+        return f"{round(self.zone_low, 6)}-{round(self.zone_high, 6)}"
 
 
 @dataclass

@@ -936,11 +936,13 @@ async function softRefreshStats() {
         const data = await portfolioResp.json();
         const openData = await openResp.json();
 
-        // Use portfolio snapshot for equity/drawdown (these are fine from snapshot)
+        // Equity = initial balance + total realized P&L (DB ground truth)
+        const totalPnl = parseFloat(stats.total_pnl || 0);
+        const equityValue = initial + totalPnl;
         if (data.current) {
             const s = data.current;
             const eqEl = document.getElementById('equity-value');
-            if (eqEl) eqEl.textContent = '$' + parseFloat(s.balance_usd || 0).toFixed(2);
+            if (eqEl) eqEl.textContent = '$' + equityValue.toFixed(2);
 
             const ddEl = document.getElementById('drawdown-value');
             if (ddEl) ddEl.textContent = (parseFloat(s.drawdown_pct || 0) * 100).toFixed(1) + '%';
@@ -972,7 +974,7 @@ async function softRefreshStats() {
 
         // Update available cash and allocated (using remaining qty for partial exits)
         if (data.current) {
-            const equity = parseFloat(data.current.balance_usd || 0);
+            const equity = equityValue;
             let allocated = 0;
             openTrades.forEach(t => {
                 const lev = parseInt(t.leverage || 1) || 1;
