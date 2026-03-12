@@ -144,6 +144,12 @@ class Settings(BaseSettings):
     refiner_agent_enabled: bool = False
     refiner_agent_check_interval_minutes: float = 5.0  # Agent 2 runs every 5 min per signal
 
+    # Position Manager Agent (Agent 3 — AI-powered position monitoring)
+    # Shares agent_api_key with Agent 1/2; runs every 15 min per open position
+    position_agent_enabled: bool = False
+    position_agent_model: str = "gpt-5-mini"  # Fast/cheap model for frequent checks
+    position_agent_check_interval_minutes: float = 15.0  # How often to check each position
+
     # Dynamic strategy weights
     dynamic_weights_enabled: bool = False  # Adjust confluence weights based on trade outcomes
 

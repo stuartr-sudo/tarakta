@@ -118,6 +118,18 @@ For ALL actions (including ENTER_NOW and SKIP), always provide your best estimat
 suggested_entry, suggested_sl, and suggested_tp. This helps the trader see your analysis \
 even when you recommend skipping. Only use 0 if you truly cannot estimate a level.
 
+## Symbol History (per-symbol feedback loop)
+If provided, you will see the last few closed trades for THIS specific symbol. Use this to:
+- If the bot has a HIGH LOSS RATE on this symbol (e.g. 3+ losses in 5 trades): raise your confidence \
+threshold — demand stronger confluence or a deeper pullback before entering.
+- If recent exits are mostly "sl_hit": check if the SL placement pattern is wrong — maybe the \
+structure requires a wider SL, or the direction is consistently wrong for this pair.
+- If recent trades were consistently profitable: lean towards entering — the current setup \
+conditions clearly work for this symbol.
+- If the holding times are very short with losses: the timing may be off — prefer WAIT_PULLBACK \
+over ENTER_NOW to get a better entry.
+If no history is provided, treat the symbol as fresh with no prior data.
+
 Be decisive. Lean towards taking trades with good sweeps rather than skipping them. \
 The formula system already filters heavily — if a signal reaches you, it has merit.
 
@@ -597,6 +609,42 @@ class AgentEntryAnalyst:
         if leverage_bonus is not None:
             leverage_info = f"Leverage alignment bonus: {leverage_bonus} pts"
 
+        # Symbol trade history (feedback loop)
+        symbol_history = context.get("symbol_history", [])
+        if symbol_history:
+            history_lines = []
+            wins = sum(1 for t in symbol_history if (t.get("pnl_usd") or 0) > 0)
+            losses = len(symbol_history) - wins
+            history_lines.append(f"  Last {len(symbol_history)} trades: {wins}W / {losses}L")
+            for t in symbol_history:
+                pnl = t.get("pnl_usd", 0) or 0
+                pnl_pct = t.get("pnl_percent", 0) or 0
+                exit_reason = t.get("exit_reason", "unknown")
+                direction_h = t.get("direction", "?")
+                conf = t.get("confluence_score")
+                entry_p = t.get("entry_price", 0) or 0
+                exit_p = t.get("exit_price", 0) or 0
+                # Calculate hold time if available
+                hold_str = ""
+                if t.get("entry_time") and t.get("exit_time"):
+                    try:
+                        from datetime import datetime as _dt
+                        et = _dt.fromisoformat(str(t["entry_time"]).replace("Z", "+00:00"))
+                        xt = _dt.fromisoformat(str(t["exit_time"]).replace("Z", "+00:00"))
+                        hold_mins = int((xt - et).total_seconds() / 60)
+                        hold_str = f", held {hold_mins}m"
+                    except Exception:
+                        pass
+                w_l = "WIN" if pnl > 0 else "LOSS"
+                conf_str = f", score={conf:.0f}" if conf else ""
+                history_lines.append(
+                    f"  - {direction_h} {w_l}: ${pnl:+.2f} ({pnl_pct:+.1f}%), "
+                    f"exit={exit_reason}, entry={entry_p:.6g}→{exit_p:.6g}{hold_str}{conf_str}"
+                )
+            symbol_history_section = "\n".join(history_lines)
+        else:
+            symbol_history_section = "  No prior trades for this symbol"
+
         # Fibonacci retracement section
         fib = signal.fibonacci_levels
         if fib and fib.get("fib_50"):
@@ -652,6 +700,9 @@ class AgentEntryAnalyst:
 
 ### Bot Performance
 {perf_section}
+
+### Symbol Trade History
+{symbol_history_section}
 
 Analyze this setup and respond with your JSON decision."""
 

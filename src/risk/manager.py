@@ -194,8 +194,10 @@ class RiskManager:
                     )
 
         # Daily drawdown check — use equity (cash + positions), not just cash
+        # For futures: use margin-based exposure (notional / leverage) to avoid inflating equity
         if daily_start_balance > 0:
-            current_equity = current_balance + total_exposure_usd
+            effective_dd_exposure = total_exposure_usd / self._leverage if self._leverage > 1 else total_exposure_usd
+            current_equity = current_balance + effective_dd_exposure
             daily_dd = (daily_start_balance - current_equity) / daily_start_balance
             if daily_dd >= self.max_daily_drawdown:
                 return TradeValidation(

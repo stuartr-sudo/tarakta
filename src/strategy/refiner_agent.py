@@ -169,6 +169,16 @@ your TP serves as the overall target reference
 - **medium:** Conditions developing — likely 1-2 more candles (5-10 minutes)
 - **low:** Price is approaching but 15-30 minutes from zone contact
 
+## Order Book Analysis (if available)
+If order book data is provided, use it as additional confirmation:
+- **Bid imbalance (positive ratio):** More buyers than sellers — supports long entries
+- **Ask imbalance (negative ratio):** More sellers than buyers — supports short entries
+- **Wide spread (>0.05%):** Low liquidity — reduce position_size_modifier (use 0.5-0.75)
+- **Walls:** Large resting orders at specific prices. A bid wall below entry zone = extra support for \
+longs. An ask wall above zone = extra resistance for shorts. Walls in the wrong direction \
+(bid wall above for longs = likely to sell into your entry) are a warning sign.
+- If order book is unavailable, skip this analysis step entirely — do NOT penalize the signal.
+
 ## Reading 5-Minute Candles — Key Metrics
 For each candle in the table, extract:
 - **Wick ratio:** (wick at zone side) / (body size). >1.0 = rejection, >2.0 = strong rejection
@@ -644,7 +654,29 @@ class RefinerMonitorAgent:
             leverage_parts.append(f"Alignment bonus: {leverage_bonus} pts")
         leverage_section = " | ".join(leverage_parts) if leverage_parts else "Not available"
 
-        # ── Section 12: Sweep details ──
+        # ── Section 12: Order book ──
+        ob_data = ctx.get("order_book", {})
+        if ob_data.get("status") == "available":
+            ob_parts = [
+                f"Spread: {ob_data.get('spread_pct', 0):.4f}%",
+                f"Bid vol (top10): {ob_data.get('bid_volume_top10', 0):.2f}",
+                f"Ask vol (top10): {ob_data.get('ask_volume_top10', 0):.2f}",
+                f"Imbalance: {ob_data.get('imbalance_ratio', 0):+.3f} (+1=all bids, -1=all asks)",
+                f"Best bid: {ob_data.get('best_bid', 0):.6g}",
+                f"Best ask: {ob_data.get('best_ask', 0):.6g}",
+            ]
+            walls = ob_data.get("walls", [])
+            if walls:
+                for w in walls:
+                    ob_parts.append(
+                        f"  Wall: {w.get('side', '?')} @ {w.get('price', 0):.6g} "
+                        f"(vol={w.get('volume', 0):.2f})"
+                    )
+            order_book_section = "\n".join(ob_parts)
+        else:
+            order_book_section = "Not available for this market"
+
+        # ── Section 13a: Sweep details ──
         sweep = ctx.get("sweep_info", {})
         if sweep:
             sweep_section = (
@@ -726,11 +758,15 @@ class RefinerMonitorAgent:
 ### Fibonacci Retracement Levels
 {fib_section}
 
+### Order Book
+{order_book_section}
+
 ### Leverage / Funding Profile
 {leverage_section}
 
 Run through the 3-step analysis: (1) price vs zone, (2) latest candle rejection signals, \
-(3) structural confirmation. Reference specific numbers from the data in your reasoning."""
+(3) structural confirmation. Check order book for liquidity support. \
+Reference specific numbers from the data in your reasoning."""
 
     def _parse_response(self, response) -> RefinerDecision:
         """Extract structured JSON from OpenAI response."""

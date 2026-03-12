@@ -59,12 +59,22 @@ class TradingEngine:
         self.risk_manager = RiskManager(config, exchange=exchange)
         self.circuit_breaker = CircuitBreaker(config)
         self.order_executor = OrderExecutor(exchange, self.risk_manager, config)
+        # Agent 3 (Position Manager) — instantiate if enabled
+        self.position_agent = None
+        if getattr(config, "position_agent_enabled", False) and config.agent_api_key:
+            from src.strategy.position_agent import PositionManagerAgent
+            self.position_agent = PositionManagerAgent(config)
+
         self.position_monitor = PositionMonitor(
             trailing_activation_rr=config.trailing_activation_rr,
             trailing_atr_multiplier=config.trailing_atr_multiplier,
             breakeven_activation_rr=config.breakeven_activation_rr,
             max_hold_hours=config.max_hold_hours,
             stale_close_below_rr=config.stale_close_below_rr,
+            position_agent=self.position_agent,
+            position_agent_interval_minutes=getattr(
+                config, "position_agent_check_interval_minutes", 15.0
+            ),
         )
         self.scanner = AltcoinScanner(candle_manager, config)
 
@@ -117,6 +127,7 @@ class TradingEngine:
                 config=config,
                 refiner_agent=_initial_refiner_agent,
                 market_filter=self.market_filter,
+                exchange=exchange,
             )
             if config.entry_refiner_enabled
             else None
@@ -790,7 +801,7 @@ class TradingEngine:
                     if signal.sweep_result and signal.sweep_result.sweep_detected and signal.sweep_result.sweep_level:
                         sweep_level = signal.sweep_result.sweep_level
                         current = signal.entry_price
-                        if signal.direction == "long" and current > sweep_level:
+                        if signal.direction in ("bullish", "long") and current > sweep_level:
                             # Bullish: displacement up from sweep low → pullback retraces downward
                             disp_low, disp_high = sweep_level, current
                             span = disp_high - disp_low
@@ -801,7 +812,7 @@ class TradingEngine:
                                 "fib_618": round(disp_high - span * 0.618, 8),
                                 "fib_786": round(disp_high - span * 0.786, 8),
                             }
-                        elif signal.direction == "short" and current < sweep_level:
+                        elif signal.direction in ("bearish", "short") and current < sweep_level:
                             # Bearish: displacement down from sweep high → pullback retraces upward
                             disp_low, disp_high = current, sweep_level
                             span = disp_high - disp_low
@@ -813,6 +824,15 @@ class TradingEngine:
                                 "fib_786": round(disp_low + span * 0.786, 8),
                             }
 
+                    # Fetch per-symbol trade history for Agent 1 feedback loop
+                    symbol_history = []
+                    try:
+                        symbol_history = await self.repo.get_recent_trades_for_symbol(
+                            signal.symbol, limit=5, mode=self.state.mode
+                        )
+                    except Exception:
+                        pass  # Non-critical — agent works without history
+
                     ai_context = {
                         "sentiment_score": early_sentiment,
                         "adjusted_score": signal.score,
@@ -823,6 +843,7 @@ class TradingEngine:
                         "open_position_count": len(self.portfolio.open_positions),
                         "recent_headlines": early_headlines,
                         "ml_win_probability": None,
+                        "symbol_history": symbol_history,
                         **ai_perf_context,
                     }
 
@@ -1610,7 +1631,7 @@ class TradingEngine:
             if signal.sweep_result and signal.sweep_result.sweep_detected and signal.sweep_result.sweep_level:
                 sweep_level = signal.sweep_result.sweep_level
                 current = signal.entry_price
-                if signal.direction == "long" and current > sweep_level:
+                if signal.direction in ("bullish", "long") and current > sweep_level:
                     span = current - sweep_level
                     signal.fibonacci_levels = {
                         "displacement_low": round(sweep_level, 8),
@@ -1619,7 +1640,7 @@ class TradingEngine:
                         "fib_618": round(current - span * 0.618, 8),
                         "fib_786": round(current - span * 0.786, 8),
                     }
-                elif signal.direction == "short" and current < sweep_level:
+                elif signal.direction in ("bearish", "short") and current < sweep_level:
                     span = sweep_level - current
                     signal.fibonacci_levels = {
                         "displacement_low": round(current, 8),
@@ -1642,6 +1663,15 @@ class TradingEngine:
             sentiment = await self.sentiment_filter.get_sentiment(signal.symbol)
             headlines = self.sentiment_filter.get_recent_headlines(signal.symbol)
 
+            # Fetch per-symbol trade history for Agent 1 feedback loop
+            expired_symbol_history = []
+            try:
+                expired_symbol_history = await self.repo.get_recent_trades_for_symbol(
+                    signal.symbol, limit=5, mode=self.state.mode
+                )
+            except Exception:
+                pass
+
             context = {
                 "sentiment_score": sentiment,
                 "adjusted_score": signal.score,
@@ -1652,6 +1682,7 @@ class TradingEngine:
                 "open_position_count": len(self.portfolio.open_positions),
                 "recent_headlines": headlines,
                 "ml_win_probability": None,
+                "symbol_history": expired_symbol_history,
                 "expired_pullback_review": True,  # Tell agent this is a re-evaluation
             }
 
@@ -1927,6 +1958,15 @@ class TradingEngine:
                     wl_sentiment = await self.sentiment_filter.get_sentiment(graduated.symbol)
                     wl_headlines = self.sentiment_filter.get_recent_headlines(graduated.symbol)
 
+                    # Fetch per-symbol trade history for Agent 1 feedback loop
+                    wl_symbol_history = []
+                    try:
+                        wl_symbol_history = await self.repo.get_recent_trades_for_symbol(
+                            graduated.symbol, limit=5, mode=self.state.mode
+                        )
+                    except Exception:
+                        pass
+
                     wl_context = {
                         "sentiment_score": wl_sentiment,
                         "adjusted_score": graduated.score,
@@ -1937,6 +1977,7 @@ class TradingEngine:
                         "open_position_count": len(self.portfolio.open_positions),
                         "recent_headlines": wl_headlines,
                         "ml_win_probability": None,
+                        "symbol_history": wl_symbol_history,
                     }
 
                     wl_agent_result = await self.agent_analyst.analyze_signal(graduated, wl_context)
@@ -1982,8 +2023,17 @@ class TradingEngine:
                     )
                 )
 
-                if position and order_result.filled:
-                    self.portfolio.add_position(position)
+                if position and order_result.filled_quantity > 0:
+                    # Match all other entry paths: confluence score, DB persistence, portfolio, state
+                    position.confluence_score = graduated.score
+
+                    if trade_record:
+                        db_trade = await self.repo.insert_trade(trade_record)
+                        if db_trade:
+                            position.trade_id = db_trade.get("id", "")
+
+                    self.portfolio.record_entry(position)
+                    self.state.open_positions[graduated.symbol] = position
                     self.state.daily_trade_count += 1
                     logger.info(
                         "watchlist_trade_entered",
@@ -2058,7 +2108,7 @@ class TradingEngine:
                     exit_reason=liq_exit.reason,
                     pnl_usd=liq_pnl, pnl_percent=liq_pnl_pct, fees_usd=liq_result.fee,
                 )
-                self.portfolio.record_exit(liq_exit.symbol, liq_exit.price, liq_result.fee)
+                self.portfolio.record_exit(liq_exit.symbol, liq_result.avg_price or liq_exit.price, liq_result.fee)
                 self.risk_manager.record_stop_out(liq_exit.symbol)
                 self.adaptive_threshold.record_outcome(is_win=(liq_pnl > 0))
                 self.state.open_positions.pop(liq_exit.symbol, None)
@@ -2089,6 +2139,7 @@ class TradingEngine:
         exits = await self.position_monitor.check_positions(
             self.portfolio.open_positions, self.exchange,
             atr_values=atr_values, trading_hours=trading_hours,
+            market_filter=self.market_filter,
         )
 
         for exit_signal in exits:
@@ -2221,7 +2272,7 @@ class TradingEngine:
                     )
 
                     # Update portfolio
-                    self.portfolio.record_exit(exit_signal.symbol, exit_signal.price, order_result.fee)
+                    self.portfolio.record_exit(exit_signal.symbol, order_result.avg_price or exit_signal.price, order_result.fee)
 
                     # Record cooldown on stop-loss and stale exits
                     if exit_signal.reason in ("sl_hit", "stale_close"):
@@ -2404,7 +2455,7 @@ class TradingEngine:
         )
 
         # Update portfolio & state
-        self.portfolio.record_exit(symbol, current_price, order_result.fee)
+        self.portfolio.record_exit(symbol, order_result.avg_price or current_price, order_result.fee)
         self.state.open_positions.pop(symbol, None)
 
         # Clear SL cooldown so the new entry isn't blocked
@@ -2899,4 +2950,6 @@ class TradingEngine:
             await self.agent_analyst.close()
         if self.refiner_agent:
             await self.refiner_agent.close()
+        if self.position_agent:
+            await self.position_agent.close()
         logger.info("engine_shutdown_complete")

@@ -112,6 +112,7 @@ class EntryRefiner:
         config: Settings,
         refiner_agent=None,
         market_filter=None,
+        exchange=None,
     ) -> None:
         self.candles = candle_manager
         self.config = config
@@ -121,6 +122,7 @@ class EntryRefiner:
         # Agent 2 (Refiner Monitor) — AI-powered tactical entry timing
         self.refiner_agent = refiner_agent
         self.market_filter = market_filter
+        self._exchange = exchange  # For order book data (Feature 2)
         self._last_agent_check: dict[str, float] = {}  # symbol → timestamp
         self._agent_check_interval = getattr(
             config, "refiner_agent_check_interval_minutes", 5.0
@@ -348,14 +350,21 @@ class EntryRefiner:
 
         # ── Resolve zone boundaries (three-tier priority) ──
 
+        # Guard: if Agent 2 already adjusted the zone, preserve it — don't recompute
+        if entry.zone_source == "agent2_adjusted" and entry.ote_zone_valid:
+            ote_top = entry.ote_zone_top
+            ote_bottom = entry.ote_zone_bottom
+            zone_resolved = True
+        else:
+            zone_resolved = False
+
         agent_high = getattr(signal, "agent_entry_zone_high", None)
         agent_low = getattr(signal, "agent_entry_zone_low", None)
         thrust_1h = getattr(signal, "thrust_extreme_1h", None)
         disp_open_1h = getattr(signal, "displacement_open_1h", None)
 
-        ote_top = 0.0
-        ote_bottom = 0.0
-        zone_resolved = False
+        ote_top = ote_top if zone_resolved else 0.0
+        ote_bottom = ote_bottom if zone_resolved else 0.0
 
         # ── Tier 1: Agent zone (highest priority) ──
         if agent_high is not None and agent_low is not None and agent_high > agent_low:
@@ -765,8 +774,43 @@ class EntryRefiner:
             SignalCandidate if ENTER (ready to trade),
             None if WAIT/ADJUST_ZONE/ABANDON (stays in queue or gets removed).
         """
+        # Fetch order book for Agent 2 context (non-critical, best-effort)
+        order_book_data = {"status": "unavailable"}
+        if self._exchange:
+            try:
+                ob = await self._exchange.fetch_order_book(entry.symbol, limit=20)
+                if ob and ob.get("bids") and ob.get("asks"):
+                    bids = ob["bids"][:10]  # Top 10 bid levels
+                    asks = ob["asks"][:10]  # Top 10 ask levels
+                    bid_vol = sum(b[1] for b in bids)
+                    ask_vol = sum(a[1] for a in asks)
+                    total_vol = bid_vol + ask_vol
+                    spread = asks[0][0] - bids[0][0] if asks and bids else 0
+                    spread_pct = (spread / bids[0][0] * 100) if bids and bids[0][0] > 0 else 0
+                    imbalance = (bid_vol - ask_vol) / total_vol if total_vol > 0 else 0
+                    # Wall detection: any level with volume > 3x the average
+                    all_levels = bids + asks
+                    avg_vol = total_vol / len(all_levels) if all_levels else 0
+                    walls = []
+                    for price, vol in all_levels:
+                        if avg_vol > 0 and vol > avg_vol * 3:
+                            side = "bid" if [price, vol] in bids else "ask"
+                            walls.append({"price": price, "volume": vol, "side": side})
+                    order_book_data = {
+                        "status": "available",
+                        "spread_pct": round(spread_pct, 4),
+                        "bid_volume_top10": round(bid_vol, 2),
+                        "ask_volume_top10": round(ask_vol, 2),
+                        "imbalance_ratio": round(imbalance, 3),  # +1 = all bids, -1 = all asks
+                        "walls": walls[:3],  # Top 3 walls only
+                        "best_bid": bids[0][0] if bids else 0,
+                        "best_ask": asks[0][0] if asks else 0,
+                    }
+            except Exception:
+                pass  # Order book not available for this market/exchange
+
         context = self._build_agent_context(
-            entry, candles_5m, zone_top, zone_bottom, direction,
+            entry, candles_5m, zone_top, zone_bottom, direction, order_book_data,
         )
 
         decision = await self.refiner_agent.evaluate_entry(context)
@@ -833,6 +877,7 @@ class EntryRefiner:
         zone_top: float,
         zone_bottom: float,
         direction: str,
+        order_book: dict | None = None,
     ) -> dict:
         """Build the context dict for Agent 2's prompt."""
         signal = entry.signal
@@ -979,6 +1024,7 @@ class EntryRefiner:
             "agent1_sl": agent1_sl,
             "agent1_tp": agent1_tp,
             "agent1_rr": agent1_rr,
+            "order_book": order_book or {"status": "unavailable"},
         }
 
     def _create_refined_signal_from_agent(
@@ -1143,6 +1189,8 @@ class EntryRefiner:
                 "agent_zone_high": entry.signal.agent_entry_zone_high,
                 "agent_zone_low": entry.signal.agent_entry_zone_low,
                 "zone_source": entry.zone_source,
+                "zone_top": entry.ote_zone_top,
+                "zone_bottom": entry.ote_zone_bottom,
                 "last_agent2_action": entry.last_agent2_action,
                 "last_agent2_reasoning": entry.last_agent2_reasoning,
                 "last_agent2_urgency": entry.last_agent2_urgency,
@@ -1200,6 +1248,16 @@ class EntryRefiner:
                     thrust_high=entry_data.get("thrust_high", 0),
                     thrust_low=entry_data.get("thrust_low", 1e18),
                 )
+                # Restore zone state so Agent 2 adjustments survive restarts
+                entry.zone_source = entry_data.get("zone_source", "")
+                if entry.zone_source:
+                    entry.ote_zone_top = entry_data.get("zone_top", 0.0)
+                    entry.ote_zone_bottom = entry_data.get("zone_bottom", 0.0)
+                    entry.ote_zone_valid = entry.ote_zone_top > 0 and entry.ote_zone_bottom > 0
+                # Restore Agent 2 continuity fields
+                entry.last_agent2_action = entry_data.get("last_agent2_action", "")
+                entry.last_agent2_reasoning = entry_data.get("last_agent2_reasoning", "")
+                entry.last_agent2_urgency = entry_data.get("last_agent2_urgency", "")
                 self.queue[sym] = entry
                 restored += 1
             except Exception as e:

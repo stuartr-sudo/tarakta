@@ -24,6 +24,8 @@ class PositionMonitor:
         breakeven_activation_rr: float = 0.5,
         max_hold_hours: float = 4.0,
         stale_close_below_rr: float = 0.0,
+        position_agent=None,
+        position_agent_interval_minutes: float = 15.0,
     ) -> None:
         self.trailing_activation_rr = trailing_activation_rr
         self.trailing_atr_multiplier = trailing_atr_multiplier
@@ -35,9 +37,15 @@ class PositionMonitor:
         self._ticker_error_last_logged: dict[str, datetime] = {}
         self._ticker_error_throttle_seconds = 300
 
+        # Agent 3 (Position Manager) — AI-powered position monitoring
+        self._position_agent = position_agent
+        self._agent3_interval = position_agent_interval_minutes * 60  # seconds
+        self._agent3_last_check: dict[str, float] = {}  # symbol → timestamp
+
     async def check_positions(
         self, positions: dict[str, Position], exchange, atr_values: dict[str, float] | None = None,
         trading_hours: TradingHours | None = None,
+        market_filter=None,
     ) -> list[ExitSignal]:
         """Check all open positions against current prices.
 
@@ -45,10 +53,12 @@ class PositionMonitor:
             positions: Map of symbol -> Position
             exchange: Exchange client for ticker fetches
             atr_values: Map of symbol -> current ATR value (from 1H candles)
+            market_filter: Optional market filter for BTC context (Agent 3)
         """
         if atr_values is None:
             atr_values = {}
         exits: list[ExitSignal] = []
+        current_prices: dict[str, float] = {}  # Cache for Agent 3 reuse
 
         for symbol, pos in positions.items():
             try:
@@ -56,6 +66,7 @@ class PositionMonitor:
                     exchange.fetch_ticker(symbol), timeout=TICKER_FETCH_TIMEOUT
                 )
                 current_price = float(ticker["last"])
+                current_prices[symbol] = current_price
             except asyncio.TimeoutError:
                 logger.warning("ticker_fetch_timeout", symbol=symbol, timeout=TICKER_FETCH_TIMEOUT)
                 continue
@@ -73,7 +84,157 @@ class PositionMonitor:
             if exit_signal:
                 exits.append(exit_signal)
 
+        # --- Agent 3 (Position Manager) — runs after algorithmic loop ---
+        if self._position_agent:
+            import time as _time
+            now_ts = _time.time()
+            exited_symbols = {e.symbol for e in exits}
+
+            for symbol, pos in positions.items():
+                # Skip if already exited by algorithmic logic
+                if symbol in exited_symbols:
+                    continue
+                # Skip if no price data
+                if symbol not in current_prices:
+                    continue
+                # Throttle: only check every N minutes per symbol
+                last_check = self._agent3_last_check.get(symbol, 0)
+                if now_ts - last_check < self._agent3_interval:
+                    continue
+
+                self._agent3_last_check[symbol] = now_ts
+                try:
+                    agent3_exit = await self._run_agent3(
+                        symbol, pos, current_prices[symbol],
+                        atr_values.get(symbol, 0.0), market_filter,
+                    )
+                    if agent3_exit:
+                        exits.append(agent3_exit)
+                except Exception as e:
+                    logger.warning("agent3_check_failed", symbol=symbol, error=str(e))
+
         return exits
+
+    async def _run_agent3(
+        self, symbol: str, pos: Position, current_price: float, atr: float,
+        market_filter=None,
+    ) -> ExitSignal | None:
+        """Run Agent 3 for a single position and return ExitSignal if action needed."""
+        # Build context
+        sl_distance = abs(pos.entry_price - pos.stop_loss) if pos.stop_loss else 0
+        if pos.direction == "long":
+            unrealized_pnl = (current_price - pos.entry_price) * pos.quantity
+            unrealized_rr = (current_price - pos.entry_price) / sl_distance if sl_distance > 0 else 0
+        else:
+            unrealized_pnl = (pos.entry_price - current_price) * pos.quantity
+            unrealized_rr = (pos.entry_price - current_price) / sl_distance if sl_distance > 0 else 0
+
+        unrealized_pnl_pct = (unrealized_pnl / (pos.entry_price * pos.quantity) * 100) if pos.entry_price * pos.quantity > 0 else 0
+
+        held_minutes = 0
+        if pos.entry_time:
+            held_minutes = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60
+
+        # Agent 1's reasoning (from components if available)
+        agent1_reasoning = ""
+        if hasattr(pos, "components") and isinstance(pos.components, dict):
+            aa = pos.components.get("agent_analysis", {})
+            if isinstance(aa, dict):
+                agent1_reasoning = aa.get("reasoning", "")
+
+        # BTC context
+        btc_trend = "unknown"
+        btc_1h_change = 0.0
+        if market_filter:
+            btc_trend = getattr(market_filter, "_cached_btc_trend", "unknown") or "unknown"
+            btc_1h_change = getattr(market_filter, "_cached_btc_1h_change", 0) or 0
+
+        # Current tier
+        current_tier = 0
+        if pos.tp_tiers:
+            current_tier = sum(1 for t in pos.tp_tiers if t.filled)
+
+        context = {
+            "symbol": symbol,
+            "direction": pos.direction,
+            "entry_price": pos.entry_price,
+            "current_price": current_price,
+            "stop_loss": pos.stop_loss,
+            "take_profit": pos.take_profit,
+            "unrealized_pnl_usd": unrealized_pnl,
+            "unrealized_pnl_pct": unrealized_pnl_pct,
+            "unrealized_rr": unrealized_rr,
+            "held_minutes": held_minutes,
+            "atr": atr,
+            "current_tier": current_tier,
+            "original_quantity": pos.original_quantity or pos.quantity,
+            "remaining_quantity": pos.quantity,
+            "confluence_score": getattr(pos, "confluence_score", 0),
+            "agent1_reasoning": agent1_reasoning,
+            "btc_trend": btc_trend,
+            "btc_1h_change": btc_1h_change,
+            "funding_rate": None,  # Can be extended with exchange.fetch_funding_rate()
+        }
+
+        decision = await self._position_agent.evaluate_position(context)
+
+        if decision.action == "CLOSE_FULL":
+            logger.info(
+                "agent3_close_full",
+                symbol=symbol,
+                direction=pos.direction,
+                unrealized_rr=f"{unrealized_rr:.2f}",
+                reasoning=decision.reasoning[:200],
+                confidence=decision.confidence,
+            )
+            return ExitSignal(symbol=symbol, reason="agent3_closed", price=current_price)
+
+        elif decision.action == "CLOSE_PARTIAL" and decision.partial_close_pct > 0:
+            partial_qty = pos.quantity * min(decision.partial_close_pct, 0.5)  # Cap at 50%
+            logger.info(
+                "agent3_close_partial",
+                symbol=symbol,
+                partial_pct=f"{decision.partial_close_pct:.0%}",
+                partial_qty=partial_qty,
+                reasoning=decision.reasoning[:200],
+                confidence=decision.confidence,
+            )
+            return ExitSignal(
+                symbol=symbol,
+                reason="agent3_partial",
+                price=current_price,
+                is_partial=True,
+                partial_quantity=partial_qty,
+            )
+
+        elif decision.action == "TIGHTEN_SL" and decision.suggested_sl > 0:
+            # Validate: can only tighten (move SL in profitable direction)
+            if pos.direction == "long" and decision.suggested_sl > pos.stop_loss:
+                old_sl = pos.stop_loss
+                pos.stop_loss = decision.suggested_sl
+                logger.info(
+                    "agent3_tighten_sl",
+                    symbol=symbol,
+                    old_sl=old_sl,
+                    new_sl=decision.suggested_sl,
+                    reasoning=decision.reasoning[:200],
+                    confidence=decision.confidence,
+                )
+            elif pos.direction == "short" and decision.suggested_sl < pos.stop_loss:
+                old_sl = pos.stop_loss
+                pos.stop_loss = decision.suggested_sl
+                logger.info(
+                    "agent3_tighten_sl",
+                    symbol=symbol,
+                    old_sl=old_sl,
+                    new_sl=decision.suggested_sl,
+                    reasoning=decision.reasoning[:200],
+                    confidence=decision.confidence,
+                )
+            # else: Agent tried to widen SL — ignore silently
+
+        # HOLD or invalid tighten → no exit signal
+        return None
 
     def _evaluate_position(
         self, symbol: str, pos: Position, current_price: float, atr: float,

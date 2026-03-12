@@ -186,6 +186,36 @@ class Repository:
         result = await asyncio.to_thread(_exec, query.order("entry_time", desc=True))
         return result.data or []
 
+    async def get_recent_trades_for_symbol(
+        self, symbol: str, limit: int = 5, mode: str | None = None
+    ) -> list[dict]:
+        """Fetch recent closed trades for a specific symbol (for Agent 1 feedback loop).
+
+        Returns trades ordered by exit_time desc with fields useful for pattern recognition:
+        direction, entry_price, exit_price, pnl_usd, pnl_percent, exit_reason,
+        entry_time, exit_time, confluence_score.
+        """
+        select_fields = (
+            "direction, entry_price, exit_price, pnl_usd, pnl_percent, "
+            "exit_reason, entry_time, exit_time, confluence_score, stop_loss, take_profit"
+        )
+        try:
+            query = (
+                self.db.table("trades")
+                .select(select_fields)
+                .eq("symbol", symbol)
+                .eq("status", "closed")
+                .order("exit_time", desc=True)
+                .limit(limit)
+            )
+            if mode:
+                query = query.eq("mode", mode)
+            result = await asyncio.to_thread(_exec, query)
+            return result.data or []
+        except Exception as e:
+            logger.warning("get_recent_trades_for_symbol_failed", symbol=symbol, error=str(e))
+            return []
+
     async def get_trades(
         self, status: str = "all", mode: str | None = None, page: int = 1, per_page: int = 25
     ) -> list[dict]:
