@@ -129,16 +129,7 @@ class Settings(BaseSettings):
     # Hugging Face Inference API
     hf_api_token: str = ""  # For FinBERT sentiment + zero-shot classification
 
-    # LLM Split Test (Claude trade analyst — legacy, still works)
-    llm_enabled: bool = False
-    llm_api_key: str = ""  # Anthropic API key
-    llm_model: str = "claude-haiku-4-5-20251001"
-    llm_timeout_seconds: float = 15.0
-    llm_split_ratio: float = 0.5  # 0.5 = 50% of signals go through LLM
-    llm_min_confidence: float = 40.0  # Reject approvals below this confidence (0-100)
-    llm_fallback_approve: bool = True  # If API fails, approve trade by default
-
-    # AI Entry Agent (OpenAI — replaces binary LLM gate with intelligent decision-maker)
+    # AI Entry Agent (OpenAI — two-agent architecture for entry decisions)
     agent_enabled: bool = False
     agent_api_key: str = ""  # OpenAI API key (set AGENT_API_KEY in .env)
     agent_model: str = "gpt-5-mini"  # gpt-5-mini ($0.25/M in), gpt-5.4 ($2.50/M in)

@@ -146,7 +146,6 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
     async def settings_page(request: Request):
         ctx = await _base_context(request)
         state = ctx.get("state") or {}
-        ctx["llm_enabled"] = state.get("llm_enabled", config.llm_enabled)
         ctx["agent1_enabled"] = bool(config.agent_api_key and config.agent_enabled)
         ctx["refiner_agent_enabled"] = state.get(
             "refiner_agent_enabled",
@@ -174,18 +173,6 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             new_mode = "paper" if state.get("mode") == "live" else "live"
             state["mode"] = new_mode
             await repo.upsert_engine_state(state)
-        return RedirectResponse(url="/settings", status_code=303)
-
-    @router.post("/settings/toggle-llm")
-    @admin_required
-    async def toggle_llm(request: Request):
-        state = await repo.get_engine_state()
-        if state:
-            current = state.get("llm_enabled", config.llm_enabled)
-            state["llm_enabled"] = not current
-            await repo.upsert_engine_state(state)
-        else:
-            await repo.upsert_engine_state({"llm_enabled": True})
         return RedirectResponse(url="/settings", status_code=303)
 
     @router.post("/settings/toggle-refiner-agent")

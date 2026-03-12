@@ -27,11 +27,9 @@ from src.strategy.confluence import WEIGHTS
 from src.strategy.dynamic_weights import DynamicWeightOptimizer
 from src.strategy.agent_analyst import AgentEntryAnalyst
 from src.strategy.refiner_agent import RefinerMonitorAgent
-from src.strategy.llm_analyst import LLMTradeAnalyst
 from src.strategy.market_filter import MarketFilter
 from src.strategy.scanner import AltcoinScanner
 from src.strategy.sentiment import SentimentFilter
-from src.strategy.split_test import SplitTestManager
 from src.strategy.trade_analyzer import TradeAnalyzer
 from src.utils.logging import get_logger
 from src.utils.time_utils import is_new_day
@@ -139,13 +137,6 @@ class TradingEngine:
         self.trade_analyzer = TradeAnalyzer(repo)
         self.adaptive_threshold = AdaptiveThreshold(config.entry_threshold)
         self.sentiment_filter = SentimentFilter(hf_api_token=config.hf_api_token)
-
-        # LLM split test components (legacy Anthropic gate)
-        self.split_test = SplitTestManager(config)
-        self.llm_analyst: LLMTradeAnalyst | None = None
-        if config.llm_api_key:
-            self.llm_analyst = LLMTradeAnalyst(config)
-            logger.info("llm_analyst_ready", model=config.llm_model, ratio=config.llm_split_ratio)
 
         # AI entry agent (OpenAI — intelligent decision-maker)
         self.agent_analyst: AgentEntryAnalyst | None = None
@@ -629,66 +620,6 @@ class TradingEngine:
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
-    async def _run_postmortem(self, trade_id: str, symbol: str) -> None:
-        """Background task: run LLM post-mortem and persist result."""
-        async with self._postmortem_semaphore:
-            try:
-                # Fetch full trade record for rich context
-                trade_records = await self.repo.get_trades_by_ids([trade_id])
-                trade_record = trade_records[0] if trade_records else None
-                if not trade_record:
-                    return
-
-                # Fetch partial exits if applicable
-                partial_exits = None
-                tp_tiers = trade_record.get("tp_tiers")
-                if tp_tiers:
-                    try:
-                        partial_exits = await self.repo.get_partial_exits(trade_id)
-                    except Exception:
-                        pass
-
-                result = await self.llm_analyst.analyze_closed_trade(
-                    trade_data=trade_record,
-                    partial_exits=partial_exits,
-                )
-
-                if not result.error:
-                    await self.repo.update_trade(trade_id, {
-                        "llm_postmortem": {
-                            "summary": result.summary,
-                            "what_worked": result.what_worked,
-                            "what_failed": result.what_failed,
-                            "entry_quality": result.entry_quality,
-                            "exit_quality": result.exit_quality,
-                            "lesson": result.lesson,
-                            "trade_grade": result.trade_grade,
-                            "latency_ms": round(result.latency_ms, 1),
-                            "input_tokens": result.input_tokens,
-                            "output_tokens": result.output_tokens,
-                            "analyzed_at": datetime.now(timezone.utc).isoformat(),
-                        }
-                    })
-                    logger.info(
-                        "llm_postmortem_complete",
-                        trade_id=trade_id,
-                        symbol=symbol,
-                        grade=result.trade_grade,
-                        latency_ms=round(result.latency_ms, 1),
-                    )
-                else:
-                    logger.warning(
-                        "llm_postmortem_failed",
-                        trade_id=trade_id,
-                        error=result.error,
-                    )
-            except Exception as e:
-                logger.warning(
-                    "llm_postmortem_error",
-                    trade_id=trade_id,
-                    error=str(e),
-                )
-
     async def _primary_tick(self) -> None:
         """Full scan cycle: scan → analyze → decide → execute → log."""
         self.state.cycle_count += 1
@@ -790,28 +721,25 @@ class TradingEngine:
 
         # Read runtime toggles ONCE per tick (not per signal)
         state_dict = await self.repo.get_engine_state() or {}
-        llm_runtime_enabled = state_dict.get("llm_enabled", self.config.llm_enabled)
         agent_runtime_enabled = state_dict.get("agent_enabled", self.config.agent_enabled)
         logger.info(
             "ai_toggle_check",
-            llm_runtime_enabled=llm_runtime_enabled,
             agent_runtime_enabled=agent_runtime_enabled,
-            has_llm=self.llm_analyst is not None,
             has_agent=self.agent_analyst is not None,
         )
 
         # Pre-fetch recent performance for AI context (once per tick)
-        llm_perf_context: dict[str, Any] = {}
-        if (llm_runtime_enabled and self.llm_analyst) or (agent_runtime_enabled and self.agent_analyst):
+        ai_perf_context: dict[str, Any] = {}
+        if agent_runtime_enabled and self.agent_analyst:
             try:
                 recent_trades = await self.repo.get_trades(status="closed", mode=self.state.mode, per_page=20)
                 if recent_trades:
                     wins = sum(1 for t in recent_trades if (t.get("pnl_usd") or 0) > 0)
-                    llm_perf_context["recent_win_rate"] = round(wins / len(recent_trades) * 100, 1)
-                    llm_perf_context["recent_trade_count"] = len(recent_trades)
+                    ai_perf_context["recent_win_rate"] = round(wins / len(recent_trades) * 100, 1)
+                    ai_perf_context["recent_trade_count"] = len(recent_trades)
                     rr_values = [float(t.get("risk_reward") or 0) for t in recent_trades if t.get("risk_reward")]
                     if rr_values:
-                        llm_perf_context["recent_avg_rr"] = round(sum(rr_values) / len(rr_values), 2)
+                        ai_perf_context["recent_avg_rr"] = round(sum(rr_values) / len(rr_values), 2)
                     # Calculate current streak
                     streak = 0
                     streak_type = None
@@ -825,11 +753,11 @@ class TradingEngine:
                         else:
                             break
                     if streak_type is True:
-                        llm_perf_context["winning_streak"] = streak
+                        ai_perf_context["winning_streak"] = streak
                     elif streak_type is False:
-                        llm_perf_context["losing_streak"] = streak
+                        ai_perf_context["losing_streak"] = streak
             except Exception as e:
-                logger.debug("llm_perf_context_failed", error=str(e))
+                logger.debug("ai_perf_context_failed", error=str(e))
 
         # Execute entries for top signals
         signals_saved = 0
@@ -895,7 +823,7 @@ class TradingEngine:
                         "open_position_count": len(self.portfolio.open_positions),
                         "recent_headlines": early_headlines,
                         "ml_win_probability": None,
-                        **llm_perf_context,
+                        **ai_perf_context,
                     }
 
                     agent_result = await self.agent_analyst.analyze_signal(signal, ai_context)
@@ -1265,103 +1193,18 @@ class TradingEngine:
                                 continue
                             # If consensus queue is full, fall through to normal entry
 
-                # --- AI Entry Agent / Legacy LLM Gate ---
+                # --- AI Entry Agent results ---
                 # Agent already ran in the early decision block above.
                 # Here we only set up variables for downstream execution.
-                llm_analysis_data = None
                 sl_override = None
                 tp_override = None
+                test_group = "control"
 
                 if agent_early_decision is not None:
                     # Agent already decided — use its results (no duplicate API call)
                     test_group = "agent"
                     sl_override = agent_result.suggested_sl
                     tp_override = agent_result.suggested_tp
-                elif llm_runtime_enabled:
-                    test_group = self.split_test.assign_group(signal)
-                else:
-                    test_group = "control"
-
-                # --- Legacy LLM Gate (Anthropic) — only when agent is NOT active ---
-                if agent_early_decision is None and test_group == "llm" and self.llm_analyst:
-                    # Pre-calculate SL/TP for LLM context
-                    pre_sl = self.order_executor._calculate_stop_loss(signal)
-                    pre_tp = None
-                    pre_rr = None
-                    if pre_sl is not None:
-                        pre_tp = self.order_executor._calculate_take_profit(signal, pre_sl)
-                        sl_dist = abs(signal.entry_price - pre_sl)
-                        if sl_dist > 0 and pre_tp is not None:
-                            pre_rr = abs(pre_tp - signal.entry_price) / sl_dist
-
-                    ai_context = {
-                        "sentiment_score": sentiment_score,
-                        "adjusted_score": adjusted_score,
-                        "active_threshold": active_threshold,
-                        "sl_price": pre_sl,
-                        "tp_price": pre_tp,
-                        "rr_ratio": round(pre_rr, 2) if pre_rr else None,
-                        "open_position_count": len(self.portfolio.open_positions),
-                        "recent_headlines": recent_headlines,
-                        "ml_win_probability": round((pattern_modifier + 1) / 2 * 100, 1) if pattern_modifier is not None else None,
-                        **llm_perf_context,
-                    }
-                    llm_result = await self.llm_analyst.analyze_signal(signal, ai_context)
-
-                    # If LLM errored, demote to control group
-                    if llm_result.error and llm_result.error != "api_backoff":
-                        test_group = "control"
-                        logger.info(
-                            "llm_error_demoted_to_control",
-                            symbol=signal.symbol,
-                            error=llm_result.error,
-                        )
-                    else:
-                        llm_analysis_data = {
-                            "approve": llm_result.approve,
-                            "confidence": llm_result.confidence,
-                            "reasoning": llm_result.reasoning,
-                            "suggested_sl": llm_result.suggested_sl,
-                            "suggested_tp": llm_result.suggested_tp,
-                            "latency_ms": round(llm_result.latency_ms, 1),
-                            "error": llm_result.error,
-                            "input_tokens": llm_result.input_tokens,
-                            "output_tokens": llm_result.output_tokens,
-                        }
-
-                    if not llm_result.approve:
-                        logger.info(
-                            "trade_blocked_by_llm",
-                            symbol=signal.symbol,
-                            confidence=llm_result.confidence,
-                            reasoning=llm_result.reasoning[:100],
-                        )
-                        vol_24h = self.exchange.get_24h_volume(signal.symbol)
-                        await self.repo.insert_signal(
-                            {
-                                "symbol": signal.symbol,
-                                "direction": signal.direction or "none",
-                                "score": signal.score,
-                                "reasons": signal.reasons + [f"BLOCKED:llm_reject(conf={llm_result.confidence:.0f})"],
-                                "components": {
-                                    "volume_24h": vol_24h,
-                                    "sentiment": sentiment_score,
-                                    "adjusted_score": round(adjusted_score, 2),
-                                    "test_group": test_group,
-                                    "llm_analysis": llm_analysis_data,
-                                    "signal_type": sig_type,
-                                },
-                                "current_price": signal.entry_price,
-                                "acted_on": False,
-                                "scan_cycle": cycle,
-                            }
-                        )
-                        signals_saved += 1
-                        continue
-
-                    # Apply LLM SL/TP suggestions if provided
-                    sl_override = llm_result.suggested_sl
-                    tp_override = llm_result.suggested_tp
 
                 # --- Opposite signal reversal check ---
                 existing_pos = self.portfolio.open_positions.get(signal.symbol)
@@ -1429,7 +1272,7 @@ class TradingEngine:
                             max_pct=self.config.max_position_volume_pct * 100,
                         )
                     else:
-                        # Execute entry (with optional LLM SL/TP overrides)
+                        # Execute entry (with optional agent SL/TP overrides)
                         position, order_result, trade_record = await self.order_executor.execute_entry(
                             signal=signal,
                             current_balance=self.portfolio.current_balance,
@@ -1444,7 +1287,7 @@ class TradingEngine:
 
                             # Tag trade with split test metadata
                             trade_record["test_group"] = test_group
-                            # Note: llm_analysis and entry_headlines stored in signal_components,
+                            # Note: agent_analysis and entry_headlines stored in signal_components,
                             # not trade record (columns don't exist in Supabase trades table)
 
                             # Save to DB
@@ -1467,8 +1310,6 @@ class TradingEngine:
                     "test_group": test_group,
                     "signal_type": sig_type,
                 }
-                if llm_analysis_data:
-                    signal_components["llm_analysis"] = llm_analysis_data
                 if agent_analysis_data:
                     signal_components["agent_analysis"] = agent_analysis_data
                 await self.repo.insert_signal(
@@ -2407,12 +2248,6 @@ class TradingEngine:
                     except Exception as e:
                         logger.warning("post_trade_analysis_failed", error=str(e))
 
-                    # --- LLM Post-mortem (non-blocking background task) ---
-                    if self.llm_analyst and position.trade_id:
-                        self._spawn_background(
-                            self._run_postmortem(position.trade_id, exit_signal.symbol)
-                        )
-
                     # --- Adaptive threshold update (Strategy C) ---
                     self.adaptive_threshold.record_outcome(is_win=(total_pnl > 0))
 
@@ -2595,12 +2430,6 @@ class TradingEngine:
         except Exception as e:
             logger.warning("reversal_post_analysis_failed", error=str(e))
 
-        # LLM post-mortem for the reversed trade
-        if self.llm_analyst and existing_position.trade_id:
-            self._spawn_background(
-                self._run_postmortem(existing_position.trade_id, symbol)
-            )
-
         self.adaptive_threshold.record_outcome(is_win=(total_pnl > 0))
 
         # Dynamic weight update
@@ -2698,11 +2527,6 @@ class TradingEngine:
                 overrides = existing.get("config_overrides") or {}
                 if not isinstance(overrides, dict):
                     overrides = {}
-                # Preserve dashboard-toggled fields that aren't in portfolio state
-                for key in ("llm_enabled",):
-                    if key in existing and key not in state_dict:
-                        state_dict[key] = existing[key]
-
             # Update only the keys this engine manages
             if self.dynamic_weights:
                 overrides["dynamic_weights"] = self.dynamic_weights.to_state()
@@ -3071,8 +2895,6 @@ class TradingEngine:
             await self._persist_state()
 
         await self.sentiment_filter.close()
-        if self.llm_analyst:
-            await self.llm_analyst.close()
         if self.agent_analyst:
             await self.agent_analyst.close()
         if self.refiner_agent:

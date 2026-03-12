@@ -86,7 +86,7 @@
                 <tbody>
                     {% for t in trades %}
                     <tr class="clickable-row" data-trade-id="{{ t.id }}" onclick="toggleDetail(this)">
-                        <td><strong>{{ t.symbol|replace(':USDT', '') }}</strong>{% if t.test_group == 'llm' %} <span class="llm-bolt" title="LLM Analyst trade">&#9889;</span>{% endif %}</td>
+                        <td><strong>{{ t.symbol|replace(':USDT', '') }}</strong>{% if t.test_group == 'agent' %} <span class="llm-bolt" title="AI Agent trade">&#9889;</span>{% endif %}</td>
                         <td>
                             <span class="dir-badge {{ t.direction | default('long') }}">
                                 {{ t.direction | default('long') }}{% if (t.leverage | default(1) | int) > 1 %} {{ t.leverage }}x{% endif %}

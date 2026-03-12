@@ -13,7 +13,6 @@ from src.dashboard.auth import admin_required, login_required
 from src.data.repository import Repository
 from src.exchange.models import OrderResult
 from src.exchange.protocol import get_symbol_category, CATEGORY_LABELS
-from src.strategy.split_test import SplitTestManager
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -809,28 +808,6 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 return json.load(f)
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
-
-    @router.get("/split-test")
-    @login_required
-    async def get_split_test_results(request: Request):
-        """Compare performance of control vs LLM-filtered trades."""
-        try:
-            closed_trades = await repo.get_trades(status="closed", per_page=500)
-            # Filter to only trades that have a test_group field
-            tagged_trades = [t for t in closed_trades if t.get("test_group")]
-            if not tagged_trades:
-                return {
-                    "status": "no_data",
-                    "message": "No split test trades found yet. Enable LLM_ENABLED=true to start the A/B test.",
-                    "control": {"trade_count": 0},
-                    "llm": {"trade_count": 0},
-                }
-            stats = SplitTestManager.compute_stats(tagged_trades)
-            stats["total_tagged_trades"] = len(tagged_trades)
-            return stats
-        except Exception as e:
-            logger.error("split_test_stats_failed", error=str(e))
-            return {"error": str(e)}
 
     @router.get("/agent-stats")
     @login_required

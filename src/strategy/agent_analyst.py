@@ -1,7 +1,6 @@
-"""AI-powered entry agent using OpenAI GPT models.
+"""Agent 1 — AI-powered strategic entry agent using OpenAI GPT models.
 
-Unlike the legacy LLM analyst (binary approve/reject gate), this agent
-makes the actual entry DECISION. Given a candidate that passed initial
+This agent makes the actual entry DECISION. Given a candidate that passed initial
 formula screening (sweep detected, score >= 35), the agent reasons about
 the full market context and returns one of:
 
@@ -15,8 +14,8 @@ This gives us an edge because:
     correlations, recent performance patterns) that formulas can't capture
   - The agent can adapt its reasoning without code changes
 
-Uses OpenAI function calling (tool use) for structured output, mirroring
-the resilience patterns from the Anthropic-based llm_analyst.py.
+Uses OpenAI function calling (tool use) for structured output with
+resilience patterns: lazy client, exponential backoff, cost tracking.
 """
 from __future__ import annotations
 
@@ -297,7 +296,7 @@ class AgentEntryAnalyst:
         self._min_confidence = config.agent_min_confidence
         self._available = bool(config.agent_api_key)
 
-        # Backoff state (mirrors sentiment.py / llm_analyst.py)
+        # Backoff state (exponential backoff on API failures)
         self._fail_count = 0
         self._backoff_until = 0.0
 
