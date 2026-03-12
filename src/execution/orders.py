@@ -971,7 +971,7 @@ class OrderExecutor:
         quantity: float,
         direction: str,
     ) -> list[TakeProfitTier]:
-        """Build 3-tier progressive TP plan: 33% at 0.75R, 33% at 1.125R, 34% at 3.5R."""
+        """Build 3-tier progressive TP plan: 33% at 0.70R, 33% at 0.95R, 34% at 1.5R."""
         sl_distance = abs(entry_price - sl_price)
         is_long = direction == "long"
 

@@ -27,6 +27,7 @@ Flow:
 """
 from __future__ import annotations
 
+import time as _time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -84,7 +85,13 @@ class RefinerEntry:
     ote_zone_top: float = 0.0
     ote_zone_bottom: float = 0.0
     ote_zone_valid: bool = False
-    zone_source: str = ""  # "agent", "1h_thrust", "5m_thrust" — for logging/dashboard
+    zone_source: str = ""  # "agent", "1h_thrust", "5m_thrust", "agent2_adjusted"
+
+    # Agent 2 (Refiner Monitor) reasoning continuity
+    last_agent2_action: str = ""       # Previous Agent 2 decision (WAIT, ADJUST_ZONE, etc.)
+    last_agent2_reasoning: str = ""    # Previous Agent 2 reasoning (fed back into next prompt)
+    last_agent2_urgency: str = ""      # Previous urgency level
+    agent2_check_count: int = 0        # How many times Agent 2 has evaluated this signal
 
 
 class EntryRefiner:
@@ -93,17 +100,31 @@ class EntryRefiner:
     Called from the engine's monitor loop on each 60-second tick.
     Handles both sweep and breakout signals with strategy-specific
     pullback detection.
+
+    When refiner_agent (Agent 2) is provided, it replaces the algorithmic
+    rejection detection every 5 minutes. Between Agent 2 checks, the
+    algorithmic fallback still runs on each 60-second tick.
     """
 
     def __init__(
         self,
         candle_manager: CandleManager,
         config: Settings,
+        refiner_agent=None,
+        market_filter=None,
     ) -> None:
         self.candles = candle_manager
         self.config = config
         self.queue: dict[str, RefinerEntry] = {}
         self.vol_analyzer = VolumeAnalyzer()
+
+        # Agent 2 (Refiner Monitor) — AI-powered tactical entry timing
+        self.refiner_agent = refiner_agent
+        self.market_filter = market_filter
+        self._last_agent_check: dict[str, float] = {}  # symbol → timestamp
+        self._agent_check_interval = getattr(
+            config, "refiner_agent_check_interval_minutes", 5.0
+        ) * 60  # Convert to seconds
 
         # OTE zone parameters
         self.ote_min_retrace = getattr(config, "ote_min_retracement", 0.50)
@@ -268,14 +289,30 @@ class EntryRefiner:
 
                 # Dispatch to strategy-specific check
                 if entry.entry_type == "sweep":
-                    result = self._check_sweep_ote(entry, candles_5m)
+                    result = await self._check_sweep_ote(entry, candles_5m)
                 else:
-                    result = self._check_breakout_retest(entry, candles_5m)
+                    result = await self._check_breakout_retest(entry, candles_5m)
+
+                # Agent 2 ABANDON → remove from queue
+                if getattr(entry, "_agent_abandoned", False):
+                    logger.info(
+                        "refiner_agent2_abandoned",
+                        symbol=symbol,
+                        reason=getattr(entry, "_agent_abandon_reason", ""),
+                        check_count=entry.check_count,
+                        agent2_checks=entry.agent2_check_count,
+                    )
+                    self.total_expired += 1
+                    del self.queue[symbol]
+                    # Clean up agent check timing
+                    self._last_agent_check.pop(symbol, None)
+                    continue
 
                 if result is not None:
                     ready.append(result)
                     self.total_confirmed += 1
                     del self.queue[symbol]
+                    self._last_agent_check.pop(symbol, None)
 
             except Exception as e:
                 logger.warning(
@@ -292,7 +329,7 @@ class EntryRefiner:
 
     # ── Sweep OTE Zone Check ──────────────────────────────────────
 
-    def _check_sweep_ote(
+    async def _check_sweep_ote(
         self, entry: RefinerEntry, candles_5m: pd.DataFrame
     ) -> SignalCandidate | None:
         """Check if price has pulled back into the OTE zone with rejection.
@@ -431,6 +468,30 @@ class EntryRefiner:
         entry.ote_zone_top = ote_top
         entry.ote_zone_bottom = ote_bottom
 
+        # ── Agent 2 check (every 5 minutes) or algorithmic fallback ──
+        now_ts = _time.time()
+        last_check = self._last_agent_check.get(entry.symbol, 0)
+        agent_due = (now_ts - last_check) >= self._agent_check_interval
+
+        if self.refiner_agent and agent_due:
+            try:
+                result = await self._agent_evaluate(
+                    entry, candles_5m, ote_top, ote_bottom, direction,
+                )
+                self._last_agent_check[entry.symbol] = now_ts
+                if result is not None:
+                    return result
+                # Agent said WAIT or ADJUST — don't fall through to algorithm
+                # (algorithm runs on non-agent ticks as safety net)
+                return None
+            except Exception as e:
+                logger.warning(
+                    "refiner_agent2_exception",
+                    symbol=entry.symbol,
+                    error=str(e)[:100],
+                )
+                # Fall through to algorithmic check
+
         return self._find_rejection_in_zone(
             entry=entry,
             candles_5m=candles_5m,
@@ -441,7 +502,7 @@ class EntryRefiner:
 
     # ── Breakout Retest Check ─────────────────────────────────────
 
-    def _check_breakout_retest(
+    async def _check_breakout_retest(
         self, entry: RefinerEntry, candles_5m: pd.DataFrame
     ) -> SignalCandidate | None:
         """Check if price has retested the breakout level and bounced.
@@ -455,21 +516,55 @@ class EntryRefiner:
           - Old support = new resistance
           - Wait for price to pull back UP to the breakout level
           - Enter when price touches the level and closes below it (rejection)
+
+        When Agent 2 is enabled, it handles ALL entry decisions.
+        The algorithmic retest detection is the fallback.
         """
         direction = entry.breakout_direction
         level = entry.breakout_level
         tolerance = level * BREAKOUT_RETEST_TOLERANCE
 
         closes = candles_5m["close"].astype(float)
-        highs = candles_5m["high"].astype(float)
-        lows = candles_5m["low"].astype(float)
-        opens = candles_5m["open"].astype(float)
 
         # Retest zone around the breakout level
         zone_top = level + tolerance
         zone_bottom = level - tolerance
 
-        # Check last 5 candles for retest + bounce
+        # Store zone for dashboard visibility
+        entry.ote_zone_valid = True
+        entry.ote_zone_top = zone_top
+        entry.ote_zone_bottom = zone_bottom
+        if not entry.zone_source:
+            entry.zone_source = "breakout_level"
+
+        # ── Agent 2 check (every 5 minutes) or algorithmic fallback ──
+        now_ts = _time.time()
+        last_check = self._last_agent_check.get(entry.symbol, 0)
+        agent_due = (now_ts - last_check) >= self._agent_check_interval
+
+        if self.refiner_agent and agent_due:
+            try:
+                result = await self._agent_evaluate(
+                    entry, candles_5m, zone_top, zone_bottom, direction,
+                )
+                self._last_agent_check[entry.symbol] = now_ts
+                if result is not None:
+                    return result
+                # Agent said WAIT or ADJUST — don't fall through to algorithm
+                return None
+            except Exception as e:
+                logger.warning(
+                    "refiner_agent2_exception",
+                    symbol=entry.symbol,
+                    error=str(e)[:100],
+                )
+                # Fall through to algorithmic check
+
+        # ── Algorithmic fallback: retest + bounce detection ──
+        highs = candles_5m["high"].astype(float)
+        lows = candles_5m["low"].astype(float)
+        opens = candles_5m["open"].astype(float)
+
         recent = candles_5m.tail(5)
 
         for i in range(len(recent)):
@@ -481,20 +576,15 @@ class EntryRefiner:
             body = abs(c_close - c_open)
 
             if direction == "bullish":
-                # Broke above → wait for pullback to level → bounce
-                # Candle low touched the retest zone AND closed above it
                 if c_low <= zone_top and c_close > level:
-                    # Rejection wick: long lower wick showing buyers at the level
                     lower_wick = min(c_open, c_close) - c_low
                     has_wick = body > 0 and lower_wick / body >= REJECTION_WICK_RATIO
 
-                    # Volume check
                     vol_profile = self.vol_analyzer.analyze(candles_5m)
                     rvol = vol_profile.relative_volume
                     has_volume = rvol >= OTE_REJECTION_RVOL
 
                     if has_wick or has_volume:
-                        # Target = the breakout level (where support is)
                         target_entry = min(c_close, zone_top)
                         return self._create_refined_signal(
                             entry=entry,
@@ -505,8 +595,6 @@ class EntryRefiner:
                         )
 
             elif direction == "bearish":
-                # Broke below → wait for pullback up to level → rejection
-                # Candle high reached the retest zone AND closed below it
                 if c_high >= zone_bottom and c_close < level:
                     upper_wick = c_high - max(c_open, c_close)
                     has_wick = body > 0 and upper_wick / body >= REJECTION_WICK_RATIO
@@ -516,7 +604,6 @@ class EntryRefiner:
                     has_volume = rvol >= OTE_REJECTION_RVOL
 
                     if has_wick or has_volume:
-                        # Target = the breakout level (where resistance is)
                         target_entry = max(c_close, zone_bottom)
                         return self._create_refined_signal(
                             entry=entry,
@@ -662,6 +749,281 @@ class EntryRefiner:
             )
         return None
 
+    # ── Agent 2 Integration ─────────────────────────────────────────
+
+    async def _agent_evaluate(
+        self,
+        entry: RefinerEntry,
+        candles_5m: pd.DataFrame,
+        zone_top: float,
+        zone_bottom: float,
+        direction: str,
+    ) -> SignalCandidate | None:
+        """Run Agent 2 evaluation and handle the decision.
+
+        Returns:
+            SignalCandidate if ENTER (ready to trade),
+            None if WAIT/ADJUST_ZONE/ABANDON (stays in queue or gets removed).
+        """
+        context = self._build_agent_context(
+            entry, candles_5m, zone_top, zone_bottom, direction,
+        )
+
+        decision = await self.refiner_agent.evaluate_entry(context)
+
+        # Always store reasoning for continuity on next check
+        entry.last_agent2_action = decision.action
+        entry.last_agent2_reasoning = decision.reasoning
+        entry.last_agent2_urgency = decision.urgency
+        entry.agent2_check_count += 1
+
+        if decision.action == "ENTER":
+            logger.info(
+                "refiner_agent2_enter",
+                symbol=entry.symbol,
+                entry_price=round(decision.entry_price, 6),
+                sl=round(decision.stop_loss, 6),
+                tp=round(decision.take_profit, 6),
+                size_modifier=decision.position_size_modifier,
+                confidence=decision.confidence,
+                agent2_check=entry.agent2_check_count,
+            )
+            return self._create_refined_signal_from_agent(entry, decision)
+
+        elif decision.action == "ADJUST_ZONE":
+            entry.ote_zone_top = decision.adjusted_zone_high
+            entry.ote_zone_bottom = decision.adjusted_zone_low
+            entry.zone_source = "agent2_adjusted"
+            logger.info(
+                "refiner_agent2_adjust_zone",
+                symbol=entry.symbol,
+                new_zone=f"{round(decision.adjusted_zone_low, 6)}-{round(decision.adjusted_zone_high, 6)}",
+                confidence=decision.confidence,
+                agent2_check=entry.agent2_check_count,
+            )
+            return None
+
+        elif decision.action == "ABANDON":
+            entry._agent_abandoned = True
+            entry._agent_abandon_reason = decision.invalidation_reason
+            logger.info(
+                "refiner_agent2_abandon",
+                symbol=entry.symbol,
+                reason=decision.invalidation_reason[:200],
+                confidence=decision.confidence,
+                agent2_check=entry.agent2_check_count,
+            )
+            return None
+
+        else:  # WAIT
+            if entry.agent2_check_count % 3 == 0:
+                logger.debug(
+                    "refiner_agent2_wait",
+                    symbol=entry.symbol,
+                    urgency=decision.urgency,
+                    reasoning=decision.reasoning[:150],
+                    agent2_check=entry.agent2_check_count,
+                )
+            return None
+
+    def _build_agent_context(
+        self,
+        entry: RefinerEntry,
+        candles_5m: pd.DataFrame,
+        zone_top: float,
+        zone_bottom: float,
+        direction: str,
+    ) -> dict:
+        """Build the context dict for Agent 2's prompt."""
+        signal = entry.signal
+        current_price = float(candles_5m["close"].iloc[-1])
+
+        # Agent 1's analysis from signal components
+        agent_analysis = {}
+        components = signal.components or {}
+        if "agent_analysis" in components:
+            aa = components["agent_analysis"]
+            if isinstance(aa, dict):
+                agent_analysis = aa
+            elif hasattr(aa, "__dict__"):
+                agent_analysis = {
+                    "action": getattr(aa, "action", ""),
+                    "confidence": getattr(aa, "confidence", 0),
+                    "reasoning": getattr(aa, "reasoning", ""),
+                    "market_regime": getattr(aa, "market_regime", ""),
+                    "risk_assessment": getattr(aa, "risk_assessment", ""),
+                }
+
+        # Build compact candle table (last 15 candles, newest first)
+        candle_rows = []
+        tail = candles_5m.tail(15).iloc[::-1]  # Reverse for newest first
+        for _, row in tail.iterrows():
+            c_open = float(row["open"])
+            c_high = float(row["high"])
+            c_low = float(row["low"])
+            c_close = float(row["close"])
+            c_vol = float(row.get("volume", 0))
+            body = abs(c_close - c_open)
+            direction_char = "▲" if c_close >= c_open else "▼"
+            ts = row.get("timestamp", row.name)
+            if hasattr(ts, "strftime"):
+                ts_str = ts.strftime("%H:%M")
+            else:
+                ts_str = str(ts)[-5:]
+            candle_rows.append(
+                f"  {ts_str} | O:{c_open:.6g} H:{c_high:.6g} L:{c_low:.6g} "
+                f"C:{c_close:.6g} | Vol:{c_vol:.0f} | Body:{body:.6g} {direction_char}"
+            )
+        candles_table = "\n".join(candle_rows)
+
+        # Volume profile
+        vol_profile = {}
+        try:
+            vp = self.vol_analyzer.analyze(candles_5m)
+            vol_profile = {
+                "relative_volume": vp.relative_volume,
+                "displacement_detected": vp.displacement_detected,
+                "volume_trend": getattr(vp, "volume_trend", ""),
+            }
+        except Exception:
+            pass
+
+        # Price change since queued
+        price_change_pct = 0.0
+        if entry.original_1h_price > 0:
+            price_change_pct = (current_price - entry.original_1h_price) / entry.original_1h_price * 100
+
+        # BTC context (from market filter if available)
+        btc_trend = "unknown"
+        btc_price = 0.0
+        btc_1h_change = 0.0
+        if self.market_filter:
+            btc_trend = getattr(self.market_filter, "_cached_btc_trend", "unknown") or "unknown"
+            btc_price = getattr(self.market_filter, "_cached_btc_price", 0) or 0
+            btc_1h_change = getattr(self.market_filter, "_cached_btc_1h_change", 0) or 0
+
+        # Structural levels from agent_context (flat dict, NOT organized by timeframe)
+        ac = signal.agent_context or {}
+        structural = {
+            "order_blocks": ac.get("order_blocks", []),
+            "fair_value_gaps": ac.get("fair_value_gaps", []),
+            "liquidity": ac.get("liquidity", {}),
+            "market_structure": ac.get("market_structure", {}),
+            "price_in_ob": ac.get("price_in_ob", False),
+            "price_in_fvg": ac.get("price_in_fvg", False),
+        }
+
+        # Pullback metrics (thrust magnitude, optimal entry, displacement origin)
+        pullback = ac.get("pullback", {})
+
+        # Leverage/funding profile (OI, funding rate, crowding, liquidation levels)
+        leverage = ac.get("leverage", {})
+
+        # Also grab the simple bonus if leverage profile is missing
+        leverage_bonus = getattr(signal, "leverage_bonus", None)
+
+        # Sweep details (type, depth, level)
+        sweep_info = {}
+        if signal.sweep_result:
+            sr = signal.sweep_result
+            sweep_info = {
+                "sweep_type": sr.sweep_type,
+                "sweep_direction": sr.sweep_direction,
+                "sweep_depth": round(sr.sweep_depth, 6),
+                "sweep_level": sr.sweep_level,
+            }
+
+        # Pre-computed SL/TP from algorithmic calculation (Agent 1 context)
+        # These give Agent 2 concrete price targets to use
+        agent1_sl = None
+        agent1_tp = None
+        agent1_rr = None
+        if "agent_analysis" in components:
+            aa = components.get("agent_analysis", {})
+            if isinstance(aa, dict):
+                # The SL/TP were stored in the signal's agent context during core.py processing
+                agent1_sl = components.get("sl_price")
+                agent1_tp = components.get("tp_price")
+                agent1_rr = components.get("rr_ratio")
+
+        # Also check signal-level attributes (set during pre-calculation)
+        if agent1_sl is None:
+            agent1_sl = getattr(signal, "_pre_sl", None)
+        if agent1_tp is None:
+            agent1_tp = getattr(signal, "_pre_tp", None)
+
+        return {
+            "symbol": entry.symbol,
+            "direction": direction,
+            "current_price": current_price,
+            "agent1_analysis": agent_analysis,
+            "previous_action": entry.last_agent2_action,
+            "previous_reasoning": entry.last_agent2_reasoning,
+            "previous_urgency": entry.last_agent2_urgency,
+            "check_count": entry.agent2_check_count,
+            "zone_top": zone_top,
+            "zone_bottom": zone_bottom,
+            "zone_source": entry.zone_source,
+            "candles_5m_table": candles_table,
+            "price_change_since_queue_pct": price_change_pct,
+            "btc_trend": btc_trend,
+            "btc_price": btc_price,
+            "btc_1h_change": btc_1h_change,
+            "structural_levels": structural,
+            "volume_profile": vol_profile,
+            "fibonacci_levels": signal.fibonacci_levels or {},
+            "pullback": pullback,
+            "leverage": leverage,
+            "leverage_bonus": leverage_bonus,
+            "sweep_info": sweep_info,
+            "agent1_sl": agent1_sl,
+            "agent1_tp": agent1_tp,
+            "agent1_rr": agent1_rr,
+        }
+
+    def _create_refined_signal_from_agent(
+        self, entry: RefinerEntry, decision,
+    ) -> SignalCandidate:
+        """Create a refined signal using Agent 2's concrete parameters."""
+        now = datetime.now(timezone.utc)
+        duration = (now - entry.added_at).total_seconds()
+
+        # Calculate improvement
+        improvement_pct = 0.0
+        if entry.original_1h_price > 0:
+            improvement_pct = abs(
+                decision.entry_price - entry.original_1h_price
+            ) / entry.original_1h_price * 100
+
+        signal = entry.signal
+        signal.entry_price = decision.entry_price
+        signal.refined_entry = True
+        signal.refinement_duration_seconds = duration
+        signal.original_1h_price = entry.original_1h_price
+
+        # Attach Agent 2's overrides for core.py to pass to execute_entry
+        signal._agent2_sl = decision.stop_loss
+        signal._agent2_tp = decision.take_profit
+        signal._agent2_size_modifier = decision.position_size_modifier
+
+        logger.info(
+            "refiner_agent2_confirmed",
+            symbol=entry.symbol,
+            entry_price=round(decision.entry_price, 6),
+            original_1h_price=round(entry.original_1h_price, 6),
+            improvement_pct=round(improvement_pct, 2),
+            sl=round(decision.stop_loss, 6),
+            tp=round(decision.take_profit, 6),
+            size_modifier=decision.position_size_modifier,
+            confidence=decision.confidence,
+            zone_source=entry.zone_source,
+            agent2_checks=entry.agent2_check_count,
+            duration_seconds=round(duration, 0),
+            direction=entry.sweep_direction or entry.breakout_direction,
+        )
+
+        return signal
+
     # ── Signal Creation ───────────────────────────────────────────
 
     def _create_refined_signal(
@@ -781,6 +1143,10 @@ class EntryRefiner:
                 "agent_zone_high": entry.signal.agent_entry_zone_high,
                 "agent_zone_low": entry.signal.agent_entry_zone_low,
                 "zone_source": entry.zone_source,
+                "last_agent2_action": entry.last_agent2_action,
+                "last_agent2_reasoning": entry.last_agent2_reasoning,
+                "last_agent2_urgency": entry.last_agent2_urgency,
+                "agent2_check_count": entry.agent2_check_count,
             }
         return {
             "entries": entries_data,

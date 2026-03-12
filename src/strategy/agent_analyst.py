@@ -120,7 +120,25 @@ suggested_entry, suggested_sl, and suggested_tp. This helps the trader see your 
 even when you recommend skipping. Only use 0 if you truly cannot estimate a level.
 
 Be decisive. Lean towards taking trades with good sweeps rather than skipping them. \
-The formula system already filters heavily — if a signal reaches you, it has merit."""
+The formula system already filters heavily — if a signal reaches you, it has merit.
+
+## Glossary (use these terms precisely — do NOT abbreviate without defining)
+
+- **SL** — Stop Loss: the price where the trade is exited at a loss to limit risk
+- **TP** — Take Profit: the price where the trade is exited at a profit
+- **R:R** — Risk-to-Reward Ratio: distance to TP divided by distance to SL (e.g. 2:1 means TP is 2x farther than SL)
+- **OB** — Order Block: a supply/demand zone from a previous institutional candle body (bullish OB = last down-candle before rally, bearish OB = last up-candle before drop)
+- **FVG** — Fair Value Gap: a three-candle imbalance where candle 1's wick doesn't overlap candle 3's wick, creating a gap that price tends to revisit
+- **BOS** — Break of Structure: price breaks a previous swing high (bullish) or swing low (bearish), confirming trend continuation
+- **CHoCH** — Change of Character: first break of structure against the prevailing trend, signaling a potential reversal
+- **OTE** — Optimal Trade Entry: the 61.8%–78.6% Fibonacci retracement zone of a displacement move — the highest-probability re-entry area
+- **HTF** — Higher Timeframe (4H, Daily, Weekly): used for trend/bias direction
+- **LTF** — Lower Timeframe (5m, 15m): used for precise entry timing
+- **RVOL** — Relative Volume: current volume divided by average volume over the lookback period (>1.5 = elevated, >2.5 = institutional)
+- **Displacement** — A large-bodied candle with above-average volume that shows aggressive institutional order flow
+- **Liquidity Sweep** — Price wicks through a key level (swing high/low, equal highs/lows) to trigger resting stop-loss orders, then reverses
+- **Kill Zone** — ICT-defined high-probability trading sessions: London Open (02:00–05:00 UTC), NY Open (12:00–15:00 UTC), NY PM (19:00–21:00 UTC)
+- **Judas Swing** — A fake initial move at session open designed to trap traders before price reverses in the true direction"""
 
 
 JSON_FORMAT_INSTRUCTION = """
@@ -133,7 +151,7 @@ The JSON object must have exactly these keys:
 {
   "action": "ENTER_NOW" | "WAIT_PULLBACK" | "SKIP",
   "confidence": <number 0-100>,
-  "reasoning": "<3-5 sentence analysis>",
+  "reasoning": "<3-5 sentence analysis with SPECIFIC price levels — see rules below>",
   "suggested_entry": <number or 0>,
   "entry_zone_high": <number or 0>,
   "entry_zone_low": <number or 0>,
@@ -152,6 +170,26 @@ Rules for numeric fields — ALWAYS provide your best price estimates for ALL ac
   Use the provided Fibonacci retracement levels, order blocks, or fair value gaps to set this zone.
 - suggested_sl: ALWAYS set a stop-loss price based on structure (below sweep level for longs, above for shorts). Never use 0.
 - suggested_tp: ALWAYS set a take-profit price based on structure. Never use 0.
+
+CRITICAL — Reasoning must include SPECIFIC PRICES AND CLEAR INSTRUCTIONS. A second AI agent \
+(Agent 2) reads your reasoning to make entry timing decisions on a 5-minute chart. \
+Vague descriptions are USELESS to it. Your reasoning is the ONLY guidance Agent 2 has.
+
+You MUST include ALL of the following in every reasoning:
+  - The EXACT entry zone prices (e.g. "entry zone 0.01895–0.01910")
+  - The EXACT stop-loss price with structural justification (e.g. "SL at 0.01925, placed 0.1% above the swept high at 0.01920")
+  - The EXACT take-profit target with structural justification (e.g. "TP at 0.01820, the 4H swing low / buy-side liquidity pool")
+  - WHAT specifically Agent 2 should watch for on the 5m chart to confirm entry (e.g. "look for a bearish engulfing candle or pin bar closing below 0.01900 with RVOL > 1.5")
+  - WHERE key structural levels are with exact prices (e.g. "bearish OB at 0.01895–0.01905, FVG at 0.01880–0.01870")
+  - WHY this setup works or doesn't (e.g. "4H trend is bearish with BOS at 0.01950, sweep took the Asian high at 0.01922")
+
+FORBIDDEN vague phrases — NEVER use these without a price:
+  - "nearby structure" → instead say "the 1H OB at 0.01895"
+  - "retest of swing highs" → instead say "retest of the swing high at 0.01920"
+  - "wait for confirmation" → instead say "wait for a 5m candle closing below 0.01900 with wick rejection"
+  - "good R:R" → instead say "R:R is 2.8:1 (SL 15 pips, TP 42 pips)"
+  - "structure supports" → instead say "1H BOS bearish at 0.01950, CHoCH not yet seen"
+  - "look for rejection" → instead say "look for lower wick > body size at the OB 0.01895–0.01905"
 
 Respond with ONLY the JSON object. No other text."""
 

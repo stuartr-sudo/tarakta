@@ -839,13 +839,20 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         try:
             result: dict = {"status": "ok"}
 
-            # Agent usage stats (if engine is available)
+            # Agent 1 usage stats (strategic analyst)
             if engine and engine.agent_analyst:
                 result["agent"] = engine.agent_analyst.get_usage_stats()
                 result["agent"]["enabled"] = True
                 result["agent"]["available_models"] = engine.agent_analyst.available_models
             else:
                 result["agent"] = {"enabled": False, "total_requests": 0}
+
+            # Agent 2 usage stats (refiner monitor — tactical entry timing)
+            if engine and getattr(engine, "refiner_agent", None):
+                result["refiner_agent"] = engine.refiner_agent.get_usage_stats()
+                result["refiner_agent"]["enabled"] = True
+            else:
+                result["refiner_agent"] = {"enabled": False, "total_requests": 0}
 
             # Agent-tagged trade performance
             closed_trades = await repo.get_trades(status="closed", per_page=500)
@@ -870,22 +877,63 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             return {"error": str(e)}
 
     @router.post("/agent-model")
-    @login_required
+    @admin_required
     async def set_agent_model(request: Request):
-        """Switch the agent model at runtime (no redeploy needed)."""
+        """Switch agent model at runtime and persist to DB.
+
+        Body: {"agent": "agent1"|"agent2", "model": "gpt-5-mini"|"gpt-5.4"}
+        Backwards-compatible: {"model": "..."} still switches Agent 1.
+        """
         try:
             body = await request.json()
             model = body.get("model", "").strip()
+            agent_key = body.get("agent", "agent1").strip()
             if not model:
                 return {"error": "model is required"}
-            if not engine or not engine.agent_analyst:
-                return {"error": "agent not enabled"}
-            active = engine.agent_analyst.set_model(model)
-            return {
+            if not engine:
+                return {"error": "engine not running"}
+
+            # Switch the correct agent
+            if agent_key == "agent2":
+                if not engine.refiner_agent:
+                    return {"error": "Agent 2 not available (no API key)"}
+                active = engine.refiner_agent.set_model(model)
+                db_field = "agent2_model"
+            else:
+                if not engine.agent_analyst:
+                    return {"error": "Agent 1 not available (no API key)"}
+                active = engine.agent_analyst.set_model(model)
+                db_field = "agent1_model"
+
+            # Persist to DB inside config_overrides JSONB (avoids column issues)
+            try:
+                state = await repo.get_engine_state()
+                if state:
+                    overrides = state.get("config_overrides") or {}
+                    if not isinstance(overrides, dict):
+                        overrides = {}
+                    agent_models = overrides.get("agent_models") or {}
+                    agent_models[agent_key] = active
+                    overrides["agent_models"] = agent_models
+                    state["config_overrides"] = overrides
+                    await repo.upsert_engine_state(state)
+            except Exception as e:
+                logger.warning("agent_model_db_save_failed", error=str(e))
+
+            # Return both agents' current models
+            result = {
                 "status": "ok",
+                "agent": agent_key,
                 "model": active,
-                "available_models": engine.agent_analyst.available_models,
+                "agent1_model": engine.agent_analyst._model if engine.agent_analyst else None,
+                "agent2_model": engine.refiner_agent._model if engine.refiner_agent else None,
+                "available_models": (
+                    engine.agent_analyst.available_models
+                    if engine.agent_analyst
+                    else ["gpt-5-mini", "gpt-5.4"]
+                ),
             }
+            return result
         except ValueError as e:
             return {"error": str(e)}
         except Exception as e:

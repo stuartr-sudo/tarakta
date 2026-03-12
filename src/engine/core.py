@@ -26,6 +26,7 @@ from src.strategy.adaptive_threshold import AdaptiveThreshold
 from src.strategy.confluence import WEIGHTS
 from src.strategy.dynamic_weights import DynamicWeightOptimizer
 from src.strategy.agent_analyst import AgentEntryAnalyst
+from src.strategy.refiner_agent import RefinerMonitorAgent
 from src.strategy.llm_analyst import LLMTradeAnalyst
 from src.strategy.market_filter import MarketFilter
 from src.strategy.scanner import AltcoinScanner
@@ -93,9 +94,32 @@ class TradingEngine:
             else None
         )
 
+        # Agent 2 — Refiner Monitor (tactical entry timing)
+        # Always create if API key exists so runtime toggle works instantly
+        self.refiner_agent: RefinerMonitorAgent | None = None
+        if config.agent_api_key:
+            self.refiner_agent = RefinerMonitorAgent(config)
+            logger.info(
+                "refiner_agent_created",
+                model=config.agent_model,
+                enabled=getattr(config, "refiner_agent_enabled", False),
+                check_interval=f"{getattr(config, 'refiner_agent_check_interval_minutes', 5.0)}min",
+            )
+
         # Post-sweep entry refinement — 5m monitoring for better entries (main bot)
+        # Only pass Agent 2 to refiner if enabled in config (runtime toggle syncs later)
+        _initial_refiner_agent = (
+            self.refiner_agent
+            if getattr(config, "refiner_agent_enabled", False)
+            else None
+        )
         self.main_entry_refiner: EntryRefiner | None = (
-            EntryRefiner(candle_manager=candle_manager, config=config)
+            EntryRefiner(
+                candle_manager=candle_manager,
+                config=config,
+                refiner_agent=_initial_refiner_agent,
+                market_filter=self.market_filter,
+            )
             if config.entry_refiner_enabled
             else None
         )
@@ -278,6 +302,24 @@ class TradingEngine:
                     initial_balance=self.config.initial_balance,
                 )
                 logger.info("engine_fresh_start", balance=self.config.initial_balance)
+
+        # Restore persisted agent model choices from config_overrides JSONB
+        try:
+            _db_state = await self.repo.get_engine_state() or {}
+            _overrides = _db_state.get("config_overrides") or {}
+            _agent_models = _overrides.get("agent_models", {}) if isinstance(_overrides, dict) else {}
+        except Exception:
+            _agent_models = {}
+        if self.agent_analyst:
+            _saved_m1 = _agent_models.get("agent1")
+            if _saved_m1 and _saved_m1 in self.agent_analyst.available_models:
+                self.agent_analyst.set_model(_saved_m1)
+                logger.info("agent1_model_restored", model=_saved_m1)
+        if self.refiner_agent:
+            _saved_m2 = _agent_models.get("agent2")
+            if _saved_m2 and _saved_m2 in self.refiner_agent.available_models:
+                self.refiner_agent.set_model(_saved_m2)
+                logger.info("agent2_model_restored", model=_saved_m2)
 
         self.portfolio = PortfolioTracker(
             initial_balance=self.state.current_balance,
@@ -921,11 +963,21 @@ class TradingEngine:
                                 signal.agent_entry_zone_high = agent_result.entry_zone_high
                             if agent_result.entry_zone_low is not None:
                                 signal.agent_entry_zone_low = agent_result.entry_zone_low
+                            # Store pre-computed SL/TP for Agent 2 to reference
+                            signal._pre_sl = pre_sl
+                            signal._pre_tp = pre_tp
                             # Attach agent analysis to signal components so
                             # the refiner queue dashboard can display reasoning
                             if agent_analysis_data:
                                 signal.components["agent_analysis"] = agent_analysis_data
+                                # Store SL/TP in components for Agent 2 context
+                                signal.components["sl_price"] = pre_sl
+                                signal.components["tp_price"] = pre_tp
+                                signal.components["rr_ratio"] = round(pre_rr, 2) if pre_rr else None
+                            # Queue in refiner — try sweep first, then breakout
                             queued = self.main_entry_refiner.add(signal)
+                            if not queued and signal.breakout_result and signal.breakout_result.breakout_detected:
+                                queued = self.main_entry_refiner.add_breakout(signal)
                             if queued:
                                 refiner_queued += 1
                                 logger.info(
@@ -1476,7 +1528,29 @@ class TradingEngine:
         that have confirmed a sweep reclaim on 5m, or have expired.
         Follows the same pipeline as watchlist graduations.
         """
-        if not self.main_entry_refiner or not self.main_entry_refiner.queue:
+        if not self.main_entry_refiner:
+            return
+
+        # Sync Agent 2 toggle from engine state (dashboard can flip at runtime)
+        # Check every 5th monitor tick (~5 min) to avoid excess DB reads
+        if self.refiner_agent and self.main_entry_refiner.total_checks % 5 == 0:
+            try:
+                db_state = await self.repo.get_engine_state() or {}
+                agent2_enabled = db_state.get(
+                    "refiner_agent_enabled",
+                    getattr(self.config, "refiner_agent_enabled", False),
+                )
+                current_agent = self.main_entry_refiner.refiner_agent
+                if agent2_enabled and current_agent is None:
+                    self.main_entry_refiner.refiner_agent = self.refiner_agent
+                    logger.info("refiner_agent_enabled_at_runtime")
+                elif not agent2_enabled and current_agent is not None:
+                    self.main_entry_refiner.refiner_agent = None
+                    logger.info("refiner_agent_disabled_at_runtime")
+            except Exception:
+                pass  # Non-critical — toggle will sync on next check
+
+        if not self.main_entry_refiner.queue:
             return
 
         ready_signals = await self.main_entry_refiner.check_all(
@@ -1590,13 +1664,24 @@ class TradingEngine:
             except Exception as e:
                 logger.warning("refiner_live_price_check_failed", symbol=signal.symbol, error=str(e)[:80])
 
-            # Execute the trade
+            # Execute the trade (with Agent 2 SL/TP overrides if available)
             try:
+                sl_override = getattr(signal, "_agent2_sl", None)
+                tp_override = getattr(signal, "_agent2_tp", None)
+                size_modifier = getattr(signal, "_agent2_size_modifier", 1.0)
+
+                # Scale balance for position sizing if Agent 2 specified a modifier
+                effective_balance = self.portfolio.current_balance
+                if size_modifier != 1.0 and size_modifier > 0:
+                    effective_balance = self.portfolio.current_balance * size_modifier
+
                 position, order_result, trade_record = (
                     await self.order_executor.execute_entry(
                         signal=signal,
-                        current_balance=self.portfolio.current_balance,
+                        current_balance=effective_balance,
                         mode=self.state.mode,
+                        sl_override=sl_override,
+                        tp_override=tp_override,
                     )
                 )
 
@@ -1809,6 +1894,8 @@ class TradingEngine:
                     if result.suggested_entry:
                         signal.original_1h_price = signal.entry_price
                     queued = self.main_entry_refiner.add(signal)
+                    if not queued and signal.breakout_result and signal.breakout_result.breakout_detected:
+                        queued = self.main_entry_refiner.add_breakout(signal)
                     if queued:
                         logger.info(
                             "expired_review_requeued",
@@ -2988,4 +3075,6 @@ class TradingEngine:
             await self.llm_analyst.close()
         if self.agent_analyst:
             await self.agent_analyst.close()
+        if self.refiner_agent:
+            await self.refiner_agent.close()
         logger.info("engine_shutdown_complete")

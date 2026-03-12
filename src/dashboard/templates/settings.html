@@ -141,6 +141,110 @@
     </div>
 </div>
 
+<!-- AI Agents -->
+<div class="two-col">
+    <!-- Agent 1: Strategic Analyst -->
+    <div class="panel">
+        <div class="panel-header">
+            <h2>Agent 1 — Signal Analyst</h2>
+            <span class="status-badge {{ 'open' if agent1_enabled else 'paper' }}">
+                {{ 'ON' if agent1_enabled else 'OFF' }}
+            </span>
+        </div>
+        <div class="panel-body">
+            <p class="text-muted mode-description">
+                {% if agent1_enabled %}
+                AI makes the <strong>strategic</strong> decision: "Is this trade worth taking?"
+                Evaluates sweep quality, HTF alignment, market regime and returns ENTER_NOW / WAIT_PULLBACK / SKIP.
+                {% else %}
+                When enabled, an AI agent evaluates each signal's context — sweep quality, structure, regime —
+                and decides whether to enter, wait for pullback, or skip.
+                {% endif %}
+            </p>
+            {% if not config.agent_api_key %}
+            <p class="text-muted" style="color: var(--orange);">
+                Set AGENT_API_KEY in environment to use AI agents.
+            </p>
+            {% else %}
+            <table class="config-table" style="margin-bottom:0.75rem;">
+                <tr>
+                    <td style="width:100px;">Model</td>
+                    <td>
+                        {% if role == 'admin' %}
+                        <div style="display:flex; align-items:center; gap:8px;">
+                            <select id="agent1-model-select" style="font-size:0.8rem; padding:4px 8px; background:var(--bg-card); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; cursor:pointer;">
+                                {% for m in available_agent_models %}
+                                <option value="{{ m }}" {{ 'selected' if m == agent1_model else '' }}>{{ m }}</option>
+                                {% endfor %}
+                            </select>
+                            <span id="agent1-model-status" style="font-size:0.7rem; color:var(--text-muted);"></span>
+                        </div>
+                        {% else %}
+                        <strong>{{ agent1_model }}</strong>
+                        {% endif %}
+                    </td>
+                </tr>
+            </table>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Agent 2: Refiner Monitor -->
+    <div class="panel" style="border-left: 3px solid {{ '#22c55e' if refiner_agent_enabled else '#64748b' }};">
+        <div class="panel-header">
+            <h2>Agent 2 — Entry Timer</h2>
+            <span class="status-badge {{ 'open' if refiner_agent_enabled else 'paper' }}">
+                {{ 'ON' if refiner_agent_enabled else 'OFF' }}
+            </span>
+        </div>
+        <div class="panel-body">
+            <p class="text-muted mode-description">
+                {% if refiner_agent_enabled %}
+                AI makes the <strong>tactical</strong> decision: "Is NOW the right time to enter?"
+                Monitors queued signals every 5 min on 5m candles. Returns ENTER / WAIT / ADJUST_ZONE / ABANDON
+                with concrete SL, TP, and position sizing.
+                {% else %}
+                When enabled, a second AI agent replaces the algorithmic rejection detection.
+                It reads 5-minute candles, remembers its previous analysis, and decides the precise
+                moment to enter — with exact entry price, stop loss, take profit, and position size.
+                {% endif %}
+            </p>
+            {% if not config.agent_api_key %}
+            <p class="text-muted" style="color: var(--orange);">
+                Set AGENT_API_KEY in environment to use AI agents.
+            </p>
+            {% elif role == 'admin' %}
+            <table class="config-table" style="margin-bottom:0.75rem;">
+                <tr>
+                    <td style="width:100px;">Model</td>
+                    <td>
+                        <div style="display:flex; align-items:center; gap:8px;">
+                            <select id="agent2-model-select" style="font-size:0.8rem; padding:4px 8px; background:var(--bg-card); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; cursor:pointer;">
+                                {% for m in available_agent_models %}
+                                <option value="{{ m }}" {{ 'selected' if m == agent2_model else '' }}>{{ m }}</option>
+                                {% endfor %}
+                            </select>
+                            <span id="agent2-model-status" style="font-size:0.7rem; color:var(--text-muted);"></span>
+                        </div>
+                    </td>
+                </tr>
+                <tr><td>Check Interval</td><td><strong>{{ config.refiner_agent_check_interval_minutes }} min</strong></td></tr>
+                <tr><td>Fallback</td><td class="text-muted">Algorithmic rejection (when Agent 2 is off or API fails)</td></tr>
+            </table>
+            <form method="post" action="/settings/toggle-refiner-agent">
+                {% if refiner_agent_enabled %}
+                <button type="submit" class="btn primary">Disable Agent 2</button>
+                {% else %}
+                <button type="submit" class="btn danger">Enable Agent 2</button>
+                {% endif %}
+            </form>
+            {% else %}
+            <p class="text-muted">View-only access. Agent toggle requires admin login.</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
 <!-- Risk & Trading Settings (editable for admin) -->
 {% if role == 'admin' %}
 <div class="panel" style="border-left: 3px solid #8b5cf6;">
@@ -360,6 +464,41 @@ async function toggleWeeklyCycle() {
     badge.style.background = newVal ? '#22c55e' : '#ef4444';
     btn.textContent = newVal ? 'Disable' : 'Enable';
 }
+
+// Agent model switching
+async function switchAgentModel(agentKey, selectId) {
+    const sel = document.getElementById(selectId);
+    const status = document.getElementById(agentKey + '-model-status');
+    if (!sel) return;
+    const model = sel.value;
+    status.textContent = 'Saving...';
+    status.style.color = '#f59e0b';
+    try {
+        const resp = await fetch('/api/agent-model', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({agent: agentKey, model: model}),
+        });
+        const data = await resp.json();
+        if (data.error) {
+            status.textContent = data.error;
+            status.style.color = '#ef4444';
+        } else {
+            status.textContent = 'Saved';
+            status.style.color = '#22c55e';
+        }
+    } catch (e) {
+        status.textContent = 'Failed';
+        status.style.color = '#ef4444';
+    }
+    setTimeout(() => { status.textContent = ''; }, 3000);
+}
+
+// Bind change events on agent model dropdowns
+const agent1Sel = document.getElementById('agent1-model-select');
+if (agent1Sel) agent1Sel.addEventListener('change', () => switchAgentModel('agent1', 'agent1-model-select'));
+const agent2Sel = document.getElementById('agent2-model-select');
+if (agent2Sel) agent2Sel.addEventListener('change', () => switchAgentModel('agent2', 'agent2-model-select'));
 </script>
 {% endif %}
 {% endblock %}

@@ -161,11 +161,7 @@
         <h2>AI Entry Agent
             <span id="agent-model-badge" class="badge" style="background:#8b5cf6; color:#fff; font-size:0.75rem;">--</span>
         </h2>
-        <div style="display:flex; align-items:center; gap:10px;">
-            <select id="agent-model-select" style="font-size:0.8rem; padding:3px 8px; background:var(--bg-card); color:var(--text-primary); border:1px solid var(--border); border-radius:4px;">
-            </select>
-            <button id="agent-model-btn" class="btn" style="font-size:0.75rem; padding:3px 10px;" onclick="switchAgentModel()">Switch</button>
-        </div>
+        <div style="font-size:0.7rem; color:var(--text-muted);">Model selection on Settings page</div>
     </div>
     <div class="panel-body" style="padding:12px 16px;">
         <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); gap:12px; font-size:0.8rem;">
@@ -1224,50 +1220,9 @@ async function loadAgentStats() {
         document.getElementById('agent-tokens').textContent = (a.total_input_tokens || 0).toLocaleString() + ' / ' + (a.total_output_tokens || 0).toLocaleString();
         document.getElementById('agent-errors').textContent = a.total_errors || 0;
 
-        // Populate model selector
-        const sel = document.getElementById('agent-model-select');
-        if (sel && sel.options.length === 0 && a.available_models) {
-            a.available_models.forEach(m => {
-                const opt = document.createElement('option');
-                opt.value = m;
-                opt.textContent = m;
-                if (m === a.model) opt.selected = true;
-                sel.appendChild(opt);
-            });
-        } else if (sel) {
-            sel.value = a.model;
-        }
     } catch (e) {
         console.error('Agent stats load failed:', e);
     }
-}
-
-async function switchAgentModel() {
-    const sel = document.getElementById('agent-model-select');
-    const btn = document.getElementById('agent-model-btn');
-    if (!sel) return;
-    const model = sel.value;
-    btn.disabled = true;
-    btn.textContent = 'Switching...';
-    try {
-        const resp = await fetch('/api/agent-model', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({model: model})
-        });
-        const data = await resp.json();
-        if (data.error) {
-            alert('Switch failed: ' + data.error);
-        } else {
-            document.getElementById('agent-model-badge').textContent = data.model;
-            btn.textContent = 'Switched!';
-            setTimeout(() => { btn.textContent = 'Switch'; }, 2000);
-        }
-    } catch (e) {
-        alert('Switch failed: ' + e);
-    }
-    btn.disabled = false;
-    if (btn.textContent === 'Switching...') btn.textContent = 'Switch';
 }
 
 loadAgentStats();

@@ -66,14 +66,15 @@ class Settings(BaseSettings):
     max_daily_trades: int = 50  # High ceiling — agent + drawdown safety will self-regulate
     min_trade_usd: float = 150.0  # Minimum margin per trade ($150 × leverage = min notional)
 
-    # Progressive take-profit tiers
+    # Progressive take-profit tiers (0.70R / 0.95R / 1.5R)
+    # Tight TPs — lock profit early, don't let winners turn to losers
     # TP1 hit → close 33%, move SL to breakeven
     # TP2 hit → close 33%, move SL to TP1 price
-    # TP3 hit → close remaining 34% at 3.5R
+    # TP3 hit → close remaining 34%
     tp_tiers_enabled: bool = True
-    tp1_rr: float = 0.75    # TP1 at 0.75R (tightened — locks profit early)
-    tp2_rr: float = 1.125   # TP2 at 1.5× TP1 = 1.125R
-    tp3_rr: float = 3.5     # TP3 at 3.5R (auto-close, no more infinite trailing)
+    tp1_rr: float = 0.70    # TP1 at 0.70R — lock in early profit
+    tp2_rr: float = 0.95    # TP2 at 0.95R — near 1:1 R:R
+    tp3_rr: float = 1.50    # TP3 at 1.5R — close remaining
     tp1_pct: float = 0.33   # close 33% at TP1
     tp2_pct: float = 0.33   # close 33% at TP2
     tp3_pct: float = 0.34   # remaining 34%
@@ -146,6 +147,11 @@ class Settings(BaseSettings):
     agent_min_confidence: float = 50.0  # Agent must be >= this confident to approve
     agent_fallback_approve: bool = True  # If API fails, ENTER trade (don't block on agent downtime)
     agent_split_ratio: float = 1.0  # 1.0 = ALL qualifying signals go through agent
+
+    # Refiner Monitor Agent (Agent 2 — tactical entry timing on 5m candles)
+    # Shares agent_api_key and agent_model with Agent 1
+    refiner_agent_enabled: bool = False
+    refiner_agent_check_interval_minutes: float = 5.0  # Agent 2 runs every 5 min per signal
 
     # Dynamic strategy weights
     dynamic_weights_enabled: bool = False  # Adjust confluence weights based on trade outcomes

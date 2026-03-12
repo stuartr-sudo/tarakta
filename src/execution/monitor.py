@@ -23,7 +23,7 @@ class PositionMonitor:
         trailing_atr_multiplier: float = 1.5,
         breakeven_activation_rr: float = 0.5,
         max_hold_hours: float = 4.0,
-        stale_close_below_rr: float = 0.5,
+        stale_close_below_rr: float = 0.0,
     ) -> None:
         self.trailing_activation_rr = trailing_activation_rr
         self.trailing_atr_multiplier = trailing_atr_multiplier

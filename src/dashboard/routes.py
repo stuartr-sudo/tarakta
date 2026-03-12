@@ -147,9 +147,21 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx = await _base_context(request)
         state = ctx.get("state") or {}
         ctx["llm_enabled"] = state.get("llm_enabled", config.llm_enabled)
-        # Leverage & margin (same source as dashboard)
+        ctx["agent1_enabled"] = bool(config.agent_api_key and config.agent_enabled)
+        ctx["refiner_agent_enabled"] = state.get(
+            "refiner_agent_enabled",
+            getattr(config, "refiner_agent_enabled", False),
+        )
+        # Agent model selection (persisted inside config_overrides JSONB)
         overrides = state.get("config_overrides") or {}
-        main_settings = overrides.get("main_bot_settings", {}) if isinstance(overrides, dict) else {}
+        if not isinstance(overrides, dict):
+            overrides = {}
+        _agent_models = overrides.get("agent_models", {})
+        ctx["agent1_model"] = _agent_models.get("agent1", config.agent_model)
+        ctx["agent2_model"] = _agent_models.get("agent2", config.agent_model)
+        ctx["available_agent_models"] = ["gpt-5-mini", "gpt-5.4"]
+        # Leverage & margin (same source as dashboard)
+        main_settings = overrides.get("main_bot_settings", {}) or {}
         ctx["main_leverage"] = main_settings.get("leverage", config.leverage)
         ctx["main_margin_pct"] = main_settings.get("margin_pct", config.max_position_pct)
         return templates.TemplateResponse("settings.html", ctx)
@@ -174,6 +186,21 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             await repo.upsert_engine_state(state)
         else:
             await repo.upsert_engine_state({"llm_enabled": True})
+        return RedirectResponse(url="/settings", status_code=303)
+
+    @router.post("/settings/toggle-refiner-agent")
+    @admin_required
+    async def toggle_refiner_agent(request: Request):
+        state = await repo.get_engine_state()
+        if state:
+            current = state.get(
+                "refiner_agent_enabled",
+                getattr(config, "refiner_agent_enabled", False),
+            )
+            state["refiner_agent_enabled"] = not current
+            await repo.upsert_engine_state(state)
+        else:
+            await repo.upsert_engine_state({"refiner_agent_enabled": True})
         return RedirectResponse(url="/settings", status_code=303)
 
     return router
