@@ -511,16 +511,19 @@ class TradingEngine:
                 entries=len(self.watchlist_monitor.entries),
             )
 
-        # Restore entry refiner state (main bot)
+        # Do NOT restore entry refiner queue — if the bot was stopped,
+        # all pending trades are null and void.  Queue starts fresh.
         if self.main_entry_refiner and db_state:
             refiner_overrides = (db_state.get("config_overrides") or {})
             refiner_data = refiner_overrides.get("main_entry_refiner")
             if refiner_data:
-                self.main_entry_refiner.restore_state(refiner_data)
-                logger.info(
-                    "main_entry_refiner_restored",
-                    queued=len(self.main_entry_refiner.queue),
-                )
+                discarded = len((refiner_data.get("entries") or {}))
+                if discarded:
+                    logger.warning(
+                        "main_entry_refiner_queue_discarded",
+                        discarded=discarded,
+                        reason="pending_entries_not_restored_on_restart",
+                    )
 
         # Restore consensus monitor state (main bot)
         if self.consensus_monitor and db_state:
@@ -2134,13 +2137,79 @@ class TradingEngine:
                             confidence=wl_agent_result.confidence,
                         )
                     elif wl_agent_result.action == "WAIT_PULLBACK":
-                        # Agent says wait — don't enter now, let it expire or re-trigger
+                        # Agent says wait — queue a PullbackPlan in the refiner (never chase now)
                         agent_skip = True
-                        logger.info(
-                            "watchlist_signal_deferred_by_agent",
-                            symbol=graduated.symbol,
-                            target_entry=wl_agent_result.suggested_entry,
-                        )
+                        if (
+                            self.main_entry_refiner
+                            and graduated.symbol not in self.portfolio.open_positions
+                            and graduated.symbol not in self.main_entry_refiner.get_queued_symbols()
+                        ):
+                            zone_h = wl_agent_result.entry_zone_high
+                            zone_l = wl_agent_result.entry_zone_low
+                            if not zone_h or not zone_l or zone_h <= zone_l or zone_h <= 0:
+                                logger.warning(
+                                    "watchlist_wait_pullback_rejected_invalid_zone",
+                                    symbol=graduated.symbol,
+                                    zone_high=zone_h,
+                                    zone_low=zone_l,
+                                )
+                            else:
+                                now = datetime.now(timezone.utc)
+                                expiry_seconds = self.config.pullback_valid_candles * 5 * 60
+                                invalidation = 0.0
+                                if (
+                                    graduated.sweep_result
+                                    and graduated.sweep_result.sweep_detected
+                                ):
+                                    invalidation = graduated.sweep_result.sweep_level
+
+                                plan = PullbackPlan(
+                                    zone_low=zone_l,
+                                    zone_high=zone_h,
+                                    created_at=now,
+                                    expires_at=now + timedelta(seconds=expiry_seconds),
+                                    invalidation_level=invalidation,
+                                    max_chase_bps=self.config.pullback_max_chase_bps,
+                                    zone_tolerance_bps=self.config.pullback_zone_tolerance_bps,
+                                    valid_for_candles=self.config.pullback_valid_candles,
+                                    direction=graduated.direction or "",
+                                    original_suggested_entry=wl_agent_result.suggested_entry or 0.0,
+                                )
+                                plan.limit_price = plan.compute_limit_price()
+                                graduated.pullback_plan = plan
+                                graduated.original_1h_price = graduated.entry_price
+                                graduated.agent_target_entry = wl_agent_result.suggested_entry
+                                graduated.agent_entry_zone_high = zone_h
+                                graduated.agent_entry_zone_low = zone_l
+
+                                queued = self.main_entry_refiner.add(graduated)
+                                if (
+                                    not queued
+                                    and graduated.breakout_result
+                                    and graduated.breakout_result.breakout_detected
+                                ):
+                                    queued = self.main_entry_refiner.add_breakout(graduated)
+
+                                if queued:
+                                    logger.info(
+                                        "watchlist_wait_pullback_queued",
+                                        symbol=graduated.symbol,
+                                        target_entry=wl_agent_result.suggested_entry,
+                                        entry_zone=plan.zone_str(),
+                                        limit_price=round(plan.limit_price, 6),
+                                        expires_in_seconds=expiry_seconds,
+                                    )
+                                else:
+                                    logger.info(
+                                        "watchlist_wait_pullback_skipped_refiner_full",
+                                        symbol=graduated.symbol,
+                                    )
+                        else:
+                            logger.info(
+                                "watchlist_wait_pullback_not_queued",
+                                symbol=graduated.symbol,
+                                reason="refiner_unavailable_or_symbol_already_tracked",
+                            )
                 except Exception as e:
                     logger.warning("watchlist_agent_failed", symbol=graduated.symbol, error=str(e))
                     # On agent failure, proceed with the trade (fallback)

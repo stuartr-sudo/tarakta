@@ -568,16 +568,21 @@ class EntryRefiner:
 
         closes = candles_5m["close"].astype(float)
 
-        # Retest zone around the breakout level
-        zone_top = level + tolerance
-        zone_bottom = level - tolerance
+        # Guard: if Agent 2 already adjusted the zone, preserve it — don't recompute.
+        if entry.zone_source == "agent2_adjusted" and entry.ote_zone_valid:
+            zone_top = entry.ote_zone_top
+            zone_bottom = entry.ote_zone_bottom
+        else:
+            # Retest zone around the breakout level
+            zone_top = level + tolerance
+            zone_bottom = level - tolerance
 
-        # Store zone for dashboard visibility
-        entry.ote_zone_valid = True
-        entry.ote_zone_top = zone_top
-        entry.ote_zone_bottom = zone_bottom
-        if not entry.zone_source:
-            entry.zone_source = "breakout_level"
+            # Store zone for dashboard visibility
+            entry.ote_zone_valid = True
+            entry.ote_zone_top = zone_top
+            entry.ote_zone_bottom = zone_bottom
+            if not entry.zone_source:
+                entry.zone_source = "breakout_level"
 
         # ── Agent 2 check (every 5 minutes) or algorithmic fallback ──
         now_ts = _time.time()

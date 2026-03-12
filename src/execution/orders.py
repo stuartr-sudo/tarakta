@@ -19,6 +19,7 @@ from src.exchange.models import (
     OrderResult,
     Position,
     ProgressiveFillResult,
+    PullbackPlan,
     SignalCandidate,
     TakeProfitTier,
     TrancheFill,
@@ -43,6 +44,20 @@ class OrderExecutor:
         self.risk_manager = risk_manager
         self.min_rr = config.min_rr_ratio
         self.config = config
+
+    def _pullback_plan_reject_reason(
+        self, plan: PullbackPlan, live_price: float
+    ) -> str:
+        """Return empty string when PullbackPlan checks pass, otherwise reject reason."""
+        if plan.is_expired:
+            return "plan_expired"
+        if plan.invalidation_hit(live_price):
+            return "invalidation_hit"
+        if not plan.price_in_zone(live_price):
+            return "price_outside_zone"
+        if not plan.slippage_ok(live_price):
+            return "slippage_exceeded"
+        return ""
 
     async def execute_entry(
         self,
@@ -211,15 +226,7 @@ class OrderExecutor:
             plan = getattr(signal, "pullback_plan", None)
             if plan is not None:
                 ob_price = best_bid if is_long else best_ask
-                reject_reason = ""
-                if plan.is_expired:
-                    reject_reason = "plan_expired"
-                elif plan.invalidation_hit(ob_price):
-                    reject_reason = "invalidation_hit"
-                elif not plan.price_in_zone(ob_price):
-                    reject_reason = "price_outside_zone"
-                elif not plan.slippage_ok(ob_price):
-                    reject_reason = "slippage_exceeded"
+                reject_reason = self._pullback_plan_reject_reason(plan, ob_price)
 
                 if reject_reason:
                     logger.info(
@@ -267,6 +274,7 @@ class OrderExecutor:
                     total_quantity=pos_size.quantity,
                     num_tranches=num_tranches,
                     is_exit=False,
+                    pullback_plan=plan,
                 )
 
                 if prog_result.total_filled <= 0:
@@ -774,6 +782,7 @@ class OrderExecutor:
         total_quantity: float,
         num_tranches: int,
         is_exit: bool = False,
+        pullback_plan: PullbackPlan | None = None,
     ) -> ProgressiveFillResult:
         """Execute an order progressively across multiple tranches.
 
@@ -845,6 +854,26 @@ class OrderExecutor:
             best_ask = float(asks[0][0])
             mid_price = (best_bid + best_ask) / 2
             current_spread = (best_ask - best_bid) / mid_price if mid_price > 0 else 1.0
+
+            # PullbackPlan hard gate per tranche (entry only).
+            # Prevents later tranches from chasing after the zone moved/expired.
+            if not is_exit and pullback_plan is not None:
+                ob_price = best_bid if is_long_side else best_ask
+                reject_reason = self._pullback_plan_reject_reason(pullback_plan, ob_price)
+                if reject_reason:
+                    logger.info(
+                        "pullback_plan_entry_rejected",
+                        symbol=symbol,
+                        reject_reason=reject_reason,
+                        live_price=round(ob_price, 6),
+                        zone=pullback_plan.zone_str(),
+                        invalidation=round(pullback_plan.invalidation_level, 6),
+                        age_seconds=round(pullback_plan.age_seconds, 1),
+                        path_taken="progressive_tranche_gate",
+                        tranche=tranche_num,
+                    )
+                    abort_reason = f"pullback_plan_{reject_reason}"
+                    break
 
             # Record initial spread on first tranche
             if initial_spread is None:

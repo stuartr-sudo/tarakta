@@ -87,10 +87,10 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
 
         # Override snapshot values with fresh DB-computed ground truth
         stats = ctx["stats"]
-        ctx["snapshot"]["daily_pnl_usd"] = stats.get("daily_pnl", 0)
-        ctx["snapshot"]["total_pnl_usd"] = stats.get("total_pnl", 0)
+        ctx["snapshot"]["daily_pnl_usd"] = stats.get("daily_pnl") or 0
+        ctx["snapshot"]["total_pnl_usd"] = stats.get("total_pnl") or 0
         # Equity = initial balance + total realized P&L (from DB, not in-memory state)
-        ctx["snapshot"]["balance_usd"] = config.initial_balance + stats.get("total_pnl", 0)
+        ctx["snapshot"]["balance_usd"] = config.initial_balance + (stats.get("total_pnl") or 0)
 
         # Main bot settings (margin_pct, leverage) from saved state
         state = ctx.get("state") or {}
