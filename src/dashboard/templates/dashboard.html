@@ -1198,8 +1198,26 @@ function toggleRefinerDetail(row) {
         agentHtml += '</dl></div>';
     }
 
+    // --- Section 5: Agent 2 (Refiner) Latest Decision ---
+    let agent2Html = '';
+    if (d.last_agent2_action || d.last_agent2_reasoning) {
+        const a2Action = d.last_agent2_action || '-';
+        const a2ActionCls = a2Action === 'ENTER' ? 'positive' : a2Action === 'SKIP' ? 'negative' : 'text-orange';
+        const a2Urgency = d.last_agent2_urgency || '-';
+        const a2Checks = d.agent2_check_count || 0;
+        agent2Html = '<div class="detail-section agent-section"><h4>Agent 2 (Refiner Monitor)</h4>';
+        if (d.last_agent2_reasoning) {
+            agent2Html += '<div class="agent-reasoning">' + d.last_agent2_reasoning.replace(/\n/g, '<br>') + '</div>';
+        }
+        agent2Html += '<dl class="detail-meta agent-meta">';
+        agent2Html += '<dt>Last Action</dt><dd class="' + a2ActionCls + '">' + a2Action + '</dd>';
+        agent2Html += '<dt>Urgency</dt><dd>' + a2Urgency + '</dd>';
+        agent2Html += '<dt>Agent 2 Checks</dt><dd>' + a2Checks + '</dd>';
+        agent2Html += '</dl></div>';
+    }
+
     // Assemble
-    td.innerHTML = '<div class="trade-detail-content">' + statusHtml + zonesHtml + componentsHtml + agentHtml + '</div>';
+    td.innerHTML = '<div class="trade-detail-content">' + statusHtml + zonesHtml + componentsHtml + agentHtml + agent2Html + '</div>';
     detailRow.appendChild(td);
     row.after(detailRow);
 }

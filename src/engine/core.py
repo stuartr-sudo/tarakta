@@ -2232,6 +2232,24 @@ class TradingEngine:
                                 graduated.agent_entry_zone_high = zone_h
                                 graduated.agent_entry_zone_low = zone_l
 
+                                # Attach agent analysis so dashboard can display reasoning
+                                graduated.components["agent_analysis"] = {
+                                    "action": wl_agent_result.action,
+                                    "confidence": wl_agent_result.confidence,
+                                    "reasoning": wl_agent_result.reasoning,
+                                    "market_regime": wl_agent_result.market_regime,
+                                    "risk_assessment": wl_agent_result.risk_assessment,
+                                    "suggested_entry": wl_agent_result.suggested_entry,
+                                    "entry_zone_high": wl_agent_result.entry_zone_high,
+                                    "entry_zone_low": wl_agent_result.entry_zone_low,
+                                    "suggested_sl": wl_agent_result.suggested_sl,
+                                    "suggested_tp": wl_agent_result.suggested_tp,
+                                    "expected_high": wl_agent_result.expected_high,
+                                }
+                                graduated.components["sl_price"] = pre_sl
+                                graduated.components["tp_price"] = pre_tp
+                                graduated.components["rr_ratio"] = round(pre_rr, 2) if pre_rr else None
+
                                 queued = self.main_entry_refiner.add(graduated)
                                 if (
                                     not queued
