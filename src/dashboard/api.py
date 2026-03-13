@@ -743,19 +743,31 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         """Get main bot entry refiner queue."""
         if not engine or not engine.main_entry_refiner:
             return {"entries": [], "total_queued": 0, "enabled": False}
-        state = engine.main_entry_refiner.get_state()
-        entries = []
-        for sym, data in state.get("entries", {}).items():
-            entries.append(data)
-        return {
-            "entries": entries,
-            "total_queued": state.get("total_queued", 0),
-            "enabled": True,
-            "last_check_at": state.get("last_check_at"),
-            "total_checks": state.get("total_checks", 0),
-            "total_confirmed": state.get("total_confirmed", 0),
-            "total_expired": state.get("total_expired", 0),
-        }
+        try:
+            state = engine.main_entry_refiner.get_state()
+            entries = []
+            for sym, data in state.get("entries", {}).items():
+                entries.append(data)
+            return {
+                "entries": entries,
+                "total_queued": state.get("total_queued", 0),
+                "enabled": True,
+                "last_check_at": state.get("last_check_at"),
+                "total_checks": state.get("total_checks", 0),
+                "total_confirmed": state.get("total_confirmed", 0),
+                "total_expired": state.get("total_expired", 0),
+                "queue_size": len(engine.main_entry_refiner.queue),
+            }
+        except Exception as e:
+            import traceback
+            return {
+                "entries": [],
+                "total_queued": 0,
+                "enabled": True,
+                "error": str(e),
+                "traceback": traceback.format_exc()[:500],
+                "queue_size": len(engine.main_entry_refiner.queue),
+            }
 
     # ── Consensus Monitor Queue ────────────────────────────────────────
     @router.get("/consensus/main")

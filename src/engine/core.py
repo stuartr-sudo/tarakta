@@ -510,18 +510,12 @@ class TradingEngine:
                 entries=len(self.watchlist_monitor.entries),
             )
 
-        # Restore entry refiner queue — 4h expiry means entries survive restarts.
-        # Expired entries are filtered out during restore_state().
-        if self.main_entry_refiner and db_state:
-            refiner_overrides = (db_state.get("config_overrides") or {})
-            refiner_data = refiner_overrides.get("main_entry_refiner")
-            if refiner_data:
-                self.main_entry_refiner.restore_state(refiner_data)
-                if self.main_entry_refiner.queue:
-                    logger.info(
-                        "main_entry_refiner_restored",
-                        restored=len(self.main_entry_refiner.queue),
-                    )
+        # Do NOT restore entry refiner queue on restart.
+        # Pending signals are stale after a restart — the market has moved on.
+        # Fresh signals will come through naturally from the scanner.
+        # Only open positions (managed by portfolio) survive restarts.
+        if self.main_entry_refiner:
+            logger.info("main_entry_refiner_fresh_start", msg="Queue starts empty on restart")
 
         # Restore consensus monitor state (main bot)
         if self.consensus_monitor and db_state:
