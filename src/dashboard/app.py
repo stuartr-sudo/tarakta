@@ -60,4 +60,11 @@ def create_dashboard_app(config: Settings, repo: Repository, exchange=None, engi
     async def health():
         return {"status": "ok", "service": "tarakta"}
 
+    # Suppress favicon 404
+    from fastapi.responses import Response
+
+    @app.get("/favicon.ico")
+    async def favicon():
+        return Response(status_code=204)
+
     return app

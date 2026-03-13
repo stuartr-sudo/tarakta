@@ -923,6 +923,7 @@ setInterval(loadMainStatus, 15000);
 // Soft-refresh stat cards every 30s. Full reload if position count changes.
 let _knownPositionCount = document.querySelectorAll('#positions-tbody tr[data-trade-id]').length;
 const _tradingMode = '{{ config.trading_mode | default("live") }}';
+const _initialBalance = {{ config.initial_balance | default(100.0) }};
 
 async function softRefreshStats() {
     try {
@@ -938,7 +939,7 @@ async function softRefreshStats() {
 
         // Equity = initial balance + total realized P&L (DB ground truth)
         const totalPnl = parseFloat(stats.total_pnl || 0);
-        const equityValue = initial + totalPnl;
+        const equityValue = _initialBalance + totalPnl;
         if (data.current) {
             const s = data.current;
             const eqEl = document.getElementById('equity-value');

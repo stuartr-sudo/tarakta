@@ -139,13 +139,26 @@ async def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown_all()))
 
-    # Run all market engines concurrently
+    # Run all market engines concurrently (with restart-on-crash)
     async def run_engine(name: str, engine: TradingEngine):
-        try:
-            await engine.run()
-        except Exception as e:
-            logger.critical("engine_fatal", market=name, error=str(e), exc_info=True)
-            await repo.log_error(f"engine_{name}", "critical", str(e))
+        backoff = 30
+        max_backoff = 600  # 10 min cap
+        while True:
+            try:
+                await engine.run()
+                # Engine exited cleanly (shutdown requested)
+                break
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.critical("engine_fatal", market=name, error=str(e), exc_info=True)
+                try:
+                    await repo.log_error(f"engine_{name}", "critical", str(e))
+                except Exception:
+                    pass
+                logger.info("engine_restart_backoff", market=name, seconds=backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
 
     try:
         await asyncio.gather(*[run_engine(name, eng) for name, eng in engines.items()])

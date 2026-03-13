@@ -42,6 +42,7 @@ class AgentDecision:
     suggested_entry: float | None = None  # For WAIT_PULLBACK: target price
     entry_zone_high: float | None = None  # Approximate entry zone upper bound
     entry_zone_low: float | None = None   # Approximate entry zone lower bound
+    expected_high: float | None = None    # WAIT_PULLBACK: price must reach here BEFORE pullback
     suggested_sl: float | None = None
     suggested_tp: float | None = None
     market_regime: str = ""  # trending/ranging/volatile/choppy
@@ -70,10 +71,15 @@ and HOW — not just yes/no, but the optimal approach.
    to pull back to a specific level before entering.
    Use when: sweep confirmed but no pullback yet, or price ran too far from sweep level, \
    or you see a better entry zone on the structure.
-   When choosing WAIT_PULLBACK, you MUST provide an entry_zone_high and entry_zone_low — \
-   the price range where you expect the pullback to reach. Use the **provided Fibonacci \
-   retracement levels** (especially the 61.8-78.6% OTE zone), nearby order blocks, or FVGs \
-   to set this zone. The Fibonacci levels are pre-calculated from the displacement move.
+   When choosing WAIT_PULLBACK, you MUST provide:
+   - **entry_zone_high / entry_zone_low**: the price range where you expect the pullback to reach. \
+     Use the **provided Fibonacci retracement levels** (especially the 61.8-78.6% OTE zone), \
+     nearby order blocks, or FVGs to set this zone.
+   - **expected_high**: the price you expect to be reached BEFORE the pullback happens. \
+     This prevents premature entry on the initial move. For LONGS: the high price expects to \
+     reach before pulling back down to the zone. For SHORTS: the low price expects to reach \
+     before bouncing up to the zone. Set to 0 if the move has already happened and you're \
+     waiting for a pullback that should start from the current price area.
 
 3. **SKIP** — This trade isn't worth taking despite the formula signal.
    Use when: market regime is wrong, BTC context is dangerous, news risk is elevated, \
@@ -166,6 +172,7 @@ The JSON object must have exactly these keys:
   "suggested_entry": <number or 0>,
   "entry_zone_high": <number or 0>,
   "entry_zone_low": <number or 0>,
+  "expected_high": <number or 0>,
   "suggested_sl": <number or 0>,
   "suggested_tp": <number or 0>,
   "market_regime": "trending" | "ranging" | "volatile" | "choppy",
@@ -179,6 +186,12 @@ Rules for numeric fields — ALWAYS provide your best price estimates for ALL ac
   For a LONG: the zone should be BELOW current price (pullback down to buy).
   For a SHORT: the zone should be ABOVE current price (pullback up to sell).
   Use the provided Fibonacci retracement levels, order blocks, or fair value gaps to set this zone.
+- expected_high: For WAIT_PULLBACK ONLY — the price that must be reached BEFORE the pullback begins. \
+  This is CRITICAL to prevent premature entries. For LONGS: set this to the resistance level or \
+  swing high you expect price to reach before pulling back (must be ABOVE entry_zone_high). \
+  For SHORTS: set this to the support level or swing low you expect price to reach before \
+  bouncing up (must be BELOW entry_zone_low). Set to 0 if the move already happened and \
+  pullback should start from current price area, or for ENTER_NOW/SKIP.
 - suggested_sl: ALWAYS set a stop-loss price based on structure (below sweep level for longs, above for shorts). Never use 0.
 - suggested_tp: ALWAYS set a take-profit price based on structure. Never use 0.
 
@@ -255,6 +268,15 @@ ENTRY_DECISION_TOOL = {
                         "For ENTER_NOW or SKIP: set to 0."
                     ),
                 },
+                "expected_high": {
+                    "type": "number",
+                    "description": (
+                        "For WAIT_PULLBACK: price that must be reached BEFORE pullback begins. "
+                        "For LONGS: resistance/swing high above zone (must be > entry_zone_high). "
+                        "For SHORTS: support/swing low below zone (must be < entry_zone_low). "
+                        "Set to 0 if the move already happened or for ENTER_NOW/SKIP."
+                    ),
+                },
                 "suggested_sl": {
                     "type": "number",
                     "description": (
@@ -283,7 +305,7 @@ ENTRY_DECISION_TOOL = {
             "required": [
                 "reasoning", "action", "confidence",
                 "suggested_entry", "entry_zone_high", "entry_zone_low",
-                "suggested_sl", "suggested_tp",
+                "expected_high", "suggested_sl", "suggested_tp",
                 "market_regime", "risk_assessment",
             ],
             "additionalProperties": False,
@@ -407,7 +429,7 @@ class AgentEntryAnalyst:
             client = self._get_client()
             response = await client.chat.completions.create(
                 model=self._model,
-                max_completion_tokens=4000,
+                max_completion_tokens=7000,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT + JSON_FORMAT_INSTRUCTION},
                     {"role": "user", "content": user_prompt},
@@ -752,6 +774,7 @@ Analyze this setup and respond with your JSON decision."""
         tp = data.get("suggested_tp")
         zone_high = data.get("entry_zone_high")
         zone_low = data.get("entry_zone_low")
+        exp_high = data.get("expected_high")
         return AgentDecision(
             action=data.get("action", "SKIP"),
             confidence=float(data.get("confidence", 0)),
@@ -759,6 +782,7 @@ Analyze this setup and respond with your JSON decision."""
             suggested_entry=entry if entry and entry != 0 else None,
             entry_zone_high=zone_high if zone_high and zone_high != 0 else None,
             entry_zone_low=zone_low if zone_low and zone_low != 0 else None,
+            expected_high=exp_high if exp_high and exp_high != 0 else None,
             suggested_sl=sl if sl and sl != 0 else None,
             suggested_tp=tp if tp and tp != 0 else None,
             market_regime=data.get("market_regime", ""),
@@ -833,6 +857,32 @@ Analyze this setup and respond with your JSON decision."""
                 logger.warning("agent_zone_below_entry_for_short", symbol=signal.symbol)
                 decision.entry_zone_high = None
                 decision.entry_zone_low = None
+
+        # Validate expected_high (must-reach-before-pullback gate)
+        if decision.expected_high is not None and decision.action == "WAIT_PULLBACK":
+            eh = decision.expected_high
+            zh = decision.entry_zone_high
+            zl = decision.entry_zone_low
+            if is_long:
+                # For longs: expected_high should be ABOVE the entry zone
+                if zh is not None and eh <= zh:
+                    logger.warning(
+                        "agent_expected_high_below_zone",
+                        symbol=signal.symbol,
+                        expected_high=eh,
+                        zone_high=zh,
+                    )
+                    decision.expected_high = None
+            else:
+                # For shorts: expected_high (really expected_low) should be BELOW the entry zone
+                if zl is not None and eh >= zl:
+                    logger.warning(
+                        "agent_expected_high_above_zone",
+                        symbol=signal.symbol,
+                        expected_high=eh,
+                        zone_low=zl,
+                    )
+                    decision.expected_high = None
 
         # Derive suggested_entry from zone midpoint if zone is valid but entry is missing
         if (decision.entry_zone_high is not None and decision.entry_zone_low is not None

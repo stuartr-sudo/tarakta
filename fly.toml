@@ -1,5 +1,5 @@
 app = "tarakta"
-primary_region = "iad"
+primary_region = "ams"
 
 [build]
   dockerfile = "Dockerfile"
@@ -8,6 +8,7 @@ primary_region = "iad"
   LOG_LEVEL = "INFO"
   LOG_FORMAT = "json"
   PORT = "8080"
+  POSITION_AGENT_ENABLED = "true"
 
 [http_service]
   internal_port = 8080
@@ -23,7 +24,7 @@ primary_region = "iad"
 
 [checks]
   [checks.health]
-    grace_period = "30s"
+    grace_period = "60s"
     interval = "30s"
     method = "GET"
     path = "/health"

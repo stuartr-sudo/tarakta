@@ -29,7 +29,10 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
 
     async def _base_context(request: Request) -> dict:
         """Common context for all authenticated pages (mode banner, nav)."""
-        state = await repo.get_engine_state()
+        try:
+            state = await repo.get_engine_state()
+        except Exception:
+            state = None
         role = request.session.get("role", "viewer")
         return {
             "request": request,
@@ -37,6 +40,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             "config": config,
             "role": role,
             "enabled_markets": enabled_markets,
+            "db_offline": state is None,
         }
 
     @router.get("/login", response_class=HTMLResponse)
@@ -80,10 +84,17 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
     @login_required
     async def dashboard_home(request: Request):
         ctx = await _base_context(request)
-        ctx["snapshot"] = await repo.get_latest_snapshot() or {}
-        ctx["trades"] = await repo.get_open_trades(mode=config.trading_mode)
-        ctx["signals"] = await repo.get_recent_signals(limit=10)
-        ctx["stats"] = await repo.get_trade_stats(mode=config.trading_mode)
+        try:
+            ctx["snapshot"] = await repo.get_latest_snapshot() or {}
+            ctx["trades"] = await repo.get_open_trades(mode=config.trading_mode)
+            ctx["signals"] = await repo.get_recent_signals(limit=10)
+            ctx["stats"] = await repo.get_trade_stats(mode=config.trading_mode)
+        except Exception:
+            ctx["snapshot"] = {}
+            ctx["trades"] = []
+            ctx["signals"] = []
+            ctx["stats"] = {}
+            ctx["db_offline"] = True
 
         # Override snapshot values with fresh DB-computed ground truth
         stats = ctx["stats"]
@@ -107,8 +118,13 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx = await _base_context(request)
         status = request.query_params.get("status", "all")
         page = int(request.query_params.get("page", 1))
-        ctx["trades"] = await repo.get_trades(status=status, mode=config.trading_mode, page=page, per_page=25)
-        ctx["stats"] = await repo.get_trade_stats(mode=config.trading_mode)
+        try:
+            ctx["trades"] = await repo.get_trades(status=status, mode=config.trading_mode, page=page, per_page=25)
+            ctx["stats"] = await repo.get_trade_stats(mode=config.trading_mode)
+        except Exception:
+            ctx["trades"] = []
+            ctx["stats"] = {}
+            ctx["db_offline"] = True
         ctx["current_status"] = status
         ctx["current_page"] = page
         return templates.TemplateResponse("trades.html", ctx)
@@ -118,7 +134,11 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
     async def signals_page(request: Request):
         ctx = await _base_context(request)
         page = int(request.query_params.get("page", 1))
-        ctx["signals"] = await repo.get_signals(page=page, per_page=50)
+        try:
+            ctx["signals"] = await repo.get_signals(page=page, per_page=50)
+        except Exception:
+            ctx["signals"] = []
+            ctx["db_offline"] = True
         ctx["current_page"] = page
         return templates.TemplateResponse("signals.html", ctx)
 
@@ -152,13 +172,13 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             "refiner_agent_enabled",
             getattr(config, "refiner_agent_enabled", False),
         )
-        # Agent model selection (persisted inside config_overrides JSONB)
+        # Agent models always start at config default on restart (cost-safe)
+        # Runtime changes via Settings are session-only
         overrides = state.get("config_overrides") or {}
         if not isinstance(overrides, dict):
             overrides = {}
-        _agent_models = overrides.get("agent_models", {})
-        ctx["agent1_model"] = _agent_models.get("agent1", config.agent_model)
-        ctx["agent2_model"] = _agent_models.get("agent2", config.agent_model)
+        ctx["agent1_model"] = config.agent_model
+        ctx["agent2_model"] = config.agent_model
         ctx["available_agent_models"] = ["gpt-5-mini", "gpt-5.4"]
         # Leverage & margin (same source as dashboard)
         main_settings = overrides.get("main_bot_settings", {}) or {}

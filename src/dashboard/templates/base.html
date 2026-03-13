@@ -51,6 +51,12 @@
         </div>
     </nav>
 
+    {% if db_offline %}
+    <div style="background:#b91c1c;color:#fff;text-align:center;padding:8px;font-weight:600">
+        Database unreachable &mdash; showing cached/empty data. Engines will auto-retry.
+    </div>
+    {% endif %}
+
     <main class="content">
         {% block content %}{% endblock %}
     </main>

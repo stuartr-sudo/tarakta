@@ -96,6 +96,10 @@ class RefinerEntry:
     last_agent2_urgency: str = ""      # Previous urgency level
     agent2_check_count: int = 0        # How many times Agent 2 has evaluated this signal
 
+    # ENTER_NOW routing: Agent 1 said enter immediately, but route through
+    # Agent 2 for quick confirmation. Agent 2 called on first tick (no 5m wait).
+    enter_now: bool = False
+
 
 class EntryRefiner:
     """Monitors queued signals on 5m candles for better entry timing.
@@ -251,6 +255,61 @@ class EntryRefiner:
         )
         return True
 
+    def add_enter_now(self, signal: SignalCandidate) -> bool:
+        """Queue an ENTER_NOW signal for Agent 2 quick confirmation.
+
+        Agent 1 said enter immediately, but we route through Agent 2 for
+        a fast confirmation check. Agent 2 is called on the very first tick
+        (no 5-minute wait). Short 10-minute expiry.
+
+        Returns True if added, False if duplicate.
+        """
+        if signal.symbol in self.queue:
+            return False
+
+        now = datetime.now(timezone.utc)
+        # Determine entry type from signal
+        entry_type = "sweep"
+        sweep_level = 0.0
+        sweep_direction = ""
+        breakout_level = 0.0
+        breakout_direction = ""
+
+        if signal.sweep_result and signal.sweep_result.sweep_detected:
+            sweep_level = signal.sweep_result.sweep_level
+            sweep_direction = signal.sweep_result.sweep_direction
+        elif signal.breakout_result and signal.breakout_result.breakout_detected:
+            entry_type = "breakout"
+            breakout_level = signal.breakout_result.breakout_level
+            breakout_direction = signal.breakout_result.breakout_direction or ""
+
+        entry = RefinerEntry(
+            symbol=signal.symbol,
+            signal=signal,
+            added_at=now,
+            expires_at=now + timedelta(minutes=30),  # Shorter than pullback but enough for Agent 2 confirmation
+            original_1h_price=signal.entry_price,
+            entry_type=entry_type,
+            sweep_level=sweep_level,
+            sweep_direction=sweep_direction,
+            breakout_level=breakout_level,
+            breakout_direction=breakout_direction,
+            pullback_plan=getattr(signal, "pullback_plan", None),
+            enter_now=True,
+        )
+        self.queue[signal.symbol] = entry
+
+        logger.info(
+            "refiner_queued_enter_now",
+            symbol=signal.symbol,
+            score=signal.score,
+            entry_type=entry_type,
+            original_1h_price=round(signal.entry_price, 6),
+            expires_at=entry.expires_at.isoformat(),
+            queue_size=len(self.queue),
+        )
+        return True
+
     async def check_all(
         self, open_position_symbols: set[str] | None = None,
     ) -> list[SignalCandidate]:
@@ -319,6 +378,26 @@ class EntryRefiner:
                 candles_5m = await self.candles.get_candles(symbol, "5m", limit=30)
                 if candles_5m is None or candles_5m.empty or len(candles_5m) < 10:
                     continue
+
+                # Phase gate: expected_high must be reached before zone entry is allowed
+                if entry.pullback_plan and entry.pullback_plan.expected_high > 0:
+                    last_close = float(candles_5m["close"].iloc[-1])
+                    candle_high = float(candles_5m["high"].iloc[-1])
+                    candle_low = float(candles_5m["low"].iloc[-1])
+                    # Check both close and wick extremes
+                    check_price = candle_high if entry.pullback_plan.direction in ("bullish", "long") else candle_low
+                    if not entry.pullback_plan.pullback_allowed(check_price):
+                        if entry.check_count % 5 == 0:
+                            logger.debug(
+                                "refiner_waiting_expected_high",
+                                symbol=symbol,
+                                direction=entry.pullback_plan.direction,
+                                expected_high=round(entry.pullback_plan.expected_high, 6),
+                                current_price=round(last_close, 6),
+                                check_count=entry.check_count,
+                            )
+                        entry.check_count += 1
+                        continue
 
                 entry.check_count += 1
 
@@ -510,10 +589,10 @@ class EntryRefiner:
         entry.ote_zone_top = ote_top
         entry.ote_zone_bottom = ote_bottom
 
-        # ── Agent 2 check (every 5 minutes) or algorithmic fallback ──
+        # ── Agent 2 check (every 5 minutes, or immediately for ENTER_NOW) ──
         now_ts = _time.time()
         last_check = self._last_agent_check.get(entry.symbol, 0)
-        agent_due = (now_ts - last_check) >= self._agent_check_interval
+        agent_due = entry.enter_now or (now_ts - last_check) >= self._agent_check_interval
 
         if self.refiner_agent and agent_due:
             try:
@@ -584,10 +663,10 @@ class EntryRefiner:
             if not entry.zone_source:
                 entry.zone_source = "breakout_level"
 
-        # ── Agent 2 check (every 5 minutes) or algorithmic fallback ──
+        # ── Agent 2 check (every 5 minutes, or immediately for ENTER_NOW) ──
         now_ts = _time.time()
         last_check = self._last_agent_check.get(entry.symbol, 0)
-        agent_due = (now_ts - last_check) >= self._agent_check_interval
+        agent_due = entry.enter_now or (now_ts - last_check) >= self._agent_check_interval
 
         if self.refiner_agent and agent_due:
             try:
@@ -1116,7 +1195,12 @@ class EntryRefiner:
                 "age_seconds": entry.pullback_plan.age_seconds,
                 "zone_updates": entry.pullback_plan.zone_updates,
                 "max_chase_bps": entry.pullback_plan.max_chase_bps,
+                "expected_high": entry.pullback_plan.expected_high,
+                "expected_high_reached": entry.pullback_plan.expected_high_reached,
             } if entry.pullback_plan else None,
+            # ENTER_NOW flag: Agent 1 said enter immediately, Agent 2 is doing
+            # a quick confirmation. Bias toward ENTER unless clearly bad setup.
+            "enter_now_confirmation": entry.enter_now,
         }
 
     def _create_refined_signal_from_agent(
@@ -1287,6 +1371,7 @@ class EntryRefiner:
                 "last_agent2_reasoning": entry.last_agent2_reasoning,
                 "last_agent2_urgency": entry.last_agent2_urgency,
                 "agent2_check_count": entry.agent2_check_count,
+                "enter_now": entry.enter_now,
                 # PullbackPlan persistence
                 "pullback_plan": {
                     "zone_low": entry.pullback_plan.zone_low,
@@ -1301,6 +1386,8 @@ class EntryRefiner:
                     "limit_price": entry.pullback_plan.limit_price,
                     "original_suggested_entry": entry.pullback_plan.original_suggested_entry,
                     "zone_updates": entry.pullback_plan.zone_updates,
+                    "expected_high": entry.pullback_plan.expected_high,
+                    "expected_high_reached": entry.pullback_plan.expected_high_reached,
                 } if entry.pullback_plan else None,
             }
         return {
@@ -1361,7 +1448,8 @@ class EntryRefiner:
                     entry.ote_zone_top = entry_data.get("zone_top", 0.0)
                     entry.ote_zone_bottom = entry_data.get("zone_bottom", 0.0)
                     entry.ote_zone_valid = entry.ote_zone_top > 0 and entry.ote_zone_bottom > 0
-                # Restore Agent 2 continuity fields
+                # Restore enter_now flag and Agent 2 continuity fields
+                entry.enter_now = entry_data.get("enter_now", False)
                 entry.last_agent2_action = entry_data.get("last_agent2_action", "")
                 entry.last_agent2_reasoning = entry_data.get("last_agent2_reasoning", "")
                 entry.last_agent2_urgency = entry_data.get("last_agent2_urgency", "")
@@ -1382,6 +1470,8 @@ class EntryRefiner:
                             limit_price=plan_data.get("limit_price", 0.0),
                             original_suggested_entry=plan_data.get("original_suggested_entry", 0.0),
                             zone_updates=plan_data.get("zone_updates", 0),
+                            expected_high=plan_data.get("expected_high", 0.0),
+                            expected_high_reached=plan_data.get("expected_high_reached", False),
                         )
                         # Also restore plan on the signal
                         entry.signal.pullback_plan = entry.pullback_plan

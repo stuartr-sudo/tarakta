@@ -354,7 +354,7 @@ class RefinerMonitorAgent:
             client = self._get_client()
             response = await client.chat.completions.create(
                 model=self._model,
-                max_completion_tokens=2000,
+                max_completion_tokens=7000,
                 messages=[
                     {"role": "system", "content": REFINER_SYSTEM_PROMPT + REFINER_JSON_FORMAT},
                     {"role": "user", "content": user_prompt},
@@ -693,11 +693,20 @@ class RefinerMonitorAgent:
         if plan_ctx:
             time_left = plan_ctx.get("time_remaining_seconds", 0)
             minutes_left = time_left / 60
+            # Phase gate info
+            exp_high = plan_ctx.get("expected_high", 0)
+            exp_reached = plan_ctx.get("expected_high_reached", False)
+            phase_line = ""
+            if exp_high and exp_high > 0:
+                status = "REACHED" if exp_reached else "NOT YET REACHED"
+                phase_line = f"- **Expected move to:** {exp_high:.6g} ({status}) — entry only valid AFTER this level is hit\n"
+
             plan_section = (
                 f"### Pending Order Plan\n"
                 f"- **Zone:** {plan_ctx.get('zone_low', 0):.6g} – {plan_ctx.get('zone_high', 0):.6g}\n"
                 f"- **Limit price:** {plan_ctx.get('limit_price', 0):.6g}\n"
                 f"- **Invalidation:** {plan_ctx.get('invalidation_level', 0):.6g}\n"
+                f"{phase_line}"
                 f"- **Time remaining:** {minutes_left:.1f} min\n"
                 f"- **Max chase:** {plan_ctx.get('max_chase_bps', 0):.1f} bps\n"
                 f"- **Zone updates:** {plan_ctx.get('zone_updates', 0)}\n\n"
@@ -725,6 +734,17 @@ class RefinerMonitorAgent:
         else:
             action_hint = ""
 
+        # ── ENTER_NOW confirmation mode ──
+        enter_now_hint = ""
+        if ctx.get("enter_now_confirmation"):
+            enter_now_hint = (
+                "\n**FAST CONFIRMATION MODE:** Agent 1 said ENTER_NOW (immediate entry). "
+                "Your job is a quick sanity check — confirm ENTER unless you see a clear "
+                "red flag (price already ran far, obvious reversal pattern, extreme spread, "
+                "or BTC dumping). Bias toward ENTER. Only ABANDON if the setup is clearly "
+                "invalidated. Do NOT WAIT unless there's a specific, concrete reason.\n"
+            )
+
         return f"""\
 ## Tactical Entry Evaluation
 
@@ -732,7 +752,7 @@ class RefinerMonitorAgent:
 **Direction:** {direction}
 **Current Price:** {current_price:.6g}
 {action_hint}
-
+{enter_now_hint}
 ### Agent 1's Strategic Analysis
 {a1_section}
 

@@ -136,7 +136,7 @@ class Settings(BaseSettings):
     agent_timeout_seconds: float = 60.0  # 60s — gpt-5-mini needs time with large prompts
     agent_min_score: float = 35.0  # Minimum formula score to send to agent (sweep detected)
     agent_min_confidence: float = 50.0  # Agent must be >= this confident to approve
-    agent_fallback_approve: bool = True  # If API fails, ENTER trade (don't block on agent downtime)
+    agent_fallback_approve: bool = False  # If API fails, SKIP trade (never enter blind)
     agent_split_ratio: float = 1.0  # 1.0 = ALL qualifying signals go through agent
 
     # Refiner Monitor Agent (Agent 2 — tactical entry timing on 5m candles)
@@ -147,7 +147,7 @@ class Settings(BaseSettings):
     # Position Manager Agent (Agent 3 — AI-powered position monitoring)
     # Shares agent_api_key with Agent 1/2; runs every 15 min per open position
     position_agent_enabled: bool = False
-    position_agent_model: str = "gpt-5-mini"  # Fast/cheap model for frequent checks
+    position_agent_model: str = "gpt-5-nano"  # Cheapest model for frequent 15-min checks
     position_agent_check_interval_minutes: float = 15.0  # How often to check each position
 
     # Feature rollback toggles — disable individual AI enhancements without redeploying
@@ -190,7 +190,7 @@ class Settings(BaseSettings):
     # WAIT_PULLBACK pending order plan — formal zone enforcement for pullback entries
     pullback_zone_tolerance_bps: float = 2.0    # Basis points tolerance for zone boundary check
     pullback_max_chase_bps: float = 3.0         # Max basis points slippage beyond zone edge
-    pullback_valid_candles: int = 6             # Number of 5m candles before expiry (6 = 30min)
+    pullback_valid_candles: int = 48            # Number of 5m candles before expiry (48 = 4h)
     pullback_use_limit_in_zone: bool = True     # Place limit orders at zone levels (not best bid/ask)
 
     # Market Consensus Check — portfolio + BTC alignment before entry

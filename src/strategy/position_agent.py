@@ -175,6 +175,7 @@ class PositionManagerAgent:
 
         # Pricing per 1M tokens (input, cached_input, output)
         self._pricing: dict[str, tuple[float, float, float]] = {
+            "gpt-5-nano": (0.05, 0.005, 0.40),
             "gpt-5-mini": (0.25, 0.025, 2.00),
             "gpt-5.4": (2.50, 0.25, 15.00),
         }
@@ -222,6 +223,7 @@ class PositionManagerAgent:
             client = self._get_client()
             response = await client.chat.completions.create(
                 model=self._model,
+                max_completion_tokens=7000,
                 messages=[
                     {"role": "system", "content": POSITION_SYSTEM_PROMPT + POSITION_JSON_FORMAT},
                     {"role": "user", "content": prompt},
@@ -243,7 +245,7 @@ class PositionManagerAgent:
             self.total_input_tokens += in_tok
             self.total_output_tokens += out_tok
 
-            pricing = self._pricing.get(self._model, (0.25, 0.025, 2.00))
+            pricing = self._pricing.get(self._model, (0.05, 0.005, 0.40))
             non_cached = max(0, in_tok - cached_tok)
             cost = (non_cached * pricing[0] + cached_tok * pricing[1] + out_tok * pricing[2]) / 1_000_000
             self.total_cost_usd += cost

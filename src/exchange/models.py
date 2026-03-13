@@ -284,6 +284,12 @@ class PullbackPlan:
     limit_price: float = 0.0          # Computed zone-aware limit price
     original_suggested_entry: float = 0.0  # Agent 1's suggested_entry
     zone_updates: int = 0              # How many times Agent 2 adjusted zone
+    # Phase gate: price must reach expected_high BEFORE pullback entry is allowed.
+    # For longs: price must rise to this level first (then pull back to zone).
+    # For shorts: price must drop to this level first (then bounce to zone).
+    # 0.0 = no gate (pullback can start from current price area).
+    expected_high: float = 0.0
+    expected_high_reached: bool = False  # Flipped to True once price reaches gate
 
     @property
     def is_expired(self) -> bool:
@@ -320,6 +326,33 @@ class PullbackPlan:
             return price < self.invalidation_level
         else:
             return price > self.invalidation_level
+
+    def check_expected_high(self, price: float) -> bool:
+        """Check if price has reached the expected_high gate.
+
+        Returns True if the gate has been reached (or no gate set).
+        Once reached, expected_high_reached is permanently set to True.
+        """
+        if self.expected_high <= 0 or self.expected_high_reached:
+            return True
+        if self.direction in ("bullish", "long"):
+            # For longs: price must reach UP to expected_high
+            if price >= self.expected_high:
+                self.expected_high_reached = True
+                return True
+        else:
+            # For shorts: price must reach DOWN to expected_high (it's actually expected_low)
+            if price <= self.expected_high:
+                self.expected_high_reached = True
+                return True
+        return False
+
+    def pullback_allowed(self, price: float) -> bool:
+        """Check if pullback entry is allowed — expected_high must have been reached first."""
+        if self.expected_high <= 0:
+            return True  # No gate set
+        self.check_expected_high(price)
+        return self.expected_high_reached
 
     def compute_limit_price(self) -> float:
         """Compute optimal limit price within zone.

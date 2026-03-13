@@ -309,23 +309,13 @@ class TradingEngine:
                 )
                 logger.info("engine_fresh_start", balance=self.config.initial_balance)
 
-        # Restore persisted agent model choices from config_overrides JSONB
-        try:
-            _db_state = await self.repo.get_engine_state() or {}
-            _overrides = _db_state.get("config_overrides") or {}
-            _agent_models = _overrides.get("agent_models", {}) if isinstance(_overrides, dict) else {}
-        except Exception:
-            _agent_models = {}
+        # Agent models: always start with config default (cost-safe).
+        # Users can switch at runtime via Settings — changes are session-only
+        # to prevent accidental lock-in on expensive models across restarts.
         if self.agent_analyst:
-            _saved_m1 = _agent_models.get("agent1")
-            if _saved_m1 and _saved_m1 in self.agent_analyst.available_models:
-                self.agent_analyst.set_model(_saved_m1)
-                logger.info("agent1_model_restored", model=_saved_m1)
+            logger.info("agent1_model_default", model=self.config.agent_model)
         if self.refiner_agent:
-            _saved_m2 = _agent_models.get("agent2")
-            if _saved_m2 and _saved_m2 in self.refiner_agent.available_models:
-                self.refiner_agent.set_model(_saved_m2)
-                logger.info("agent2_model_restored", model=_saved_m2)
+            logger.info("agent2_model_default", model=self.config.agent_model)
 
         self.portfolio = PortfolioTracker(
             initial_balance=self.state.current_balance,
@@ -447,7 +437,16 @@ class TradingEngine:
                              "Deposit funds or reduce min_trade_usd.",
                     )
             except Exception as e:
-                logger.warning("live_balance_check_failed", error=str(e)[:200])
+                logger.critical(
+                    "LIVE_PREFLIGHT_FAILED",
+                    error=str(e)[:200],
+                    hint=(
+                        "Cannot reach Binance authenticated endpoints. "
+                        "If you moved regions (e.g. iad → ams) you MUST update "
+                        "your Binance API key IP whitelist to include the new "
+                        "server IP. Live trading will NOT work until this is fixed."
+                    ),
+                )
         else:
             logger.info("paper_trading_mode", mode="PAPER")
 
@@ -511,18 +510,17 @@ class TradingEngine:
                 entries=len(self.watchlist_monitor.entries),
             )
 
-        # Do NOT restore entry refiner queue — if the bot was stopped,
-        # all pending trades are null and void.  Queue starts fresh.
+        # Restore entry refiner queue — 4h expiry means entries survive restarts.
+        # Expired entries are filtered out during restore_state().
         if self.main_entry_refiner and db_state:
             refiner_overrides = (db_state.get("config_overrides") or {})
             refiner_data = refiner_overrides.get("main_entry_refiner")
             if refiner_data:
-                discarded = len((refiner_data.get("entries") or {}))
-                if discarded:
-                    logger.warning(
-                        "main_entry_refiner_queue_discarded",
-                        discarded=discarded,
-                        reason="pending_entries_not_restored_on_restart",
+                self.main_entry_refiner.restore_state(refiner_data)
+                if self.main_entry_refiner.queue:
+                    logger.info(
+                        "main_entry_refiner_restored",
+                        restored=len(self.main_entry_refiner.queue),
                     )
 
         # Restore consensus monitor state (main bot)
@@ -661,6 +659,9 @@ class TradingEngine:
 
         # Monitor existing positions first
         await self._monitor_tick()
+        # Process any pending refiner entries (the scan can take 10+ min,
+        # so MONITOR ticks won't fire during _primary_tick — check here)
+        await self._process_refined_entries()
 
         # Get tradeable pairs
         try:
@@ -781,8 +782,17 @@ class TradingEngine:
         signals_saved = 0
         trades_entered = 0
         refiner_queued = 0
+        _last_refiner_check = datetime.now(timezone.utc)
         for signal in signals:
             try:
+                # Periodically check refiner queue during long scan loops.
+                # The primary tick can take 10-40 min processing agents,
+                # blocking MONITOR ticks. Check refiner every ~60s inline.
+                _now_check = datetime.now(timezone.utc)
+                if (_now_check - _last_refiner_check).total_seconds() >= 60:
+                    await self._process_refined_entries()
+                    _last_refiner_check = _now_check
+
                 position = None
                 sig_type = "breakout" if signal.breakout_result is not None else "sweep"
 
@@ -877,6 +887,7 @@ class TradingEngine:
                         "entry_zone_low": agent_result.entry_zone_low,
                         "suggested_sl": agent_result.suggested_sl,
                         "suggested_tp": agent_result.suggested_tp,
+                        "expected_high": agent_result.expected_high,
                         "latency_ms": round(agent_result.latency_ms, 1),
                         "error": agent_result.error,
                         "tokens": agent_result.input_tokens + agent_result.output_tokens,
@@ -950,6 +961,13 @@ class TradingEngine:
                             if signal.sweep_result and signal.sweep_result.sweep_detected:
                                 invalidation = signal.sweep_result.sweep_level
 
+                            # Use sweep_direction for invalidation logic (not signal.direction
+                            # which may have been flipped by HTF override)
+                            sweep_dir = (
+                                signal.sweep_result.sweep_direction
+                                if signal.sweep_result and signal.sweep_result.sweep_direction
+                                else signal.direction or ""
+                            )
                             plan = PullbackPlan(
                                 zone_low=zone_l,
                                 zone_high=zone_h,
@@ -959,8 +977,9 @@ class TradingEngine:
                                 max_chase_bps=self.config.pullback_max_chase_bps,
                                 zone_tolerance_bps=self.config.pullback_zone_tolerance_bps,
                                 valid_for_candles=self.config.pullback_valid_candles,
-                                direction=signal.direction or "",
+                                direction=sweep_dir,
                                 original_suggested_entry=agent_result.suggested_entry or 0.0,
+                                expected_high=agent_result.expected_high or 0.0,
                             )
                             plan.limit_price = plan.compute_limit_price()
                             signal.pullback_plan = plan
@@ -1047,7 +1066,7 @@ class TradingEngine:
                         signals_saved += 1
                         continue
 
-                    # Agent says ENTER_NOW
+                    # Agent says ENTER_NOW — execute directly (no Agent 2 delay)
                     logger.info(
                         "agent_enter_now",
                         symbol=signal.symbol,
@@ -1417,6 +1436,10 @@ class TradingEngine:
                     details={"symbol": signal.symbol, "score": signal.score},
                     stack_trace=traceback.format_exc(),
                 )
+
+        # Final refiner check after all signals processed — catch anything
+        # queued during this scan that hasn't been checked yet
+        await self._process_refined_entries()
 
         # Update state
         self.state.last_scan_time = datetime.now(timezone.utc)
@@ -1878,6 +1901,11 @@ class TradingEngine:
                         invalidation = 0.0
                         if signal.sweep_result and signal.sweep_result.sweep_detected:
                             invalidation = signal.sweep_result.sweep_level
+                        sweep_dir = (
+                            signal.sweep_result.sweep_direction
+                            if signal.sweep_result and signal.sweep_result.sweep_direction
+                            else signal.direction or ""
+                        )
                         plan = PullbackPlan(
                             zone_low=zone_l,
                             zone_high=zone_h,
@@ -1887,7 +1915,7 @@ class TradingEngine:
                             max_chase_bps=self.config.pullback_max_chase_bps,
                             zone_tolerance_bps=self.config.pullback_zone_tolerance_bps,
                             valid_for_candles=self.config.pullback_valid_candles,
-                            direction=signal.direction or "",
+                            direction=sweep_dir,
                             original_suggested_entry=result.suggested_entry or 0.0,
                         )
                         plan.limit_price = plan.compute_limit_price()
@@ -2163,6 +2191,13 @@ class TradingEngine:
                                 ):
                                     invalidation = graduated.sweep_result.sweep_level
 
+                                # Use sweep_direction for invalidation logic (not graduated.direction
+                                # which may have been flipped by HTF override)
+                                sweep_dir = (
+                                    graduated.sweep_result.sweep_direction
+                                    if graduated.sweep_result and graduated.sweep_result.sweep_direction
+                                    else graduated.direction or ""
+                                )
                                 plan = PullbackPlan(
                                     zone_low=zone_l,
                                     zone_high=zone_h,
@@ -2172,7 +2207,7 @@ class TradingEngine:
                                     max_chase_bps=self.config.pullback_max_chase_bps,
                                     zone_tolerance_bps=self.config.pullback_zone_tolerance_bps,
                                     valid_for_candles=self.config.pullback_valid_candles,
-                                    direction=graduated.direction or "",
+                                    direction=sweep_dir,
                                     original_suggested_entry=wl_agent_result.suggested_entry or 0.0,
                                 )
                                 plan.limit_price = plan.compute_limit_price()
