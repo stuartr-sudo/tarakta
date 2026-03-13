@@ -2589,6 +2589,11 @@ class TradingEngine:
                     # Remove from state
                     self.state.open_positions.pop(exit_signal.symbol, None)
 
+                    # --- Post-win reassessment (all TPs hit → rescan symbol) ---
+                    await self._post_win_reassessment(
+                        exit_signal.symbol, position, pnl_pct,
+                    )
+
         # Persist SL changes for open positions (catches breakeven moves, trailing SL, etc.)
         for symbol, pos in self.portfolio.open_positions.items():
             if not pos.trade_id:
@@ -2617,6 +2622,185 @@ class TradingEngine:
         self.state.peak_balance = self.portfolio.peak_balance
         self.state.daily_pnl = self.portfolio.daily_pnl
         self.state.total_pnl = self.portfolio.total_pnl
+
+    async def _post_win_reassessment(
+        self,
+        symbol: str,
+        closed_position: Position,
+        pnl_pct: float,
+    ) -> None:
+        """Reassess symbol for a new trade after all TP tiers were filled.
+
+        When a trade hits all 3 TPs (a clean win), the same symbol is rescanned
+        through the full Agent 1 → Agent 2 pipeline for a potential new position
+        in either direction.  If the scanner finds no actionable signal, the
+        symbol simply returns to normal scan rotation.
+        """
+        if not self.agent_analyst or not self.scanner:
+            return
+
+        # Only trigger when ALL TP tiers were filled
+        if (
+            not closed_position.tp_tiers
+            or not all(getattr(t, "filled", False) for t in closed_position.tp_tiers)
+        ):
+            return
+
+        logger.info(
+            "post_win_reassessment_start",
+            symbol=symbol,
+            prev_direction=closed_position.direction,
+            pnl_pct=round(pnl_pct, 2),
+            tiers_hit=len(closed_position.tp_tiers),
+        )
+
+        try:
+            # Fresh scan of just this symbol
+            signals = await self.scanner.scan([symbol])
+            if not signals:
+                logger.info("post_win_reassessment_no_signal", symbol=symbol)
+                return
+
+            signal = signals[0]
+
+            # ── Build Agent 1 context (mirrors _primary_tick inline block) ──
+            pre_sl = self.order_executor._calculate_stop_loss(signal)
+            pre_tp = None
+            pre_rr = None
+            if pre_sl:
+                pre_tp = self.order_executor._calculate_take_profit(signal, pre_sl)
+                sl_dist = abs(signal.entry_price - pre_sl)
+                if sl_dist > 0 and pre_tp:
+                    pre_rr = abs(pre_tp - signal.entry_price) / sl_dist
+
+            # Symbol history for Agent 1 feedback
+            symbol_history = []
+            try:
+                symbol_history = await self.repo.get_recent_trades_for_symbol(
+                    signal.symbol, limit=5, mode=self.state.mode,
+                )
+            except Exception:
+                pass
+
+            ai_context = {
+                "sentiment_score": None,
+                "adjusted_score": signal.score,
+                "active_threshold": self.adaptive_threshold.current_threshold,
+                "sl_price": pre_sl,
+                "tp_price": pre_tp,
+                "rr_ratio": round(pre_rr, 2) if pre_rr else None,
+                "open_position_count": len(self.portfolio.open_positions),
+                "recent_headlines": None,
+                "ml_win_probability": None,
+                "symbol_history": symbol_history,
+                # Reassessment context for Agent 1
+                "post_win_reassessment": True,
+                "previous_direction": closed_position.direction,
+                "previous_pnl_pct": round(pnl_pct, 2),
+            }
+
+            # ── Run Agent 1 ──
+            agent_result = await self.agent_analyst.analyze_signal(signal, ai_context)
+
+            logger.info(
+                "post_win_reassessment_decision",
+                symbol=symbol,
+                action=agent_result.action,
+                confidence=agent_result.confidence,
+                reasoning=agent_result.reasoning[:150],
+            )
+
+            if agent_result.action == "SKIP":
+                return
+
+            # ── WAIT_PULLBACK → queue in refiner (same as primary tick) ──
+            if agent_result.action == "WAIT_PULLBACK" and self.main_entry_refiner:
+                if (
+                    signal.symbol not in self.portfolio.open_positions
+                    and signal.symbol not in self.main_entry_refiner.get_queued_symbols()
+                ):
+                    signal.original_1h_price = signal.entry_price
+                    if agent_result.suggested_entry is not None:
+                        signal.agent_target_entry = agent_result.suggested_entry
+                    if agent_result.entry_zone_high is not None:
+                        signal.agent_entry_zone_high = agent_result.entry_zone_high
+                    if agent_result.entry_zone_low is not None:
+                        signal.agent_entry_zone_low = agent_result.entry_zone_low
+
+                    zone_h = agent_result.entry_zone_high
+                    zone_l = agent_result.entry_zone_low
+                    if not zone_h or not zone_l or zone_h <= zone_l or zone_h <= 0:
+                        logger.warning(
+                            "post_win_reassessment_invalid_zone",
+                            symbol=symbol, zone_high=zone_h, zone_low=zone_l,
+                        )
+                        return
+
+                    now = datetime.now(timezone.utc)
+                    expiry_seconds = self.config.pullback_valid_candles * 5 * 60
+                    invalidation = 0.0
+                    if signal.sweep_result and signal.sweep_result.sweep_detected:
+                        invalidation = signal.sweep_result.sweep_level
+
+                    sweep_dir = (
+                        signal.sweep_result.sweep_direction
+                        if signal.sweep_result and signal.sweep_result.sweep_direction
+                        else signal.direction or ""
+                    )
+                    plan = PullbackPlan(
+                        zone_low=zone_l,
+                        zone_high=zone_h,
+                        created_at=now,
+                        expires_at=now + timedelta(seconds=expiry_seconds),
+                        invalidation_level=invalidation,
+                        max_chase_bps=self.config.pullback_max_chase_bps,
+                        zone_tolerance_bps=self.config.pullback_zone_tolerance_bps,
+                        valid_for_candles=self.config.pullback_valid_candles,
+                        direction=sweep_dir,
+                        original_suggested_entry=agent_result.suggested_entry or 0.0,
+                        expected_high=agent_result.expected_high or 0.0,
+                    )
+                    plan.limit_price = plan.compute_limit_price()
+                    signal.pullback_plan = plan
+                    signal._pre_sl = pre_sl
+                    signal._pre_tp = pre_tp
+
+                    agent_analysis_data = {
+                        "action": agent_result.action,
+                        "confidence": agent_result.confidence,
+                        "reasoning": agent_result.reasoning,
+                        "market_regime": agent_result.market_regime,
+                        "risk_assessment": agent_result.risk_assessment,
+                        "suggested_entry": agent_result.suggested_entry,
+                        "entry_zone_high": agent_result.entry_zone_high,
+                        "entry_zone_low": agent_result.entry_zone_low,
+                        "suggested_sl": agent_result.suggested_sl,
+                        "suggested_tp": agent_result.suggested_tp,
+                        "expected_high": agent_result.expected_high,
+                    }
+                    signal.components["agent_analysis"] = agent_analysis_data
+                    signal.components["sl_price"] = pre_sl
+                    signal.components["tp_price"] = pre_tp
+                    signal.components["rr_ratio"] = round(pre_rr, 2) if pre_rr else None
+
+                    queued = self.main_entry_refiner.add(signal)
+                    if not queued and signal.breakout_result and signal.breakout_result.breakout_detected:
+                        queued = self.main_entry_refiner.add_breakout(signal)
+                    if queued:
+                        logger.info(
+                            "post_win_reassessment_queued",
+                            symbol=symbol,
+                            direction=signal.direction,
+                            zone=f"{zone_l}-{zone_h}",
+                            confidence=agent_result.confidence,
+                        )
+
+        except Exception as e:
+            logger.warning(
+                "post_win_reassessment_failed",
+                symbol=symbol,
+                error=str(e),
+            )
 
     async def _attempt_reversal(
         self,

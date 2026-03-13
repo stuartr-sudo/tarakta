@@ -725,8 +725,24 @@ class AgentEntryAnalyst:
 
 ### Symbol Trade History
 {symbol_history_section}
-
+{self._reassessment_section(context)}
 Analyze this setup and respond with your JSON decision."""
+
+    @staticmethod
+    def _reassessment_section(context: dict) -> str:
+        """Build prompt section for post-win reassessment signals."""
+        if not context.get("post_win_reassessment"):
+            return ""
+        prev_dir = context.get("previous_direction", "unknown")
+        prev_pnl = context.get("previous_pnl_pct", 0)
+        return (
+            "\n### Post-Win Reassessment\n"
+            f"This symbol JUST closed a successful {prev_dir} trade "
+            f"(all TP tiers hit, PnL: {prev_pnl:+.1f}%). "
+            "Reassess the CURRENT market structure for a new entry in EITHER direction. "
+            "The previous trade's thesis may no longer apply — analyze fresh. "
+            "Be objective: if the setup is exhausted or unclear, SKIP.\n"
+        )
 
     def _parse_response(self, response) -> AgentDecision:
         """Extract structured JSON from OpenAI response."""
