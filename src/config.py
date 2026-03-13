@@ -161,9 +161,9 @@ class Settings(BaseSettings):
 
     # Hyper-Watchlist Monitor — promotes near-miss signals to a fast 5m monitor
     watchlist_enabled: bool = True
-    watchlist_monitor_interval_seconds: int = 150   # Check every 2.5 min
+    watchlist_monitor_interval_seconds: int = 300   # Check every 5 min (aligned with 5m candles)
     watchlist_expiry_hours: float = 3.0             # Release after 3 hours
-    watchlist_max_size: int = 30                    # Top 30 near-miss signals (prevents API flooding)
+    watchlist_max_size: int = 90                    # Track up to 90 near-miss signals
     watchlist_min_score: float = 35.0               # Must have at least a sweep (35 pts)
 
     # Progressive order execution — split large orders into tranches to reduce market impact
