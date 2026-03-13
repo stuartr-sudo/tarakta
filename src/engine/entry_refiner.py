@@ -255,7 +255,40 @@ class EntryRefiner:
         )
         return True
 
-    def add_enter_now(self, signal: SignalCandidate) -> bool:
+    def requeue(self, signal: SignalCandidate, entry: RefinerEntry | None = None) -> bool:
+        """Re-queue a signal that was confirmed but rejected at dispatch time.
+
+        This happens when Agent 2 confirms entry (price was in zone), but by
+        the time core.py dispatches, the live price has moved outside the zone.
+        Instead of permanently killing the signal, we put it back in the queue
+        so Agent 2 can keep watching it until the 4h expiry.
+
+        Returns True if re-queued, False if duplicate or expired.
+        """
+        symbol = signal.symbol
+        if symbol in self.queue:
+            return False  # Already in queue (shouldn't happen, but guard)
+
+        # If we have the original RefinerEntry, restore it directly
+        if entry is not None:
+            # Check if already expired
+            if entry.expires_at <= datetime.now(timezone.utc):
+                return False
+            self.queue[symbol] = entry
+            # Reset agent check timing so Agent 2 re-evaluates soon
+            self._last_agent_check.pop(symbol, None)
+            logger.info(
+                "refiner_requeued",
+                symbol=symbol,
+                remaining_seconds=round((entry.expires_at - datetime.now(timezone.utc)).total_seconds()),
+                check_count=entry.check_count,
+                agent2_checks=entry.agent2_check_count,
+            )
+            return True
+
+        return False
+
+
         """Queue an ENTER_NOW signal for Agent 2 quick confirmation.
 
         Agent 1 said enter immediately, but we route through Agent 2 for
@@ -423,6 +456,9 @@ class EntryRefiner:
                     continue
 
                 if result is not None:
+                    # Attach the RefinerEntry so core.py can re-queue if
+                    # live price moves outside zone at dispatch time
+                    result._refiner_entry = entry
                     ready.append(result)
                     self.total_confirmed += 1
                     del self.queue[symbol]

@@ -1576,7 +1576,22 @@ class TradingEngine:
                             age_seconds=round(plan.age_seconds, 1),
                             path_taken="pre_dispatch",
                         )
-                        continue  # DO_NOT_ENTER — no re-queue, no market fallback
+                        # Re-queue soft rejections back to refiner so Agent 2
+                        # can keep watching until the 4h expiry.
+                        # Only price_outside_zone and slippage_exceeded are
+                        # re-queueable — invalidation_hit and plan_expired
+                        # are permanent kills.
+                        if reject_reason in ("price_outside_zone", "slippage_exceeded"):
+                            refiner_entry = getattr(signal, "_refiner_entry", None)
+                            if refiner_entry and self.main_entry_refiner:
+                                requeued = self.main_entry_refiner.requeue(signal, refiner_entry)
+                                if requeued:
+                                    logger.info(
+                                        "pullback_plan_requeued",
+                                        symbol=signal.symbol,
+                                        reject_reason=reject_reason,
+                                    )
+                        continue  # DO_NOT_ENTER — no market fallback
 
                     # Plan passed all checks — update entry to live price
                     signal.entry_price = live_price
