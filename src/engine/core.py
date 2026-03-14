@@ -357,6 +357,20 @@ class TradingEngine:
         self.portfolio.daily_pnl = db_daily_pnl
         self.state.daily_pnl = db_daily_pnl
 
+        # Sanitise peak_balance: a previous bug inflated it via broken get_equity().
+        # Peak can never legitimately exceed initial_balance + total_realized_pnl
+        # (unrealized may push it slightly higher, but not by >5%).
+        max_plausible_peak = self.config.initial_balance + db_total_pnl
+        if self.portfolio.peak_balance > max_plausible_peak * 1.05:
+            logger.warning(
+                "peak_balance_clamped",
+                old_peak=self.portfolio.peak_balance,
+                new_peak=max_plausible_peak,
+                reason="inflated by previous equity bug",
+            )
+            self.portfolio.peak_balance = max_plausible_peak
+            self.state.peak_balance = max_plausible_peak
+
         # Restore PaperExchange internal position tracking after restart
         # Without this, partial exits would create phantom positions instead of closing
         if hasattr(self.exchange, "restore_positions"):
