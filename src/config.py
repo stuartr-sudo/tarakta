@@ -190,7 +190,7 @@ class Settings(BaseSettings):
     # WAIT_PULLBACK pending order plan — formal zone enforcement for pullback entries
     pullback_zone_tolerance_bps: float = 2.0    # Basis points tolerance for zone boundary check
     pullback_max_chase_bps: float = 3.0         # Max basis points slippage beyond zone edge
-    pullback_valid_candles: int = 48            # Number of 5m candles before expiry (48 = 4h)
+    pullback_valid_candles: int = 96            # Number of 5m candles before expiry (96 = 8h)
     pullback_use_limit_in_zone: bool = True     # Place limit orders at zone levels (not best bid/ask)
 
     # Market Consensus Check — portfolio + BTC alignment before entry

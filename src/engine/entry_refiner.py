@@ -321,7 +321,7 @@ class EntryRefiner:
             symbol=signal.symbol,
             signal=signal,
             added_at=now,
-            expires_at=now + timedelta(minutes=90),  # 90 minutes to find confirmation
+            expires_at=now + timedelta(hours=4),  # 4 hours to find confirmation
             original_1h_price=signal.entry_price,
             entry_type=entry_type,
             sweep_level=sweep_level,

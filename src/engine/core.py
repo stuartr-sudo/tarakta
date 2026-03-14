@@ -1099,8 +1099,8 @@ class TradingEngine:
                         zone_l = agent_result.entry_zone_low
                         if zone_h and zone_l and zone_h > zone_l and zone_h > 0:
                             now = datetime.now(timezone.utc)
-                            # ENTER_NOW gets 90 minutes to find confirmation
-                            expiry_seconds = 90 * 60  # 90 minutes
+                            # ENTER_NOW gets 4 hours to find confirmation
+                            expiry_seconds = 4 * 60 * 60  # 4 hours
                             invalidation = 0.0
                             if signal.sweep_result and signal.sweep_result.sweep_detected:
                                 invalidation = signal.sweep_result.sweep_level
