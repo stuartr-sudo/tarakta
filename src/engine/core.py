@@ -357,19 +357,41 @@ class TradingEngine:
         self.portfolio.daily_pnl = db_daily_pnl
         self.state.daily_pnl = db_daily_pnl
 
-        # Sanitise peak_balance: a previous bug inflated it via broken get_equity().
-        # Peak can never legitimately exceed initial_balance + total_realized_pnl
-        # (unrealized may push it slightly higher, but not by >5%).
-        max_plausible_peak = self.config.initial_balance + db_total_pnl
-        if self.portfolio.peak_balance > max_plausible_peak * 1.05:
+        # Reconcile current_balance from ground truth.
+        # correct_cash = initial_balance + realized_pnl - margin_for_open_positions
+        # The stored current_balance can drift due to accounting bugs.
+        deployed_margin = 0.0
+        for pos in self.portfolio.open_positions.values():
+            if pos.leverage > 1:
+                deployed_margin += pos.margin_used or (pos.cost_usd / pos.leverage)
+            else:
+                deployed_margin += pos.cost_usd
+        correct_cash = self.config.initial_balance + db_total_pnl - deployed_margin
+        if abs(correct_cash - self.portfolio.current_balance) > 0.01:
+            logger.warning(
+                "current_balance_reconciled",
+                old=round(self.portfolio.current_balance, 2),
+                new=round(correct_cash, 2),
+                initial=self.config.initial_balance,
+                realized_pnl=db_total_pnl,
+                deployed_margin=round(deployed_margin, 2),
+            )
+            self.portfolio.current_balance = correct_cash
+            self.state.current_balance = correct_cash
+
+        # Sanitise peak_balance: correct_equity = correct_cash + deployed_margin
+        # = initial_balance + realized_pnl. Peak can never exceed this (plus
+        # a small tolerance for unrealized gains).
+        correct_equity = correct_cash + deployed_margin  # = initial + realized_pnl
+        if self.portfolio.peak_balance > correct_equity * 1.05:
             logger.warning(
                 "peak_balance_clamped",
                 old_peak=self.portfolio.peak_balance,
-                new_peak=max_plausible_peak,
+                new_peak=correct_equity,
                 reason="inflated by previous equity bug",
             )
-            self.portfolio.peak_balance = max_plausible_peak
-            self.state.peak_balance = max_plausible_peak
+            self.portfolio.peak_balance = correct_equity
+            self.state.peak_balance = correct_equity
 
         # Restore PaperExchange internal position tracking after restart
         # Without this, partial exits would create phantom positions instead of closing

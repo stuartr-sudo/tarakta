@@ -969,11 +969,11 @@ async function softRefreshStats() {
         const data = await portfolioResp.json();
         const openData = await openResp.json();
 
-        // Equity from snapshot includes unrealized P&L (mark-to-market)
-        let equityValue = _initialBalance;
+        // Equity = initial balance + total realized P&L (ground truth from DB stats)
+        const totalPnl = parseFloat(stats.total_pnl || 0);
+        let equityValue = _initialBalance + totalPnl;
         if (data.current) {
             const s = data.current;
-            equityValue = parseFloat(s.balance_usd || 0);
             const eqEl = document.getElementById('equity-value');
             if (eqEl) eqEl.textContent = '$' + equityValue.toFixed(2);
 
