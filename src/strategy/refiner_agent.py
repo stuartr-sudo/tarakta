@@ -62,7 +62,15 @@ You cannot flip it, second-guess it, or suggest a different direction.
 2. **Your ONLY job is timing.** Decide WHETHER to enter NOW, WAIT for better 5m confirmation, \
 ADJUST the entry zone, or ABANDON if structure is broken — but NEVER because you disagree \
 with the direction or thesis.
-3. **If you ABANDON**, it must be because of concrete 5m structural invalidation (BOS against, \
+3. **NEVER enter without 5m candle confirmation.** Even if Agent 1 says ENTER_NOW, you MUST \
+verify that the latest 5m candle shows a rejection pattern (wick ratio > 1.0, engulfing, \
+higher-low/lower-high, or volume spike) at the entry zone. If no rejection candle exists yet, \
+your answer is WAIT. "ENTER_NOW" from Agent 1 means "conditions are ripe, confirm and execute" \
+— NOT "execute blindly without checking candles."
+4. **Read Agent 1's specific criteria.** Agent 1 often specifies exact confirmation signals \
+(e.g., "look for a 5m bearish engulfing closing below 0.02680 with RVOL > 1.5"). You MUST \
+check whether those specific conditions are met in the candle data before entering.
+5. **If you ABANDON**, it must be because of concrete 5m structural invalidation (BOS against, \
 price ran away, candle body closed through invalidation) — NOT because you think the thesis \
 is wrong.
 
@@ -749,11 +757,22 @@ class RefinerMonitorAgent:
         enter_now_hint = ""
         if ctx.get("enter_now_confirmation"):
             enter_now_hint = (
-                "\n**FAST CONFIRMATION MODE:** Agent 1 said ENTER_NOW (immediate entry). "
-                "Your job is a quick sanity check — confirm ENTER unless you see a clear "
-                "red flag (price already ran far, obvious reversal pattern, extreme spread, "
-                "or BTC dumping). Bias toward ENTER. Only ABANDON if the setup is clearly "
-                "invalidated. Do NOT WAIT unless there's a specific, concrete reason.\n"
+                "\n**⚠️ ENTER_NOW CONFIRMATION MODE:** Agent 1 said ENTER_NOW, meaning "
+                "conditions look favorable for immediate entry. However, you MUST STILL "
+                "verify 5m candle confirmation before entering. Do NOT skip your analysis.\n\n"
+                "**You MUST check these before entering:**\n"
+                "1. Does the latest 5m candle show a rejection pattern at the zone? "
+                "(bearish engulfing, pin bar, lower-high for shorts — or bullish equivalent for longs)\n"
+                "2. Is the candle's wick-to-body ratio > 1.0 showing genuine rejection?\n"
+                "3. Is volume on the rejection candle above average? (RVOL > 1.0)\n"
+                "4. Has price actually reached the entry zone?\n\n"
+                "**If the 5m candle does NOT show rejection yet → WAIT.** "
+                "Agent 1 identified the opportunity but YOU confirm the timing. "
+                "Do not enter just because Agent 1 said ENTER_NOW — that means "
+                "'conditions are ready, confirm on 5m and execute' NOT 'execute blindly'.\n\n"
+                "**Read Agent 1's reasoning carefully** — it often specifies exact confirmation "
+                "criteria (e.g., 'look for bearish engulfing closing below X with RVOL > 1.5'). "
+                "You must verify those specific conditions are met in the candle data.\n"
             )
 
         return f"""\

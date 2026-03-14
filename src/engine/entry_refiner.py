@@ -288,12 +288,13 @@ class EntryRefiner:
 
         return False
 
-
-        """Queue an ENTER_NOW signal for Agent 2 quick confirmation.
+    def add_enter_now(self, signal: SignalCandidate) -> bool:
+        """Queue an ENTER_NOW signal for Agent 2 confirmation.
 
         Agent 1 said enter immediately, but we route through Agent 2 for
-        a fast confirmation check. Agent 2 is called on the very first tick
-        (no 5-minute wait). Short 10-minute expiry.
+        a confirmation check. Agent 2 is called on the very first tick
+        (no 5-minute wait). Agent 2 must verify the 5m candle confirmation
+        criteria that Agent 1 specified before executing.
 
         Returns True if added, False if duplicate.
         """
@@ -320,7 +321,7 @@ class EntryRefiner:
             symbol=signal.symbol,
             signal=signal,
             added_at=now,
-            expires_at=now + timedelta(minutes=30),  # Shorter than pullback but enough for Agent 2 confirmation
+            expires_at=now + timedelta(minutes=15),  # Short window — ENTER_NOW should confirm fast
             original_1h_price=signal.entry_price,
             entry_type=entry_type,
             sweep_level=sweep_level,

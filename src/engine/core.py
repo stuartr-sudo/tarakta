@@ -1078,14 +1078,104 @@ class TradingEngine:
                         signals_saved += 1
                         continue
 
-                    # Agent says ENTER_NOW — execute directly (no Agent 2 delay)
-                    logger.info(
-                        "agent_enter_now",
+                    # Agent says ENTER_NOW — route through Agent 2 for confirmation
+                    # Agent 2 checks on the very first tick (no 5-minute wait)
+                    # but MUST verify the 5m candle confirmation criteria Agent 1 specified
+                    if (
+                        self.main_entry_refiner
+                        and signal.symbol not in self.portfolio.open_positions
+                        and signal.symbol not in self.main_entry_refiner.get_queued_symbols()
+                    ):
+                        signal.original_1h_price = signal.entry_price
+                        if agent_result.suggested_entry is not None:
+                            signal.agent_target_entry = agent_result.suggested_entry
+                        if agent_result.entry_zone_high is not None:
+                            signal.agent_entry_zone_high = agent_result.entry_zone_high
+                        if agent_result.entry_zone_low is not None:
+                            signal.agent_entry_zone_low = agent_result.entry_zone_low
+
+                        # Build a PullbackPlan so Agent 2 has zone context
+                        zone_h = agent_result.entry_zone_high
+                        zone_l = agent_result.entry_zone_low
+                        if zone_h and zone_l and zone_h > zone_l and zone_h > 0:
+                            now = datetime.now(timezone.utc)
+                            # ENTER_NOW gets a shorter expiry — Agent 1 says conditions are ready
+                            expiry_seconds = 15 * 60  # 15 minutes max
+                            invalidation = 0.0
+                            if signal.sweep_result and signal.sweep_result.sweep_detected:
+                                invalidation = signal.sweep_result.sweep_level
+                            sweep_dir = (
+                                signal.sweep_result.sweep_direction
+                                if signal.sweep_result and signal.sweep_result.sweep_direction
+                                else signal.direction or ""
+                            )
+                            plan = PullbackPlan(
+                                zone_low=zone_l,
+                                zone_high=zone_h,
+                                created_at=now,
+                                expires_at=now + timedelta(seconds=expiry_seconds),
+                                invalidation_level=invalidation,
+                                max_chase_bps=self.config.pullback_max_chase_bps,
+                                zone_tolerance_bps=self.config.pullback_zone_tolerance_bps,
+                                valid_for_candles=3,  # Short window
+                                direction=sweep_dir,
+                                original_suggested_entry=agent_result.suggested_entry or 0.0,
+                                expected_high=0.0,  # No expected_high gate for ENTER_NOW
+                            )
+                            plan.limit_price = plan.compute_limit_price()
+                            signal.pullback_plan = plan
+
+                        # Store pre-computed SL/TP for Agent 2 to reference
+                        signal._pre_sl = pre_sl
+                        signal._pre_tp = pre_tp
+                        if agent_analysis_data:
+                            signal.components["agent_analysis"] = agent_analysis_data
+                            signal.components["sl_price"] = pre_sl
+                            signal.components["tp_price"] = pre_tp
+                            signal.components["rr_ratio"] = round(pre_rr, 2) if pre_rr else None
+
+                        queued = self.main_entry_refiner.add_enter_now(signal)
+                        if queued:
+                            refiner_queued += 1
+                            logger.info(
+                                "agent_enter_now_queued_for_confirmation",
+                                symbol=signal.symbol,
+                                confidence=agent_result.confidence,
+                                regime=agent_result.market_regime,
+                                risk=agent_result.risk_assessment,
+                                entry_zone=f"{zone_l}-{zone_h}" if zone_l and zone_h else "none",
+                            )
+                            vol_24h = self.exchange.get_24h_volume(signal.symbol)
+                            await self.repo.insert_signal(
+                                {
+                                    "symbol": signal.symbol,
+                                    "direction": signal.direction or "none",
+                                    "score": signal.score,
+                                    "reasons": signal.reasons + [
+                                        f"AGENT:ENTER_NOW→AGENT2(conf={agent_result.confidence:.0f})"
+                                    ],
+                                    "components": {
+                                        "volume_24h": vol_24h,
+                                        "test_group": "agent",
+                                        "agent_analysis": agent_analysis_data,
+                                        "signal_type": sig_type,
+                                    },
+                                    "current_price": signal.entry_price,
+                                    "acted_on": False,
+                                    "scan_cycle": cycle,
+                                }
+                            )
+                            signals_saved += 1
+                            continue
+
+                    # Fallback: if refiner unavailable, skip (don't blindly execute)
+                    logger.warning(
+                        "agent_enter_now_no_refiner",
                         symbol=signal.symbol,
                         confidence=agent_result.confidence,
-                        regime=agent_result.market_regime,
-                        risk=agent_result.risk_assessment,
+                        reason="refiner unavailable or symbol already queued/in position",
                     )
+                    continue
 
                 # --- OTE Entry Refinement (only when agent is NOT active) ---
                 # When agent is active, it already decided whether to use the refiner.
