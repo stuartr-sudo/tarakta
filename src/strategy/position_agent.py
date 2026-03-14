@@ -13,7 +13,7 @@ Decisions:
 Key constraint: Agent 3 cannot widen the SL or override hard SL/TP levels.
 If the API call fails, the algorithmic logic has already run — no action taken.
 
-Uses the same infrastructure as Agent 1 and Agent 2: lazy AsyncOpenAI client,
+Uses the same infrastructure as Agent 1 and Agent 2: lazy Gemini AsyncClient,
 exponential backoff, cost tracking, JSON response parsing.
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from openai import AsyncOpenAI
+from google import genai
 
 from src.config import Settings
 from src.utils.logging import get_logger
@@ -156,6 +156,20 @@ Rules:
 Respond with ONLY the JSON object. No other text."""
 
 
+# Gemini structured output schema for Agent 3
+POSITION_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {"type": "string", "enum": ["HOLD", "TIGHTEN_SL", "CLOSE_PARTIAL", "CLOSE_FULL"]},
+        "suggested_sl": {"type": "number"},
+        "partial_close_pct": {"type": "number"},
+        "reasoning": {"type": "string"},
+        "confidence": {"type": "number"},
+    },
+    "required": ["action", "suggested_sl", "partial_close_pct", "reasoning", "confidence"],
+}
+
+
 class PositionManagerAgent:
     """Agent 3 — AI-powered position management.
 
@@ -164,13 +178,14 @@ class PositionManagerAgent:
     """
 
     def __init__(self, config: Settings) -> None:
-        self._client: AsyncOpenAI | None = None
+        self._client: genai.AsyncClient | None = None
         self._api_key = config.agent_api_key
-        self._model = getattr(config, "position_agent_model", "gpt-5-nano")
+        self._model = getattr(config, "position_agent_model", "gemini-3-flash-preview")
         self._timeout = config.agent_timeout_seconds
         self._available = bool(config.agent_api_key) and getattr(
             config, "position_agent_enabled", False
         )
+        self._thinking_level = "minimal"  # Agent 3: simple SL checks, fast
 
         # Backoff state
         self._fail_count = 0
@@ -189,18 +204,13 @@ class PositionManagerAgent:
 
         # Pricing per 1M tokens (input, cached_input, output)
         self._pricing: dict[str, tuple[float, float, float]] = {
-            "gpt-5-nano": (0.05, 0.005, 0.40),
-            "gpt-5-mini": (0.25, 0.025, 2.00),
-            "gpt-5.4": (2.50, 0.25, 15.00),
+            "gemini-3-pro-preview": (1.25, 0.125, 10.00),
+            "gemini-3-flash-preview": (0.10, 0.01, 0.40),
         }
 
-    def _get_client(self) -> AsyncOpenAI:
+    def _get_client(self) -> genai.AsyncClient:
         if self._client is None:
-            self._client = AsyncOpenAI(
-                api_key=self._api_key,
-                timeout=self._timeout,
-                max_retries=1,
-            )
+            self._client = genai.AsyncClient(api_key=self._api_key)
         return self._client
 
     def _should_try(self) -> bool:
@@ -235,35 +245,32 @@ class PositionManagerAgent:
 
         try:
             client = self._get_client()
-            response = await client.chat.completions.create(
+            interaction = await client.interactions.create(
                 model=self._model,
-                max_completion_tokens=7000,
-                messages=[
-                    {"role": "system", "content": POSITION_SYSTEM_PROMPT + POSITION_JSON_FORMAT},
-                    {"role": "user", "content": prompt},
-                ],
-                response_format={"type": "json_object"},
+                system_instruction=POSITION_SYSTEM_PROMPT + POSITION_JSON_FORMAT,
+                input=prompt,
+                response_format=POSITION_RESPONSE_SCHEMA,
+                generation_config={
+                    "thinking_level": self._thinking_level,
+                    "temperature": 1.0,
+                },
             )
 
             latency_ms = (time.time() - t0) * 1000
             self.total_requests += 1
 
             # Track tokens + cost
-            usage = response.usage
-            in_tok = usage.prompt_tokens if usage else 0
-            out_tok = usage.completion_tokens if usage else 0
-            cached_tok = getattr(
-                getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0
-            ) or 0
+            usage = interaction.usage
+            in_tok = getattr(usage, "input_tokens", 0) or 0
+            out_tok = getattr(usage, "output_tokens", 0) or 0
             self.total_input_tokens += in_tok
             self.total_output_tokens += out_tok
 
-            pricing = self._pricing.get(self._model, (0.05, 0.005, 0.40))
-            non_cached = max(0, in_tok - cached_tok)
-            cost = (non_cached * pricing[0] + cached_tok * pricing[1] + out_tok * pricing[2]) / 1_000_000
+            pricing = self._pricing.get(self._model, (0.10, 0.01, 0.40))
+            cost = (in_tok * pricing[0] + out_tok * pricing[2]) / 1_000_000
             self.total_cost_usd += cost
 
-            decision = self._parse_response(response)
+            decision = self._parse_response(interaction)
             decision.latency_ms = latency_ms
             decision.input_tokens = in_tok
             decision.output_tokens = out_tok
@@ -391,16 +398,19 @@ class PositionManagerAgent:
 
 Evaluate this position and respond with your JSON decision. Default to HOLD unless you see clear evidence for action."""
 
-    def _parse_response(self, response) -> PositionDecision:
-        """Extract structured JSON from OpenAI response."""
+    def _parse_response(self, interaction) -> PositionDecision:
+        """Extract structured JSON from Gemini Interactions response."""
         import json as _json
 
-        choice = response.choices[0]
-        message = choice.message
+        # Get the last text output from the interaction
+        text = None
+        for output in reversed(interaction.outputs):
+            if getattr(output, "text", None):
+                text = output.text.strip()
+                break
 
-        if message.content:
+        if text:
             try:
-                text = message.content.strip()
                 if text.startswith("```"):
                     text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
                 data = _json.loads(text)
@@ -420,6 +430,4 @@ Evaluate this position and respond with your JSON decision. Default to HOLD unle
         return PositionDecision(action="HOLD", reasoning="Failed to parse response")
 
     async def close(self) -> None:
-        if self._client:
-            await self._client.close()
-            self._client = None
+        self._client = None

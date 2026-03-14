@@ -13,7 +13,7 @@ It runs every 5 minutes on queued signals and returns concrete parameters:
 Agent 2 has reasoning continuity — its previous analysis is included in each
 prompt so it can build on its own observations across checks.
 
-Uses OpenAI function calling (JSON response format), mirroring Agent 1's
+Uses Gemini Interactions API (JSON response format), mirroring Agent 1's
 resilience patterns (lazy client, exponential backoff, cost tracking).
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from openai import AsyncOpenAI
+from google import genai
 
 from src.config import Settings
 from src.utils.logging import get_logger
@@ -286,20 +286,49 @@ Rules:
 Respond with ONLY the JSON object. No other text."""
 
 
+# Gemini structured output schema for Agent 2
+REFINER_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {"type": "string", "enum": ["ENTER", "WAIT", "ADJUST_ZONE", "ABANDON"]},
+        "entry_price": {"type": "number"},
+        "stop_loss": {"type": "number"},
+        "take_profit": {"type": "number"},
+        "adjusted_zone_high": {"type": "number"},
+        "adjusted_zone_low": {"type": "number"},
+        "position_size_modifier": {"type": "number"},
+        "confidence": {"type": "number"},
+        "urgency": {"type": "string", "enum": ["low", "medium", "high"]},
+        "reasoning": {"type": "string"},
+        "invalidation_reason": {"type": "string"},
+    },
+    "required": [
+        "action", "entry_price", "stop_loss", "take_profit",
+        "adjusted_zone_high", "adjusted_zone_low",
+        "position_size_modifier", "confidence", "urgency",
+        "reasoning", "invalidation_reason",
+    ],
+}
+
+
 class RefinerMonitorAgent:
     """Agent 2 — AI-powered tactical entry timing.
 
-    Mirrors Agent 1's infrastructure: lazy AsyncOpenAI client, exponential
+    Mirrors Agent 1's infrastructure: lazy Gemini AsyncClient, exponential
     backoff, token/cost tracking, JSON response parsing with fallbacks.
     """
 
     def __init__(self, config: Settings) -> None:
-        self._client: AsyncOpenAI | None = None
+        self._client: genai.AsyncClient | None = None
         self._api_key = config.agent_api_key
-        self._model = config.agent_model
+        self._model = getattr(config, "agent_model", "gemini-3-flash-preview")
+        # Agent 2 always uses flash — override any pro model from config
+        if "pro" in self._model:
+            self._model = "gemini-3-flash-preview"
         self._timeout = config.agent_timeout_seconds
         self._max_sl_pct = getattr(config, "max_sl_pct", 0.15)
         self._available = bool(config.agent_api_key)
+        self._thinking_level = "low"  # Agent 2 refine: fast tactical decisions
 
         # Backoff state (mirrors Agent 1)
         self._fail_count = 0
@@ -318,8 +347,8 @@ class RefinerMonitorAgent:
 
         # Pricing per 1M tokens by model (input, cached_input, output)
         self._pricing: dict[str, tuple[float, float, float]] = {
-            "gpt-5-mini": (0.25, 0.025, 2.00),
-            "gpt-5.4": (2.50, 0.25, 15.00),
+            "gemini-3-pro-preview": (1.25, 0.125, 10.00),
+            "gemini-3-flash-preview": (0.10, 0.01, 0.40),
         }
 
         # Available models for runtime switching
@@ -334,13 +363,9 @@ class RefinerMonitorAgent:
         logger.info("refiner_agent_model_switched", old_model=old, new_model=model)
         return self._model
 
-    def _get_client(self) -> AsyncOpenAI:
+    def _get_client(self) -> genai.AsyncClient:
         if self._client is None:
-            self._client = AsyncOpenAI(
-                api_key=self._api_key,
-                timeout=self._timeout,
-                max_retries=1,
-            )
+            self._client = genai.AsyncClient(api_key=self._api_key)
         return self._client
 
     def _should_try(self) -> bool:
@@ -396,44 +421,39 @@ class RefinerMonitorAgent:
 
         try:
             client = self._get_client()
-            response = await client.chat.completions.create(
+            interaction = await client.interactions.create(
                 model=self._model,
-                max_completion_tokens=7000,
-                messages=[
-                    {"role": "system", "content": REFINER_SYSTEM_PROMPT + REFINER_JSON_FORMAT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                response_format={"type": "json_object"},
+                system_instruction=REFINER_SYSTEM_PROMPT + REFINER_JSON_FORMAT,
+                input=user_prompt,
+                response_format=REFINER_RESPONSE_SCHEMA,
+                generation_config={
+                    "thinking_level": self._thinking_level,
+                    "temperature": 1.0,
+                },
             )
 
             latency_ms = (time.monotonic() - start) * 1000
             self._record_success()
 
             # Track token usage & cost
-            usage = response.usage
-            input_tokens = usage.prompt_tokens if usage else 0
-            cached_tokens = getattr(usage, "prompt_tokens_details", None)
-            cached_tokens = (
-                getattr(cached_tokens, "cached_tokens", 0) if cached_tokens else 0
-            )
-            output_tokens = usage.completion_tokens if usage else 0
+            usage = interaction.usage
+            input_tokens = getattr(usage, "input_tokens", 0) or 0
+            output_tokens = getattr(usage, "output_tokens", 0) or 0
             self.total_input_tokens += input_tokens
             self.total_output_tokens += output_tokens
             self.total_requests += 1
 
             # Calculate cost in USD
-            price_in, price_cached, price_out = self._pricing.get(
-                self._model, (2.50, 0.25, 15.00)
+            price_in, _price_cached, price_out = self._pricing.get(
+                self._model, (0.10, 0.01, 0.40)
             )
-            non_cached = input_tokens - cached_tokens
             call_cost = (
-                non_cached * price_in / 1_000_000
-                + cached_tokens * price_cached / 1_000_000
+                input_tokens * price_in / 1_000_000
                 + output_tokens * price_out / 1_000_000
             )
             self.total_cost_usd += call_cost
 
-            decision = self._parse_response(response)
+            decision = self._parse_response(interaction)
             decision.latency_ms = latency_ms
             decision.input_tokens = input_tokens
             decision.output_tokens = output_tokens
@@ -844,17 +864,19 @@ Run through the 3-step analysis: (1) price vs zone, (2) latest candle rejection 
 (3) structural confirmation. Check order book for liquidity support. \
 Reference specific numbers from the data in your reasoning."""
 
-    def _parse_response(self, response) -> RefinerDecision:
-        """Extract structured JSON from OpenAI response."""
+    def _parse_response(self, interaction) -> RefinerDecision:
+        """Extract structured JSON from Gemini Interactions response."""
         import json as _json
 
-        choice = response.choices[0]
-        message = choice.message
+        # Get the last text output from the interaction
+        text = None
+        for output in reversed(interaction.outputs):
+            if getattr(output, "text", None):
+                text = output.text.strip()
+                break
 
-        # Primary path: JSON in message content
-        if message.content:
+        if text:
             try:
-                text = message.content.strip()
                 # Strip markdown code fences if present
                 if text.startswith("```"):
                     text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -864,13 +886,13 @@ Reference specific numbers from the data in your reasoning."""
                 logger.warning(
                     "refiner_agent_json_parse_failed",
                     error=str(e),
-                    content_preview=message.content[:200],
+                    content_preview=text[:200],
                 )
 
         logger.warning(
             "refiner_agent_no_response",
-            finish_reason=choice.finish_reason,
-            has_content=bool(message.content),
+            status=getattr(interaction, "status", "unknown"),
+            output_count=len(interaction.outputs) if interaction.outputs else 0,
         )
         return RefinerDecision(
             action="WAIT",
@@ -1090,6 +1112,4 @@ Reference specific numbers from the data in your reasoning."""
         }
 
     async def close(self) -> None:
-        if self._client:
-            await self._client.close()
-            self._client = None
+        self._client = None

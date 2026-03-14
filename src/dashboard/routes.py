@@ -179,7 +179,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             overrides = {}
         ctx["agent1_model"] = config.agent_model
         ctx["agent2_model"] = config.agent_model
-        ctx["available_agent_models"] = ["gpt-5-mini", "gpt-5.4"]
+        ctx["available_agent_models"] = ["gemini-3-pro-preview", "gemini-3-flash-preview"]
         # Leverage & margin (same source as dashboard)
         main_settings = overrides.get("main_bot_settings", {}) or {}
         ctx["main_leverage"] = main_settings.get("leverage", config.leverage)

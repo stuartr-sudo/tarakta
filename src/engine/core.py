@@ -153,7 +153,7 @@ class TradingEngine:
         self.adaptive_threshold = AdaptiveThreshold(config.entry_threshold)
         self.sentiment_filter = SentimentFilter(hf_api_token=config.hf_api_token)
 
-        # AI entry agent (OpenAI — intelligent decision-maker)
+        # AI entry agent (Gemini — intelligent decision-maker)
         self.agent_analyst: AgentEntryAnalyst | None = None
         if config.agent_api_key:
             self.agent_analyst = AgentEntryAnalyst(config)

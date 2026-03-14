@@ -129,11 +129,11 @@ class Settings(BaseSettings):
     # Hugging Face Inference API
     hf_api_token: str = ""  # For FinBERT sentiment + zero-shot classification
 
-    # AI Entry Agent (OpenAI — two-agent architecture for entry decisions)
+    # AI Entry Agent (Gemini — two-agent architecture for entry decisions)
     agent_enabled: bool = False
-    agent_api_key: str = ""  # OpenAI API key (set AGENT_API_KEY in .env)
-    agent_model: str = "gpt-5-mini"  # gpt-5-mini ($0.25/M in), gpt-5.4 ($2.50/M in)
-    agent_timeout_seconds: float = 60.0  # 60s — gpt-5-mini needs time with large prompts
+    agent_api_key: str = ""  # Gemini API key (set AGENT_API_KEY in .env)
+    agent_model: str = "gemini-3-pro-preview"  # Agent 1: pro for strategic analysis
+    agent_timeout_seconds: float = 60.0  # 60s timeout for large prompts
     agent_min_score: float = 35.0  # Minimum formula score to send to agent (sweep detected)
     agent_min_confidence: float = 50.0  # Agent must be >= this confident to approve
     agent_fallback_approve: bool = False  # If API fails, SKIP trade (never enter blind)
@@ -147,7 +147,7 @@ class Settings(BaseSettings):
     # Position Manager Agent (Agent 3 — AI-powered position monitoring)
     # Shares agent_api_key with Agent 1/2; runs every 5 min per open position
     position_agent_enabled: bool = False
-    position_agent_model: str = "gpt-5-nano"  # Cheapest model for frequent 5-min checks
+    position_agent_model: str = "gemini-3-flash-preview"  # Flash for frequent 5-min checks
     position_agent_check_interval_minutes: float = 5.0  # How often to check each position
 
     # Feature rollback toggles — disable individual AI enhancements without redeploying

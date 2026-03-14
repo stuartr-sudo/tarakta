@@ -1,4 +1,4 @@
-"""Agent 1 — AI-powered strategic entry agent using OpenAI GPT models.
+"""Agent 1 — AI-powered strategic entry agent using Gemini Interactions API.
 
 This agent makes the actual entry DECISION. Given a candidate that passed initial
 formula screening (sweep detected, score >= 35), the agent reasons about
@@ -14,7 +14,7 @@ This gives us an edge because:
     correlations, recent performance patterns) that formulas can't capture
   - The agent can adapt its reasoning without code changes
 
-Uses OpenAI function calling (tool use) for structured output with
+Uses Gemini Interactions API for structured output with
 resilience patterns: lazy client, exponential backoff, cost tracking.
 """
 from __future__ import annotations
@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from openai import AsyncOpenAI
+from google import genai
 
 from src.config import Settings
 from src.exchange.models import SignalCandidate
@@ -237,16 +237,44 @@ FORBIDDEN vague phrases — NEVER use these without a price:
 Respond with ONLY the JSON object. No other text."""
 
 
+# Gemini structured output schema for Agent 1
+AGENT1_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {"type": "string", "enum": ["ENTER_NOW", "WAIT_PULLBACK", "SKIP"]},
+        "direction": {"type": "string"},
+        "confidence": {"type": "number"},
+        "reasoning": {"type": "string"},
+        "suggested_entry": {"type": "number"},
+        "entry_zone_high": {"type": "number"},
+        "entry_zone_low": {"type": "number"},
+        "must_reach_price": {"type": "number"},
+        "invalidation_level": {"type": "number"},
+        "suggested_sl": {"type": "number"},
+        "suggested_tp": {"type": "number"},
+        "market_regime": {"type": "string", "enum": ["trending", "ranging", "volatile", "choppy"]},
+        "risk_assessment": {"type": "string", "enum": ["low", "medium", "high", "extreme"]},
+    },
+    "required": [
+        "action", "direction", "confidence", "reasoning",
+        "suggested_entry", "entry_zone_high", "entry_zone_low",
+        "must_reach_price", "invalidation_level",
+        "suggested_sl", "suggested_tp",
+        "market_regime", "risk_assessment",
+    ],
+}
+
+
 
 class AgentEntryAnalyst:
-    """OpenAI-powered entry agent with resilient API handling.
+    """Gemini-powered entry agent with resilient API handling.
 
     Replaces the binary approve/reject LLM gate with an intelligent
     decision-maker that chooses between ENTER_NOW, WAIT_PULLBACK, and SKIP.
     """
 
     def __init__(self, config: Settings) -> None:
-        self._client: AsyncOpenAI | None = None
+        self._client: genai.AsyncClient | None = None
         self._api_key = config.agent_api_key
         self._model = config.agent_model
         self._timeout = config.agent_timeout_seconds
@@ -254,6 +282,7 @@ class AgentEntryAnalyst:
         self._min_confidence = config.agent_min_confidence
         self._max_sl_pct = config.max_sl_pct
         self._available = bool(config.agent_api_key)
+        self._thinking_level = "high"  # Agent 1: strategic analysis needs deep thinking
 
         # Backoff state (exponential backoff on API failures)
         self._fail_count = 0
@@ -271,8 +300,8 @@ class AgentEntryAnalyst:
 
         # Pricing per 1M tokens by model (input, cached_input, output)
         self._pricing: dict[str, tuple[float, float, float]] = {
-            "gpt-5-mini": (0.25, 0.025, 2.00),
-            "gpt-5.4": (2.50, 0.25, 15.00),
+            "gemini-3-pro-preview": (1.25, 0.125, 10.00),
+            "gemini-3-flash-preview": (0.10, 0.01, 0.40),
         }
 
         # Available models for runtime switching
@@ -287,13 +316,9 @@ class AgentEntryAnalyst:
         logger.info("agent_model_switched", old_model=old, new_model=model)
         return self._model
 
-    def _get_client(self) -> AsyncOpenAI:
+    def _get_client(self) -> genai.AsyncClient:
         if self._client is None:
-            self._client = AsyncOpenAI(
-                api_key=self._api_key,
-                timeout=self._timeout,
-                max_retries=1,
-            )
+            self._client = genai.AsyncClient(api_key=self._api_key)
         return self._client
 
     def _should_try(self) -> bool:
@@ -352,46 +377,42 @@ class AgentEntryAnalyst:
 
         try:
             client = self._get_client()
-            response = await client.chat.completions.create(
+            system_prompt = (SYSTEM_PROMPT + JSON_FORMAT_INSTRUCTION).replace(
+                "{max_sl_pct}", str(round(self._max_sl_pct * 100, 1))
+            )
+            interaction = await client.interactions.create(
                 model=self._model,
-                max_completion_tokens=7000,
-                messages=[
-                    {"role": "system", "content": (SYSTEM_PROMPT + JSON_FORMAT_INSTRUCTION).replace(
-                        "{max_sl_pct}", str(round(self._max_sl_pct * 100, 1))
-                    )},
-                    {"role": "user", "content": user_prompt},
-                ],
-                response_format={"type": "json_object"},
+                system_instruction=system_prompt,
+                input=user_prompt,
+                response_format=AGENT1_RESPONSE_SCHEMA,
+                generation_config={
+                    "thinking_level": self._thinking_level,
+                    "temperature": 1.0,
+                },
             )
 
             latency_ms = (time.monotonic() - start) * 1000
             self._record_success()
 
             # Track token usage & cost
-            usage = response.usage
-            input_tokens = usage.prompt_tokens if usage else 0
-            cached_tokens = getattr(usage, "prompt_tokens_details", None)
-            cached_tokens = (
-                getattr(cached_tokens, "cached_tokens", 0) if cached_tokens else 0
-            )
-            output_tokens = usage.completion_tokens if usage else 0
+            usage = interaction.usage
+            input_tokens = getattr(usage, "input_tokens", 0) or 0
+            output_tokens = getattr(usage, "output_tokens", 0) or 0
             self.total_input_tokens += input_tokens
             self.total_output_tokens += output_tokens
             self.total_requests += 1
 
-            # Calculate cost in USD
-            price_in, price_cached, price_out = self._pricing.get(
-                self._model, (2.50, 0.25, 15.00)
+            # Calculate cost in USD (no cached token distinction for Gemini)
+            price_in, _price_cached, price_out = self._pricing.get(
+                self._model, (1.25, 0.125, 10.00)
             )
-            non_cached = input_tokens - cached_tokens
             call_cost = (
-                non_cached * price_in / 1_000_000
-                + cached_tokens * price_cached / 1_000_000
+                input_tokens * price_in / 1_000_000
                 + output_tokens * price_out / 1_000_000
             )
             self.total_cost_usd += call_cost
 
-            decision = self._parse_response(response)
+            decision = self._parse_response(interaction)
             decision.latency_ms = latency_ms
             decision.input_tokens = input_tokens
             decision.output_tokens = output_tokens
@@ -663,17 +684,19 @@ Analyze this setup and respond with your JSON decision."""
             "Be objective: if the setup is exhausted or unclear, SKIP.\n"
         )
 
-    def _parse_response(self, response) -> AgentDecision:
-        """Extract structured JSON from OpenAI response."""
+    def _parse_response(self, interaction) -> AgentDecision:
+        """Extract structured JSON from Gemini Interactions response."""
         import json as _json
 
-        choice = response.choices[0]
-        message = choice.message
+        # Get the last text output from the interaction
+        text = None
+        for output in reversed(interaction.outputs):
+            if getattr(output, "text", None):
+                text = output.text.strip()
+                break
 
-        # Primary path: JSON in message content (response_format=json_schema)
-        if message.content:
+        if text:
             try:
-                text = message.content.strip()
                 # Strip markdown code fences if present
                 if text.startswith("```"):
                     text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -681,20 +704,12 @@ Analyze this setup and respond with your JSON decision."""
                 return self._data_to_decision(data)
             except (_json.JSONDecodeError, Exception) as e:
                 logger.warning("agent_json_parse_failed", error=str(e),
-                               content_preview=message.content[:200])
-
-        # Fallback: tool calls (kept for compatibility)
-        if message.tool_calls:
-            for tool_call in message.tool_calls:
-                if tool_call.function.name == "record_entry_decision":
-                    data = _json.loads(tool_call.function.arguments)
-                    return self._data_to_decision(data)
+                               content_preview=text[:200])
 
         logger.warning(
             "agent_no_response",
-            finish_reason=choice.finish_reason,
-            has_content=bool(message.content),
-            content_preview=(message.content or "")[:200],
+            status=getattr(interaction, "status", "unknown"),
+            output_count=len(interaction.outputs) if interaction.outputs else 0,
         )
         return AgentDecision(
             action="SKIP",
@@ -879,6 +894,4 @@ Analyze this setup and respond with your JSON decision."""
         }
 
     async def close(self) -> None:
-        if self._client:
-            await self._client.close()
-            self._client = None
+        self._client = None
