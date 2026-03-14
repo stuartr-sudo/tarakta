@@ -2172,6 +2172,8 @@ class TradingEngine:
                             "watchlist_signal_skipped_by_agent",
                             symbol=graduated.symbol,
                             confidence=wl_agent_result.confidence,
+                            risk=wl_agent_result.risk_assessment,
+                            reasoning=wl_agent_result.reasoning[:120],
                         )
                     elif wl_agent_result.action == "WAIT_PULLBACK":
                         # Agent says wait — queue a PullbackPlan in the refiner (never chase now)
@@ -2274,7 +2276,8 @@ class TradingEngine:
                             )
                 except Exception as e:
                     logger.warning("watchlist_agent_failed", symbol=graduated.symbol, error=str(e))
-                    # On agent failure, proceed with the trade (fallback)
+                    # On agent failure, SKIP the trade — never enter blind
+                    agent_skip = True
 
             if agent_skip:
                 continue
