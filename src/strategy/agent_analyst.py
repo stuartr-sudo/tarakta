@@ -37,6 +37,7 @@ class AgentDecision:
     """Result from the AI entry agent."""
 
     action: str = "SKIP"  # ENTER_NOW, WAIT_PULLBACK, SKIP
+    direction: str = ""   # "LONG", "SHORT", or "" (for SKIP) — Agent 1 chooses
     confidence: float = 0.0  # 0-100
     reasoning: str = ""
     suggested_entry: float | None = None  # For WAIT_PULLBACK: target price
@@ -55,20 +56,23 @@ class AgentDecision:
 
 SYSTEM_PROMPT = """\
 You are an elite crypto futures trader specializing in Smart Money Concepts (ICT methodology). \
-You manage a systematic trading bot and your job is to make the FINAL entry decision.
+You manage a systematic trading bot and your job is to make the FINAL trade decision.
 
-The bot's formula system has already detected a candidate signal. It found a completed liquidity \
-sweep (price wicked through a key level and closed back), possibly confirmed by displacement \
-(large-bodied candle with volume). Your job is to decide WHETHER to actually enter this trade \
-and HOW — not just yes/no, but the optimal approach.
+The bot's formula system has detected market structure activity — a completed liquidity sweep \
+(price wicked through a key level and closed back), possibly confirmed by displacement \
+(large-bodied candle with volume). Your job is to:
+1. **Choose the DIRECTION** — LONG or SHORT — based on the full picture (sweep type, HTF trend, \
+   displacement, structure). The scanner suggests a direction but YOU make the final call.
+2. **Choose the APPROACH** — enter now or wait for a pullback to a specific zone.
+3. **Or SKIP** — if the setup genuinely doesn't warrant any trade in either direction.
 
 ## Your Decision Options
 
-1. **ENTER_NOW** — The setup is strong. Enter at the current market price immediately.
+1. **ENTER_NOW** with direction **LONG** or **SHORT** — The setup is strong. Enter immediately.
    Use when: sweep + displacement confirmed, HTF aligned, good timing, favorable context.
 
-2. **WAIT_PULLBACK** — The setup has potential but entry price isn't optimal. Wait for price \
-   to pull back to a specific level before entering.
+2. **WAIT_PULLBACK** with direction **LONG** or **SHORT** — Wait for price to pull back to a \
+   specific zone before entering.
    Use when: sweep confirmed but no pullback yet, or price ran too far from sweep level, \
    or you see a better entry zone on the structure.
    When choosing WAIT_PULLBACK, you MUST provide:
@@ -76,15 +80,13 @@ and HOW — not just yes/no, but the optimal approach.
      Use the **provided Fibonacci retracement levels** (especially the 61.8-78.6% OTE zone), \
      nearby order blocks, or FVGs to set this zone.
    - **expected_high**: the price you expect to be reached BEFORE the pullback happens. \
-     This prevents premature entry on the initial move. For LONGS: the high price expects to \
-     reach before pulling back down to the zone. For SHORTS: the low price expects to reach \
-     before bouncing up to the zone. Set to 0 if the move has already happened and you're \
-     waiting for a pullback that should start from the current price area.
+     For LONGS: the high price expects to reach before pulling back down to the zone. \
+     For SHORTS: the low price expects to reach before bouncing up to the zone. \
+     Set to 0 if the move has already happened.
 
-3. **SKIP** — This trade isn't worth taking despite the formula signal.
-   Use when: market regime is wrong, BTC context is dangerous, news risk is elevated, \
-   the sweep looks like a fake/manufactured signal, R:R doesn't justify the risk, \
-   or recent performance suggests the bot should be more selective.
+3. **SKIP** — No trade in either direction. The structure doesn't support a trade.
+   Use when: counter-trend to BOTH 4H AND Daily, BTC in freefall, manufactured sweep, \
+   or genuinely no edge in either direction.
 
 ## What Makes a GREAT Entry (approve aggressively)
 - Sweep of Asian/London range high or low with large-body displacement candle
@@ -167,6 +169,7 @@ You MUST respond with a single JSON object and NOTHING else. No markdown, no exp
 The JSON object must have exactly these keys:
 {
   "action": "ENTER_NOW" | "WAIT_PULLBACK" | "SKIP",
+  "direction": "LONG" | "SHORT" | "",
   "confidence": <number 0-100>,
   "reasoning": "<3-5 sentence analysis with SPECIFIC price levels — see rules below>",
   "suggested_entry": <number or 0>,
@@ -178,6 +181,11 @@ The JSON object must have exactly these keys:
   "market_regime": "trending" | "ranging" | "volatile" | "choppy",
   "risk_assessment": "low" | "medium" | "high" | "extreme"
 }
+
+Rules for direction:
+- For ENTER_NOW and WAIT_PULLBACK: direction MUST be "LONG" or "SHORT" — you choose.
+- For SKIP: direction MUST be "" (empty string).
+- The scanner suggests a direction but you can OVERRIDE it. Your call is final.
 
 Rules for numeric fields — ALWAYS provide your best price estimates for ALL actions:
 - suggested_entry: Your ideal entry price. For WAIT_PULLBACK use the zone midpoint. For ENTER_NOW use the current price. For SKIP still provide where you WOULD enter if forced.
@@ -240,7 +248,15 @@ ENTRY_DECISION_TOOL = {
                     "description": (
                         "ENTER_NOW: take trade immediately. "
                         "WAIT_PULLBACK: wait for better price. "
-                        "SKIP: don't take this trade."
+                        "SKIP: don't take this trade in either direction."
+                    ),
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": ["LONG", "SHORT", ""],
+                    "description": (
+                        "YOUR chosen trade direction. LONG or SHORT for ENTER_NOW/WAIT_PULLBACK. "
+                        "Empty string for SKIP. You decide — the scanner's suggestion is just a hint."
                     ),
                 },
                 "confidence": {
@@ -684,7 +700,7 @@ class AgentEntryAnalyst:
 ## Entry Decision Request
 
 **Symbol:** {signal.symbol}
-**Direction:** {direction}
+**Scanner Suggested Direction:** {direction} *(you may override — YOUR direction choice is final)*
 **Current Price:** {signal.entry_price:.6g}
 **Formula Score:** {signal.score:.1f}/100 (adjusted: {adjusted:.1f}, threshold: {threshold:.1f})
 **Open Positions:** {open_count}
@@ -793,6 +809,7 @@ Analyze this setup and respond with your JSON decision."""
         exp_high = data.get("expected_high")
         return AgentDecision(
             action=data.get("action", "SKIP"),
+            direction=data.get("direction", "").upper().strip(),
             confidence=float(data.get("confidence", 0)),
             reasoning=str(data.get("reasoning", "")),
             suggested_entry=entry if entry and entry != 0 else None,
@@ -809,7 +826,8 @@ Analyze this setup and respond with your JSON decision."""
         self, decision: AgentDecision, signal: SignalCandidate
     ) -> AgentDecision:
         """Validate and sanitize agent-suggested SL/TP/entry levels."""
-        is_long = signal.direction == "bullish"
+        # Use Agent 1's chosen direction if available, else fall back to scanner's
+        is_long = (decision.direction == "LONG") if decision.direction else (signal.direction == "bullish")
         entry = signal.entry_price
 
         if decision.suggested_sl is not None:

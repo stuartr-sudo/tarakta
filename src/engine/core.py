@@ -870,8 +870,26 @@ class TradingEngine:
                     agent_result = await self.agent_analyst.analyze_signal(signal, ai_context)
                     agent_early_decision = agent_result.action
 
+                    # ── Agent 1 is the direction authority ──
+                    # If Agent 1 chose a direction, override the scanner's suggestion
+                    if agent_result.direction in ("LONG", "SHORT"):
+                        new_direction = "bullish" if agent_result.direction == "LONG" else "bearish"
+                        if new_direction != signal.direction:
+                            logger.info(
+                                "agent1_direction_override",
+                                symbol=signal.symbol,
+                                scanner_direction=signal.direction,
+                                agent_direction=new_direction,
+                            )
+                            signal.direction = new_direction
+                            # Re-compute SL/TP with the flipped direction
+                            pre_sl = self.risk_manager.compute_stop_loss(signal)
+                            pre_tp = self.risk_manager.compute_take_profit(signal, pre_sl)
+                            pre_rr = self.risk_manager.compute_rr(signal, pre_sl, pre_tp)
+
                     agent_analysis_data = {
                         "action": agent_result.action,
+                        "direction": agent_result.direction,
                         "confidence": agent_result.confidence,
                         "reasoning": agent_result.reasoning,
                         "market_regime": agent_result.market_regime,
@@ -2156,10 +2174,28 @@ class TradingEngine:
                     }
 
                     wl_agent_result = await self.agent_analyst.analyze_signal(graduated, wl_context)
+
+                    # ── Agent 1 is the direction authority ──
+                    if wl_agent_result.direction in ("LONG", "SHORT"):
+                        new_dir = "bullish" if wl_agent_result.direction == "LONG" else "bearish"
+                        if new_dir != graduated.direction:
+                            logger.info(
+                                "watchlist_agent1_direction_override",
+                                symbol=graduated.symbol,
+                                scanner_direction=graduated.direction,
+                                agent_direction=new_dir,
+                            )
+                            graduated.direction = new_dir
+                            # Re-compute SL/TP with the flipped direction
+                            pre_sl = self.risk_manager.compute_stop_loss(graduated)
+                            pre_tp = self.risk_manager.compute_take_profit(graduated, pre_sl)
+                            pre_rr = self.risk_manager.compute_rr(graduated, pre_sl, pre_tp)
+
                     logger.info(
                         "watchlist_agent_decision",
                         symbol=graduated.symbol,
                         action=wl_agent_result.action,
+                        direction=wl_agent_result.direction,
                         confidence=wl_agent_result.confidence,
                         risk=wl_agent_result.risk_assessment,
                         latency_ms=round(wl_agent_result.latency_ms, 1),
@@ -2231,6 +2267,7 @@ class TradingEngine:
                                 # Attach agent analysis so dashboard can display reasoning
                                 graduated.components["agent_analysis"] = {
                                     "action": wl_agent_result.action,
+                                    "direction": wl_agent_result.direction,
                                     "confidence": wl_agent_result.confidence,
                                     "reasoning": wl_agent_result.reasoning,
                                     "market_regime": wl_agent_result.market_regime,
