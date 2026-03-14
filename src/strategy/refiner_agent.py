@@ -67,9 +67,11 @@ verify that the latest 5m candle shows a rejection pattern (wick ratio > 1.0, en
 higher-low/lower-high, or volume spike) at the entry zone. If no rejection candle exists yet, \
 your answer is WAIT. "ENTER_NOW" from Agent 1 means "conditions are ripe, confirm and execute" \
 — NOT "execute blindly without checking candles."
-4. **Read Agent 1's specific criteria.** Agent 1 often specifies exact confirmation signals \
-(e.g., "look for a 5m bearish engulfing closing below 0.02680 with RVOL > 1.5"). You MUST \
-check whether those specific conditions are met in the candle data before entering.
+4. **Use Agent 1's levels and thesis as your reference.** Agent 1 provides the entry zone, \
+SL, TP, invalidation level, and structural thesis. Apply your OWN 5m expertise to decide \
+timing. If Agent 1's reasoning mentions structural levels, use those as reference points — \
+but decide timing yourself based on what the 5m candles show. \
+Default 5m confirmation: wick ratio > 1.0 at zone boundary, candle close in trade direction, RVOL > 1.0.
 5. **If you ABANDON**, it must be because of concrete 5m structural invalidation (BOS against, \
 price ran away, candle body closed through invalidation) — NOT because you think the thesis \
 is wrong.
@@ -88,12 +90,32 @@ BTC macro context, and your own previous analysis for reasoning continuity.
 
 For EVERY check, you must perform these concrete data checks:
 
+### Step 0: Check the must_reach_price gate
+If the "Pending Order Plan" section shows a must_reach_price that is "NOT YET REACHED", \
+your answer is WAIT. Period. Do not evaluate the zone or candles.
+
+This gate exists because Agent 1 expects price to move to an extreme BEFORE pulling back. \
+If price hasn't reached that extreme yet, any zone contact is price PASSING THROUGH on the \
+way to the extreme — not a pullback. Entering now would put you in a losing position while \
+waiting for the actual pullback.
+
+Only proceed to Step 1 after must_reach_price shows "REACHED" or if no must_reach_price is set.
+
 ### Step 1: Where is price relative to the entry zone?
 - Read current_price and compare to zone_top / zone_bottom
-- If INSIDE the zone → proceed to Step 2 (possible entry)
-- If ABOVE the zone (for longs) → setup may have run without us → check for ABANDON
-- If BELOW the zone (for longs) → price hasn't arrived yet → WAIT or check approach speed
-- Reverse the logic for shorts
+- If INSIDE the zone → check HOW price got there:
+  - Look at the last 3-5 candles. Is price moving TOWARD the zone from the pullback side? \
+    (For longs: price dropping into zone from above = correct pullback. \
+     For shorts: price rising into zone from below = correct pullback.)
+  - Or is price moving THROUGH the zone from the opposite side? \
+    (For longs: price rising through zone from below = pass-through, NOT a pullback.)
+  - If passing through → WAIT (price hasn't peaked and pulled back yet)
+  - If pulling back into zone → proceed to Step 2
+- If ABOVE zone (for longs):
+  - For ENTER_NOW signals: this is expected. Focus on Step 2 candle confirmation.
+  - For WAIT_PULLBACK signals: setup may have run without us → check for ABANDON
+- If BELOW zone (for longs) → price hasn't arrived → WAIT
+- Reverse all logic for shorts
 
 ### Step 2: What does the latest 5m candle show?
 Read the MOST RECENT candle from the candle table:
@@ -140,6 +162,9 @@ The setup is still valid but the entry condition is NOT yet confirmed in the dat
 - BTC just made a sharp move — wait for the next candle to see if it stabilizes
 - Volume is below average — no institutional participation visible yet
 
+Note: the system automatically expires signals after their time window. You do not need to \
+track staleness — evaluate each check independently with fresh data.
+
 ### 3. ADJUST_ZONE — Update zone boundaries
 New 5m price action has created a better reference point.
 
@@ -158,24 +183,23 @@ The setup is invalidated by the live data.
 - Break of structure (BOS) against the trade direction: new lower-low (for longs) or higher-high (for shorts)
 - Multiple consecutive candles closing against the trade direction
 - BTC moved sharply against the trade (>1% in 5 minutes against the direction)
+- Agent 1's invalidation level has been breached (check "Agent 1's Strategic Analysis" — \
+  if current price has closed beyond the invalidation price, ABANDON)
 
 **You MUST provide:** invalidation_reason
 
 ## Setting Stop Loss & Take Profit
 
 ### Stop Loss:
-- Use the PRE-COMPUTED SL from the "Pre-Computed Levels" section as your primary reference
-- If Agent 1's reasoning specifies a SL price, use that
-- You may tighten the SL based on 5m structure (e.g., place below the nearest 5m swing low for longs)
-- Do NOT widen it beyond the pre-computed level
-- **Longs:** SL MUST be below entry_price. **Shorts:** SL MUST be above entry_price
+- Use Agent 1's SL from the "Pre-Computed Levels" section — this is the validated final SL
+- You may TIGHTEN the SL based on 5m structure (e.g. below nearest 5m swing low for longs)
+- Do NOT widen it beyond Agent 1's level
+- Longs: SL MUST be below entry_price. Shorts: SL MUST be above entry_price
 
 ### Take Profit:
-- Use the PRE-COMPUTED TP from the "Pre-Computed Levels" section
-- If Agent 1's reasoning specifies a TP price, use that
-- Cross-reference with structural levels: nearest opposing liquidity pool, order block, or FVG midpoint
-- The system uses progressive TP tiers (0.70R, 0.95R, 1.5R) automatically after entry — \
-your TP serves as the overall target reference
+- Use Agent 1's TP from the "Pre-Computed Levels" section
+- Cross-reference with structural levels visible on 5m
+- The system uses progressive TP tiers (0.70R, 0.95R, 1.5R) automatically — your TP is the overall target
 
 ### Position Size Modifier:
 - 1.0 = standard size (most entries)
@@ -274,6 +298,7 @@ class RefinerMonitorAgent:
         self._api_key = config.agent_api_key
         self._model = config.agent_model
         self._timeout = config.agent_timeout_seconds
+        self._max_sl_pct = getattr(config, "max_sl_pct", 0.15)
         self._available = bool(config.agent_api_key)
 
         # Backoff state (mirrors Agent 1)
@@ -473,15 +498,12 @@ class RefinerMonitorAgent:
             f"Market Regime: {a1.get('market_regime', 'N/A')}",
             f"Risk Assessment: {a1.get('risk_assessment', 'N/A')}",
         ]
-        # Include Agent 1's suggested SL/TP if available
-        if a1.get("suggested_sl"):
-            a1_parts.append(f"Agent 1 Suggested SL: {a1['suggested_sl']:.6g}")
-        if a1.get("suggested_tp"):
-            a1_parts.append(f"Agent 1 Suggested TP: {a1['suggested_tp']:.6g}")
-        if a1.get("entry_zone_high") and a1.get("entry_zone_low"):
-            a1_parts.append(
-                f"Agent 1 Entry Zone: {a1['entry_zone_low']:.6g} – {a1['entry_zone_high']:.6g}"
-            )
+        # Add invalidation level
+        if a1.get("invalidation_level"):
+            a1_parts.append(f"Invalidation Level: {a1['invalidation_level']:.6g} (thesis dead beyond this price)")
+        # Add must_reach_price
+        if a1.get("must_reach_price"):
+            a1_parts.append(f"Must Reach Price: {a1['must_reach_price']:.6g} (price must hit this BEFORE pullback)")
         a1_section = "\n".join(a1_parts)
 
         # ── Section 2: Agent 2's previous analysis (reasoning continuity) ──
@@ -713,12 +735,12 @@ class RefinerMonitorAgent:
             time_left = plan_ctx.get("time_remaining_seconds", 0)
             minutes_left = time_left / 60
             # Phase gate info
-            exp_high = plan_ctx.get("expected_high", 0)
-            exp_reached = plan_ctx.get("expected_high_reached", False)
+            must_reach = plan_ctx.get("must_reach_price", 0)
+            must_reached = plan_ctx.get("must_reach_price_reached", False)
             phase_line = ""
-            if exp_high and exp_high > 0:
-                status = "REACHED" if exp_reached else "NOT YET REACHED"
-                phase_line = f"- **Expected move to:** {exp_high:.6g} ({status}) — entry only valid AFTER this level is hit\n"
+            if must_reach and must_reach > 0:
+                status = "REACHED" if must_reached else "NOT YET REACHED"
+                phase_line = f"- **Must reach price:** {must_reach:.6g} ({status}) — entry only valid AFTER this level is hit\n"
 
             plan_section = (
                 f"### Pending Order Plan\n"
@@ -757,22 +779,9 @@ class RefinerMonitorAgent:
         enter_now_hint = ""
         if ctx.get("enter_now_confirmation"):
             enter_now_hint = (
-                "\n**⚠️ ENTER_NOW CONFIRMATION MODE:** Agent 1 said ENTER_NOW, meaning "
-                "conditions look favorable for immediate entry. However, you MUST STILL "
-                "verify 5m candle confirmation before entering. Do NOT skip your analysis.\n\n"
-                "**You MUST check these before entering:**\n"
-                "1. Does the latest 5m candle show a rejection pattern at the zone? "
-                "(bearish engulfing, pin bar, lower-high for shorts — or bullish equivalent for longs)\n"
-                "2. Is the candle's wick-to-body ratio > 1.0 showing genuine rejection?\n"
-                "3. Is volume on the rejection candle above average? (RVOL > 1.0)\n"
-                "4. Has price actually reached the entry zone?\n\n"
-                "**If the 5m candle does NOT show rejection yet → WAIT.** "
-                "Agent 1 identified the opportunity but YOU confirm the timing. "
-                "Do not enter just because Agent 1 said ENTER_NOW — that means "
-                "'conditions are ready, confirm on 5m and execute' NOT 'execute blindly'.\n\n"
-                "**Read Agent 1's reasoning carefully** — it often specifies exact confirmation "
-                "criteria (e.g., 'look for bearish engulfing closing below X with RVOL > 1.5'). "
-                "You must verify those specific conditions are met in the candle data.\n"
+                "\n**ENTER_NOW MODE:** Agent 1 said conditions are favorable. You MUST still "
+                "verify 5m candle confirmation (rejection pattern, wick ratio > 1.0, RVOL > 1.0) "
+                "before entering. If the latest 5m candle shows no rejection → WAIT.\n"
             )
 
         return f"""\
@@ -895,7 +904,7 @@ Reference specific numbers from the data in your reasoning."""
     ) -> RefinerDecision:
         """Validate and sanitize Agent 2's decision."""
         direction = context.get("direction", "")
-        is_long = direction in ("bullish", "long")
+        is_long = direction.lower() in ("bullish", "long") if direction else False
         current_price = context.get("current_price", 0)
 
         if decision.action == "ENTER":
@@ -987,7 +996,7 @@ Reference specific numbers from the data in your reasoning."""
             # Validate SL isn't too far (>15% from entry)
             if current_price > 0:
                 sl_dist_pct = abs(decision.entry_price - decision.stop_loss) / current_price
-                if sl_dist_pct > 0.15:
+                if sl_dist_pct > self._max_sl_pct:
                     logger.warning(
                         "refiner_agent_sl_too_far",
                         symbol=context.get("symbol", "?"),

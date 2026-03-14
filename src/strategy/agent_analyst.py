@@ -43,7 +43,8 @@ class AgentDecision:
     suggested_entry: float | None = None  # For WAIT_PULLBACK: target price
     entry_zone_high: float | None = None  # Approximate entry zone upper bound
     entry_zone_low: float | None = None   # Approximate entry zone lower bound
-    expected_high: float | None = None    # WAIT_PULLBACK: price must reach here BEFORE pullback
+    must_reach_price: float | None = None  # WAIT_PULLBACK: price must reach here BEFORE pullback
+    invalidation_level: float | None = None  # Price where the trade thesis is dead
     suggested_sl: float | None = None
     suggested_tp: float | None = None
     market_regime: str = ""  # trending/ranging/volatile/choppy
@@ -55,21 +56,32 @@ class AgentDecision:
 
 
 SYSTEM_PROMPT = """\
-You are an elite crypto futures trader specializing in Smart Money Concepts (ICT methodology). \
-You manage a systematic trading bot and your job is to make the FINAL trade decision.
+You are an elite crypto futures strategist specializing in Smart Money Concepts (ICT methodology).
+Your job is to make a ONE-TIME strategic decision on a trade setup.
 
 The bot's formula system has detected market structure activity — a completed liquidity sweep \
 (price wicked through a key level and closed back), possibly confirmed by displacement \
-(large-bodied candle with volume). Your job is to:
-1. **Choose the DIRECTION** — LONG or SHORT — based on the full picture (sweep type, HTF trend, \
-   displacement, structure). The scanner suggests a direction but YOU make the final call.
-2. **Choose the APPROACH** — enter now or wait for a pullback to a specific zone.
-3. **Or SKIP** — if the setup genuinely doesn't warrant any trade in either direction.
+(large-bodied candle with volume). You receive RAW STRUCTURAL DATA with no directional bias.
+
+Your job is to:
+1. INDEPENDENTLY choose the DIRECTION — LONG or SHORT — by reading the structure yourself. \
+   You receive raw data (sweep levels, structural levels, order blocks, FVGs, trends). \
+   You must interpret the data and decide direction from scratch.
+2. Choose the APPROACH — enter now or wait for a pullback to a specific zone.
+3. Or SKIP — if the setup genuinely doesn't warrant any trade in either direction.
+
+A second AI agent (Agent 2) will handle entry TIMING on the 5-minute chart. \
+You do NOT need to specify what 5m patterns to look for — that is Agent 2's expertise. \
+Your job is to define WHAT the trade is, WHERE the levels are, and WHY the thesis works.
 
 ## Your Decision Options
 
-1. **ENTER_NOW** with direction **LONG** or **SHORT** — The setup is strong. Enter immediately.
-   Use when: sweep + displacement confirmed, HTF aligned, good timing, favorable context.
+1. **ENTER_NOW** with direction **LONG** or **SHORT** — Conditions are met for entry. \
+   Agent 2 will confirm timing on the next 5-minute candle and execute. \
+   Use when: sweep + displacement confirmed, HTF aligned, good timing, favorable context. \
+   Note: ENTER_NOW means "conditions are ready, confirm on 5m and execute" — NOT "execute blindly." \
+   You MUST still provide an entry zone — the structural feature price is currently at (OB, FVG, or \
+   sweep level). Agent 2 needs this to know WHERE to look for 5m confirmation.
 
 2. **WAIT_PULLBACK** with direction **LONG** or **SHORT** — Wait for price to pull back to a \
    specific zone before entering.
@@ -79,7 +91,7 @@ The bot's formula system has detected market structure activity — a completed 
    - **entry_zone_high / entry_zone_low**: the price range where you expect the pullback to reach. \
      Use the **provided Fibonacci retracement levels** (especially the 61.8-78.6% OTE zone), \
      nearby order blocks, or FVGs to set this zone.
-   - **expected_high**: the price you expect to be reached BEFORE the pullback happens. \
+   - **must_reach_price**: the price you expect to be reached BEFORE the pullback happens. \
      For LONGS: the high price expects to reach before pulling back down to the zone. \
      For SHORTS: the low price expects to reach before bouncing up to the zone. \
      Set to 0 if the move has already happened.
@@ -171,11 +183,12 @@ The JSON object must have exactly these keys:
   "action": "ENTER_NOW" | "WAIT_PULLBACK" | "SKIP",
   "direction": "LONG" | "SHORT" | "",
   "confidence": <number 0-100>,
-  "reasoning": "<3-5 sentence analysis with SPECIFIC price levels — see rules below>",
+  "reasoning": "<5-8 sentence analysis with SPECIFIC price levels — see rules below>",
   "suggested_entry": <number or 0>,
   "entry_zone_high": <number or 0>,
   "entry_zone_low": <number or 0>,
-  "expected_high": <number or 0>,
+  "must_reach_price": <number or 0>,
+  "invalidation_level": <number or 0>,
   "suggested_sl": <number or 0>,
   "suggested_tp": <number or 0>,
   "market_regime": "trending" | "ranging" | "volatile" | "choppy",
@@ -185,155 +198,44 @@ The JSON object must have exactly these keys:
 Rules for direction:
 - For ENTER_NOW and WAIT_PULLBACK: direction MUST be "LONG" or "SHORT" — you choose.
 - For SKIP: direction MUST be "" (empty string).
-- The scanner suggests a direction but you can OVERRIDE it. Your call is final.
 
 Rules for numeric fields — ALWAYS provide your best price estimates for ALL actions:
 - suggested_entry: Your ideal entry price. For WAIT_PULLBACK use the zone midpoint. For ENTER_NOW use the current price. For SKIP still provide where you WOULD enter if forced.
-- entry_zone_high: Upper bound of the ideal entry zone. Always provide this based on structure (Fibonacci, order blocks, FVGs).
-- entry_zone_low: Lower bound of the ideal entry zone. Always provide this.
-  For a LONG: the zone should be BELOW current price (pullback down to buy).
-  For a SHORT: the zone should be ABOVE current price (pullback up to sell).
-  Use the provided Fibonacci retracement levels, order blocks, or fair value gaps to set this zone.
-- expected_high: For WAIT_PULLBACK ONLY — the price that must be reached BEFORE the pullback begins. \
-  This is CRITICAL to prevent premature entries. For LONGS: set this to the resistance level or \
-  swing high you expect price to reach before pulling back (must be ABOVE entry_zone_high). \
-  For SHORTS: set this to the support level or swing low you expect price to reach before \
-  bouncing up (must be BELOW entry_zone_low). Set to 0 if the move already happened and \
-  pullback should start from current price area, or for ENTER_NOW/SKIP.
-- suggested_sl: ALWAYS set a stop-loss price based on structure (below sweep level for longs, above for shorts). Never use 0. \
-  CRITICAL SL CONSTRAINT: The stop-loss MUST be within {max_sl_pct}% of the entry price. Trades with wider stops \
-  are automatically rejected by the system. If the nearest structural level requires a wider SL, you MUST either: \
-  (1) find a tighter structural level for the SL (e.g. use a 1H swing instead of 4H swing), or \
-  (2) move the entry zone closer to the SL level so the distance is within {max_sl_pct}%, or \
-  (3) SKIP the trade if no valid SL within {max_sl_pct}% exists. \
+- entry_zone_high / entry_zone_low: ALWAYS provide, even for ENTER_NOW. \
+  For ENTER_NOW: set to the structural feature price is currently at (the OB, FVG, or \
+  retracement level). For WAIT_PULLBACK: the pullback target zone. For SKIP: your best estimate. \
+  For LONGS: zone should be BELOW current price. For SHORTS: zone should be ABOVE current price.
+- must_reach_price: For WAIT_PULLBACK ONLY — the price that must be reached BEFORE the pullback begins. \
+  For LONGS: resistance/swing high above entry_zone_high. For SHORTS: support/swing low below entry_zone_low. \
+  Set to 0 if the move already happened or for ENTER_NOW/SKIP.
+- invalidation_level: The price where the trade thesis is dead. ALWAYS provide this. \
+  For LONGS: price below which the bullish thesis fails (e.g. below the sweep low). \
+  For SHORTS: price above which the bearish thesis fails (e.g. above the sweep high).
+- suggested_sl: Agent 1's SL is PRIMARY — the system uses YOUR level (validated for max distance \
+  and correct side). Only falls back to algorithmic SL if you return 0. ALWAYS provide a structural SL. \
+  CRITICAL SL CONSTRAINT: must be within {max_sl_pct}% of entry price. \
   Always calculate and verify: abs(entry - SL) / entry × 100 <= {max_sl_pct}%.
-- suggested_tp: ALWAYS set a take-profit price based on structure. Never use 0.
+- suggested_tp: Same as SL — YOUR level is primary. ALWAYS provide a structural TP.
 
-CRITICAL — Reasoning must include SPECIFIC PRICES AND CLEAR INSTRUCTIONS. A second AI agent \
-(Agent 2) reads your reasoning to make entry timing decisions on a 5-minute chart. \
-Vague descriptions are USELESS to it. Your reasoning is the ONLY guidance Agent 2 has.
+CRITICAL — Reasoning must include SPECIFIC PRICES. \
+Vague descriptions are USELESS. Your reasoning is reviewed by Agent 2 for context.
 
 You MUST include ALL of the following in every reasoning:
   - The EXACT entry zone prices (e.g. "entry zone 0.01895–0.01910")
-  - The EXACT stop-loss price with structural justification (e.g. "SL at 0.01925, placed 0.1% above the swept high at 0.01920")
-  - The EXACT take-profit target with structural justification (e.g. "TP at 0.01820, the 4H swing low / buy-side liquidity pool")
-  - WHAT specifically Agent 2 should watch for on the 5m chart to confirm entry (e.g. "look for a bearish engulfing candle or pin bar closing below 0.01900 with RVOL > 1.5")
-  - WHERE key structural levels are with exact prices (e.g. "bearish OB at 0.01895–0.01905, FVG at 0.01880–0.01870")
+  - The EXACT stop-loss price with structural justification (e.g. "SL at 0.01870, below the swept low at 0.01875")
+  - The EXACT take-profit target with structural justification (e.g. "TP at 0.01980, the 4H swing high")
+  - The INVALIDATION LEVEL — the specific price where the thesis is dead (e.g. "thesis invalid if price closes below 0.01860")
+  - WHERE key structural levels are with exact prices (e.g. "bearish OB at 0.01895–0.01905, bullish FVG at 0.01870–0.01880")
   - WHY this setup works or doesn't (e.g. "4H trend is bearish with BOS at 0.01950, sweep took the Asian high at 0.01922")
 
 FORBIDDEN vague phrases — NEVER use these without a price:
   - "nearby structure" → instead say "the 1H OB at 0.01895"
   - "retest of swing highs" → instead say "retest of the swing high at 0.01920"
-  - "wait for confirmation" → instead say "wait for a 5m candle closing below 0.01900 with wick rejection"
   - "good R:R" → instead say "R:R is 2.8:1 (SL 15 pips, TP 42 pips)"
   - "structure supports" → instead say "1H BOS bearish at 0.01950, CHoCH not yet seen"
-  - "look for rejection" → instead say "look for lower wick > body size at the OB 0.01895–0.01905"
 
 Respond with ONLY the JSON object. No other text."""
 
-
-ENTRY_DECISION_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "record_entry_decision",
-        "description": "Records the entry decision with reasoning and suggested parameters.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "reasoning": {
-                    "type": "string",
-                    "description": (
-                        "Step-by-step analysis of the setup. Cover: sweep quality, "
-                        "displacement strength, HTF alignment, timing, risk/reward, "
-                        "market regime, and any red flags. 3-5 sentences."
-                    ),
-                },
-                "action": {
-                    "type": "string",
-                    "enum": ["ENTER_NOW", "WAIT_PULLBACK", "SKIP"],
-                    "description": (
-                        "ENTER_NOW: take trade immediately. "
-                        "WAIT_PULLBACK: wait for better price. "
-                        "SKIP: don't take this trade in either direction."
-                    ),
-                },
-                "direction": {
-                    "type": "string",
-                    "enum": ["LONG", "SHORT", ""],
-                    "description": (
-                        "YOUR chosen trade direction. LONG or SHORT for ENTER_NOW/WAIT_PULLBACK. "
-                        "Empty string for SKIP. You decide — the scanner's suggestion is just a hint."
-                    ),
-                },
-                "confidence": {
-                    "type": "number",
-                    "description": "Confidence in the decision, 0-100. 80+ = very confident.",
-                },
-                "suggested_entry": {
-                    "type": "number",
-                    "description": (
-                        "For WAIT_PULLBACK: the price level to wait for (zone midpoint). "
-                        "For ENTER_NOW or SKIP: set to 0."
-                    ),
-                },
-                "entry_zone_high": {
-                    "type": "number",
-                    "description": (
-                        "For WAIT_PULLBACK: upper bound of ideal entry zone. "
-                        "For ENTER_NOW or SKIP: set to 0."
-                    ),
-                },
-                "entry_zone_low": {
-                    "type": "number",
-                    "description": (
-                        "For WAIT_PULLBACK: lower bound of ideal entry zone. "
-                        "For ENTER_NOW or SKIP: set to 0."
-                    ),
-                },
-                "expected_high": {
-                    "type": "number",
-                    "description": (
-                        "For WAIT_PULLBACK: price that must be reached BEFORE pullback begins. "
-                        "For LONGS: resistance/swing high above zone (must be > entry_zone_high). "
-                        "For SHORTS: support/swing low below zone (must be < entry_zone_low). "
-                        "Set to 0 if the move already happened or for ENTER_NOW/SKIP."
-                    ),
-                },
-                "suggested_sl": {
-                    "type": "number",
-                    "description": (
-                        "Alternative stop-loss price if you see a better structural level. "
-                        "Set to 0 to keep the formula-calculated SL."
-                    ),
-                },
-                "suggested_tp": {
-                    "type": "number",
-                    "description": (
-                        "Alternative take-profit if you see a better target. "
-                        "Set to 0 to keep the formula-calculated TP."
-                    ),
-                },
-                "market_regime": {
-                    "type": "string",
-                    "enum": ["trending", "ranging", "volatile", "choppy"],
-                    "description": "Current market regime classification.",
-                },
-                "risk_assessment": {
-                    "type": "string",
-                    "enum": ["low", "medium", "high", "extreme"],
-                    "description": "Overall risk level of this trade.",
-                },
-            },
-            "required": [
-                "reasoning", "action", "confidence",
-                "suggested_entry", "entry_zone_high", "entry_zone_low",
-                "expected_high", "suggested_sl", "suggested_tp",
-                "market_regime", "risk_assessment",
-            ],
-            "additionalProperties": False,
-        },
-    },
-}
 
 
 class AgentEntryAnalyst:
@@ -350,6 +252,7 @@ class AgentEntryAnalyst:
         self._timeout = config.agent_timeout_seconds
         self._fallback_approve = config.agent_fallback_approve
         self._min_confidence = config.agent_min_confidence
+        self._max_sl_pct = config.max_sl_pct
         self._available = bool(config.agent_api_key)
 
         # Backoff state (exponential backoff on API failures)
@@ -454,7 +357,7 @@ class AgentEntryAnalyst:
                 max_completion_tokens=7000,
                 messages=[
                     {"role": "system", "content": (SYSTEM_PROMPT + JSON_FORMAT_INSTRUCTION).replace(
-                        "{max_sl_pct}", str(round(self.config.max_sl_pct * 100, 1))
+                        "{max_sl_pct}", str(round(self._max_sl_pct * 100, 1))
                     )},
                     {"role": "user", "content": user_prompt},
                 ],
@@ -503,6 +406,21 @@ class AgentEntryAnalyst:
                 logger.info(
                     "agent_low_confidence_override",
                     symbol=signal.symbol,
+                    original_action="ENTER_NOW",
+                    confidence=decision.confidence,
+                    threshold=self._min_confidence,
+                )
+
+            if decision.action == "WAIT_PULLBACK" and decision.confidence < self._min_confidence:
+                decision.action = "SKIP"
+                decision.reasoning = (
+                    f"WAIT_PULLBACK but confidence {decision.confidence:.0f} "
+                    f"< threshold {self._min_confidence:.0f}: {decision.reasoning}"
+                )
+                logger.info(
+                    "agent_low_confidence_override",
+                    symbol=signal.symbol,
+                    original_action="WAIT_PULLBACK",
                     confidence=decision.confidence,
                     threshold=self._min_confidence,
                 )
@@ -553,13 +471,6 @@ class AgentEntryAnalyst:
 
     def _build_prompt(self, signal: SignalCandidate, context: dict[str, Any]) -> str:
         """Build the user prompt with all signal and market context."""
-        direction = signal.direction or "unknown"
-
-        # Score breakdown
-        components_str = "\n".join(
-            f"  - {k}: {v}" for k, v in signal.components.items()
-        ) if signal.components else "  Not available"
-
         # Key levels
         key_levels_str = "\n".join(
             f"  - {k}: {v:.6g}" for k, v in signal.key_levels.items()
@@ -577,31 +488,16 @@ class AgentEntryAnalyst:
             fvg = signal.fvg_context
             fvg_info = f"{fvg.direction} FVG [{fvg.bottom:.6g} - {fvg.top:.6g}]"
 
-        # Sweep details
+        # Sweep details — directionally neutral
         sweep_info = "None"
         if signal.sweep_result:
             sr = signal.sweep_result
+            level_type = sr.sweep_type or "unknown"
+            swept_side = "high" if "high" in level_type else "low" if "low" in level_type else "level"
             sweep_info = (
-                f"Type: {sr.sweep_type}, Direction: {sr.sweep_direction}, "
-                f"Depth: {sr.sweep_depth:.4f}, Level: {sr.sweep_level:.6g}"
+                f"Swept {swept_side} at {sr.sweep_level:.6g} "
+                f"(type: {level_type}, wick depth: {sr.sweep_depth:.4f})"
             )
-            if sr.htf_continuation:
-                sweep_info += " (HTF continuation override)"
-
-        # SL/TP/R:R
-        sl_price = context.get("sl_price")
-        tp_price = context.get("tp_price")
-        rr_ratio = context.get("rr_ratio")
-        sl_tp_section = "Not calculated yet"
-        if sl_price is not None:
-            sl_dist_pct = abs(signal.entry_price - sl_price) / signal.entry_price * 100 if signal.entry_price > 0 else 0
-            parts = [f"Stop Loss: {sl_price:.6g} ({sl_dist_pct:.2f}% from entry)"]
-            if tp_price is not None:
-                tp_dist_pct = abs(tp_price - signal.entry_price) / signal.entry_price * 100 if signal.entry_price > 0 else 0
-                parts.append(f"Take Profit: {tp_price:.6g} ({tp_dist_pct:.2f}% from entry)")
-            if rr_ratio is not None:
-                parts.append(f"Risk:Reward: {rr_ratio:.2f}")
-            sl_tp_section = " | ".join(parts)
 
         # Sentiment
         sentiment = context.get("sentiment_score", 0.0)
@@ -631,14 +527,8 @@ class AgentEntryAnalyst:
         if btc_change is not None:
             btc_section += f", 24h Change: {btc_change:+.2f}%"
 
-        # ML win probability
-        ml_prob = context.get("ml_win_probability")
-        ml_section = f"{ml_prob:.0f}%" if ml_prob is not None else "N/A"
-
         # Open positions
         open_count = context.get("open_position_count", 0)
-        adjusted = context.get("adjusted_score", signal.score)
-        threshold = context.get("active_threshold", 65.0)
 
         # Weekly cycle context (may not be set on all signals)
         weekly_info = ""
@@ -648,12 +538,6 @@ class AgentEntryAnalyst:
                 weekly_info = "WARNING: Monday manipulation window active"
             elif weekly_factors.get("is_midweek_reversal"):
                 weekly_info = "Mid-week reversal window (Wed/Thu counter-trend bonus)"
-
-        # Leverage/funding context (may not be set on all signals)
-        leverage_info = ""
-        leverage_bonus = getattr(signal, "leverage_bonus", None)
-        if leverage_bonus is not None:
-            leverage_info = f"Leverage alignment bonus: {leverage_bonus} pts"
 
         # Symbol trade history (feedback loop)
         symbol_history = context.get("symbol_history", [])
@@ -691,26 +575,42 @@ class AgentEntryAnalyst:
         else:
             symbol_history_section = "  No prior trades for this symbol"
 
-        # Fibonacci retracement section
+        # Fibonacci retracement section — show BOTH directions
         fib = signal.fibonacci_levels
         if fib and fib.get("fib_50"):
+            disp_low = fib['displacement_low']
+            disp_high = fib['displacement_high']
+            move = disp_high - disp_low
+
+            # Both directions
+            bull_618 = disp_high - move * 0.618
+            bull_786 = disp_high - move * 0.786
+            bear_618 = disp_low + move * 0.618
+            bear_786 = disp_low + move * 0.786
+
             fib_section = (
-                f"Displacement: {fib['displacement_low']:.6g} → {fib['displacement_high']:.6g}\n"
-                f"  50.0% retracement: {fib['fib_50']:.6g}\n"
-                f"  61.8% retracement: {fib['fib_618']:.6g}\n"
-                f"  78.6% retracement: {fib['fib_786']:.6g}\n"
-                f"  OTE Zone (optimal entry): {fib['fib_618']:.6g} – {fib['fib_786']:.6g}"
+                f"Recent displacement range: {disp_low:.6g} – {disp_high:.6g}\n"
+                f"  If LONG (buying pullback from high):\n"
+                f"    61.8%: {bull_618:.6g} | 78.6%: {bull_786:.6g}\n"
+                f"    OTE zone: {bull_618:.6g} – {bull_786:.6g}\n"
+                f"  If SHORT (selling bounce from low):\n"
+                f"    61.8%: {bear_618:.6g} | 78.6%: {bear_786:.6g}\n"
+                f"    OTE zone: {bear_618:.6g} – {bear_786:.6g}"
             )
         else:
             fib_section = "Not available (no displacement data)"
+
+        # Funding rate
+        funding_section = "N/A"
+        lp = signal.leverage_profile
+        if lp and hasattr(lp, 'funding_rate'):
+            funding_section = f"{lp.funding_rate:.6f}"
 
         return f"""\
 ## Entry Decision Request
 
 **Symbol:** {signal.symbol}
-**Scanner Suggested Direction:** {direction} *(you may override — YOUR direction choice is final)*
 **Current Price:** {signal.entry_price:.6g}
-**Formula Score:** {signal.score:.1f}/100 (adjusted: {adjusted:.1f}, threshold: {threshold:.1f})
 **Open Positions:** {open_count}
 
 ### Sweep Analysis
@@ -718,15 +618,6 @@ class AgentEntryAnalyst:
 
 ### Fibonacci Retracement (from displacement move)
 {fib_section}
-
-### Score Breakdown
-{components_str}
-
-### Risk Management
-{sl_tp_section}
-
-### Signal Reasons ({len(signal.reasons)} factors)
-{chr(10).join(f"  - {r}" for r in signal.reasons)}
 
 ### Key Structural Levels
 {key_levels_str}
@@ -737,9 +628,10 @@ class AgentEntryAnalyst:
 ### Market Context
 - BTC: {btc_section}
 - Sentiment: {sentiment:.1f} (range: -10 to +10, positive = bullish)
-- ML Win Probability: {ml_section}
-{f"- {weekly_info}" if weekly_info else ""}\
-{f"- {leverage_info}" if leverage_info else ""}
+{f"- {weekly_info}" if weekly_info else ""}
+
+### Funding Rate
+{funding_section}
 
 ### Recent Headlines
 {headlines_section}
@@ -749,6 +641,9 @@ class AgentEntryAnalyst:
 
 ### Symbol Trade History
 {symbol_history_section}
+
+### Scanner Observations (evaluated relative to ONE possible direction — interpret independently)
+{chr(10).join(f"  - {r}" for r in signal.reasons)}
 {self._reassessment_section(context)}
 Analyze this setup and respond with your JSON decision."""
 
@@ -814,7 +709,8 @@ Analyze this setup and respond with your JSON decision."""
         tp = data.get("suggested_tp")
         zone_high = data.get("entry_zone_high")
         zone_low = data.get("entry_zone_low")
-        exp_high = data.get("expected_high")
+        exp = data.get("must_reach_price")
+        inv = data.get("invalidation_level")
         return AgentDecision(
             action=data.get("action", "SKIP"),
             direction=data.get("direction", "").upper().strip(),
@@ -823,7 +719,8 @@ Analyze this setup and respond with your JSON decision."""
             suggested_entry=entry if entry and entry != 0 else None,
             entry_zone_high=zone_high if zone_high and zone_high != 0 else None,
             entry_zone_low=zone_low if zone_low and zone_low != 0 else None,
-            expected_high=exp_high if exp_high and exp_high != 0 else None,
+            must_reach_price=exp if exp and exp != 0 else None,
+            invalidation_level=inv if inv and inv != 0 else None,
             suggested_sl=sl if sl and sl != 0 else None,
             suggested_tp=tp if tp and tp != 0 else None,
             market_regime=data.get("market_regime", ""),
@@ -848,7 +745,7 @@ Analyze this setup and respond with your JSON decision."""
                 decision.suggested_sl = None
             else:
                 sl_distance_pct = abs(entry - sl) / entry
-                if sl_distance_pct > 0.15:
+                if sl_distance_pct > self._max_sl_pct:
                     logger.warning("agent_sl_too_far", symbol=signal.symbol, distance=f"{sl_distance_pct:.2%}")
                     decision.suggested_sl = None
 
@@ -900,31 +797,31 @@ Analyze this setup and respond with your JSON decision."""
                 decision.entry_zone_high = None
                 decision.entry_zone_low = None
 
-        # Validate expected_high (must-reach-before-pullback gate)
-        if decision.expected_high is not None and decision.action == "WAIT_PULLBACK":
-            eh = decision.expected_high
+        # Validate must_reach_price (must-reach-before-pullback gate)
+        if decision.must_reach_price is not None and decision.action == "WAIT_PULLBACK":
+            mrp = decision.must_reach_price
             zh = decision.entry_zone_high
             zl = decision.entry_zone_low
             if is_long:
-                # For longs: expected_high should be ABOVE the entry zone
-                if zh is not None and eh <= zh:
+                # For longs: must_reach_price should be ABOVE the entry zone
+                if zh is not None and mrp <= zh:
                     logger.warning(
-                        "agent_expected_high_below_zone",
+                        "agent_must_reach_below_zone",
                         symbol=signal.symbol,
-                        expected_high=eh,
+                        must_reach_price=mrp,
                         zone_high=zh,
                     )
-                    decision.expected_high = None
+                    decision.must_reach_price = None
             else:
-                # For shorts: expected_high (really expected_low) should be BELOW the entry zone
-                if zl is not None and eh >= zl:
+                # For shorts: must_reach_price should be BELOW the entry zone
+                if zl is not None and mrp >= zl:
                     logger.warning(
-                        "agent_expected_high_above_zone",
+                        "agent_must_reach_above_zone",
                         symbol=signal.symbol,
-                        expected_high=eh,
+                        must_reach_price=mrp,
                         zone_low=zl,
                     )
-                    decision.expected_high = None
+                    decision.must_reach_price = None
 
         # Derive suggested_entry from zone midpoint if zone is valid but entry is missing
         if (decision.entry_zone_high is not None and decision.entry_zone_low is not None

@@ -10,18 +10,13 @@ Sweep Strategy (OTE Zone):
   Enter only when price pulls back INTO that zone and shows rejection
   (wick, engulfing, or volume confirmation).
 
-Breakout Strategy (Level Retest):
-  After a breakout is confirmed (price broke + held beyond a level), we
-  wait for price to come back and RETEST the breakout level.  Old resistance
-  becomes new support (or vice versa).  Enter on the bounce.
-
 If price never pulls back within the expiry window, we SKIP the trade.
 The best setups always give you a pullback — V-shaped moves that never
 retrace are typically traps or liquidation cascades.
 
 Flow:
   1H scan detects signal (score >= threshold) → queue in EntryRefiner
-  Every 60s: check 5m candles for OTE zone entry / breakout retest
+  Every 60s: check 5m candles for OTE zone entry
   Pullback confirmed → return refined signal with better entry price
   Expired (30 min) → SKIP trade (no chase) unless ote_skip_on_expiry=False
 """
@@ -53,9 +48,6 @@ REJECTION_WICK_RATIO = 0.5
 MIN_THRUST_PCT = 0.004  # 0.4%
 MIN_THRUST_PCT_1H = 0.008  # 0.8% — higher threshold for 1H scale
 
-# Breakout retest tolerance — how close price must get to the breakout level
-BREAKOUT_RETEST_TOLERANCE = 0.003  # 0.3%
-
 
 @dataclass
 class RefinerEntry:
@@ -69,15 +61,11 @@ class RefinerEntry:
     check_count: int = 0
 
     # Entry type
-    entry_type: str = "sweep"  # "sweep" or "breakout"
+    entry_type: str = "sweep"
 
     # Sweep-specific
     sweep_level: float = 0.0
     sweep_direction: str = ""  # "bullish" (swept lows) or "bearish" (swept highs)
-
-    # Breakout-specific
-    breakout_level: float = 0.0
-    breakout_direction: str = ""  # "bullish" or "bearish"
 
     # OTE tracking (dynamically updated from 5m candles)
     thrust_high: float = 0.0
@@ -105,8 +93,7 @@ class EntryRefiner:
     """Monitors queued signals on 5m candles for better entry timing.
 
     Called from the engine's monitor loop on each 60-second tick.
-    Handles both sweep and breakout signals with strategy-specific
-    pullback detection.
+    Handles sweep signals with OTE zone pullback detection.
 
     When refiner_agent (Agent 2) is provided, it replaces the algorithmic
     rejection detection every 5 minutes. Between Agent 2 checks, the
@@ -214,47 +201,6 @@ class EntryRefiner:
         )
         return True
 
-    def add_breakout(self, signal: SignalCandidate) -> bool:
-        """Queue a breakout signal for level-retest entry refinement.
-
-        Returns True if added, False if duplicate.
-        """
-        if signal.symbol in self.queue:
-            return False
-
-        breakout_result = signal.breakout_result
-        if not breakout_result or not breakout_result.breakout_detected:
-            return False
-
-        now = datetime.now(timezone.utc)
-        plan = getattr(signal, "pullback_plan", None)
-        expiry = plan.expires_at if plan else now + timedelta(minutes=self.config.entry_refiner_expiry_minutes)
-        entry = RefinerEntry(
-            symbol=signal.symbol,
-            signal=signal,
-            added_at=now,
-            expires_at=expiry,
-            original_1h_price=signal.entry_price,
-            entry_type="breakout",
-            breakout_level=breakout_result.breakout_level,
-            breakout_direction=breakout_result.breakout_direction or "",
-            pullback_plan=plan,
-        )
-        self.queue[signal.symbol] = entry
-
-        logger.info(
-            "refiner_queued_breakout",
-            symbol=signal.symbol,
-            score=signal.score,
-            breakout_level=round(breakout_result.breakout_level, 6),
-            breakout_direction=breakout_result.breakout_direction,
-            breakout_type=breakout_result.breakout_type,
-            original_1h_price=round(signal.entry_price, 6),
-            expires_at=entry.expires_at.isoformat(),
-            queue_size=len(self.queue),
-        )
-        return True
-
     def requeue(self, signal: SignalCandidate, entry: RefinerEntry | None = None) -> bool:
         """Re-queue a signal that was confirmed but rejected at dispatch time.
 
@@ -302,20 +248,12 @@ class EntryRefiner:
             return False
 
         now = datetime.now(timezone.utc)
-        # Determine entry type from signal
-        entry_type = "sweep"
         sweep_level = 0.0
         sweep_direction = ""
-        breakout_level = 0.0
-        breakout_direction = ""
 
         if signal.sweep_result and signal.sweep_result.sweep_detected:
             sweep_level = signal.sweep_result.sweep_level
             sweep_direction = signal.sweep_result.sweep_direction
-        elif signal.breakout_result and signal.breakout_result.breakout_detected:
-            entry_type = "breakout"
-            breakout_level = signal.breakout_result.breakout_level
-            breakout_direction = signal.breakout_result.breakout_direction or ""
 
         entry = RefinerEntry(
             symbol=signal.symbol,
@@ -323,11 +261,8 @@ class EntryRefiner:
             added_at=now,
             expires_at=now + timedelta(hours=4),  # 4 hours to find confirmation
             original_1h_price=signal.entry_price,
-            entry_type=entry_type,
             sweep_level=sweep_level,
             sweep_direction=sweep_direction,
-            breakout_level=breakout_level,
-            breakout_direction=breakout_direction,
             pullback_plan=getattr(signal, "pullback_plan", None),
             enter_now=True,
         )
@@ -337,7 +272,6 @@ class EntryRefiner:
             "refiner_queued_enter_now",
             symbol=signal.symbol,
             score=signal.score,
-            entry_type=entry_type,
             original_1h_price=round(signal.entry_price, 6),
             expires_at=entry.expires_at.isoformat(),
             queue_size=len(self.queue),
@@ -413,8 +347,8 @@ class EntryRefiner:
                 if candles_5m is None or candles_5m.empty or len(candles_5m) < 10:
                     continue
 
-                # Phase gate: expected_high must be reached before zone entry is allowed
-                if entry.pullback_plan and entry.pullback_plan.expected_high > 0:
+                # Phase gate: must_reach_price must be reached before zone entry is allowed
+                if entry.pullback_plan and entry.pullback_plan.must_reach_price > 0:
                     last_close = float(candles_5m["close"].iloc[-1])
                     candle_high = float(candles_5m["high"].iloc[-1])
                     candle_low = float(candles_5m["low"].iloc[-1])
@@ -423,10 +357,10 @@ class EntryRefiner:
                     if not entry.pullback_plan.pullback_allowed(check_price):
                         if entry.check_count % 5 == 0:
                             logger.debug(
-                                "refiner_waiting_expected_high",
+                                "refiner_waiting_must_reach_price",
                                 symbol=symbol,
                                 direction=entry.pullback_plan.direction,
-                                expected_high=round(entry.pullback_plan.expected_high, 6),
+                                must_reach_price=round(entry.pullback_plan.must_reach_price, 6),
                                 current_price=round(last_close, 6),
                                 check_count=entry.check_count,
                             )
@@ -435,11 +369,7 @@ class EntryRefiner:
 
                 entry.check_count += 1
 
-                # Dispatch to strategy-specific check
-                if entry.entry_type == "sweep":
-                    result = await self._check_sweep_ote(entry, candles_5m)
-                else:
-                    result = await self._check_breakout_retest(entry, candles_5m)
+                result = await self._check_sweep_ote(entry, candles_5m)
 
                 # Agent 2 ABANDON → remove from queue
                 if getattr(entry, "_agent_abandoned", False):
@@ -657,138 +587,6 @@ class EntryRefiner:
             zone_bottom=ote_bottom,
             direction=direction,
         )
-
-    # ── Breakout Retest Check ─────────────────────────────────────
-
-    async def _check_breakout_retest(
-        self, entry: RefinerEntry, candles_5m: pd.DataFrame
-    ) -> SignalCandidate | None:
-        """Check if price has retested the breakout level and bounced.
-
-        For bullish breakout (broke above resistance):
-          - Old resistance = new support
-          - Wait for price to pull back TO the breakout level
-          - Enter when price touches the level and closes above it (bounce)
-
-        For bearish breakout (broke below support):
-          - Old support = new resistance
-          - Wait for price to pull back UP to the breakout level
-          - Enter when price touches the level and closes below it (rejection)
-
-        When Agent 2 is enabled, it handles ALL entry decisions.
-        The algorithmic retest detection is the fallback.
-        """
-        direction = entry.breakout_direction
-        level = entry.breakout_level
-        tolerance = level * BREAKOUT_RETEST_TOLERANCE
-
-        closes = candles_5m["close"].astype(float)
-
-        # Guard: if Agent 2 already adjusted the zone, preserve it — don't recompute.
-        if entry.zone_source == "agent2_adjusted" and entry.ote_zone_valid:
-            zone_top = entry.ote_zone_top
-            zone_bottom = entry.ote_zone_bottom
-        else:
-            # Retest zone around the breakout level
-            zone_top = level + tolerance
-            zone_bottom = level - tolerance
-
-            # Store zone for dashboard visibility
-            entry.ote_zone_valid = True
-            entry.ote_zone_top = zone_top
-            entry.ote_zone_bottom = zone_bottom
-            if not entry.zone_source:
-                entry.zone_source = "breakout_level"
-
-        # ── Agent 2 check (every 5 minutes, or immediately for ENTER_NOW) ──
-        now_ts = _time.time()
-        last_check = self._last_agent_check.get(entry.symbol, 0)
-        agent_due = entry.enter_now or (now_ts - last_check) >= self._agent_check_interval
-
-        if self.refiner_agent and agent_due:
-            try:
-                result = await self._agent_evaluate(
-                    entry, candles_5m, zone_top, zone_bottom, direction,
-                )
-                self._last_agent_check[entry.symbol] = now_ts
-                if result is not None:
-                    return result
-                # Agent said WAIT or ADJUST — don't fall through to algorithm
-                return None
-            except Exception as e:
-                logger.warning(
-                    "refiner_agent2_exception",
-                    symbol=entry.symbol,
-                    error=str(e)[:100],
-                )
-                # Fall through to algorithmic check
-
-        # ── Algorithmic fallback: retest + bounce detection ──
-        highs = candles_5m["high"].astype(float)
-        lows = candles_5m["low"].astype(float)
-        opens = candles_5m["open"].astype(float)
-
-        recent = candles_5m.tail(5)
-
-        for i in range(len(recent)):
-            candle = recent.iloc[i]
-            c_close = float(candle["close"])
-            c_open = float(candle["open"])
-            c_high = float(candle["high"])
-            c_low = float(candle["low"])
-            body = abs(c_close - c_open)
-
-            if direction == "bullish":
-                if c_low <= zone_top and c_close > level:
-                    lower_wick = min(c_open, c_close) - c_low
-                    has_wick = body > 0 and lower_wick / body >= REJECTION_WICK_RATIO
-
-                    vol_profile = self.vol_analyzer.analyze(candles_5m)
-                    rvol = vol_profile.relative_volume
-                    has_volume = rvol >= OTE_REJECTION_RVOL
-
-                    if has_wick or has_volume:
-                        target_entry = min(c_close, zone_top)
-                        return self._create_refined_signal(
-                            entry=entry,
-                            entry_price=target_entry,
-                            rejection_type="breakout_retest",
-                            has_wick=has_wick,
-                            rvol=rvol,
-                        )
-
-            elif direction == "bearish":
-                if c_high >= zone_bottom and c_close < level:
-                    upper_wick = c_high - max(c_open, c_close)
-                    has_wick = body > 0 and upper_wick / body >= REJECTION_WICK_RATIO
-
-                    vol_profile = self.vol_analyzer.analyze(candles_5m)
-                    rvol = vol_profile.relative_volume
-                    has_volume = rvol >= OTE_REJECTION_RVOL
-
-                    if has_wick or has_volume:
-                        target_entry = max(c_close, zone_bottom)
-                        return self._create_refined_signal(
-                            entry=entry,
-                            entry_price=target_entry,
-                            rejection_type="breakout_retest",
-                            has_wick=has_wick,
-                            rvol=rvol,
-                        )
-
-        # No retest detected yet
-        if entry.check_count % 5 == 0:
-            current_price = float(closes.iloc[-1])
-            logger.debug(
-                "refiner_waiting_retest",
-                symbol=entry.symbol,
-                direction=direction,
-                breakout_level=round(level, 6),
-                current_price=round(current_price, 6),
-                distance_pct=f"{abs(current_price - level) / level * 100:.2f}%",
-                check_count=entry.check_count,
-            )
-        return None
 
     # ── OTE Zone Rejection Detection ──────────────────────────────
 
@@ -1232,8 +1030,8 @@ class EntryRefiner:
                 "age_seconds": entry.pullback_plan.age_seconds,
                 "zone_updates": entry.pullback_plan.zone_updates,
                 "max_chase_bps": entry.pullback_plan.max_chase_bps,
-                "expected_high": entry.pullback_plan.expected_high,
-                "expected_high_reached": entry.pullback_plan.expected_high_reached,
+                "must_reach_price": entry.pullback_plan.must_reach_price,
+                "must_reach_price_reached": entry.pullback_plan.must_reach_price_reached,
             } if entry.pullback_plan else None,
             # ENTER_NOW flag: Agent 1 said enter immediately, Agent 2 is doing
             # a quick confirmation. Bias toward ENTER unless clearly bad setup.
@@ -1278,7 +1076,7 @@ class EntryRefiner:
             zone_source=entry.zone_source,
             agent2_checks=entry.agent2_check_count,
             duration_seconds=round(duration, 0),
-            direction=entry.sweep_direction or entry.breakout_direction,
+            direction=entry.sweep_direction,
         )
 
         return signal
@@ -1326,7 +1124,7 @@ class EntryRefiner:
             zone_source=entry.zone_source or "n/a",
             check_count=entry.check_count,
             duration_seconds=round(duration, 0),
-            direction=entry.sweep_direction or entry.breakout_direction,
+            direction=entry.sweep_direction,
         )
 
         return signal
@@ -1395,8 +1193,6 @@ class EntryRefiner:
                 "entry_type": entry.entry_type,
                 "sweep_level": entry.sweep_level,
                 "sweep_direction": entry.sweep_direction,
-                "breakout_level": entry.breakout_level,
-                "breakout_direction": entry.breakout_direction,
                 "thrust_high": entry.thrust_high,
                 "thrust_low": entry.thrust_low if entry.thrust_low < 1e17 else 0,
                 "agent_zone_high": entry.signal.agent_entry_zone_high,
@@ -1423,8 +1219,8 @@ class EntryRefiner:
                     "limit_price": entry.pullback_plan.limit_price,
                     "original_suggested_entry": entry.pullback_plan.original_suggested_entry,
                     "zone_updates": entry.pullback_plan.zone_updates,
-                    "expected_high": entry.pullback_plan.expected_high,
-                    "expected_high_reached": entry.pullback_plan.expected_high_reached,
+                    "must_reach_price": entry.pullback_plan.must_reach_price,
+                    "must_reach_price_reached": entry.pullback_plan.must_reach_price_reached,
                 } if entry.pullback_plan else None,
             }
         return {
@@ -1474,8 +1270,6 @@ class EntryRefiner:
                     entry_type=entry_data.get("entry_type", "sweep"),
                     sweep_level=entry_data.get("sweep_level", 0),
                     sweep_direction=entry_data.get("sweep_direction", "bullish"),
-                    breakout_level=entry_data.get("breakout_level", 0),
-                    breakout_direction=entry_data.get("breakout_direction", ""),
                     thrust_high=entry_data.get("thrust_high", 0),
                     thrust_low=entry_data.get("thrust_low", 1e18),
                 )
@@ -1507,8 +1301,8 @@ class EntryRefiner:
                             limit_price=plan_data.get("limit_price", 0.0),
                             original_suggested_entry=plan_data.get("original_suggested_entry", 0.0),
                             zone_updates=plan_data.get("zone_updates", 0),
-                            expected_high=plan_data.get("expected_high", 0.0),
-                            expected_high_reached=plan_data.get("expected_high_reached", False),
+                            must_reach_price=plan_data.get("must_reach_price", plan_data.get("expected_high", 0.0)),
+                            must_reach_price_reached=plan_data.get("must_reach_price_reached", plan_data.get("expected_high_reached", False)),
                         )
                         # Also restore plan on the signal
                         entry.signal.pullback_plan = entry.pullback_plan

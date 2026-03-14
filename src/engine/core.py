@@ -73,7 +73,7 @@ class TradingEngine:
             stale_close_below_rr=config.stale_close_below_rr,
             position_agent=self.position_agent,
             position_agent_interval_minutes=getattr(
-                config, "position_agent_check_interval_minutes", 15.0
+                config, "position_agent_check_interval_minutes", 5.0
             ),
         )
         # Req 8: wire shadow mode from config
@@ -686,7 +686,7 @@ class TradingEngine:
         if self.watchlist_monitor and self.scanner.last_near_misses:
             promoted = 0
             for near_miss in self.scanner.last_near_misses:
-                sig_type = "breakout" if near_miss.breakout_result is not None else "sweep"
+                sig_type = "sweep"
                 if self.watchlist_monitor.add_entry(near_miss, sig_type):
                     promoted += 1
             if promoted:
@@ -788,7 +788,7 @@ class TradingEngine:
                     _last_refiner_check = _now_check
 
                 position = None
-                sig_type = "breakout" if signal.breakout_result is not None else "sweep"
+                sig_type = "sweep"
 
                 # --- AI Agent Early Decision (runs BEFORE refiner so agent controls the flow) ---
                 agent_early_decision = None  # None = agent not active, let refiner decide
@@ -872,6 +872,7 @@ class TradingEngine:
 
                     # ── Agent 1 is the direction authority ──
                     # If Agent 1 chose a direction, override the scanner's suggestion
+                    new_direction = signal.direction or ""
                     if agent_result.direction in ("LONG", "SHORT"):
                         new_direction = "bullish" if agent_result.direction == "LONG" else "bearish"
                         if new_direction != signal.direction:
@@ -887,6 +888,32 @@ class TradingEngine:
                             pre_tp = self.risk_manager.compute_take_profit(signal, pre_sl)
                             pre_rr = self.risk_manager.compute_rr(signal, pre_sl, pre_tp)
 
+                    # ── SL/TP Priority: Agent 1 is primary, risk_manager is fallback ──
+                    agent_sl = agent_result.suggested_sl
+                    agent_tp = agent_result.suggested_tp
+
+                    if agent_sl and agent_sl > 0:
+                        sl_valid = True
+                        if new_direction == "bullish" and agent_sl >= signal.entry_price:
+                            sl_valid = False
+                        elif new_direction == "bearish" and agent_sl <= signal.entry_price:
+                            sl_valid = False
+                        elif signal.entry_price > 0:
+                            sl_dist = abs(signal.entry_price - agent_sl) / signal.entry_price
+                            if sl_dist > self.config.max_sl_pct:
+                                sl_valid = False
+                        if sl_valid:
+                            pre_sl = agent_sl
+
+                    if agent_tp and agent_tp > 0:
+                        tp_valid = True
+                        if new_direction == "bullish" and agent_tp <= signal.entry_price:
+                            tp_valid = False
+                        elif new_direction == "bearish" and agent_tp >= signal.entry_price:
+                            tp_valid = False
+                        if tp_valid:
+                            pre_tp = agent_tp
+
                     agent_analysis_data = {
                         "action": agent_result.action,
                         "direction": agent_result.direction,
@@ -899,7 +926,8 @@ class TradingEngine:
                         "entry_zone_low": agent_result.entry_zone_low,
                         "suggested_sl": agent_result.suggested_sl,
                         "suggested_tp": agent_result.suggested_tp,
-                        "expected_high": agent_result.expected_high,
+                        "must_reach_price": agent_result.must_reach_price,
+                        "invalidation_level": agent_result.invalidation_level,
                         "latency_ms": round(agent_result.latency_ms, 1),
                         "error": agent_result.error,
                         "tokens": agent_result.input_tokens + agent_result.output_tokens,
@@ -968,9 +996,11 @@ class TradingEngine:
                             # ── Build PullbackPlan ──
                             now = datetime.now(timezone.utc)
                             expiry_seconds = self.config.pullback_valid_candles * 5 * 60  # candles × 5m
-                            # Invalidation level = sweep level (the wick extreme that must hold)
+                            # Invalidation level: Agent 1 primary, sweep level fallback
                             invalidation = 0.0
-                            if signal.sweep_result and signal.sweep_result.sweep_detected:
+                            if agent_result.invalidation_level and agent_result.invalidation_level > 0:
+                                invalidation = agent_result.invalidation_level
+                            elif signal.sweep_result and signal.sweep_result.sweep_detected:
                                 invalidation = signal.sweep_result.sweep_level
 
                             # Use sweep_direction for invalidation logic (not signal.direction
@@ -991,7 +1021,7 @@ class TradingEngine:
                                 valid_for_candles=self.config.pullback_valid_candles,
                                 direction=sweep_dir,
                                 original_suggested_entry=agent_result.suggested_entry or 0.0,
-                                expected_high=agent_result.expected_high or 0.0,
+                                must_reach_price=agent_result.must_reach_price or 0.0,
                             )
                             plan.limit_price = plan.compute_limit_price()
                             signal.pullback_plan = plan
@@ -1007,10 +1037,8 @@ class TradingEngine:
                                 signal.components["sl_price"] = pre_sl
                                 signal.components["tp_price"] = pre_tp
                                 signal.components["rr_ratio"] = round(pre_rr, 2) if pre_rr else None
-                            # Queue in refiner — try sweep first, then breakout
+                            # Queue in refiner
                             queued = self.main_entry_refiner.add(signal)
-                            if not queued and signal.breakout_result and signal.breakout_result.breakout_detected:
-                                queued = self.main_entry_refiner.add_breakout(signal)
                             if queued:
                                 refiner_queued += 1
                                 logger.info(
@@ -1102,7 +1130,9 @@ class TradingEngine:
                             # ENTER_NOW gets 4 hours to find confirmation
                             expiry_seconds = 4 * 60 * 60  # 4 hours
                             invalidation = 0.0
-                            if signal.sweep_result and signal.sweep_result.sweep_detected:
+                            if agent_result.invalidation_level and agent_result.invalidation_level > 0:
+                                invalidation = agent_result.invalidation_level
+                            elif signal.sweep_result and signal.sweep_result.sweep_detected:
                                 invalidation = signal.sweep_result.sweep_level
                             sweep_dir = (
                                 signal.sweep_result.sweep_direction
@@ -1120,7 +1150,7 @@ class TradingEngine:
                                 valid_for_candles=3,  # Short window
                                 direction=sweep_dir,
                                 original_suggested_entry=agent_result.suggested_entry or 0.0,
-                                expected_high=0.0,  # No expected_high gate for ENTER_NOW
+                                must_reach_price=0.0,  # No must_reach_price gate for ENTER_NOW
                             )
                             plan.limit_price = plan.compute_limit_price()
                             signal.pullback_plan = plan
@@ -1191,8 +1221,6 @@ class TradingEngine:
 
                         if signal.sweep_result and signal.sweep_result.sweep_detected:
                             queued = self.main_entry_refiner.add(signal)
-                        elif signal.breakout_result and signal.breakout_result.breakout_detected:
-                            queued = self.main_entry_refiner.add_breakout(signal)
 
                         if queued:
                             refiner_queued += 1
@@ -1481,6 +1509,8 @@ class TradingEngine:
                         if position and trade_record:
                             # Store confluence score on position for post-trade analysis
                             position.confluence_score = signal.score
+                            if agent_analysis_data:
+                                position.agent1_reasoning = agent_analysis_data.get("reasoning", "")
 
                             # Tag trade with split test metadata
                             trade_record["test_group"] = test_group
@@ -1779,6 +1809,10 @@ class TradingEngine:
 
                 if position and trade_record:
                     position.confluence_score = signal.score
+                    # Set agent1_reasoning from signal components if available
+                    agent_data = signal.components.get("agent_analysis") if hasattr(signal, "components") else None
+                    if agent_data:
+                        position.agent1_reasoning = agent_data.get("reasoning", "")
                     db_trade = await self.repo.insert_trade(trade_record)
                     if db_trade:
                         position.trade_id = db_trade.get("id", "")
@@ -1975,6 +2009,10 @@ class TradingEngine:
                 )
                 if position and trade_record:
                     position.confluence_score = signal.score
+                    # Set agent1_reasoning from signal components if available
+                    agent_data = signal.components.get("agent_analysis") if hasattr(signal, "components") else None
+                    if agent_data:
+                        position.agent1_reasoning = agent_data.get("reasoning", "")
                     db_trade = await self.repo.insert_trade(trade_record)
                     if db_trade:
                         position.trade_id = db_trade.get("id", "")
@@ -2016,7 +2054,9 @@ class TradingEngine:
                         now = datetime.now(timezone.utc)
                         expiry_seconds = self.config.pullback_valid_candles * 5 * 60
                         invalidation = 0.0
-                        if signal.sweep_result and signal.sweep_result.sweep_detected:
+                        if result.invalidation_level and result.invalidation_level > 0:
+                            invalidation = result.invalidation_level
+                        elif signal.sweep_result and signal.sweep_result.sweep_detected:
                             invalidation = signal.sweep_result.sweep_level
                         sweep_dir = (
                             signal.sweep_result.sweep_direction
@@ -2034,13 +2074,12 @@ class TradingEngine:
                             valid_for_candles=self.config.pullback_valid_candles,
                             direction=sweep_dir,
                             original_suggested_entry=result.suggested_entry or 0.0,
+                            must_reach_price=result.must_reach_price or 0.0,
                         )
                         plan.limit_price = plan.compute_limit_price()
                         signal.pullback_plan = plan
 
                     queued = self.main_entry_refiner.add(signal)
-                    if not queued and signal.breakout_result and signal.breakout_result.breakout_detected:
-                        queued = self.main_entry_refiner.add_breakout(signal)
                     if queued:
                         logger.info(
                             "expired_review_requeued",
@@ -2122,6 +2161,10 @@ class TradingEngine:
 
                 if position and trade_record:
                     position.confluence_score = signal.score
+                    # Set agent1_reasoning from signal components if available
+                    agent_data = signal.components.get("agent_analysis") if hasattr(signal, "components") else None
+                    if agent_data:
+                        position.agent1_reasoning = agent_data.get("reasoning", "")
                     db_trade = await self.repo.insert_trade(trade_record)
                     if db_trade:
                         position.trade_id = db_trade.get("id", "")
@@ -2266,6 +2309,7 @@ class TradingEngine:
                     wl_agent_result = await self.agent_analyst.analyze_signal(graduated, wl_context)
 
                     # ── Agent 1 is the direction authority ──
+                    new_dir = graduated.direction or ""
                     if wl_agent_result.direction in ("LONG", "SHORT"):
                         new_dir = "bullish" if wl_agent_result.direction == "LONG" else "bearish"
                         if new_dir != graduated.direction:
@@ -2280,6 +2324,32 @@ class TradingEngine:
                             pre_sl = self.risk_manager.compute_stop_loss(graduated)
                             pre_tp = self.risk_manager.compute_take_profit(graduated, pre_sl)
                             pre_rr = self.risk_manager.compute_rr(graduated, pre_sl, pre_tp)
+
+                    # ── SL/TP Priority: Agent 1 is primary, risk_manager is fallback ──
+                    agent_sl = wl_agent_result.suggested_sl
+                    agent_tp = wl_agent_result.suggested_tp
+
+                    if agent_sl and agent_sl > 0:
+                        sl_valid = True
+                        if new_dir == "bullish" and agent_sl >= graduated.entry_price:
+                            sl_valid = False
+                        elif new_dir == "bearish" and agent_sl <= graduated.entry_price:
+                            sl_valid = False
+                        elif graduated.entry_price > 0:
+                            sl_dist = abs(graduated.entry_price - agent_sl) / graduated.entry_price
+                            if sl_dist > self.config.max_sl_pct:
+                                sl_valid = False
+                        if sl_valid:
+                            pre_sl = agent_sl
+
+                    if agent_tp and agent_tp > 0:
+                        tp_valid = True
+                        if new_dir == "bullish" and agent_tp <= graduated.entry_price:
+                            tp_valid = False
+                        elif new_dir == "bearish" and agent_tp >= graduated.entry_price:
+                            tp_valid = False
+                        if tp_valid:
+                            pre_tp = agent_tp
 
                     logger.info(
                         "watchlist_agent_decision",
@@ -2322,7 +2392,9 @@ class TradingEngine:
                                 now = datetime.now(timezone.utc)
                                 expiry_seconds = self.config.pullback_valid_candles * 5 * 60
                                 invalidation = 0.0
-                                if (
+                                if wl_agent_result.invalidation_level and wl_agent_result.invalidation_level > 0:
+                                    invalidation = wl_agent_result.invalidation_level
+                                elif (
                                     graduated.sweep_result
                                     and graduated.sweep_result.sweep_detected
                                 ):
@@ -2346,6 +2418,7 @@ class TradingEngine:
                                     valid_for_candles=self.config.pullback_valid_candles,
                                     direction=sweep_dir,
                                     original_suggested_entry=wl_agent_result.suggested_entry or 0.0,
+                                    must_reach_price=wl_agent_result.must_reach_price or 0.0,
                                 )
                                 plan.limit_price = plan.compute_limit_price()
                                 graduated.pullback_plan = plan
@@ -2367,19 +2440,14 @@ class TradingEngine:
                                     "entry_zone_low": wl_agent_result.entry_zone_low,
                                     "suggested_sl": wl_agent_result.suggested_sl,
                                     "suggested_tp": wl_agent_result.suggested_tp,
-                                    "expected_high": wl_agent_result.expected_high,
+                                    "must_reach_price": wl_agent_result.must_reach_price,
+                                    "invalidation_level": wl_agent_result.invalidation_level,
                                 }
                                 graduated.components["sl_price"] = pre_sl
                                 graduated.components["tp_price"] = pre_tp
                                 graduated.components["rr_ratio"] = round(pre_rr, 2) if pre_rr else None
 
                                 queued = self.main_entry_refiner.add(graduated)
-                                if (
-                                    not queued
-                                    and graduated.breakout_result
-                                    and graduated.breakout_result.breakout_detected
-                                ):
-                                    queued = self.main_entry_refiner.add_breakout(graduated)
 
                                 if queued:
                                     logger.info(
@@ -2438,6 +2506,10 @@ class TradingEngine:
 
                     # Match all other entry paths: confluence score, DB persistence, portfolio, state
                     position.confluence_score = graduated.score
+                    # Set agent1_reasoning from signal components if available
+                    agent_data = graduated.components.get("agent_analysis") if hasattr(graduated, "components") else None
+                    if agent_data:
+                        position.agent1_reasoning = agent_data.get("reasoning", "")
 
                     if trade_record:
                         db_trade = await self.repo.insert_trade(trade_record)
@@ -2881,7 +2953,9 @@ class TradingEngine:
                     now = datetime.now(timezone.utc)
                     expiry_seconds = self.config.pullback_valid_candles * 5 * 60
                     invalidation = 0.0
-                    if signal.sweep_result and signal.sweep_result.sweep_detected:
+                    if agent_result.invalidation_level and agent_result.invalidation_level > 0:
+                        invalidation = agent_result.invalidation_level
+                    elif signal.sweep_result and signal.sweep_result.sweep_detected:
                         invalidation = signal.sweep_result.sweep_level
 
                     sweep_dir = (
@@ -2900,7 +2974,7 @@ class TradingEngine:
                         valid_for_candles=self.config.pullback_valid_candles,
                         direction=sweep_dir,
                         original_suggested_entry=agent_result.suggested_entry or 0.0,
-                        expected_high=agent_result.expected_high or 0.0,
+                        must_reach_price=agent_result.must_reach_price or 0.0,
                     )
                     plan.limit_price = plan.compute_limit_price()
                     signal.pullback_plan = plan
@@ -2918,7 +2992,8 @@ class TradingEngine:
                         "entry_zone_low": agent_result.entry_zone_low,
                         "suggested_sl": agent_result.suggested_sl,
                         "suggested_tp": agent_result.suggested_tp,
-                        "expected_high": agent_result.expected_high,
+                        "must_reach_price": agent_result.must_reach_price,
+                        "invalidation_level": agent_result.invalidation_level,
                     }
                     signal.components["agent_analysis"] = agent_analysis_data
                     signal.components["sl_price"] = pre_sl
@@ -2926,8 +3001,6 @@ class TradingEngine:
                     signal.components["rr_ratio"] = round(pre_rr, 2) if pre_rr else None
 
                     queued = self.main_entry_refiner.add(signal)
-                    if not queued and signal.breakout_result and signal.breakout_result.breakout_detected:
-                        queued = self.main_entry_refiner.add_breakout(signal)
                     if queued:
                         logger.info(
                             "post_win_reassessment_queued",
@@ -3111,6 +3184,10 @@ class TradingEngine:
 
         new_trade_id = ""
         if new_position and new_trade_record:
+            # Set agent1_reasoning from signal components if available
+            agent_data = signal.components.get("agent_analysis") if hasattr(signal, "components") else None
+            if agent_data:
+                new_position.agent1_reasoning = agent_data.get("reasoning", "")
             db_trade = await self.repo.insert_trade(new_trade_record)
             if db_trade:
                 new_position.trade_id = db_trade.get("id", "")

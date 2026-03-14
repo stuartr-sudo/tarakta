@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from src.config import Settings
 from src.data.candles import CandleManager
 from src.exchange.models import SignalCandidate
-from src.strategy.confluence import BREAKOUT_THRESHOLD, WEIGHTS
+from src.strategy.confluence import WEIGHTS
 from src.strategy.pullback import PullbackAnalyzer
 from src.strategy.volume import VolumeAnalyzer
 from src.utils.logging import get_logger
@@ -37,7 +37,7 @@ class WatchlistEntry:
     expires_at: datetime
     initial_score: float
     initial_signal: SignalCandidate  # Full signal with components, sweep_result, etc.
-    signal_type: str  # "sweep" or "breakout"
+    signal_type: str  # "sweep"
     direction: str  # From sweep/breakout detection
     htf_direction: str | None
     check_count: int = 0
@@ -199,10 +199,7 @@ class WatchlistMonitor:
         entry.check_count += 1
         entry.last_checked = datetime.now(timezone.utc)
 
-        if entry.signal_type == "sweep":
-            return self._check_sweep_entry(entry, candles_5m)
-        else:
-            return self._check_breakout_entry(entry, candles_5m)
+        return self._check_sweep_entry(entry, candles_5m)
 
     def _check_sweep_entry(self, entry, candles_5m) -> SignalCandidate | None:
         """For sweep near-misses: look for displacement + pullback on 5m."""
@@ -282,66 +279,7 @@ class WatchlistMonitor:
                 atr_1h=orig.atr_1h,
                 sweep_result=orig.sweep_result,
                 session_result=orig.session_result,
-                breakout_result=orig.breakout_result,
-                key_levels=orig.key_levels,
-                watchlist_promoted=True,
-                watchlist_duration_seconds=(now - entry.added_at).total_seconds(),
-                htf_direction_cache=entry.htf_direction,
-            )
-            return graduated
 
-        return None
-
-    def _check_breakout_entry(self, entry, candles_5m) -> SignalCandidate | None:
-        """For breakout near-misses: check volume confirmation + hold on 5m."""
-        orig = entry.initial_signal
-        score = entry.initial_score
-        reasons = list(orig.reasons)
-        components = dict(orig.components)
-
-        # Check RVOL on 5m for volume confirmation
-        vol_profile = self.vol_analyzer.analyze(candles_5m)
-
-        if vol_profile.relative_volume >= 1.5 and components.get("volume_confirmed", 0) == 0:
-            from src.strategy.confluence import BREAKOUT_WEIGHTS
-
-            vol_weight = BREAKOUT_WEIGHTS.get("volume_confirmed", 20)
-            score += vol_weight
-            components["volume_confirmed"] = vol_weight
-            reasons.append(
-                f"5m volume confirmed: RVOL {vol_profile.relative_volume:.1f}x"
-            )
-
-        # Check if price is still holding beyond breakout level
-        if orig.breakout_result is not None:
-            current_price = float(candles_5m["close"].iloc[-1])
-            bo = orig.breakout_result
-            if bo.breakout_direction == "bullish" and current_price < bo.breakout_level:
-                # Price fell back below breakout level — invalidated
-                return None
-            if bo.breakout_direction == "bearish" and current_price > bo.breakout_level:
-                return None
-
-        entry.best_5m_score = max(entry.best_5m_score, score)
-
-        # Check threshold
-        if score >= BREAKOUT_THRESHOLD:
-            now = datetime.now(timezone.utc)
-            current_price = float(candles_5m["close"].iloc[-1])
-
-            graduated = SignalCandidate(
-                score=score,
-                direction=entry.direction,
-                reasons=reasons + [
-                    f"Watchlist-promoted (breakout) after {entry.check_count} checks"
-                ],
-                symbol=entry.symbol,
-                entry_price=current_price,
-                components=components,
-                atr_1h=orig.atr_1h,
-                sweep_result=orig.sweep_result,
-                session_result=orig.session_result,
-                breakout_result=orig.breakout_result,
                 key_levels=orig.key_levels,
                 watchlist_promoted=True,
                 watchlist_duration_seconds=(now - entry.added_at).total_seconds(),

@@ -75,6 +75,7 @@ class Position:
     original_stop_loss: float = 0.0  # original SL before breakeven move
     current_tier: int = 0            # 0=no tiers hit, 1=TP1 hit, 2=TP2 hit
     confluence_score: float = 0.0    # confluence score at entry (for post-trade analysis)
+    agent1_reasoning: str = ""       # Agent 1's thesis for Agent 3 context
 
 
 @dataclass
@@ -125,18 +126,6 @@ class SweepResult:
     sweep_depth: float             # How far past the level
     htf_continuation: bool = False # True when trade direction was overridden by HTF context
 
-
-@dataclass
-class BreakoutResult:
-    """Result of breakout detection (price breaks AND holds beyond a level)."""
-    breakout_detected: bool
-    breakout_direction: str | None    # "bullish" or "bearish"
-    breakout_level: float             # The level that was broken
-    breakout_type: str | None         # "london_high", "swing_high", etc.
-    target_level: float               # Opposite side (for TP)
-    volume_confirmed: bool            # Volume > 1.5x average
-    candles_held: int                 # How many candles price held above/below
-    atr_distance: float               # Distance from level in ATR units
 
 
 @dataclass
@@ -238,7 +227,6 @@ class SignalCandidate:
     crt_result: object | None = None     # CRTResult from strategy.crt
     session_result: object | None = None  # SessionResult from strategy.sessions
     sweep_result: object | None = None   # SweepResult from strategy.sweep_detector
-    breakout_result: object | None = None  # BreakoutResult from strategy.breakout_detector
     leverage_profile: object | None = None  # LeverageProfile from strategy.leverage
     # Hyper-Watchlist fields
     watchlist_promoted: bool = False           # True if signal graduated from watchlist
@@ -284,12 +272,12 @@ class PullbackPlan:
     limit_price: float = 0.0          # Computed zone-aware limit price
     original_suggested_entry: float = 0.0  # Agent 1's suggested_entry
     zone_updates: int = 0              # How many times Agent 2 adjusted zone
-    # Phase gate: price must reach expected_high BEFORE pullback entry is allowed.
+    # Phase gate: price must reach must_reach_price BEFORE pullback entry is allowed.
     # For longs: price must rise to this level first (then pull back to zone).
     # For shorts: price must drop to this level first (then bounce to zone).
     # 0.0 = no gate (pullback can start from current price area).
-    expected_high: float = 0.0
-    expected_high_reached: bool = False  # Flipped to True once price reaches gate
+    must_reach_price: float = 0.0
+    must_reach_price_reached: bool = False  # Flipped to True once price reaches gate
 
     @property
     def is_expired(self) -> bool:
@@ -327,32 +315,32 @@ class PullbackPlan:
         else:
             return price > self.invalidation_level
 
-    def check_expected_high(self, price: float) -> bool:
-        """Check if price has reached the expected_high gate.
+    def check_must_reach_price(self, price: float) -> bool:
+        """Check if price has reached the must_reach_price gate.
 
         Returns True if the gate has been reached (or no gate set).
-        Once reached, expected_high_reached is permanently set to True.
+        Once reached, must_reach_price_reached is permanently set to True.
         """
-        if self.expected_high <= 0 or self.expected_high_reached:
+        if self.must_reach_price <= 0 or self.must_reach_price_reached:
             return True
         if self.direction in ("bullish", "long"):
-            # For longs: price must reach UP to expected_high
-            if price >= self.expected_high:
-                self.expected_high_reached = True
+            # For longs: price must reach UP to must_reach_price
+            if price >= self.must_reach_price:
+                self.must_reach_price_reached = True
                 return True
         else:
-            # For shorts: price must reach DOWN to expected_high (it's actually expected_low)
-            if price <= self.expected_high:
-                self.expected_high_reached = True
+            # For shorts: price must reach DOWN to must_reach_price
+            if price <= self.must_reach_price:
+                self.must_reach_price_reached = True
                 return True
         return False
 
     def pullback_allowed(self, price: float) -> bool:
-        """Check if pullback entry is allowed — expected_high must have been reached first."""
-        if self.expected_high <= 0:
+        """Check if pullback entry is allowed — must_reach_price must have been reached first."""
+        if self.must_reach_price <= 0:
             return True  # No gate set
-        self.check_expected_high(price)
-        return self.expected_high_reached
+        self.check_must_reach_price(price)
+        return self.must_reach_price_reached
 
     def compute_limit_price(self) -> float:
         """Compute optimal limit price within zone.

@@ -1,6 +1,6 @@
 """AI-powered position manager (Agent 3 — Position Monitor).
 
-Agent 3 runs every 15 minutes per open position and provides AI-powered
+Agent 3 runs every 5 minutes per open position and provides AI-powered
 recommendations for position management. It SUPPLEMENTS (not replaces)
 the algorithmic SL/TP/trailing logic in PositionMonitor.
 
@@ -82,8 +82,16 @@ You see new structure that allows a tighter SL without premature exit.
 - New swing high formed below current SL (shorts)
 - Market structure deteriorating — tighten to protect remaining profit
 
+**Example:** LONG entered at 0.500, current SL at 0.480, new swing low formed at 0.492.
+TIGHTEN_SL to 0.490 (just below new swing low, still tighter/higher than current 0.480).
+
 ### 3. CLOSE_PARTIAL — Close a percentage of the position
 Take some profit off the table while keeping exposure.
+
+**Percentage guidance (system caps at 50% per action):**
+- 25%: Conservative — small amount off the table
+- 50%: Maximum allowed per single action — significant profit-taking
+Note: the system will cap any value above 50% down to 50%.
 
 **When to use:**
 - Approaching strong resistance/support with momentum fading
@@ -105,6 +113,12 @@ The thesis is invalidated or risk/reward no longer justifies holding.
 - **Never widen SL.** You can only move it in the profitable direction.
 - **Never override hard SL/TP.** The algorithmic system handles execution.
 - **Be conservative.** False signals cost money. When in doubt, HOLD.
+- **TP tier progress matters.** If 2+ TP tiers are completed and less than 50% of the position \
+  remains, be more willing to CLOSE_FULL — the trade has already achieved its primary objective. \
+  Protecting remaining profit is more important than squeezing the last tier.
+- **Time matters.** A position held 6+ hours with zero progress and marginal PnL is different \
+  from one entered 20 minutes ago. Longer-held stale positions with deteriorating structure \
+  deserve more aggressive management.
 
 ## Glossary
 - **SL** — Stop Loss: price where the trade exits at a loss
@@ -145,14 +159,14 @@ Respond with ONLY the JSON object. No other text."""
 class PositionManagerAgent:
     """Agent 3 — AI-powered position management.
 
-    Runs every 15 minutes per open position, providing supplementary
+    Runs every 5 minutes per open position, providing supplementary
     recommendations to the algorithmic position monitor.
     """
 
     def __init__(self, config: Settings) -> None:
         self._client: AsyncOpenAI | None = None
         self._api_key = config.agent_api_key
-        self._model = getattr(config, "position_agent_model", "gpt-5-mini")
+        self._model = getattr(config, "position_agent_model", "gpt-5-nano")
         self._timeout = config.agent_timeout_seconds
         self._available = bool(config.agent_api_key) and getattr(
             config, "position_agent_enabled", False
@@ -229,7 +243,6 @@ class PositionManagerAgent:
                     {"role": "user", "content": prompt},
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.3,
             )
 
             latency_ms = (time.time() - t0) * 1000
@@ -254,6 +267,23 @@ class PositionManagerAgent:
             decision.latency_ms = latency_ms
             decision.input_tokens = in_tok
             decision.output_tokens = out_tok
+
+            # Validate TIGHTEN_SL actually tightens
+            if decision.action == "TIGHTEN_SL" and decision.suggested_sl > 0:
+                current_sl = context.get("stop_loss", 0)
+                ctx_direction = context.get("direction", "unknown")
+                if ctx_direction.lower() in ("long", "bullish"):
+                    if decision.suggested_sl <= current_sl:
+                        logger.warning("position_agent_sl_not_tighter",
+                            suggested=decision.suggested_sl, current=current_sl, direction=ctx_direction)
+                        decision.action = "HOLD"
+                        decision.reasoning = f"TIGHTEN_SL rejected: {decision.suggested_sl} not above current {current_sl}. {decision.reasoning}"
+                elif ctx_direction.lower() in ("short", "bearish"):
+                    if decision.suggested_sl >= current_sl:
+                        logger.warning("position_agent_sl_not_tighter",
+                            suggested=decision.suggested_sl, current=current_sl, direction=ctx_direction)
+                        decision.action = "HOLD"
+                        decision.reasoning = f"TIGHTEN_SL rejected: {decision.suggested_sl} not below current {current_sl}. {decision.reasoning}"
 
             # Update action stats
             action = decision.action.upper()
@@ -351,7 +381,7 @@ class PositionManagerAgent:
 - ATR (1H): {atr:.6g} ({atr_pct:.2f}% of price)
 
 ### Entry Context
-- Confluence Score: {confluence:.0f}/100
+- Entry Confidence: {confluence:.0f}/100
 - Agent 1 Thesis: {agent1_reasoning[:300]}
 
 ### Market Context

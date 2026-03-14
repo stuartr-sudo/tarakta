@@ -1,8 +1,7 @@
-"""Trade Travel Chill scanner — post-sweep displacement + breakout pipeline.
+"""Trade Travel Chill scanner — post-sweep displacement pipeline.
 
-Scans all tradeable pairs through a dual-path pipeline:
+Scans all tradeable pairs through a sweep-only pipeline:
 
-Path A — Sweep & Reverse (primary):
 1. Fetch candles (1H, 4H, 1D)
 2. Market structure on all TFs (for HTF trend + swing levels)
 3. Session analysis (Asian, London, NY ranges + post-KZ timing)
@@ -10,14 +9,9 @@ Path A — Sweep & Reverse (primary):
 5. Displacement check on 1H (confirms institutional commitment)
 6. Score with PostSweepEngine
 
-Path B — Breakout (complementary):
-7. If no sweep detected, check for genuine breakouts
-8. Price broke AND held beyond a key level with volume
-9. Score with PostSweepEngine.score_breakout()
-
 Removed from pipeline: CRT, Order Blocks, FVGs, Premium/Discount,
-LiquidityAnalyzer, MarketRegimeAnalyzer — these are the retail signals
-that market makers hunt.
+LiquidityAnalyzer, MarketRegimeAnalyzer, BreakoutDetector — these are
+the retail signals that market makers hunt.
 """
 from __future__ import annotations
 
@@ -28,10 +22,9 @@ import pandas as pd
 
 from src.config import Settings
 from src.data.candles import CandleManager
-from src.exchange.models import BreakoutResult, SignalCandidate
+from src.exchange.models import SignalCandidate
 from src.exchange.protocol import FuturesCapable
-from src.strategy.breakout_detector import BreakoutDetector
-from src.strategy.confluence import BREAKOUT_THRESHOLD, BREAKOUT_WEIGHTS, PostSweepEngine
+from src.strategy.confluence import PostSweepEngine
 from src.strategy.fair_value_gaps import FairValueGapAnalyzer
 from src.strategy.leverage import LeverageAnalyzer
 from src.strategy.liquidity import LiquidityAnalyzer
@@ -61,7 +54,6 @@ class AltcoinScanner:
         self.vol_analyzer = VolumeAnalyzer()
         self.session_analyzer = SessionAnalyzer()
         self.sweep_detector = SweepDetector()
-        self.breakout_detector = BreakoutDetector()
         self.pullback_analyzer = PullbackAnalyzer(
             min_retracement=config.pullback_min_retracement,
             max_retracement=config.pullback_max_retracement,
@@ -98,8 +90,6 @@ class AltcoinScanner:
         diag_sweeps = 0
         diag_displacements = 0
         diag_sweep_and_disp = 0
-        diag_breakouts = 0
-        diag_breakout_vol = 0
         diag_near_misses: list[tuple[str, float, str]] = []  # (symbol, score, type)
         diag_errors = 0
 
@@ -128,8 +118,6 @@ class AltcoinScanner:
                     comp = result.components
                     has_sweep = comp.get("sweep_detected", 0) > 0
                     has_disp = comp.get("displacement_confirmed", 0) > 0
-                    has_breakout = comp.get("breakout_confirmed", 0) > 0
-                    has_bo_vol = comp.get("volume_confirmed", 0) > 0
 
                     if has_sweep:
                         diag_sweeps += 1
@@ -137,25 +125,15 @@ class AltcoinScanner:
                         diag_displacements += 1
                     if has_sweep and has_disp:
                         diag_sweep_and_disp += 1
-                    if has_breakout:
-                        diag_breakouts += 1
-                    if has_breakout and has_bo_vol:
-                        diag_breakout_vol += 1
 
                     # ── Threshold check ──
-                    # Breakout signals use lower threshold (45) vs sweep (60)
-                    threshold = (
-                        BREAKOUT_THRESHOLD
-                        if result.breakout_result is not None
-                        else self.config.entry_threshold
-                    )
+                    threshold = self.config.entry_threshold
                     if result.score >= threshold:
                         all_signals.append(result)
                     elif result.score > 0:
                         # Near miss — scored but didn't qualify
-                        sig_type = "breakout" if has_breakout else "sweep"
                         diag_near_misses.append(
-                            (result.symbol, round(result.score, 1), sig_type)
+                            (result.symbol, round(result.score, 1), "sweep")
                         )
                         # Collect full signal for hyper-watchlist promotion
                         if result.score >= self.config.watchlist_min_score:
@@ -191,8 +169,6 @@ class AltcoinScanner:
             sweeps_found=diag_sweeps,
             displacements_found=diag_displacements,
             sweep_plus_displacement=diag_sweep_and_disp,
-            breakouts_found=diag_breakouts,
-            breakouts_with_volume=diag_breakout_vol,
             signals_qualified=len(all_signals),
             near_misses=len(diag_near_misses),
             top_near_misses=top_misses if top_misses else "none",
@@ -300,58 +276,6 @@ class AltcoinScanner:
             pullback_result=pullback_result,
         )
 
-        # 8. If sweep didn't produce a qualifying signal, try breakout path
-        if signal.score < self.config.entry_threshold:
-            breakout_result = self.breakout_detector.detect(
-                candles_1h=candles["1h"],
-                asian_high=session_result.asian_high,
-                asian_low=session_result.asian_low,
-                london_high=session_result.london_high,
-                london_low=session_result.london_low,
-                ny_high=session_result.ny_high,
-                ny_low=session_result.ny_low,
-                swing_high=swing_high,
-                swing_low=swing_low,
-            )
-
-            if breakout_result.breakout_detected:
-                # Volume sustainability check for breakouts (same logic as sweep path).
-                # Declining overall volume = likely a one-off spike, not sustained
-                # institutional interest.
-                if vol_profile.volume_trend == "decreasing":
-                    breakout_result = BreakoutResult(
-                        breakout_detected=False,
-                        breakout_direction=None,
-                        breakout_level=0.0,
-                        breakout_type=None,
-                        target_level=0.0,
-                        volume_confirmed=False,
-                        candles_held=0,
-                        atr_distance=0.0,
-                    )
-
-            if breakout_result.breakout_detected:
-                breakout_signal = self.confluence.score_breakout(
-                    symbol=symbol,
-                    current_price=current_price,
-                    breakout_result=breakout_result,
-                    htf_direction=htf_direction,
-                    in_post_kill_zone=session_result.in_post_kill_zone,
-                    ms_results=ms_results,
-                )
-
-                # Use breakout signal if it scores above breakout threshold
-                if breakout_signal.score >= BREAKOUT_THRESHOLD:
-                    breakout_signal.breakout_result = breakout_result
-                    breakout_signal.atr_1h = atr_1h
-                    breakout_signal.session_result = session_result
-                    signal = breakout_signal
-                else:
-                    # Breakout found but too low — tag sweep signal for diagnostics
-                    signal.components["breakout_confirmed"] = BREAKOUT_WEIGHTS["breakout_confirmed"]
-                    if breakout_result.volume_confirmed:
-                        signal.components["volume_confirmed"] = BREAKOUT_WEIGHTS["volume_confirmed"]
-
         # ── Weekly Cycle: Fake Move Monday & Mid-Week Reversal ──
         if self.weekly_cycle_enabled and signal.score > 0:
             weekly_result = self.weekly_cycle.analyze(
@@ -384,19 +308,14 @@ class AltcoinScanner:
         signal._scan_vol_profile = vol_profile
         signal._scan_pullback_result = pullback_result
 
-        # Log qualifying signals (sweep threshold=60, breakout threshold=45)
-        log_threshold = (
-            BREAKOUT_THRESHOLD
-            if signal.breakout_result is not None
-            else self.config.entry_threshold
-        )
-        if signal.score >= log_threshold:
+        # Log qualifying signals
+        if signal.score >= self.config.entry_threshold:
             logger.info(
                 "signal_detected",
                 symbol=symbol,
                 score=signal.score,
                 direction=signal.direction,
-                signal_type="breakout" if signal.breakout_result is not None else "sweep",
+                signal_type="sweep",
                 htf_continuation=sweep_result.htf_continuation if sweep_result.sweep_detected else False,
                 reasons=signal.reasons,
             )

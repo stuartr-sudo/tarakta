@@ -156,12 +156,8 @@ class PositionMonitor:
         if pos.entry_time:
             held_minutes = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60
 
-        # Agent 1's reasoning (from components if available)
-        agent1_reasoning = ""
-        if hasattr(pos, "components") and isinstance(pos.components, dict):
-            aa = pos.components.get("agent_analysis", {})
-            if isinstance(aa, dict):
-                agent1_reasoning = aa.get("reasoning", "")
+        # Agent 1's reasoning (from dedicated field)
+        agent1_reasoning = getattr(pos, "agent1_reasoning", "") or ""
 
         # BTC context
         btc_trend = "unknown"
