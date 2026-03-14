@@ -335,9 +335,9 @@ class TradingEngine:
         # THEN set P&L from closed trades in DB — this is the ground truth
         # and overwrites whatever _reconcile_positions accumulated,
         # preventing double-counting.
-        stats = await self.repo.get_trade_stats()
+        stats = await self.repo.get_trade_stats(mode=self.state.mode)
         db_total_pnl = stats["total_pnl"]
-        db_daily_pnl = await self.repo.get_daily_realized_pnl()
+        db_daily_pnl = await self.repo.get_daily_realized_pnl(mode=self.state.mode)
 
         if abs(db_total_pnl - self.portfolio.total_pnl) > 0.01:
             logger.info(
