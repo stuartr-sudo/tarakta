@@ -3276,7 +3276,18 @@ class TradingEngine:
                 mode=self.state.mode,
             )
             # Equity = initial balance + total realized P&L (ground truth)
-            snapshot["balance_usd"] = self.config.initial_balance + self.portfolio.total_pnl
+            ground_truth_equity = self.config.initial_balance + self.portfolio.total_pnl
+            snapshot["balance_usd"] = ground_truth_equity
+            # Fix drawdown: use ground-truth equity, not internal get_equity() which
+            # excludes unrealized P&L. Drawdown = drop from peak to current equity.
+            peak = self.portfolio.peak_balance
+            if peak > 0 and ground_truth_equity < peak:
+                snapshot["drawdown_pct"] = (peak - ground_truth_equity) / peak
+            else:
+                snapshot["drawdown_pct"] = 0.0
+                # Update peak if equity has grown
+                if ground_truth_equity > peak:
+                    self.portfolio.peak_balance = ground_truth_equity
             await self.repo.insert_snapshot(snapshot)
         except Exception as e:
             logger.error("state_persist_failed", error=str(e))

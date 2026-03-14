@@ -695,6 +695,34 @@ function renderPnlData(data) {
             pnlCell.textContent = '--';
             pnlCell.className = 'mono pos-pnl';
         }
+
+        // Update TP tier indicators dynamically
+        if (pos.tp_tiers && pos.tp_tiers.length > 0) {
+            const tiersDone = parseInt(pos.current_tier || 0);
+            const tpContainer = row.querySelector('.tp-tiers-detail');
+            if (tpContainer) {
+                const tierRows = tpContainer.querySelectorAll('.tp-tier-row');
+                tierRows.forEach((tierRow, idx) => {
+                    const tier = pos.tp_tiers[idx];
+                    if (!tier) return;
+                    const isFilled = tier.filled || false;
+                    const isTarget = !isFilled && tier.level === tiersDone + 1;
+                    tierRow.className = 'tp-tier-row ' + (isFilled ? 'filled' : (isTarget ? 'target' : 'pending'));
+                    const dot = tierRow.querySelector('.tp-tier-dot');
+                    if (dot) dot.className = 'tp-tier-dot ' + (isFilled ? 'filled' : (isTarget ? 'target' : ''));
+                    // Add/remove checkmark
+                    let check = tierRow.querySelector('.tp-tier-check');
+                    if (isFilled && !check) {
+                        check = document.createElement('span');
+                        check.className = 'tp-tier-check';
+                        check.textContent = '\u2713';
+                        tierRow.appendChild(check);
+                    } else if (!isFilled && check) {
+                        check.remove();
+                    }
+                });
+            }
+        }
     });
 
     // 2. Compute card totals from the SAME data used for the table

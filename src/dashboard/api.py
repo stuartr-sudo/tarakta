@@ -251,6 +251,8 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 "leverage": leverage,
                 "trade_id": trade.get("id"),
                 "sector": CATEGORY_LABELS.get(get_symbol_category(symbol), "Other"),
+                "current_tier": trade.get("current_tier", 0) or 0,
+                "tp_tiers": trade.get("tp_tiers"),
             })
             total_unrealized += unrealized
 
