@@ -494,6 +494,10 @@ async function toggleDetail(row) {
         // Key metrics grid
         agentHtml += '<dl class="detail-meta agent-meta">';
         agentHtml += '<dt>Action</dt><dd class="' + actionCls + '">' + (aa.action || '-') + '</dd>';
+        if (aa.direction) {
+            const dirCls = aa.direction === 'LONG' ? 'positive' : aa.direction === 'SHORT' ? 'negative' : '';
+            agentHtml += '<dt>Direction</dt><dd class="' + dirCls + '">' + aa.direction + '</dd>';
+        }
         agentHtml += '<dt>Confidence</dt><dd>' + confPct + '</dd>';
         agentHtml += '<dt>Risk</dt><dd class="' + riskCls + '">' + (aa.risk_assessment || '-') + '</dd>';
         agentHtml += '<dt>Regime</dt><dd>' + (aa.market_regime || '-') + '</dd>';
@@ -1186,6 +1190,10 @@ function toggleRefinerDetail(row) {
         }
         agentHtml += '<dl class="detail-meta agent-meta">';
         agentHtml += '<dt>Action</dt><dd class="' + actionCls + '">' + (aa.action || '-') + '</dd>';
+        if (aa.direction) {
+            const dirCls2 = aa.direction === 'LONG' ? 'positive' : aa.direction === 'SHORT' ? 'negative' : '';
+            agentHtml += '<dt>Direction</dt><dd class="' + dirCls2 + '">' + aa.direction + '</dd>';
+        }
         agentHtml += '<dt>Confidence</dt><dd>' + confPct + '</dd>';
         agentHtml += '<dt>Risk</dt><dd class="' + riskCls + '">' + (aa.risk_assessment || '-') + '</dd>';
         agentHtml += '<dt>Regime</dt><dd>' + (aa.market_regime || '-') + '</dd>';
@@ -1200,14 +1208,14 @@ function toggleRefinerDetail(row) {
 
     // --- Section 5: Agent 2 (Refiner) Latest Decision ---
     let agent2Html = '';
-    if (d.last_agent2_action || d.last_agent2_reasoning) {
-        const a2Action = d.last_agent2_action || '-';
-        const a2ActionCls = a2Action === 'ENTER' ? 'positive' : a2Action === 'SKIP' ? 'negative' : 'text-orange';
-        const a2Urgency = d.last_agent2_urgency || '-';
-        const a2Checks = d.agent2_check_count || 0;
+    if (e.last_agent2_action || e.last_agent2_reasoning) {
+        const a2Action = e.last_agent2_action || '-';
+        const a2ActionCls = a2Action === 'ENTER' ? 'positive' : a2Action === 'ABANDON' ? 'negative' : 'text-orange';
+        const a2Urgency = e.last_agent2_urgency || '-';
+        const a2Checks = e.agent2_check_count || 0;
         agent2Html = '<div class="detail-section agent-section"><h4>Agent 2 (Refiner Monitor)</h4>';
-        if (d.last_agent2_reasoning) {
-            agent2Html += '<div class="agent-reasoning">' + d.last_agent2_reasoning.replace(/\n/g, '<br>') + '</div>';
+        if (e.last_agent2_reasoning) {
+            agent2Html += '<div class="agent-reasoning">' + e.last_agent2_reasoning.replace(/\n/g, '<br>') + '</div>';
         }
         agent2Html += '<dl class="detail-meta agent-meta">';
         agent2Html += '<dt>Last Action</dt><dd class="' + a2ActionCls + '">' + a2Action + '</dd>';
