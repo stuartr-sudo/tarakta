@@ -170,6 +170,8 @@ class TradingEngine:
         self._reversal_cooldowns: dict[str, datetime] = {}
         # Throttle repeated error logs (e.g. liq_check_failed for same symbol)
         self._error_last_logged: dict[str, datetime] = {}
+        # Cache current prices from monitor tick for accurate drawdown calculation
+        self._last_monitor_prices: dict[str, float] = {}
 
         # Dynamic weight optimizer
         self.dynamic_weights: DynamicWeightOptimizer | None = None
@@ -3275,19 +3277,20 @@ class TradingEngine:
                 cycle_number=self.state.cycle_count,
                 mode=self.state.mode,
             )
-            # Equity = initial balance + total realized P&L (ground truth)
-            ground_truth_equity = self.config.initial_balance + self.portfolio.total_pnl
-            snapshot["balance_usd"] = ground_truth_equity
-            # Fix drawdown: use ground-truth equity, not internal get_equity() which
-            # excludes unrealized P&L. Drawdown = drop from peak to current equity.
+            # True equity = cash + deployed capital + unrealized P&L (mark-to-market)
+            # Use prices cached from the latest monitor tick for accuracy
+            monitor_prices = getattr(self.position_monitor, "last_prices", {}) or {}
+            true_equity = self.portfolio.get_equity(current_prices=monitor_prices if monitor_prices else None)
+            snapshot["balance_usd"] = true_equity
+            # Drawdown = peak-to-trough decline. Only positive when equity is below peak.
             peak = self.portfolio.peak_balance
-            if peak > 0 and ground_truth_equity < peak:
-                snapshot["drawdown_pct"] = (peak - ground_truth_equity) / peak
+            if peak > 0 and true_equity < peak:
+                snapshot["drawdown_pct"] = (peak - true_equity) / peak
             else:
                 snapshot["drawdown_pct"] = 0.0
                 # Update peak if equity has grown
-                if ground_truth_equity > peak:
-                    self.portfolio.peak_balance = ground_truth_equity
+                if true_equity > peak:
+                    self.portfolio.peak_balance = true_equity
             await self.repo.insert_snapshot(snapshot)
         except Exception as e:
             logger.error("state_persist_failed", error=str(e))

@@ -43,6 +43,8 @@ class PositionMonitor:
         self._agent3_last_check: dict[str, float] = {}  # symbol → timestamp
         self._agent3_locks: dict[str, asyncio.Lock] = {}  # Req 7: per-symbol concurrency lock
         self._agent3_shadow_mode: bool = False  # Req 8: set from config at runtime
+        # Cache of latest prices fetched during check_positions (for drawdown calc)
+        self.last_prices: dict[str, float] = {}
 
     async def check_positions(
         self, positions: dict[str, Position], exchange, atr_values: dict[str, float] | None = None,
@@ -134,6 +136,8 @@ class PositionMonitor:
                 except Exception as e:
                     logger.warning("agent3_check_failed", symbol=symbol, error=str(e))
 
+        # Cache prices for equity/drawdown calculation
+        self.last_prices = current_prices
         return exits
 
     async def _run_agent3(
