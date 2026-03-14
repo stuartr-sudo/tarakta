@@ -200,7 +200,13 @@ Rules for numeric fields — ALWAYS provide your best price estimates for ALL ac
   For SHORTS: set this to the support level or swing low you expect price to reach before \
   bouncing up (must be BELOW entry_zone_low). Set to 0 if the move already happened and \
   pullback should start from current price area, or for ENTER_NOW/SKIP.
-- suggested_sl: ALWAYS set a stop-loss price based on structure (below sweep level for longs, above for shorts). Never use 0.
+- suggested_sl: ALWAYS set a stop-loss price based on structure (below sweep level for longs, above for shorts). Never use 0. \
+  CRITICAL SL CONSTRAINT: The stop-loss MUST be within {max_sl_pct}% of the entry price. Trades with wider stops \
+  are automatically rejected by the system. If the nearest structural level requires a wider SL, you MUST either: \
+  (1) find a tighter structural level for the SL (e.g. use a 1H swing instead of 4H swing), or \
+  (2) move the entry zone closer to the SL level so the distance is within {max_sl_pct}%, or \
+  (3) SKIP the trade if no valid SL within {max_sl_pct}% exists. \
+  Always calculate and verify: abs(entry - SL) / entry × 100 <= {max_sl_pct}%.
 - suggested_tp: ALWAYS set a take-profit price based on structure. Never use 0.
 
 CRITICAL — Reasoning must include SPECIFIC PRICES AND CLEAR INSTRUCTIONS. A second AI agent \
@@ -447,7 +453,9 @@ class AgentEntryAnalyst:
                 model=self._model,
                 max_completion_tokens=7000,
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT + JSON_FORMAT_INSTRUCTION},
+                    {"role": "system", "content": (SYSTEM_PROMPT + JSON_FORMAT_INSTRUCTION).replace(
+                        "{max_sl_pct}", str(round(self.config.max_sl_pct * 100, 1))
+                    )},
                     {"role": "user", "content": user_prompt},
                 ],
                 response_format={"type": "json_object"},
