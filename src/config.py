@@ -141,7 +141,7 @@ class Settings(BaseSettings):
 
     # Refiner Monitor Agent (Agent 2 — tactical entry timing on 5m candles)
     # Shares agent_api_key and agent_model with Agent 1
-    refiner_agent_enabled: bool = False
+    refiner_agent_enabled: bool = True
     refiner_agent_check_interval_minutes: float = 5.0  # Agent 2 runs every 5 min per signal
 
     # Position Manager Agent (Agent 3 — AI-powered position monitoring)

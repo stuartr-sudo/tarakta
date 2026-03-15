@@ -933,12 +933,14 @@ function updateMainButton() {
 async function toggleMainBot() {
     const btn = document.getElementById('main-start-btn');
     if (btn) { btn.disabled = true; btn.textContent = '...'; }
+    // Capture the intended action BEFORE the await (prevents race with loadMainStatus)
+    const wantStart = !_mainScanning;
     try {
-        const url = _mainScanning ? '/api/main/stop' : '/api/main/begin';
+        const url = wantStart ? '/api/main/begin' : '/api/main/stop';
         const resp = await fetch(url, { method: 'POST' });
         const data = await resp.json();
         if (data.success) {
-            _mainScanning = !_mainScanning;
+            _mainScanning = wantStart;
             updateMainButton();
         } else {
             alert('Failed: ' + (data.error || 'Unknown'));
@@ -947,6 +949,8 @@ async function toggleMainBot() {
         alert('Error: ' + e.message);
     } finally {
         if (btn) btn.disabled = false;
+        // Confirm true state from server after toggle
+        setTimeout(loadMainStatus, 1000);
     }
 }
 loadMainStatus();

@@ -2679,6 +2679,7 @@ class TradingEngine:
             self.portfolio.open_positions, self.exchange,
             atr_values=atr_values, trading_hours=trading_hours,
             market_filter=self.market_filter,
+            candle_manager=self.candle_manager,
         )
 
         for exit_signal in exits:

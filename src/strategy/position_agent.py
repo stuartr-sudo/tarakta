@@ -324,7 +324,7 @@ class PositionManagerAgent:
             )
 
     def _build_prompt(self, ctx: dict[str, Any]) -> str:
-        """Build the user prompt with position context."""
+        """Build the user prompt with full market context for position management."""
         symbol = ctx.get("symbol", "?")
         direction = ctx.get("direction", "unknown")
         entry_price = ctx.get("entry_price", 0)
@@ -367,6 +367,13 @@ class PositionManagerAgent:
         funding_rate = ctx.get("funding_rate")
         funding_section = f"{funding_rate:.6f}" if funding_rate is not None else "N/A"
 
+        # --- Build candle tables ---
+        candles_5m_section = self._format_candle_table(ctx.get("candles_5m", []), "5m")
+        candles_1h_section = self._format_candle_table(ctx.get("candles_1h", []), "1h")
+
+        # --- Market structure ---
+        ms_section = self._format_market_structure(ctx.get("market_structure", {}))
+
         return f"""\
 ## Position Management Check
 
@@ -398,7 +405,56 @@ class PositionManagerAgent:
 - BTC 1H Change: {btc_change:+.2f}%
 - Funding Rate: {funding_section}
 
+{ms_section}
+
+{candles_5m_section}
+
+{candles_1h_section}
+
 Evaluate this position and respond with your JSON decision. Default to HOLD unless you see clear evidence for action."""
+
+    @staticmethod
+    def _format_candle_table(candles: list[dict], timeframe: str) -> str:
+        """Format candle data as a readable table for the prompt."""
+        if not candles:
+            return f"### Recent {timeframe} Candles\nNo candle data available."
+
+        lines = [f"### Recent {timeframe} Candles"]
+        lines.append("| Time | Open | High | Low | Close | Volume |")
+        lines.append("|------|------|------|-----|-------|--------|")
+        for c in candles:
+            t = c.get("time", "?")
+            # Shorten timestamp for readability
+            if len(t) > 16:
+                t = t[5:16]  # "MM-DD HH:MM"
+            lines.append(
+                f"| {t} | {c['open']:.6g} | {c['high']:.6g} | {c['low']:.6g} | {c['close']:.6g} | {c['volume']:.0f} |"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_market_structure(ms: dict) -> str:
+        """Format market structure data for the prompt."""
+        if not ms:
+            return "### HTF Market Structure\nNo market structure data available."
+
+        lines = ["### HTF Market Structure"]
+        for tf in ("1h", "4h", "1d"):
+            data = ms.get(tf)
+            if not data:
+                continue
+            trend = data.get("trend", "unknown")
+            strength = data.get("strength", 0)
+            last_bos = data.get("last_bos", "none")
+            last_choch = data.get("last_choch", "none")
+            lines.append(
+                f"- **{tf.upper()}:** Trend={trend}, Strength={strength:.0f}%, "
+                f"Last BOS={last_bos}, Last CHoCH={last_choch}"
+            )
+
+        if len(lines) == 1:
+            lines.append("No market structure data available.")
+        return "\n".join(lines)
 
     def _parse_response(self, response) -> PositionDecision:
         """Extract structured JSON from Gemini response."""

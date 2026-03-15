@@ -6,9 +6,13 @@ from datetime import datetime, timezone
 from src.exchange.models import ExitSignal, Position
 from src.exchange.protocol import TradingHours
 from src.exchange.trading_hours import TradingHoursManager
+from src.strategy.market_structure import MarketStructureAnalyzer
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Shared market structure analyzer for Agent 3
+_ms_analyzer = MarketStructureAnalyzer()
 
 TRAILING_STOP_PCT_FALLBACK = 0.02  # Fallback if ATR not available
 TICKER_FETCH_TIMEOUT = 45  # seconds — safety net above ccxt's 30s timeout
@@ -50,6 +54,7 @@ class PositionMonitor:
         self, positions: dict[str, Position], exchange, atr_values: dict[str, float] | None = None,
         trading_hours: TradingHours | None = None,
         market_filter=None,
+        candle_manager=None,
     ) -> list[ExitSignal]:
         """Check all open positions against current prices.
 
@@ -58,6 +63,7 @@ class PositionMonitor:
             exchange: Exchange client for ticker fetches
             atr_values: Map of symbol -> current ATR value (from 1H candles)
             market_filter: Optional market filter for BTC context (Agent 3)
+            candle_manager: Optional CandleManager for Agent 3 market data
         """
         if atr_values is None:
             atr_values = {}
@@ -121,6 +127,8 @@ class PositionMonitor:
                         agent3_exit = await self._run_agent3(
                             symbol, pos, current_prices[symbol],
                             atr_values.get(symbol, 0.0), market_filter,
+                            exchange=exchange,
+                            candle_manager=candle_manager,
                         )
                         if agent3_exit:
                             # Req 8: shadow mode — log but don't act
@@ -142,7 +150,7 @@ class PositionMonitor:
 
     async def _run_agent3(
         self, symbol: str, pos: Position, current_price: float, atr: float,
-        market_filter=None,
+        market_filter=None, exchange=None, candle_manager=None,
     ) -> ExitSignal | None:
         """Run Agent 3 for a single position and return ExitSignal if action needed."""
         # Build context
@@ -175,6 +183,62 @@ class PositionMonitor:
         if pos.tp_tiers:
             current_tier = sum(1 for t in pos.tp_tiers if t.filled)
 
+        # --- Fetch market data for Agent 3 ---
+        candles_5m = []
+        candles_1h = []
+        market_structure = {}
+        funding_rate = None
+
+        if candle_manager:
+            try:
+                df_5m = await candle_manager.get_candles(symbol, "5m", limit=20)
+                if df_5m is not None and not df_5m.empty:
+                    candles_5m = self._format_candles(df_5m)
+            except Exception as e:
+                logger.debug("agent3_candle_5m_fetch_failed", symbol=symbol, error=str(e))
+
+            try:
+                df_1h = await candle_manager.get_candles(symbol, "1h", limit=50)
+                if df_1h is not None and not df_1h.empty:
+                    candles_1h = self._format_candles(df_1h, limit=10)
+                    # Run market structure analysis on 1h candles
+                    try:
+                        ms_result = _ms_analyzer.analyze(df_1h, timeframe="1h")
+                        market_structure["1h"] = {
+                            "trend": ms_result.trend,
+                            "strength": ms_result.structure_strength,
+                            "last_bos": ms_result.last_bos_direction,
+                            "last_choch": ms_result.last_choch_direction,
+                        }
+                    except Exception as e:
+                        logger.debug("agent3_ms_1h_failed", symbol=symbol, error=str(e))
+            except Exception as e:
+                logger.debug("agent3_candle_1h_fetch_failed", symbol=symbol, error=str(e))
+
+            try:
+                df_4h = await candle_manager.get_candles(symbol, "4h", limit=50)
+                if df_4h is not None and not df_4h.empty:
+                    try:
+                        ms_result_4h = _ms_analyzer.analyze(df_4h, timeframe="4h")
+                        market_structure["4h"] = {
+                            "trend": ms_result_4h.trend,
+                            "strength": ms_result_4h.structure_strength,
+                            "last_bos": ms_result_4h.last_bos_direction,
+                            "last_choch": ms_result_4h.last_choch_direction,
+                        }
+                    except Exception as e:
+                        logger.debug("agent3_ms_4h_failed", symbol=symbol, error=str(e))
+            except Exception as e:
+                logger.debug("agent3_candle_4h_fetch_failed", symbol=symbol, error=str(e))
+
+        # Fetch funding rate from exchange
+        if exchange and hasattr(exchange, "fetch_funding_rate"):
+            try:
+                fr_data = await exchange.fetch_funding_rate(symbol)
+                funding_rate = fr_data.get("funding_rate")
+            except Exception as e:
+                logger.debug("agent3_funding_rate_failed", symbol=symbol, error=str(e))
+
         context = {
             "symbol": symbol,
             "direction": pos.direction,
@@ -194,7 +258,11 @@ class PositionMonitor:
             "agent1_reasoning": agent1_reasoning,
             "btc_trend": btc_trend,
             "btc_1h_change": btc_1h_change,
-            "funding_rate": None,  # Can be extended with exchange.fetch_funding_rate()
+            "funding_rate": funding_rate,
+            # New market data for Agent 3
+            "candles_5m": candles_5m,
+            "candles_1h": candles_1h,
+            "market_structure": market_structure,
         }
 
         decision = await self._position_agent.evaluate_position(context)
@@ -256,6 +324,21 @@ class PositionMonitor:
 
         # HOLD or invalid tighten → no exit signal
         return None
+
+    @staticmethod
+    def _format_candles(df, limit: int = 20) -> list[dict]:
+        """Convert a candle DataFrame to a list of dicts for Agent 3 context."""
+        rows = []
+        for ts, row in df.tail(limit).iterrows():
+            rows.append({
+                "time": str(ts),
+                "open": round(float(row["open"]), 6),
+                "high": round(float(row["high"]), 6),
+                "low": round(float(row["low"]), 6),
+                "close": round(float(row["close"]), 6),
+                "volume": round(float(row.get("volume", 0)), 2),
+            })
+        return rows
 
     def _evaluate_position(
         self, symbol: str, pos: Position, current_price: float, atr: float,
