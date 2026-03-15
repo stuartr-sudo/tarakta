@@ -92,12 +92,11 @@ class RefinerEntry:
 class EntryRefiner:
     """Monitors queued signals on 5m candles for better entry timing.
 
-    Called from the engine's monitor loop on each 60-second tick.
+    Called every 5 minutes from the engine's MONITOR tick (the sole check path).
     Handles sweep signals with OTE zone pullback detection.
 
     When refiner_agent (Agent 2) is provided, it replaces the algorithmic
-    rejection detection every 5 minutes. Between Agent 2 checks, the
-    algorithmic fallback still runs on each 60-second tick.
+    rejection detection. Agent 2 evaluates each entry every 5 minutes.
     """
 
     def __init__(
@@ -1046,6 +1045,8 @@ class EntryRefiner:
             "setup_confirmed_mode": entry.setup_confirmed,
             # Symbol trade history — previous trades on this token for learning
             "symbol_history": getattr(signal, "_symbol_history", []) or [],
+            # RAG knowledge — similar past trades from knowledge base
+            "rag_context": getattr(signal, "_rag_context", "") or "",
         }
 
     def _create_refined_signal_from_agent(

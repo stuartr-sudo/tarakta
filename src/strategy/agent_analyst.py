@@ -862,6 +862,9 @@ class AgentEntryAnalyst:
 ### Symbol Trade History
 {symbol_history_section}
 
+### Similar Past Trades (RAG Knowledge Base)
+{context.get("rag_context", "  Not available")}
+
 ### Scanner Observations (factual only — directional conclusions removed)
 {chr(10).join(f"  - {r}" for r in self._neutralize_reasons(signal.reasons))}
 {self._reassessment_section(context)}
@@ -950,8 +953,19 @@ Analyze this setup and respond with your JSON decision."""
         zone_low = data.get("entry_zone_low")
         exp = data.get("must_reach_price")
         inv = data.get("invalidation_level")
+        # Normalize legacy action names to current values
+        raw_action = data.get("action", "SKIP").upper().strip()
+        _ACTION_MAP = {
+            "ENTER_NOW": "SETUP_CONFIRMED",
+            "ENTRY_CONFIRMED": "SETUP_CONFIRMED",
+            "ENTER": "SETUP_CONFIRMED",
+        }
+        action = _ACTION_MAP.get(raw_action, raw_action)
+        if action not in ("SETUP_CONFIRMED", "WAIT_PULLBACK", "SKIP"):
+            logger.warning("agent_unknown_action", raw_action=raw_action, defaulting_to="SKIP")
+            action = "SKIP"
         return AgentDecision(
-            action=data.get("action", "SKIP"),
+            action=action,
             direction=data.get("direction", "").upper().strip(),
             confidence=float(data.get("confidence", 0)),
             reasoning=str(data.get("reasoning", "")),

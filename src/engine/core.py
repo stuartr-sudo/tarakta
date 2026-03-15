@@ -31,6 +31,7 @@ from src.strategy.market_filter import MarketFilter
 from src.strategy.scanner import AltcoinScanner
 from src.strategy.sentiment import SentimentFilter
 from src.strategy.trade_analyzer import TradeAnalyzer
+from src.data.rag import TradeRAG
 from src.utils.logging import get_logger
 from src.utils.time_utils import is_new_day
 
@@ -152,6 +153,13 @@ class TradingEngine:
         self.trade_analyzer = TradeAnalyzer(repo)
         self.adaptive_threshold = AdaptiveThreshold(config.entry_threshold)
         self.sentiment_filter = SentimentFilter(hf_api_token=config.hf_api_token)
+
+        # RAG Knowledge Base — trade history retrieval for agents
+        self.trade_rag: TradeRAG | None = None
+        if getattr(config, "rag_enabled", False) and config.openai_api_key:
+            from src.data.db import Database as _DB
+            self.trade_rag = TradeRAG(repo.db, config.openai_api_key)
+            logger.info("rag_knowledge_base_ready")
 
         # AI entry agent (Gemini — intelligent decision-maker)
         self.agent_analyst: AgentEntryAnalyst | None = None
@@ -555,6 +563,14 @@ class TradingEngine:
         if self.main_entry_refiner:
             logger.info("main_entry_refiner_fresh_start", msg="Queue starts empty on restart")
 
+        # RAG backfill — ingest recent closed trades into knowledge base
+        if self.trade_rag and getattr(self.config, "rag_backfill_on_startup", True):
+            try:
+                ingested = await self.trade_rag.backfill_trades(limit=200)
+                logger.info("rag_startup_backfill", ingested=ingested)
+            except Exception as e:
+                logger.warning("rag_backfill_failed", error=str(e)[:100])
+
         # Restore consensus monitor state (main bot)
         if self.consensus_monitor and db_state:
             consensus_overrides = (db_state.get("config_overrides") or {})
@@ -691,9 +707,6 @@ class TradingEngine:
 
         # Monitor existing positions first
         await self._monitor_tick()
-        # Process any pending refiner entries (the scan can take 10+ min,
-        # so MONITOR ticks won't fire during _primary_tick — check here)
-        await self._process_refined_entries()
 
         # Get tradeable pairs
         try:
@@ -814,17 +827,8 @@ class TradingEngine:
         signals_saved = 0
         trades_entered = 0
         refiner_queued = 0
-        _last_refiner_check = datetime.now(timezone.utc)
         for signal in signals:
             try:
-                # Periodically check refiner queue during long scan loops.
-                # The primary tick can take 10-40 min processing agents,
-                # blocking MONITOR ticks. Check refiner every ~60s inline.
-                _now_check = datetime.now(timezone.utc)
-                if (_now_check - _last_refiner_check).total_seconds() >= 60:
-                    await self._process_refined_entries()
-                    _last_refiner_check = _now_check
-
                 position = None
                 sig_type = "sweep"
 
@@ -894,6 +898,24 @@ class TradingEngine:
                     # Attach trade history to signal so Agent 2 can also access it
                     signal._symbol_history = symbol_history
 
+                    # RAG knowledge retrieval — similar past trades
+                    rag_context = ""
+                    if self.trade_rag:
+                        try:
+                            sweep_type = signal.sweep_result.sweep_type if signal.sweep_result else ""
+                            rag_results = await self.trade_rag.retrieve_for_symbol(
+                                signal.symbol,
+                                direction=signal.direction,
+                                setup_context=f"sweep {sweep_type}",
+                                k=getattr(self.config, "rag_max_results", 5),
+                            )
+                            rag_context = self.trade_rag.format_context(rag_results)
+                        except Exception:
+                            pass
+
+                    # Attach RAG context to signal so Agent 2 can also access it
+                    signal._rag_context = rag_context
+
                     ai_context = {
                         "sentiment_score": early_sentiment,
                         "adjusted_score": signal.score,
@@ -905,6 +927,7 @@ class TradingEngine:
                         "recent_headlines": early_headlines,
                         "ml_win_probability": None,
                         "symbol_history": symbol_history,
+                        "rag_context": rag_context,
                         **ai_perf_context,
                     }
 
@@ -1615,10 +1638,6 @@ class TradingEngine:
                     stack_trace=traceback.format_exc(),
                 )
 
-        # Final refiner check after all signals processed — catch anything
-        # queued during this scan that hasn't been checked yet
-        await self._process_refined_entries()
-
         # Update state
         self.state.last_scan_time = datetime.now(timezone.utc)
         self.state.current_balance = self.portfolio.current_balance
@@ -1639,15 +1658,37 @@ class TradingEngine:
             refiner_queued=refiner_queued,
         )
 
+    async def _rag_ingest_closed_trade(self, trade_id: str) -> None:
+        """Ingest a freshly closed trade into the RAG knowledge base."""
+        if not self.trade_rag:
+            return
+        try:
+            trades = await self.repo.get_trades_by_ids([trade_id])
+            if trades:
+                await self.trade_rag.ingest_trade(trades[0])
+        except Exception as e:
+            logger.debug("rag_post_close_ingest_failed", error=str(e)[:80])
+
     async def _process_refined_entries(self) -> None:
         """Process signals refined on 5m candles (post-sweep entry refinement).
 
-        Runs every 60s (on MONITOR tick). Checks the entry refiner for signals
-        that have confirmed a sweep reclaim on 5m, or have expired.
-        Follows the same pipeline as watchlist graduations.
+        Called on MONITOR ticks but only runs every 5 minutes (aligned with
+        Agent 2's check interval). Agent 2 is the SOLE checker of queued
+        entries — no redundant polling from primary tick.
         """
         if not self.main_entry_refiner:
             return
+
+        # 5-minute cooldown — Agent 2 checks every 5 min, no need to poll faster
+        now = datetime.now(timezone.utc)
+        if hasattr(self, "_last_refiner_run"):
+            elapsed = (now - self._last_refiner_run).total_seconds()
+            refiner_interval = getattr(
+                self.config, "refiner_agent_check_interval_minutes", 5.0
+            ) * 60
+            if elapsed < refiner_interval:
+                return
+        self._last_refiner_run = now
 
         # Sync Agent 2 toggle from engine state (dashboard can flip at runtime)
         # Check every 5th monitor tick (~5 min) to avoid excess DB reads
@@ -2130,6 +2171,26 @@ class TradingEngine:
                         reasoning=wl_agent_result.reasoning[:120],
                     )
 
+                    # Build agent_analysis_data for signal persistence
+                    wl_agent_analysis_data = {
+                        "action": wl_agent_result.action,
+                        "direction": wl_agent_result.direction,
+                        "confidence": wl_agent_result.confidence,
+                        "reasoning": wl_agent_result.reasoning,
+                        "market_regime": wl_agent_result.market_regime,
+                        "risk_assessment": wl_agent_result.risk_assessment,
+                        "suggested_entry": wl_agent_result.suggested_entry,
+                        "entry_zone_high": wl_agent_result.entry_zone_high,
+                        "entry_zone_low": wl_agent_result.entry_zone_low,
+                        "suggested_sl": wl_agent_result.suggested_sl,
+                        "suggested_tp": wl_agent_result.suggested_tp,
+                        "must_reach_price": wl_agent_result.must_reach_price,
+                        "invalidation_level": wl_agent_result.invalidation_level,
+                        "latency_ms": round(wl_agent_result.latency_ms, 1),
+                        "error": wl_agent_result.error,
+                        "tokens": wl_agent_result.input_tokens + wl_agent_result.output_tokens,
+                    }
+
                     if wl_agent_result.action == "SKIP":
                         agent_skip = True
                         logger.info(
@@ -2139,6 +2200,134 @@ class TradingEngine:
                             risk=wl_agent_result.risk_assessment,
                             reasoning=wl_agent_result.reasoning[:120],
                         )
+                        # Save SKIP signal for dashboard history
+                        vol_24h = self.exchange.get_24h_volume(graduated.symbol)
+                        await self.repo.insert_signal(
+                            {
+                                "symbol": graduated.symbol,
+                                "direction": graduated.direction or "none",
+                                "score": graduated.score,
+                                "reasons": graduated.reasons + [
+                                    f"AGENT:SKIP(conf={wl_agent_result.confidence:.0f},watchlist)"
+                                ],
+                                "components": {
+                                    "volume_24h": vol_24h,
+                                    "test_group": "agent",
+                                    "agent_analysis": wl_agent_analysis_data,
+                                    "signal_type": "watchlist",
+                                },
+                                "current_price": graduated.entry_price,
+                                "acted_on": False,
+                                "scan_cycle": 0,
+                            }
+                        )
+                    elif wl_agent_result.action == "SETUP_CONFIRMED":
+                        # Agent says setup is valid — route through Agent 2 for 5m confirmation
+                        # NEVER execute directly from watchlist — Agent 2 MUST confirm
+                        agent_skip = True
+                        if (
+                            self.main_entry_refiner
+                            and graduated.symbol not in self.portfolio.open_positions
+                            and graduated.symbol not in self.main_entry_refiner.get_queued_symbols()
+                        ):
+                            zone_h = wl_agent_result.entry_zone_high
+                            zone_l = wl_agent_result.entry_zone_low
+                            if not zone_h or not zone_l or zone_h <= zone_l or zone_h <= 0:
+                                logger.warning(
+                                    "watchlist_setup_confirmed_rejected_invalid_zone",
+                                    symbol=graduated.symbol,
+                                    zone_high=zone_h,
+                                    zone_low=zone_l,
+                                )
+                            else:
+                                now = datetime.now(timezone.utc)
+                                expiry_seconds = 4 * 60 * 60  # 4 hours for SETUP_CONFIRMED
+                                invalidation = 0.0
+                                if wl_agent_result.invalidation_level and wl_agent_result.invalidation_level > 0:
+                                    invalidation = wl_agent_result.invalidation_level
+                                elif (
+                                    graduated.sweep_result
+                                    and graduated.sweep_result.sweep_detected
+                                ):
+                                    invalidation = graduated.sweep_result.sweep_level
+
+                                sweep_dir = (
+                                    graduated.sweep_result.sweep_direction
+                                    if graduated.sweep_result and graduated.sweep_result.sweep_direction
+                                    else ("swing_low" if graduated.direction == "bullish" else "swing_high" if graduated.direction == "bearish" else "")
+                                )
+                                plan = PullbackPlan(
+                                    zone_low=zone_l,
+                                    zone_high=zone_h,
+                                    created_at=now,
+                                    expires_at=now + timedelta(seconds=expiry_seconds),
+                                    invalidation_level=invalidation,
+                                    max_chase_bps=self.config.pullback_max_chase_bps,
+                                    zone_tolerance_bps=self.config.pullback_zone_tolerance_bps,
+                                    valid_for_candles=3,  # Short window
+                                    direction=sweep_dir,
+                                    original_suggested_entry=wl_agent_result.suggested_entry or 0.0,
+                                    must_reach_price=0.0,  # No must_reach for SETUP_CONFIRMED
+                                )
+                                plan.limit_price = plan.compute_limit_price()
+                                graduated.pullback_plan = plan
+                                graduated.original_1h_price = graduated.entry_price
+                                graduated.agent_target_entry = wl_agent_result.suggested_entry
+                                graduated.agent_entry_zone_high = zone_h
+                                graduated.agent_entry_zone_low = zone_l
+
+                                # Attach agent analysis for dashboard
+                                graduated.components["agent_analysis"] = wl_agent_analysis_data
+                                graduated.components["sl_price"] = pre_sl
+                                graduated.components["tp_price"] = pre_tp
+                                graduated.components["rr_ratio"] = round(pre_rr, 2) if pre_rr else None
+
+                                # Store pre-computed SL/TP for Agent 2
+                                graduated._pre_sl = pre_sl
+                                graduated._pre_tp = pre_tp
+
+                                queued = self.main_entry_refiner.add_setup_confirmed(graduated)
+                                if queued:
+                                    logger.info(
+                                        "watchlist_setup_confirmed_queued_agent2",
+                                        symbol=graduated.symbol,
+                                        confidence=wl_agent_result.confidence,
+                                        regime=wl_agent_result.market_regime,
+                                        risk=wl_agent_result.risk_assessment,
+                                        entry_zone=plan.zone_str(),
+                                    )
+                                    vol_24h = self.exchange.get_24h_volume(graduated.symbol)
+                                    await self.repo.insert_signal(
+                                        {
+                                            "symbol": graduated.symbol,
+                                            "direction": graduated.direction or "none",
+                                            "score": graduated.score,
+                                            "reasons": graduated.reasons + [
+                                                f"AGENT:SETUP_CONFIRMED→AGENT2(conf={wl_agent_result.confidence:.0f},watchlist)"
+                                            ],
+                                            "components": {
+                                                "volume_24h": vol_24h,
+                                                "test_group": "agent",
+                                                "agent_analysis": wl_agent_analysis_data,
+                                                "signal_type": "watchlist",
+                                            },
+                                            "current_price": graduated.entry_price,
+                                            "acted_on": False,
+                                            "scan_cycle": 0,
+                                        }
+                                    )
+                                else:
+                                    logger.info(
+                                        "watchlist_setup_confirmed_not_queued",
+                                        symbol=graduated.symbol,
+                                        reason="refiner_queue_full_or_duplicate",
+                                    )
+                        else:
+                            logger.warning(
+                                "watchlist_setup_confirmed_no_refiner",
+                                symbol=graduated.symbol,
+                                reason="refiner unavailable or symbol already queued/in position",
+                            )
                     elif wl_agent_result.action == "WAIT_PULLBACK":
                         # Agent says wait — queue a PullbackPlan in the refiner (never chase now)
                         agent_skip = True
@@ -2196,24 +2385,14 @@ class TradingEngine:
                                 graduated.agent_entry_zone_low = zone_l
 
                                 # Attach agent analysis so dashboard can display reasoning
-                                graduated.components["agent_analysis"] = {
-                                    "action": wl_agent_result.action,
-                                    "direction": wl_agent_result.direction,
-                                    "confidence": wl_agent_result.confidence,
-                                    "reasoning": wl_agent_result.reasoning,
-                                    "market_regime": wl_agent_result.market_regime,
-                                    "risk_assessment": wl_agent_result.risk_assessment,
-                                    "suggested_entry": wl_agent_result.suggested_entry,
-                                    "entry_zone_high": wl_agent_result.entry_zone_high,
-                                    "entry_zone_low": wl_agent_result.entry_zone_low,
-                                    "suggested_sl": wl_agent_result.suggested_sl,
-                                    "suggested_tp": wl_agent_result.suggested_tp,
-                                    "must_reach_price": wl_agent_result.must_reach_price,
-                                    "invalidation_level": wl_agent_result.invalidation_level,
-                                }
+                                graduated.components["agent_analysis"] = wl_agent_analysis_data
                                 graduated.components["sl_price"] = pre_sl
                                 graduated.components["tp_price"] = pre_tp
                                 graduated.components["rr_ratio"] = round(pre_rr, 2) if pre_rr else None
+
+                                # Store pre-computed SL/TP for Agent 2
+                                graduated._pre_sl = pre_sl
+                                graduated._pre_tp = pre_tp
 
                                 queued = self.main_entry_refiner.add(graduated)
 
@@ -2225,6 +2404,28 @@ class TradingEngine:
                                         entry_zone=plan.zone_str(),
                                         limit_price=round(plan.limit_price, 6),
                                         expires_in_seconds=expiry_seconds,
+                                    )
+                                    # Persist signal for dashboard linkage
+                                    vol_24h = self.exchange.get_24h_volume(graduated.symbol)
+                                    await self.repo.insert_signal(
+                                        {
+                                            "symbol": graduated.symbol,
+                                            "direction": graduated.direction or "none",
+                                            "score": graduated.score,
+                                            "reasons": graduated.reasons + [
+                                                f"AGENT:WAIT_PULLBACK(conf={wl_agent_result.confidence:.0f},"
+                                                f"target={wl_agent_result.suggested_entry},watchlist)"
+                                            ],
+                                            "components": {
+                                                "volume_24h": vol_24h,
+                                                "test_group": "agent",
+                                                "agent_analysis": wl_agent_analysis_data,
+                                                "signal_type": "watchlist",
+                                            },
+                                            "current_price": graduated.entry_price,
+                                            "acted_on": False,
+                                            "scan_cycle": 0,
+                                        }
                                     )
                                 else:
                                     logger.info(
@@ -2551,6 +2752,9 @@ class TradingEngine:
                         )
                     except Exception as e:
                         logger.warning("post_trade_analysis_failed", error=str(e))
+
+                    # --- RAG knowledge ingestion ---
+                    await self._rag_ingest_closed_trade(position.trade_id)
 
                     # --- Adaptive threshold update (Strategy C) ---
                     self.adaptive_threshold.record_outcome(is_win=(total_pnl > 0))
@@ -2966,6 +3170,9 @@ class TradingEngine:
             )
         except Exception as e:
             logger.warning("reversal_post_analysis_failed", error=str(e))
+
+        # RAG knowledge ingestion
+        await self._rag_ingest_closed_trade(existing_position.trade_id)
 
         self.adaptive_threshold.record_outcome(is_win=(total_pnl > 0))
 

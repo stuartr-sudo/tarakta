@@ -150,6 +150,12 @@ class Settings(BaseSettings):
     position_agent_model: str = "gemini-3-flash-preview"  # Flash for frequent 5-min checks
     position_agent_check_interval_minutes: float = 5.0  # How often to check each position
 
+    # RAG Knowledge Base — trade history retrieval for Agent 1 & 2
+    rag_enabled: bool = False               # Master toggle for RAG trade knowledge
+    openai_api_key: str = ""                # For text-embedding-3-small (RAG embeddings)
+    rag_backfill_on_startup: bool = True    # Backfill recent trades into RAG on engine start
+    rag_max_results: int = 5               # Max RAG results to include in agent prompts
+
     # Feature rollback toggles — disable individual AI enhancements without redeploying
     symbol_history_enabled: bool = True     # Agent 1 per-symbol trade feedback loop
     order_book_enabled: bool = True         # Agent 2 order book context
