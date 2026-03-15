@@ -1673,12 +1673,16 @@ class TradingEngine:
         )
         for signal in ready_signals:
 
-            # ── Expired signal re-evaluation ──────────────────────
-            # If the refiner expired without a pullback, re-feed to agent
-            # with fresh market data for a second opinion.
+            # ── Expired signal — drop it ──────────────────────────
+            # If the refiner expired without a pullback, the market has
+            # moved on.  Do NOT re-evaluate or enter at current price —
+            # chasing missed pullbacks leads to bad entries.
             if getattr(signal, "_expired_from_refiner", False):
-                signal._expired_from_refiner = False  # Clear flag
-                await self._re_evaluate_expired_signal(signal)
+                logger.info(
+                    "refiner_expired_dropped",
+                    symbol=signal.symbol,
+                    reason="pullback_never_came",
+                )
                 continue
 
             # Skip if in cooldown
@@ -1772,60 +1776,18 @@ class TradingEngine:
                     signal.entry_price = live_price
 
                 else:
-                    # ── Legacy drift check for SETUP_CONFIRMED signals ──
-                    if signal.entry_price > 0:
-                        drift_pct = abs(live_price - signal.entry_price) / signal.entry_price
-                        max_drift = 0.005  # 0.5%
-                        if drift_pct > max_drift:
-                            logger.info(
-                                "refiner_entry_price_drifted",
-                                symbol=signal.symbol,
-                                refined_price=round(signal.entry_price, 6),
-                                live_price=round(live_price, 6),
-                                drift_pct=f"{drift_pct:.4f}",
-                                max_drift=f"{max_drift:.4f}",
-                            )
-                            if self.main_entry_refiner and signal.symbol not in self.main_entry_refiner.queue:
-                                signal.entry_price = signal.original_1h_price
-                                self.main_entry_refiner.add(signal)
-                                logger.info("refiner_requeued_after_drift", symbol=signal.symbol)
-                            continue
-
-                        # Zone boundary check for non-plan signals
-                        zone_max_overshoot = 0.005
-                        zone_high = getattr(signal, "agent_entry_zone_high", None)
-                        zone_low = getattr(signal, "agent_entry_zone_low", None)
-                        if zone_high and zone_low:
-                            direction = signal.direction or ""
-                            if direction in ("long", "bullish") and live_price > zone_high * (1 + zone_max_overshoot):
-                                logger.info(
-                                    "refiner_live_price_beyond_zone",
-                                    symbol=signal.symbol,
-                                    live_price=round(live_price, 6),
-                                    zone_high=round(zone_high, 6),
-                                    direction=direction,
-                                )
-                                if self.main_entry_refiner and signal.symbol not in self.main_entry_refiner.queue:
-                                    signal.entry_price = signal.original_1h_price
-                                    self.main_entry_refiner.add(signal)
-                                    logger.info("refiner_requeued_beyond_zone", symbol=signal.symbol)
-                                continue
-                            if direction in ("short", "bearish") and live_price < zone_low * (1 - zone_max_overshoot):
-                                logger.info(
-                                    "refiner_live_price_beyond_zone",
-                                    symbol=signal.symbol,
-                                    live_price=round(live_price, 6),
-                                    zone_low=round(zone_low, 6),
-                                    direction=direction,
-                                )
-                                if self.main_entry_refiner and signal.symbol not in self.main_entry_refiner.queue:
-                                    signal.entry_price = signal.original_1h_price
-                                    self.main_entry_refiner.add(signal)
-                                    logger.info("refiner_requeued_beyond_zone", symbol=signal.symbol)
-                                continue
-
-                    # Update entry price to live for accurate execution
-                    signal.entry_price = live_price
+                    # ── No PullbackPlan — reject entry ──
+                    # Every trade MUST have a PullbackPlan with zone enforcement.
+                    # Signals without a plan have no structural confirmation and
+                    # must not enter.
+                    logger.warning(
+                        "refiner_no_pullback_plan_rejected",
+                        symbol=signal.symbol,
+                        live_price=round(live_price, 6),
+                        decision_price=round(signal.entry_price, 6),
+                        reason="no_pullback_plan",
+                    )
+                    continue
             except Exception as e:
                 logger.warning("refiner_live_price_check_failed", symbol=signal.symbol, error=str(e)[:80])
 
@@ -1902,259 +1864,6 @@ class TradingEngine:
                     symbol=signal.symbol,
                     error=str(e),
                 )
-
-    async def _re_evaluate_expired_signal(self, signal: SignalCandidate) -> None:
-        """Re-feed an expired refiner signal to the agent for a fresh review.
-
-        When the refiner waited for a pullback that never came, instead of
-        silently dropping the signal we ask the agent to look at it again
-        with current market context.  The agent can:
-          - SETUP_CONFIRMED  → execute immediately at current price
-          - WAIT_PULLBACK → re-queue in refiner with a new zone
-          - SKIP → drop for real this time
-        """
-        if not self.config.agent_enabled or not self.agent_analyst:
-            logger.info("expired_review_skipped_no_agent", symbol=signal.symbol)
-            return
-
-        if signal.symbol in self.portfolio.open_positions:
-            return
-
-        logger.info(
-            "expired_signal_re_evaluating",
-            symbol=signal.symbol,
-            original_score=signal.score,
-            original_direction=signal.direction,
-        )
-
-        try:
-            # Update signal to current market price
-            ticker = await self.exchange.fetch_ticker(signal.symbol)
-            if not isinstance(ticker, dict):
-                logger.warning(
-                    "expired_review_bad_ticker",
-                    symbol=signal.symbol,
-                    ticker_type=type(ticker).__name__,
-                )
-                return
-            signal.entry_price = float(ticker.get("last", 0) or 0)
-            if signal.entry_price <= 0:
-                return
-
-            # Recompute Fibonacci levels from the original sweep
-            if signal.sweep_result and signal.sweep_result.sweep_detected and signal.sweep_result.sweep_level:
-                sweep_level = signal.sweep_result.sweep_level
-                current = signal.entry_price
-                if signal.direction in ("bullish", "long") and current > sweep_level:
-                    span = current - sweep_level
-                    signal.fibonacci_levels = {
-                        "displacement_low": round(sweep_level, 8),
-                        "displacement_high": round(current, 8),
-                        "fib_50": round(current - span * 0.50, 8),
-                        "fib_618": round(current - span * 0.618, 8),
-                        "fib_786": round(current - span * 0.786, 8),
-                    }
-                elif signal.direction in ("bearish", "short") and current < sweep_level:
-                    span = sweep_level - current
-                    signal.fibonacci_levels = {
-                        "displacement_low": round(current, 8),
-                        "displacement_high": round(sweep_level, 8),
-                        "fib_50": round(current + span * 0.50, 8),
-                        "fib_618": round(current + span * 0.618, 8),
-                        "fib_786": round(current + span * 0.786, 8),
-                    }
-
-            # Build context for agent
-            pre_sl = self.order_executor._calculate_stop_loss(signal)
-            pre_tp = None
-            pre_rr = None
-            if pre_sl is not None:
-                pre_tp = self.order_executor._calculate_take_profit(signal, pre_sl)
-                sl_dist = abs(signal.entry_price - pre_sl)
-                if sl_dist > 0 and pre_tp is not None:
-                    pre_rr = abs(pre_tp - signal.entry_price) / sl_dist
-
-            sentiment = await self.sentiment_filter.get_sentiment(signal.symbol)
-            headlines = self.sentiment_filter.get_recent_headlines(signal.symbol)
-
-            # Fetch per-symbol trade history for Agent 1 feedback loop
-            expired_symbol_history = []
-            if getattr(self.config, "symbol_history_enabled", True):
-                try:
-                    expired_symbol_history = await self.repo.get_recent_trades_for_symbol(
-                        signal.symbol, limit=5, mode=self.state.mode
-                    )
-                    # No-lookahead: exclude trades closed < 5 min ago (Req 5)
-                    if expired_symbol_history:
-                        from datetime import timedelta
-                        cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
-                        expired_symbol_history = [
-                            t for t in expired_symbol_history
-                            if datetime.fromisoformat(t.get("exit_time", "2000-01-01T00:00:00+00:00")) < cutoff
-                        ]
-                except Exception:
-                    pass
-
-            context = {
-                "sentiment_score": sentiment,
-                "adjusted_score": signal.score,
-                "active_threshold": 60.0,
-                "sl_price": pre_sl,
-                "tp_price": pre_tp,
-                "rr_ratio": round(pre_rr, 2) if pre_rr else None,
-                "open_position_count": len(self.portfolio.open_positions),
-                "recent_headlines": headlines,
-                "ml_win_probability": None,
-                "symbol_history": expired_symbol_history,
-                "expired_pullback_review": True,  # Tell agent this is a re-evaluation
-            }
-
-            result = await self.agent_analyst.analyze_signal(signal, context)
-            logger.info(
-                "expired_review_agent_decision",
-                symbol=signal.symbol,
-                action=result.action,
-                confidence=result.confidence,
-                risk=result.risk_assessment,
-                reasoning=result.reasoning[:120],
-            )
-
-            if result.action == "SETUP_CONFIRMED":
-                # Re-check: another path may have opened this symbol while agent was thinking
-                if signal.symbol in self.portfolio.open_positions:
-                    logger.info(
-                        "expired_review_skip_already_open",
-                        symbol=signal.symbol,
-                    )
-                    return
-
-                # Validate through risk manager (same as all other entry paths)
-                total_exposure = sum(
-                    pos.cost_usd for pos in self.portfolio.open_positions.values()
-                )
-                validation = self.risk_manager.validate_trade(
-                    open_position_count=len(self.portfolio.open_positions),
-                    open_position_symbols=set(self.portfolio.open_positions.keys()),
-                    current_balance=self.portfolio.current_balance,
-                    daily_start_balance=self.portfolio.daily_start_balance,
-                    daily_pnl=self.portfolio.daily_pnl,
-                    signal=signal,
-                    total_exposure_usd=total_exposure,
-                )
-                if not validation.allowed:
-                    logger.info(
-                        "expired_review_rejected",
-                        symbol=signal.symbol,
-                        reason=validation.reason,
-                    )
-                    return
-
-                # Agent says enter now — execute immediately
-                position, order_result, trade_record = (
-                    await self.order_executor.execute_entry(
-                        signal=signal,
-                        current_balance=self.portfolio.current_balance,
-                        mode=self.state.mode,
-                    )
-                )
-                if position and trade_record:
-                    position.confluence_score = signal.score
-                    # Set agent1_reasoning from signal components if available
-                    agent_data = signal.components.get("agent_analysis") if hasattr(signal, "components") else None
-                    if agent_data:
-                        position.agent1_reasoning = agent_data.get("reasoning", "")
-                    db_trade = await self.repo.insert_trade(trade_record)
-                    if db_trade:
-                        position.trade_id = db_trade.get("id", "")
-                    self.portfolio.record_entry(position)
-                    self.state.open_positions[signal.symbol] = position
-                    self.state.daily_trade_count += 1
-                    logger.info(
-                        "expired_review_trade_entered",
-                        symbol=signal.symbol,
-                        entry=position.entry_price,
-                        sl=position.stop_loss,
-                        tp=position.take_profit,
-                    )
-                    if position.trade_id:
-                        await self.repo.link_signal_to_trade(
-                            signal.symbol, position.trade_id
-                        )
-
-            elif result.action == "WAIT_PULLBACK":
-                # Agent wants another pullback attempt — re-queue with fresh PullbackPlan
-                if (
-                    self.main_entry_refiner
-                    and signal.symbol not in self.main_entry_refiner.queue
-                ):
-                    zone_h = result.entry_zone_high
-                    zone_l = result.entry_zone_low
-                    if zone_h and zone_l and zone_h > zone_l and zone_h > 0:
-                        signal.agent_entry_zone_high = zone_h
-                        signal.agent_entry_zone_low = zone_l
-                    else:
-                        # Fall back to existing zone on signal (from previous plan)
-                        zone_h = signal.agent_entry_zone_high
-                        zone_l = signal.agent_entry_zone_low
-                    if result.suggested_entry:
-                        signal.original_1h_price = signal.entry_price
-
-                    # Build fresh PullbackPlan (never reuse stale plan)
-                    if zone_h and zone_l and zone_h > zone_l:
-                        now = datetime.now(timezone.utc)
-                        expiry_seconds = self.config.pullback_valid_candles * 5 * 60
-                        invalidation = 0.0
-                        if result.invalidation_level and result.invalidation_level > 0:
-                            invalidation = result.invalidation_level
-                        elif signal.sweep_result and signal.sweep_result.sweep_detected:
-                            invalidation = signal.sweep_result.sweep_level
-                        sweep_dir = (
-                            signal.sweep_result.sweep_direction
-                            if signal.sweep_result and signal.sweep_result.sweep_direction
-                            else signal.direction or ""
-                        )
-                        plan = PullbackPlan(
-                            zone_low=zone_l,
-                            zone_high=zone_h,
-                            created_at=now,
-                            expires_at=now + timedelta(seconds=expiry_seconds),
-                            invalidation_level=invalidation,
-                            max_chase_bps=self.config.pullback_max_chase_bps,
-                            zone_tolerance_bps=self.config.pullback_zone_tolerance_bps,
-                            valid_for_candles=self.config.pullback_valid_candles,
-                            direction=sweep_dir,
-                            original_suggested_entry=result.suggested_entry or 0.0,
-                            must_reach_price=result.must_reach_price or 0.0,
-                        )
-                        plan.limit_price = plan.compute_limit_price()
-                        signal.pullback_plan = plan
-
-                    queued = self.main_entry_refiner.add(signal)
-                    if queued:
-                        logger.info(
-                            "expired_review_requeued",
-                            symbol=signal.symbol,
-                            new_zone=f"{zone_l}-{zone_h}" if zone_h and zone_l else "inherited",
-                            has_plan=signal.pullback_plan is not None,
-                            confidence=result.confidence,
-                        )
-                    else:
-                        logger.info("expired_review_requeue_failed", symbol=signal.symbol)
-            else:
-                # SKIP — drop for real
-                logger.info(
-                    "expired_review_final_skip",
-                    symbol=signal.symbol,
-                    confidence=result.confidence,
-                    reasoning=result.reasoning[:80],
-                )
-
-        except Exception as e:
-            logger.warning(
-                "expired_review_failed",
-                symbol=signal.symbol,
-                error=str(e)[:120],
-            )
 
     async def _process_consensus_graduations(self) -> None:
         """Process signals that graduated from the consensus monitor.

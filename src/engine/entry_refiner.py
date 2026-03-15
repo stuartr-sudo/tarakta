@@ -556,10 +556,12 @@ class EntryRefiner:
         entry.ote_zone_top = ote_top
         entry.ote_zone_bottom = ote_bottom
 
-        # ── Agent 2 check (every 5 minutes, or immediately for SETUP_CONFIRMED) ──
+        # ── Agent 2 check (every 5 minutes — no bypass for SETUP_CONFIRMED) ──
+        # All signals must wait at least one 5m candle cycle so Agent 2 can
+        # observe actual price action in the zone before confirming entry.
         now_ts = _time.time()
         last_check = self._last_agent_check.get(entry.symbol, 0)
-        agent_due = entry.setup_confirmed or (now_ts - last_check) >= self._agent_check_interval
+        agent_due = (now_ts - last_check) >= self._agent_check_interval
 
         if self.refiner_agent:
             if agent_due:
@@ -1149,50 +1151,28 @@ class EntryRefiner:
         return signal
 
     def _handle_expiry(self, entry: RefinerEntry) -> SignalCandidate | None:
-        """Handle expired entries — return for agent re-evaluation.
+        """Handle expired entries — log and drop.
 
-        Instead of silently dropping the signal, return it with a flag so
-        the engine can re-feed it to the agent with fresh market context.
-        The agent gets one more look and can SETUP_CONFIRMED, WAIT_PULLBACK
-        (re-queue with new zone), or SKIP (done for real).
+        If the pullback never came within the allowed window, the market
+        has moved on.  We do NOT re-evaluate or chase — just drop it.
         """
         now = datetime.now(timezone.utc)
         duration = (now - entry.added_at).total_seconds()
 
-        signal = entry.signal
-        signal.refined_entry = False
-        signal.refinement_duration_seconds = duration
-        signal.original_1h_price = entry.original_1h_price
-
-        # Mark for re-evaluation (only once — prevent infinite loops)
-        already_reviewed = getattr(signal, "_expiry_reviewed", False)
-        if already_reviewed:
-            logger.info(
-                "refiner_expired_final_skip",
-                symbol=entry.symbol,
-                entry_type=entry.entry_type,
-                check_count=entry.check_count,
-                original_1h_price=round(entry.original_1h_price, 6),
-                duration_seconds=round(duration, 0),
-                reason="already_reviewed_on_expiry",
-            )
-            return None
-
-        signal._expiry_reviewed = True
-        signal._expired_from_refiner = True
-
         logger.info(
-            "refiner_expired_for_review",
+            "refiner_expired_dropped",
             symbol=entry.symbol,
             entry_type=entry.entry_type,
             check_count=entry.check_count,
+            agent2_checks=entry.agent2_check_count,
             original_1h_price=round(entry.original_1h_price, 6),
             duration_seconds=round(duration, 0),
             ote_zone_valid=entry.ote_zone_valid,
             ote_zone=f"{round(entry.ote_zone_bottom, 4)}-{round(entry.ote_zone_top, 4)}"
             if entry.ote_zone_valid else "n/a",
+            reason="pullback_never_came",
         )
-        return signal
+        return None
 
     # ── State Persistence ──────────────────────────────────────────
 
