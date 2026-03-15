@@ -1851,6 +1851,13 @@ class TradingEngine:
                     agent_data = signal.components.get("agent_analysis") if hasattr(signal, "components") else None
                     if agent_data:
                         position.agent1_reasoning = agent_data.get("reasoning", "")
+                    # Attach Agent 2 (Refiner) decision data to trade record for dashboard
+                    if getattr(signal, "_agent2_reasoning", None):
+                        trade_record["last_agent2_action"] = getattr(signal, "_agent2_action", "")
+                        trade_record["last_agent2_reasoning"] = getattr(signal, "_agent2_reasoning", "")
+                        trade_record["last_agent2_urgency"] = getattr(signal, "_agent2_urgency", "")
+                        trade_record["agent2_confidence"] = getattr(signal, "_agent2_confidence", 0)
+                        trade_record["agent2_check_count"] = getattr(signal, "_agent2_check_count", 0)
                     db_trade = await self.repo.insert_trade(trade_record)
                     if db_trade:
                         position.trade_id = db_trade.get("id", "")

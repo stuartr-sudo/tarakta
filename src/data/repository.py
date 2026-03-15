@@ -36,6 +36,8 @@ class Repository:
         "test_group",
         "tp_tiers", "current_tier", "original_quantity", "remaining_quantity",
         "original_stop_loss",
+        "last_agent2_action", "last_agent2_reasoning", "last_agent2_urgency",
+        "agent2_confidence", "agent2_check_count",
         "created_at", "updated_at",
     }
 

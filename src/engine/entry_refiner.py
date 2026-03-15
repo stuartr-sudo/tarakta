@@ -561,25 +561,37 @@ class EntryRefiner:
         last_check = self._last_agent_check.get(entry.symbol, 0)
         agent_due = entry.enter_now or (now_ts - last_check) >= self._agent_check_interval
 
-        if self.refiner_agent and agent_due:
-            try:
-                result = await self._agent_evaluate(
-                    entry, candles_5m, ote_top, ote_bottom, direction,
-                )
-                self._last_agent_check[entry.symbol] = now_ts
-                if result is not None:
-                    return result
-                # Agent said WAIT or ADJUST — don't fall through to algorithm
-                # (algorithm runs on non-agent ticks as safety net)
+        if self.refiner_agent:
+            if agent_due:
+                try:
+                    result = await self._agent_evaluate(
+                        entry, candles_5m, ote_top, ote_bottom, direction,
+                    )
+                    self._last_agent_check[entry.symbol] = now_ts
+                    if result is not None:
+                        return result
+                    # Agent said WAIT or ADJUST — don't fall through to algorithm
+                    return None
+                except Exception as e:
+                    logger.warning(
+                        "refiner_agent2_exception",
+                        symbol=entry.symbol,
+                        error=str(e)[:100],
+                    )
+                    # Fall through to algorithmic check as exception safety net
+                    return self._find_rejection_in_zone(
+                        entry=entry,
+                        candles_5m=candles_5m,
+                        zone_top=ote_top,
+                        zone_bottom=ote_bottom,
+                        direction=direction,
+                    )
+            else:
+                # Agent 2 is configured but not due yet — wait for next check
+                # Do NOT fall through to algorithmic entry
                 return None
-            except Exception as e:
-                logger.warning(
-                    "refiner_agent2_exception",
-                    symbol=entry.symbol,
-                    error=str(e)[:100],
-                )
-                # Fall through to algorithmic check
 
+        # No Agent 2 configured — use algorithmic rejection detection
         return self._find_rejection_in_zone(
             entry=entry,
             candles_5m=candles_5m,
@@ -1062,6 +1074,13 @@ class EntryRefiner:
         signal._agent2_sl = decision.stop_loss
         signal._agent2_tp = decision.take_profit
         signal._agent2_size_modifier = decision.position_size_modifier
+
+        # Attach Agent 2's reasoning for trade record (dashboard display)
+        signal._agent2_action = decision.action
+        signal._agent2_reasoning = decision.reasoning
+        signal._agent2_confidence = decision.confidence
+        signal._agent2_urgency = decision.urgency
+        signal._agent2_check_count = entry.agent2_check_count
 
         logger.info(
             "refiner_agent2_confirmed",
