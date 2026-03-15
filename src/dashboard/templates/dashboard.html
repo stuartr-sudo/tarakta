@@ -1197,7 +1197,17 @@ function toggleRefinerDetail(row) {
             const label = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
             if (typeof val === 'number') {
                 const cls = val > 0 ? 'positive' : val < 0 ? 'negative' : '';
-                componentsHtml += '<dt>' + label + '</dt><dd class="' + cls + '">' + (Number.isInteger(val) ? (val > 0 ? '+' + val : val) : val.toFixed(1)) + '</dd>';
+                let formatted;
+                if (Number.isInteger(val)) {
+                    formatted = val > 0 ? '+' + val : '' + val;
+                } else if (k === 'sl_price' || k === 'tp_price') {
+                    formatted = '$' + val.toFixed(6);
+                } else if (k === 'rr_ratio') {
+                    formatted = val.toFixed(2) + ':1';
+                } else {
+                    formatted = val.toFixed(1);
+                }
+                componentsHtml += '<dt>' + label + '</dt><dd class="' + cls + '">' + formatted + '</dd>';
             } else if (typeof val === 'string') {
                 componentsHtml += '<dt>' + label + '</dt><dd>' + val + '</dd>';
             }
