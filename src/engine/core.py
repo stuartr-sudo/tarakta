@@ -891,6 +891,9 @@ class TradingEngine:
                         except Exception:
                             pass  # Non-critical — agent works without history
 
+                    # Attach trade history to signal so Agent 2 can also access it
+                    signal._symbol_history = symbol_history
+
                     ai_context = {
                         "sentiment_score": early_sentiment,
                         "adjusted_score": signal.score,
@@ -1790,6 +1793,7 @@ class TradingEngine:
                     continue
             except Exception as e:
                 logger.warning("refiner_live_price_check_failed", symbol=signal.symbol, error=str(e)[:80])
+                continue  # Do NOT fall through to execution without validation
 
             # Execute the trade (with Agent 2 SL/TP overrides if available)
             try:

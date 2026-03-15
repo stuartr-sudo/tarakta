@@ -446,7 +446,7 @@ class EntryRefiner:
         ote_bottom = ote_bottom if zone_resolved else 0.0
 
         # ── Tier 1: Agent zone (highest priority) ──
-        if agent_high is not None and agent_low is not None and agent_high > agent_low:
+        if not zone_resolved and agent_high is not None and agent_low is not None and agent_high > agent_low:
             ote_top = agent_high
             ote_bottom = agent_low
             entry.zone_source = "agent"
@@ -580,14 +580,8 @@ class EntryRefiner:
                         symbol=entry.symbol,
                         error=str(e)[:100],
                     )
-                    # Fall through to algorithmic check as exception safety net
-                    return self._find_rejection_in_zone(
-                        entry=entry,
-                        candles_5m=candles_5m,
-                        zone_top=ote_top,
-                        zone_bottom=ote_bottom,
-                        direction=direction,
-                    )
+                    # Do NOT fall back to algorithmic check — wait for next cycle
+                    return None
             else:
                 # Agent 2 is configured but not due yet — wait for next check
                 # Do NOT fall through to algorithmic entry
@@ -1050,6 +1044,8 @@ class EntryRefiner:
             # SETUP_CONFIRMED flag: Agent 1 said enter immediately, Agent 2 is doing
             # a quick confirmation. Bias toward ENTER unless clearly bad setup.
             "setup_confirmed_mode": entry.setup_confirmed,
+            # Symbol trade history — previous trades on this token for learning
+            "symbol_history": getattr(signal, "_symbol_history", []) or [],
         }
 
     def _create_refined_signal_from_agent(

@@ -595,7 +595,7 @@ class AgentEntryAnalyst:
             "sweep_detected": "Sweep Detected",
             "displacement_confirmed": "Displacement Confirmed",
             "pullback_confirmed": "Pullback Confirmed",
-            "htf_aligned": "HTF Aligned",
+            "htf_aligned": "HTF Score",
             "timing_optimal": "Timing Optimal",
             "leverage_aligned": "Leverage Aligned",
             "weekly_cycle": "Weekly Cycle Adj",
@@ -610,7 +610,7 @@ class AgentEntryAnalyst:
             + " | ".join(score_parts)
         ) if score_parts else f"Total Score: {signal.score:.0f}"
 
-        # ── Pre-computed Risk Levels (algorithmic fallback) ──
+        # ── Algorithmic Risk Levels (for reference) ──
         sl_price = context.get("sl_price")
         tp_price = context.get("tp_price")
         rr_ratio = context.get("rr_ratio")
@@ -695,7 +695,7 @@ class AgentEntryAnalyst:
             if hasattr(sr, 'target_level') and sr.target_level:
                 sweep_info += f"\n  Opposite-side target: {sr.target_level:.6g}"
             if hasattr(sr, 'htf_continuation') and sr.htf_continuation:
-                sweep_info += "\n  HTF continuation confirmed"
+                sweep_info += "\n  Note: Scanner detected HTF trend alignment with this sweep"
 
         # Sentiment
         sentiment = context.get("sentiment_score", 0.0)
@@ -842,7 +842,7 @@ class AgentEntryAnalyst:
 ### Volatility
 {atr_section}
 
-### Pre-Computed Risk Levels
+### Algorithmic Risk Levels (for reference only — computed for scanner's initial direction, which you may override)
 {risk_section}
 
 ### Leverage & Positioning
@@ -862,10 +862,40 @@ class AgentEntryAnalyst:
 ### Symbol Trade History
 {symbol_history_section}
 
-### Scanner Observations (evaluated relative to ONE possible direction — interpret independently)
-{chr(10).join(f"  - {r}" for r in signal.reasons)}
+### Scanner Observations (factual only — directional conclusions removed)
+{chr(10).join(f"  - {r}" for r in self._neutralize_reasons(signal.reasons))}
 {self._reassessment_section(context)}
 Analyze this setup and respond with your JSON decision."""
+
+    @staticmethod
+    def _neutralize_reasons(reasons: list[str]) -> list[str]:
+        """Strip directional conclusions from scanner reasons to avoid biasing Agent 1.
+
+        - Drops HTF-aligned / HTF-override reasons (HTF data shown separately)
+        - Strips trailing direction words from displacement confirmations
+        - Neutralizes direction mismatch descriptions
+        - Keeps factual observations as-is
+        """
+        import re
+
+        neutral = []
+        for r in reasons:
+            r_lower = r.lower()
+            # Drop HTF alignment / override reasons entirely — HTF data shown in its own section
+            if r_lower.startswith("htf aligned") or r_lower.startswith("htf override"):
+                continue
+            # Strip direction from post-sweep displacement confirmation
+            if r_lower.startswith("post-sweep displacement confirmed"):
+                neutral.append("Post-sweep displacement confirmed")
+                continue
+            # Neutralize displacement direction mismatch
+            if "displacement direction mismatch" in r_lower:
+                neutral.append("Displacement direction differs from sweep direction")
+                continue
+            # Generic: strip trailing ": bullish" / ": bearish" from any remaining reason
+            cleaned = re.sub(r":\s*(bullish|bearish)\s*$", "", r, flags=re.IGNORECASE).strip()
+            neutral.append(cleaned)
+        return neutral
 
     @staticmethod
     def _reassessment_section(context: dict) -> str:

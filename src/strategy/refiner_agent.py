@@ -880,9 +880,48 @@ class RefinerMonitorAgent:
 ### Leverage / Funding Profile
 {leverage_section}
 
+### Symbol Trade History (previous entries on this token)
+{self._build_history_section(ctx)}
+
 Run through the 3-step analysis: (1) price vs zone, (2) latest candle rejection signals, \
 (3) structural confirmation. Check order book for liquidity support. \
+If previous trades on this symbol show repeated losses, demand stronger 5m confirmation. \
 Reference specific numbers from the data in your reasoning."""
+
+    @staticmethod
+    def _build_history_section(ctx: dict) -> str:
+        """Build trade history section for Agent 2 prompt."""
+        history = ctx.get("symbol_history", [])
+        if not history:
+            return "  No prior trades for this symbol"
+
+        lines = []
+        wins = sum(1 for t in history if (t.get("pnl_usd") or 0) > 0)
+        losses = len(history) - wins
+        lines.append(f"  Last {len(history)} trades: {wins}W / {losses}L")
+        for t in history:
+            pnl = t.get("pnl_usd", 0) or 0
+            pnl_pct = t.get("pnl_percent", 0) or 0
+            exit_reason = t.get("exit_reason", "unknown")
+            direction_h = t.get("direction", "?")
+            entry_p = t.get("entry_price", 0) or 0
+            exit_p = t.get("exit_price", 0) or 0
+            w_l = "WIN" if pnl > 0 else "LOSS"
+            hold_str = ""
+            if t.get("entry_time") and t.get("exit_time"):
+                try:
+                    from datetime import datetime as _dt
+                    et = _dt.fromisoformat(str(t["entry_time"]).replace("Z", "+00:00"))
+                    xt = _dt.fromisoformat(str(t["exit_time"]).replace("Z", "+00:00"))
+                    hold_mins = int((xt - et).total_seconds() / 60)
+                    hold_str = f", held {hold_mins}m"
+                except Exception:
+                    pass
+            lines.append(
+                f"  - {direction_h} {w_l}: ${pnl:+.2f} ({pnl_pct:+.1f}%), "
+                f"exit={exit_reason}, entry={entry_p:.6g}→{exit_p:.6g}{hold_str}"
+            )
+        return "\n".join(lines)
 
     def _parse_response(self, response) -> RefinerDecision:
         """Extract structured JSON from Gemini response."""
