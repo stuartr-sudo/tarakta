@@ -290,3 +290,60 @@ class TestPostSweepEngine:
         )
         assert "4h_swing_high" in signal.key_levels
         assert "1h_swing_low" in signal.key_levels
+
+    def test_htf_opposing_trade_direction_scores_zero(self, engine):
+        """Bug fix: HTF aligned should score 0 when all HTFs oppose trade direction.
+
+        A bullish sweep (LONG) with all bearish HTFs is a counter-trend setup.
+        HTF score must reflect this opposition, not reward it.
+        """
+        ms = {"4h": _ms("bearish"), "1d": _ms("bearish"), "1h": _ms("bearish")}
+        signal = engine.score_signal(
+            symbol="W/USDT", current_price=0.01701,
+            sweep_result=_bullish_sweep(),
+            displacement_confirmed=True,
+            displacement_direction="bullish",
+            htf_direction="bearish",
+            in_post_kill_zone=True,
+            ms_results=ms,
+            pullback_result=_valid_pullback(),
+        )
+        assert signal.direction == "bullish"
+        assert signal.components["htf_aligned"] == 0
+
+    def test_displacement_confirms_against_sweep_direction(self, engine):
+        """Bug fix: Displacement should oppose sweep direction to confirm reversal.
+
+        After sweeping a swing low (price moved down), bullish displacement
+        (price rejecting upward) confirms the setup. The displacement check
+        must not require bearish displacement to match the sweep direction.
+        """
+        ms = {"4h": _ms("ranging"), "1d": _ms("ranging"), "1h": _ms("ranging")}
+        signal = engine.score_signal(
+            symbol="W/USDT", current_price=0.01701,
+            sweep_result=_bullish_sweep(),
+            displacement_confirmed=True,
+            displacement_direction="bullish",
+            htf_direction=None,
+            in_post_kill_zone=False,
+            ms_results=ms,
+            pullback_result=None,
+        )
+        assert signal.components["displacement_confirmed"] == 25
+        assert signal.direction == "bullish"
+
+    def test_bearish_displacement_after_high_sweep_confirms(self, engine):
+        """After sweeping a swing high, bearish displacement confirms the short."""
+        ms = {"4h": _ms("ranging"), "1d": _ms("ranging"), "1h": _ms("ranging")}
+        signal = engine.score_signal(
+            symbol="TON/USDT", current_price=5.0,
+            sweep_result=_bearish_sweep(),
+            displacement_confirmed=True,
+            displacement_direction="bearish",
+            htf_direction=None,
+            in_post_kill_zone=False,
+            ms_results=ms,
+            pullback_result=None,
+        )
+        assert signal.components["displacement_confirmed"] == 25
+        assert signal.direction == "bearish"

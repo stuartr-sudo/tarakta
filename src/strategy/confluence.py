@@ -115,21 +115,6 @@ class PostSweepEngine:
                 f"(depth={sweep_result.sweep_depth:.4f})"
             )
             components["sweep_detected"] = self._weights.get("sweep_detected", 35)
-
-            # HTF continuation override: when 4H trend is confident and
-            # contradicts the naive sweep direction, reinterpret sweep as
-            # continuation (not reversal).
-            # e.g. low sweep in bearish 4H = bearish continuation, not bullish reversal.
-            if htf_direction is not None and htf_direction != direction:
-                htf_4h = ms_results.get("4h")
-                if htf_4h and htf_4h.structure_strength >= 0.6:
-                    original_direction = direction
-                    direction = htf_direction
-                    sweep_result.htf_continuation = True
-                    reasons.append(
-                        f"HTF override: {original_direction}\u2192{direction} "
-                        f"(4H strength={htf_4h.structure_strength:.2f})"
-                    )
         else:
             # No sweep = no trade
             return SignalCandidate(
