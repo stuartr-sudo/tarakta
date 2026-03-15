@@ -922,9 +922,14 @@ class TradingEngine:
                             )
                             signal.direction = new_direction
                             # Re-compute SL/TP with the flipped direction
-                            pre_sl = self.risk_manager.compute_stop_loss(signal)
-                            pre_tp = self.risk_manager.compute_take_profit(signal, pre_sl)
-                            pre_rr = self.risk_manager.compute_rr(signal, pre_sl, pre_tp)
+                            pre_sl = self.order_executor._calculate_stop_loss(signal)
+                            pre_tp = None
+                            pre_rr = None
+                            if pre_sl is not None:
+                                pre_tp = self.order_executor._calculate_take_profit(signal, pre_sl)
+                                sl_dist = abs(signal.entry_price - pre_sl)
+                                if sl_dist > 0 and pre_tp is not None:
+                                    pre_rr = abs(pre_tp - signal.entry_price) / sl_dist
 
                     # ── SL/TP Priority: Agent 1 is primary, risk_manager is fallback ──
                     agent_sl = agent_result.suggested_sl
@@ -2366,9 +2371,14 @@ class TradingEngine:
                             )
                             graduated.direction = new_dir
                             # Re-compute SL/TP with the flipped direction
-                            pre_sl = self.risk_manager.compute_stop_loss(graduated)
-                            pre_tp = self.risk_manager.compute_take_profit(graduated, pre_sl)
-                            pre_rr = self.risk_manager.compute_rr(graduated, pre_sl, pre_tp)
+                            pre_sl = self.order_executor._calculate_stop_loss(graduated)
+                            pre_tp = None
+                            pre_rr = None
+                            if pre_sl is not None:
+                                pre_tp = self.order_executor._calculate_take_profit(graduated, pre_sl)
+                                sl_dist = abs(graduated.entry_price - pre_sl)
+                                if sl_dist > 0 and pre_tp is not None:
+                                    pre_rr = abs(pre_tp - graduated.entry_price) / sl_dist
 
                     # ── SL/TP Priority: Agent 1 is primary, risk_manager is fallback ──
                     agent_sl = wl_agent_result.suggested_sl
@@ -2971,6 +2981,39 @@ class TradingEngine:
 
             if agent_result.action == "SKIP":
                 return
+
+            # ── SL/TP Priority: Agent 1 is primary, risk_manager is fallback ──
+            agent_sl = agent_result.suggested_sl
+            agent_tp = agent_result.suggested_tp
+            new_direction = signal.direction or ""
+
+            if agent_sl and agent_sl > 0:
+                sl_valid = True
+                if new_direction == "bullish" and agent_sl >= signal.entry_price:
+                    sl_valid = False
+                elif new_direction == "bearish" and agent_sl <= signal.entry_price:
+                    sl_valid = False
+                elif signal.entry_price > 0:
+                    sl_dist = abs(signal.entry_price - agent_sl) / signal.entry_price
+                    if sl_dist > self.config.max_sl_pct:
+                        sl_valid = False
+                if sl_valid:
+                    pre_sl = agent_sl
+
+            if agent_tp and agent_tp > 0:
+                tp_valid = True
+                if new_direction == "bullish" and agent_tp <= signal.entry_price:
+                    tp_valid = False
+                elif new_direction == "bearish" and agent_tp >= signal.entry_price:
+                    tp_valid = False
+                if tp_valid:
+                    pre_tp = agent_tp
+
+            # Recompute R:R if we now have both
+            if pre_sl and pre_tp and signal.entry_price > 0:
+                sl_dist = abs(signal.entry_price - pre_sl)
+                if sl_dist > 0:
+                    pre_rr = abs(pre_tp - signal.entry_price) / sl_dist
 
             # ── WAIT_PULLBACK → queue in refiner (same as primary tick) ──
             if agent_result.action == "WAIT_PULLBACK" and self.main_entry_refiner:
