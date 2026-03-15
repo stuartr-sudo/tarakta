@@ -71,8 +71,8 @@ from zone is > 0%, the answer is WAIT.
 4. **NEVER enter without 5m candle confirmation.** Even if price IS in the zone, you MUST \
 verify that the latest 5m candle shows a rejection pattern (wick ratio > 1.0, engulfing, \
 higher-low/lower-high, or volume spike) at the entry zone. If no rejection candle exists yet, \
-your answer is WAIT. "ENTER_NOW" from Agent 1 means "conditions are ripe, confirm and execute" \
-— NOT "execute blindly without checking candles."
+your answer is WAIT. "ENTRY_CONFIRMED" from Agent 1 means "the setup passed strategic review" \
+— it does NOT mean you should rush to enter. Take your time finding optimal 5m confirmation.
 5. **Use Agent 1's levels and thesis as your reference.** Agent 1 provides the entry zone, \
 SL, TP, invalidation level, and structural thesis. Apply your OWN 5m expertise to decide \
 timing. If Agent 1's reasoning mentions structural levels, use those as reference points — \
@@ -118,7 +118,7 @@ Only proceed to Step 1 after must_reach_price shows "REACHED" or if no must_reac
   - If passing through → WAIT (price hasn't peaked and pulled back yet)
   - If pulling back into zone → proceed to Step 2
 - If ABOVE zone (for longs):
-  - For ENTER_NOW signals: this is expected. Focus on Step 2 candle confirmation.
+  - For ENTRY_CONFIRMED signals: this is expected. Focus on Step 2 candle confirmation.
   - For WAIT_PULLBACK signals: setup may have run without us → check for ABANDON
 - If BELOW zone (for longs) → price hasn't arrived → WAIT
 - Reverse all logic for shorts
@@ -754,9 +754,15 @@ class RefinerMonitorAgent:
         # ── Section 13a: Sweep details ──
         sweep = ctx.get("sweep_info", {})
         if sweep:
+            sweep_target = sweep.get('sweep_direction', '?')
+            sweep_desc = (
+                "sell-side liquidity taken (swept lows)" if sweep_target == "swing_low"
+                else "buy-side liquidity taken (swept highs)" if sweep_target == "swing_high"
+                else sweep_target
+            )
             sweep_section = (
                 f"Type: {sweep.get('sweep_type', '?')} | "
-                f"Direction: {sweep.get('sweep_direction', '?')} | "
+                f"Sweep Target: {sweep_target} ({sweep_desc}) | "
                 f"Depth: {sweep.get('sweep_depth', 0):.6g} | "
                 f"Level: {sweep.get('sweep_level', 0):.6g}"
             )
@@ -809,13 +815,13 @@ class RefinerMonitorAgent:
         else:
             action_hint = ""
 
-        # ── ENTER_NOW confirmation mode ──
-        enter_now_hint = ""
-        if ctx.get("enter_now_confirmation"):
-            enter_now_hint = (
-                "\n**ENTER_NOW MODE:** Agent 1 said conditions are favorable. You MUST still "
-                "verify 5m candle confirmation (rejection pattern, wick ratio > 1.0, RVOL > 1.0) "
-                "before entering. If the latest 5m candle shows no rejection → WAIT.\n"
+        # ── ENTRY_CONFIRMED confirmation mode ──
+        entry_confirmed_hint = ""
+        if ctx.get("entry_confirmed_mode"):
+            entry_confirmed_hint = (
+                "\n**ENTRY_CONFIRMED:** Agent 1 has validated the setup. There is no rush — "
+                "wait for proper 5m candle confirmation (rejection pattern, wick ratio > 1.0, RVOL > 1.0) "
+                "at the entry zone. If the latest 5m candle shows no rejection → WAIT.\n"
             )
 
         return f"""\
@@ -825,7 +831,7 @@ class RefinerMonitorAgent:
 **Direction:** {direction} ⚠️ NON-NEGOTIABLE — set by Agent 1, do NOT change or question
 **Current Price:** {current_price:.6g}
 {action_hint}
-{enter_now_hint}
+{entry_confirmed_hint}
 ### Agent 1's Strategic Analysis (AUTHORITATIVE — do not override)
 {a1_section}
 

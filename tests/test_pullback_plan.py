@@ -396,7 +396,7 @@ class TestPullbackPlanSerialization:
 
 
 class TestEnterNowUnchanged:
-    """ENTER_NOW signals (no PullbackPlan) must be completely unaffected."""
+    """ENTRY_CONFIRMED signals (no PullbackPlan) must be completely unaffected."""
 
     def test_signal_without_plan(self):
         sig = SignalCandidate(

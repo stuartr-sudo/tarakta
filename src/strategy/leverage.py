@@ -53,7 +53,7 @@ class LeverageAnalyzer:
             open_interest_usd: Total open interest in USD
             funding_rate: Current 8h funding rate (positive = longs pay)
             long_short_ratio: Top trader L/S ratio (>1 = more longs), or None
-            sweep_direction: "bullish" (swept lows) or "bearish" (swept highs)
+            sweep_direction: "swing_low" (sell-side taken) or "swing_high" (buy-side taken)
             in_kill_zone: Whether we're in a London/NY kill zone
             in_post_kill_zone: Whether we're in a post-kill-zone window
         """
@@ -200,17 +200,17 @@ class LeverageAnalyzer:
     ) -> bool:
         """Check if the sweep grabbed the crowded side's liquidity.
 
-        - Bullish sweep (swept lows = grabbed long stop losses below)
+        - swing_low sweep (swept lows = grabbed long stop losses below)
           + longs crowded = MMs cleared overleveraged longs → bullish move incoming
-        - Bearish sweep (swept highs = grabbed short stop losses above)
+        - swing_high sweep (swept highs = grabbed short stop losses above)
           + shorts crowded = MMs cleared overleveraged shorts → bearish move incoming
         """
         if not sweep_direction or not crowded_side:
             return False
 
-        if sweep_direction == "bullish" and crowded_side == "long":
+        if sweep_direction == "swing_low" and crowded_side == "long":
             return True
-        if sweep_direction == "bearish" and crowded_side == "short":
+        if sweep_direction == "swing_high" and crowded_side == "short":
             return True
 
         return False

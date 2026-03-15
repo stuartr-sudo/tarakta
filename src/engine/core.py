@@ -1051,7 +1051,7 @@ class TradingEngine:
                             sweep_dir = (
                                 signal.sweep_result.sweep_direction
                                 if signal.sweep_result and signal.sweep_result.sweep_direction
-                                else signal.direction or ""
+                                else ("swing_low" if signal.direction == "bullish" else "swing_high" if signal.direction == "bearish" else "")
                             )
                             plan = PullbackPlan(
                                 zone_low=zone_l,
@@ -1149,7 +1149,7 @@ class TradingEngine:
                         signals_saved += 1
                         continue
 
-                    # Agent says ENTER_NOW — route through Agent 2 for confirmation
+                    # Agent says ENTRY_CONFIRMED — route through Agent 2 for confirmation
                     # Agent 2 checks on the very first tick (no 5-minute wait)
                     # but MUST verify the 5m candle confirmation criteria Agent 1 specified
                     if (
@@ -1170,7 +1170,7 @@ class TradingEngine:
                         zone_l = agent_result.entry_zone_low
                         if zone_h and zone_l and zone_h > zone_l and zone_h > 0:
                             now = datetime.now(timezone.utc)
-                            # ENTER_NOW gets 4 hours to find confirmation
+                            # ENTRY_CONFIRMED gets 4 hours to find confirmation
                             expiry_seconds = 4 * 60 * 60  # 4 hours
                             invalidation = 0.0
                             if agent_result.invalidation_level and agent_result.invalidation_level > 0:
@@ -1180,7 +1180,7 @@ class TradingEngine:
                             sweep_dir = (
                                 signal.sweep_result.sweep_direction
                                 if signal.sweep_result and signal.sweep_result.sweep_direction
-                                else signal.direction or ""
+                                else ("swing_low" if signal.direction == "bullish" else "swing_high" if signal.direction == "bearish" else "")
                             )
                             plan = PullbackPlan(
                                 zone_low=zone_l,
@@ -1193,7 +1193,7 @@ class TradingEngine:
                                 valid_for_candles=3,  # Short window
                                 direction=sweep_dir,
                                 original_suggested_entry=agent_result.suggested_entry or 0.0,
-                                must_reach_price=0.0,  # No must_reach_price gate for ENTER_NOW
+                                must_reach_price=0.0,  # No must_reach_price gate for ENTRY_CONFIRMED
                             )
                             plan.limit_price = plan.compute_limit_price()
                             signal.pullback_plan = plan
@@ -1207,11 +1207,11 @@ class TradingEngine:
                             signal.components["tp_price"] = pre_tp
                             signal.components["rr_ratio"] = round(pre_rr, 2) if pre_rr else None
 
-                        queued = self.main_entry_refiner.add_enter_now(signal)
+                        queued = self.main_entry_refiner.add_entry_confirmed(signal)
                         if queued:
                             refiner_queued += 1
                             logger.info(
-                                "agent_enter_now_queued_for_confirmation",
+                                "agent_entry_confirmed_queued",
                                 symbol=signal.symbol,
                                 confidence=agent_result.confidence,
                                 regime=agent_result.market_regime,
@@ -1225,7 +1225,7 @@ class TradingEngine:
                                     "direction": signal.direction or "none",
                                     "score": signal.score,
                                     "reasons": signal.reasons + [
-                                        f"AGENT:ENTER_NOW→AGENT2(conf={agent_result.confidence:.0f})"
+                                        f"AGENT:ENTRY_CONFIRMED→AGENT2(conf={agent_result.confidence:.0f})"
                                     ],
                                     "components": {
                                         "volume_24h": vol_24h,
@@ -1243,7 +1243,7 @@ class TradingEngine:
 
                     # Fallback: if refiner unavailable, skip (don't blindly execute)
                     logger.warning(
-                        "agent_enter_now_no_refiner",
+                        "agent_entry_confirmed_no_refiner",
                         symbol=signal.symbol,
                         confidence=agent_result.confidence,
                         reason="refiner unavailable or symbol already queued/in position",
@@ -1717,7 +1717,7 @@ class TradingEngine:
 
             # ── Pre-dispatch revalidation ──
             # Two paths: PullbackPlan signals get structured zone enforcement,
-            # ENTER_NOW signals get the legacy drift check.
+            # ENTRY_CONFIRMED signals get the legacy drift check.
             try:
                 ticker = await self.exchange.fetch_ticker(signal.symbol)
                 live_price = float(ticker.get("last", 0) or 0)
@@ -1772,7 +1772,7 @@ class TradingEngine:
                     signal.entry_price = live_price
 
                 else:
-                    # ── Legacy drift check for ENTER_NOW signals ──
+                    # ── Legacy drift check for ENTRY_CONFIRMED signals ──
                     if signal.entry_price > 0:
                         drift_pct = abs(live_price - signal.entry_price) / signal.entry_price
                         max_drift = 0.005  # 0.5%
@@ -1909,7 +1909,7 @@ class TradingEngine:
         When the refiner waited for a pullback that never came, instead of
         silently dropping the signal we ask the agent to look at it again
         with current market context.  The agent can:
-          - ENTER_NOW  → execute immediately at current price
+          - ENTRY_CONFIRMED  → execute immediately at current price
           - WAIT_PULLBACK → re-queue in refiner with a new zone
           - SKIP → drop for real this time
         """
@@ -2019,7 +2019,7 @@ class TradingEngine:
                 reasoning=result.reasoning[:120],
             )
 
-            if result.action == "ENTER_NOW":
+            if result.action == "ENTRY_CONFIRMED":
                 # Re-check: another path may have opened this symbol while agent was thinking
                 if signal.symbol in self.portfolio.open_positions:
                     logger.info(
@@ -2460,7 +2460,7 @@ class TradingEngine:
                                 sweep_dir = (
                                     graduated.sweep_result.sweep_direction
                                     if graduated.sweep_result and graduated.sweep_result.sweep_direction
-                                    else graduated.direction or ""
+                                    else ("swing_low" if graduated.direction == "bullish" else "swing_high" if graduated.direction == "bearish" else "")
                                 )
                                 plan = PullbackPlan(
                                     zone_low=zone_l,

@@ -199,7 +199,7 @@ class SweepDetector:
                 depth = level - l
                 return SweepResult(
                     sweep_detected=True,
-                    sweep_direction="bullish",
+                    sweep_direction="swing_low",
                     sweep_level=l,       # wick extreme for SL
                     sweep_type=level_type,
                     target_level=target,  # opposite side for TP
@@ -212,7 +212,7 @@ class SweepDetector:
                 depth = h - level
                 return SweepResult(
                     sweep_detected=True,
-                    sweep_direction="bearish",
+                    sweep_direction="swing_high",
                     sweep_level=h,       # wick extreme for SL
                     sweep_type=level_type,
                     target_level=target,  # opposite side for TP

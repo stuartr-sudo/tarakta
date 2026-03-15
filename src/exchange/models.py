@@ -119,7 +119,7 @@ class SweepResult:
     on the other side, meaning MMs grabbed the liquidity.
     """
     sweep_detected: bool
-    sweep_direction: str | None    # "bullish" (swept lows) or "bearish" (swept highs)
+    sweep_direction: str | None    # "swing_low" (sell-side liquidity taken) or "swing_high" (buy-side liquidity taken)
     sweep_level: float             # Wick extreme (for SL placement)
     sweep_type: str | None         # "asian_low", "asian_high", "swing_low", "swing_high"
     target_level: float            # Opposite side liquidity (for TP)

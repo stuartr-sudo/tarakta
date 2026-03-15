@@ -65,7 +65,7 @@ class RefinerEntry:
 
     # Sweep-specific
     sweep_level: float = 0.0
-    sweep_direction: str = ""  # "bullish" (swept lows) or "bearish" (swept highs)
+    sweep_direction: str = ""  # "swing_low" (sell-side taken) or "swing_high" (buy-side taken)
 
     # OTE tracking (dynamically updated from 5m candles)
     thrust_high: float = 0.0
@@ -84,9 +84,9 @@ class RefinerEntry:
     last_agent2_urgency: str = ""      # Previous urgency level
     agent2_check_count: int = 0        # How many times Agent 2 has evaluated this signal
 
-    # ENTER_NOW routing: Agent 1 said enter immediately, but route through
+    # ENTRY_CONFIRMED routing: Agent 1 said enter immediately, but route through
     # Agent 2 for quick confirmation. Agent 2 called on first tick (no 5m wait).
-    enter_now: bool = False
+    entry_confirmed: bool = False
 
 
 class EntryRefiner:
@@ -146,7 +146,7 @@ class EntryRefiner:
         Returns (ote_top, ote_bottom) based on Fibonacci retracement
         of the thrust from origin → thrust_extreme.
         """
-        if direction == "bullish":
+        if direction == "swing_low":
             move_size = thrust_extreme - origin
             ote_top = thrust_extreme - move_size * self.ote_min_retrace
             ote_bottom = thrust_extreme - move_size * self.ote_max_retrace
@@ -234,8 +234,8 @@ class EntryRefiner:
 
         return False
 
-    def add_enter_now(self, signal: SignalCandidate) -> bool:
-        """Queue an ENTER_NOW signal for Agent 2 confirmation.
+    def add_entry_confirmed(self, signal: SignalCandidate) -> bool:
+        """Queue an ENTRY_CONFIRMED signal for Agent 2 confirmation.
 
         Agent 1 said enter immediately, but we route through Agent 2 for
         a confirmation check. Agent 2 is called on the very first tick
@@ -264,12 +264,12 @@ class EntryRefiner:
             sweep_level=sweep_level,
             sweep_direction=sweep_direction,
             pullback_plan=getattr(signal, "pullback_plan", None),
-            enter_now=True,
+            entry_confirmed=True,
         )
         self.queue[signal.symbol] = entry
 
         logger.info(
-            "refiner_queued_enter_now",
+            "refiner_queued_entry_confirmed",
             symbol=signal.symbol,
             score=signal.score,
             original_1h_price=round(signal.entry_price, 6),
@@ -461,11 +461,11 @@ class EntryRefiner:
 
         # ── Tier 2: 1H thrust ──
         if not zone_resolved and thrust_1h is not None and disp_open_1h is not None:
-            if direction == "bullish":
+            if direction == "swing_low":
                 move = thrust_1h - disp_open_1h
                 if move > 0 and disp_open_1h > 0 and (move / disp_open_1h) >= MIN_THRUST_PCT_1H:
                     ote_top, ote_bottom = self._compute_ote_from_thrust(
-                        thrust_1h, disp_open_1h, "bullish"
+                        thrust_1h, disp_open_1h, "swing_low"
                     )
                     entry.zone_source = "1h_thrust"
                     zone_resolved = True
@@ -478,11 +478,11 @@ class EntryRefiner:
                             displacement_open=round(disp_open_1h, 6),
                             ote_zone=f"{round(ote_bottom, 6)}-{round(ote_top, 6)}",
                         )
-            else:  # bearish
+            else:  # swing_high
                 move = disp_open_1h - thrust_1h
                 if move > 0 and disp_open_1h > 0 and (move / disp_open_1h) >= MIN_THRUST_PCT_1H:
                     ote_top, ote_bottom = self._compute_ote_from_thrust(
-                        thrust_1h, disp_open_1h, "bearish"
+                        thrust_1h, disp_open_1h, "swing_high"
                     )
                     entry.zone_source = "1h_thrust"
                     zone_resolved = True
@@ -510,7 +510,7 @@ class EntryRefiner:
             if current_min_low < entry.thrust_low:
                 entry.thrust_low = current_min_low
 
-            if direction == "bullish":
+            if direction == "swing_low":
                 thrust = entry.thrust_high
                 move_size = thrust - sweep_level
                 if move_size <= 0 or (sweep_level > 0 and (move_size / sweep_level) < MIN_THRUST_PCT):
@@ -526,7 +526,7 @@ class EntryRefiner:
                     return None
                 ote_top = thrust - move_size * self.ote_min_retrace
                 ote_bottom = thrust - move_size * self.ote_max_retrace
-            else:  # bearish
+            else:  # swing_high
                 thrust = entry.thrust_low
                 move_size = sweep_level - thrust
                 if move_size <= 0 or (sweep_level > 0 and (move_size / sweep_level) < MIN_THRUST_PCT):
@@ -556,10 +556,10 @@ class EntryRefiner:
         entry.ote_zone_top = ote_top
         entry.ote_zone_bottom = ote_bottom
 
-        # ── Agent 2 check (every 5 minutes, or immediately for ENTER_NOW) ──
+        # ── Agent 2 check (every 5 minutes, or immediately for ENTRY_CONFIRMED) ──
         now_ts = _time.time()
         last_check = self._last_agent_check.get(entry.symbol, 0)
-        agent_due = entry.enter_now or (now_ts - last_check) >= self._agent_check_interval
+        agent_due = entry.entry_confirmed or (now_ts - last_check) >= self._agent_check_interval
 
         if self.refiner_agent:
             if agent_due:
@@ -630,7 +630,7 @@ class EntryRefiner:
             c_low = float(candle["low"])
             body = abs(c_close - c_open)
 
-            if direction == "bullish":
+            if direction == "swing_low":
                 # Price pulled back DOWN into zone
                 # Candle low entered the OTE zone (below zone_top)
                 if c_low <= zone_top and c_low >= zone_bottom * 0.995:
@@ -673,7 +673,7 @@ class EntryRefiner:
                             zone_bottom=zone_bottom,
                         )
 
-            elif direction == "bearish":
+            elif direction == "swing_high":
                 # Price pulled back UP into zone
                 # Candle high entered the OTE zone (above zone_bottom)
                 if c_high >= zone_bottom and c_high <= zone_top * 1.005:
@@ -1045,9 +1045,9 @@ class EntryRefiner:
                 "must_reach_price": entry.pullback_plan.must_reach_price,
                 "must_reach_price_reached": entry.pullback_plan.must_reach_price_reached,
             } if entry.pullback_plan else None,
-            # ENTER_NOW flag: Agent 1 said enter immediately, Agent 2 is doing
+            # ENTRY_CONFIRMED flag: Agent 1 said enter immediately, Agent 2 is doing
             # a quick confirmation. Bias toward ENTER unless clearly bad setup.
-            "enter_now_confirmation": entry.enter_now,
+            "entry_confirmed_mode": entry.entry_confirmed,
         }
 
     def _create_refined_signal_from_agent(
@@ -1153,7 +1153,7 @@ class EntryRefiner:
 
         Instead of silently dropping the signal, return it with a flag so
         the engine can re-feed it to the agent with fresh market context.
-        The agent gets one more look and can ENTER_NOW, WAIT_PULLBACK
+        The agent gets one more look and can ENTRY_CONFIRMED, WAIT_PULLBACK
         (re-queue with new zone), or SKIP (done for real).
         """
         now = datetime.now(timezone.utc)
@@ -1223,7 +1223,7 @@ class EntryRefiner:
                 "last_agent2_reasoning": entry.last_agent2_reasoning,
                 "last_agent2_urgency": entry.last_agent2_urgency,
                 "agent2_check_count": entry.agent2_check_count,
-                "enter_now": entry.enter_now,
+                "entry_confirmed": entry.entry_confirmed,
                 # PullbackPlan persistence
                 "pullback_plan": {
                     "zone_low": entry.pullback_plan.zone_low,
@@ -1298,8 +1298,8 @@ class EntryRefiner:
                     entry.ote_zone_top = entry_data.get("zone_top", 0.0)
                     entry.ote_zone_bottom = entry_data.get("zone_bottom", 0.0)
                     entry.ote_zone_valid = entry.ote_zone_top > 0 and entry.ote_zone_bottom > 0
-                # Restore enter_now flag and Agent 2 continuity fields
-                entry.enter_now = entry_data.get("enter_now", False)
+                # Restore entry_confirmed flag and Agent 2 continuity fields
+                entry.entry_confirmed = entry_data.get("entry_confirmed", False)
                 entry.last_agent2_action = entry_data.get("last_agent2_action", "")
                 entry.last_agent2_reasoning = entry_data.get("last_agent2_reasoning", "")
                 entry.last_agent2_urgency = entry_data.get("last_agent2_urgency", "")

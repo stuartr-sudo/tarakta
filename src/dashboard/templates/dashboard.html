@@ -479,7 +479,7 @@ async function toggleDetail(row) {
     let agentHtml = '';
     const aa = data.agent_analysis;
     if (aa) {
-        const actionCls = aa.action === 'ENTER_NOW' ? 'positive' : aa.action === 'SKIP' ? 'negative' : 'text-orange';
+        const actionCls = aa.action === 'ENTRY_CONFIRMED' ? 'positive' : aa.action === 'SKIP' ? 'negative' : 'text-orange';
         const confPct = aa.confidence != null ? aa.confidence + '%' : '-';
         const riskCls = aa.risk_assessment === 'low' ? 'positive' : aa.risk_assessment === 'high' || aa.risk_assessment === 'extreme' ? 'negative' : '';
 
@@ -513,13 +513,33 @@ async function toggleDetail(row) {
         agentHtml += '</dl></div>';
     }
 
+    // Agent 2 (Refiner) section
+    let agent2Html = '';
+    if (t.last_agent2_action || t.last_agent2_reasoning) {
+        const a2Action = t.last_agent2_action || '-';
+        const a2ActionCls = a2Action === 'ENTER' ? 'positive' : a2Action === 'ABANDON' ? 'negative' : 'text-orange';
+        const a2Urgency = t.last_agent2_urgency || '-';
+        const a2Conf = t.agent2_confidence != null ? t.agent2_confidence + '%' : '-';
+        const a2Checks = t.agent2_check_count || 0;
+        agent2Html = '<div class="detail-section agent-section"><h4>🔍 Agent 2 (Entry Refiner)</h4>';
+        if (t.last_agent2_reasoning) {
+            agent2Html += '<div class="agent-reasoning">' + t.last_agent2_reasoning.replace(/\n/g, '<br>') + '</div>';
+        }
+        agent2Html += '<dl class="detail-meta agent-meta">';
+        agent2Html += '<dt>Decision</dt><dd class="' + a2ActionCls + '">' + a2Action + '</dd>';
+        agent2Html += '<dt>Confidence</dt><dd>' + a2Conf + '</dd>';
+        agent2Html += '<dt>Urgency</dt><dd>' + a2Urgency + '</dd>';
+        agent2Html += '<dt>Checks</dt><dd>' + a2Checks + '</dd>';
+        agent2Html += '</dl></div>';
+    }
+
     // Manual close button
     let closeBtn = '<div class="detail-section" style="grid-column:1/-1;border-top:1px solid rgba(255,255,255,0.06);padding-top:0.75rem;">' +
         '<button class="btn-close-trade" onclick="closeTrade(\'' + tradeId + '\', this)" ' +
         'data-symbol="' + (t.symbol || '') + '">' +
         '✕ Close Position at Market</button></div>';
 
-    td.innerHTML = '<div class="trade-detail-content" style="max-width:' + tableWidth + 'px;">' + meta + reasons + exitsHtml + agentHtml + closeBtn + '</div>';
+    td.innerHTML = '<div class="trade-detail-content" style="max-width:' + tableWidth + 'px;">' + meta + reasons + exitsHtml + agentHtml + agent2Html + closeBtn + '</div>';
 }
 
 async function closeTrade(tradeId, btn) {
@@ -1222,7 +1242,7 @@ function toggleRefinerDetail(row) {
     let agentHtml = '';
     const aa = comps.agent_analysis || null;
     if (aa) {
-        const actionCls = aa.action === 'ENTER_NOW' ? 'positive' : aa.action === 'SKIP' ? 'negative' : 'text-orange';
+        const actionCls = aa.action === 'ENTRY_CONFIRMED' ? 'positive' : aa.action === 'SKIP' ? 'negative' : 'text-orange';
         const confPct = aa.confidence != null ? aa.confidence + '%' : '-';
         const riskCls = (aa.risk_assessment === 'low') ? 'positive' : (aa.risk_assessment === 'high' || aa.risk_assessment === 'extreme') ? 'negative' : '';
 
@@ -1285,7 +1305,7 @@ async function loadAgentStats() {
         const a = data.agent;
         document.getElementById('agent-model-badge').textContent = a.model || '--';
         document.getElementById('agent-requests').textContent = a.total_requests;
-        document.getElementById('agent-actions').textContent = a.total_enter_now + ' / ' + a.total_wait_pullback + ' / ' + a.total_skip;
+        document.getElementById('agent-actions').textContent = a.total_entry_confirmed + ' / ' + a.total_wait_pullback + ' / ' + a.total_skip;
         document.getElementById('agent-cost').textContent = '$' + (a.total_cost_usd || 0).toFixed(4);
         document.getElementById('agent-avg-cost').textContent = '$' + (a.avg_cost_per_call_usd || 0).toFixed(4);
         document.getElementById('agent-tokens').textContent = (a.total_input_tokens || 0).toLocaleString() + ' / ' + (a.total_output_tokens || 0).toLocaleString();

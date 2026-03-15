@@ -103,7 +103,13 @@ class PostSweepEngine:
         # --- Sweep Detection (35 pts) --- REQUIRED
         if sweep_result.sweep_detected:
             score += self._weights.get("sweep_detected", 35)
-            direction = sweep_result.sweep_direction
+            # Map factual sweep target to trade direction:
+            # swing_low (sell-side taken) → bullish, swing_high (buy-side taken) → bearish
+            direction = (
+                "bullish" if sweep_result.sweep_direction == "swing_low"
+                else "bearish" if sweep_result.sweep_direction == "swing_high"
+                else sweep_result.sweep_direction  # fallback
+            )
             reasons.append(
                 f"Sweep completed: {sweep_result.sweep_type} "
                 f"(depth={sweep_result.sweep_depth:.4f})"
