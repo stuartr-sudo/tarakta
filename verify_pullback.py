@@ -113,7 +113,7 @@ def test_signal(symbol, candles_1h, candles_4h, candles_1d, target):
         old_entry = float(window_1h["close"].iloc[-1])
         print(f"  Entry: ${entry:,.2f} (was ${old_entry:,.2f}, improvement: ${abs(old_entry - entry):,.2f})")
 
-        if sweep.sweep_direction == "bullish":
+        if sweep.sweep_direction == "swing_low":
             sl = sweep.sweep_level * 0.995
             tp = sweep.target_level if sweep.target_level > entry else entry + abs(entry - sl) * 3
         else:

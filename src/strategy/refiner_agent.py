@@ -71,7 +71,7 @@ from zone is > 0%, the answer is WAIT.
 4. **NEVER enter without 5m candle confirmation.** Even if price IS in the zone, you MUST \
 verify that the latest 5m candle shows a rejection pattern (wick ratio > 1.0, engulfing, \
 higher-low/lower-high, or volume spike) at the entry zone. If no rejection candle exists yet, \
-your answer is WAIT. "ENTRY_CONFIRMED" from Agent 1 means "the setup passed strategic review" \
+your answer is WAIT. "SETUP_CONFIRMED" from Agent 1 means "the setup passed strategic review" \
 — it does NOT mean you should rush to enter. Take your time finding optimal 5m confirmation.
 5. **Use Agent 1's levels and thesis as your reference.** Agent 1 provides the entry zone, \
 SL, TP, invalidation level, and structural thesis. Apply your OWN 5m expertise to decide \
@@ -118,7 +118,7 @@ Only proceed to Step 1 after must_reach_price shows "REACHED" or if no must_reac
   - If passing through → WAIT (price hasn't peaked and pulled back yet)
   - If pulling back into zone → proceed to Step 2
 - If ABOVE zone (for longs):
-  - For ENTRY_CONFIRMED signals: this is expected. Focus on Step 2 candle confirmation.
+  - For SETUP_CONFIRMED signals: this is expected. Focus on Step 2 candle confirmation.
   - For WAIT_PULLBACK signals: setup may have run without us → check for ABANDON
 - If BELOW zone (for longs) → price hasn't arrived → WAIT
 - Reverse all logic for shorts
@@ -815,11 +815,11 @@ class RefinerMonitorAgent:
         else:
             action_hint = ""
 
-        # ── ENTRY_CONFIRMED confirmation mode ──
-        entry_confirmed_hint = ""
-        if ctx.get("entry_confirmed_mode"):
-            entry_confirmed_hint = (
-                "\n**ENTRY_CONFIRMED:** Agent 1 has validated the setup. There is no rush — "
+        # ── SETUP_CONFIRMED confirmation mode ──
+        setup_confirmed_hint = ""
+        if ctx.get("setup_confirmed_mode"):
+            setup_confirmed_hint = (
+                "\n**SETUP_CONFIRMED:** Agent 1 has validated the setup. There is no rush — "
                 "wait for proper 5m candle confirmation (rejection pattern, wick ratio > 1.0, RVOL > 1.0) "
                 "at the entry zone. If the latest 5m candle shows no rejection → WAIT.\n"
             )
@@ -831,7 +831,7 @@ class RefinerMonitorAgent:
 **Direction:** {direction} ⚠️ NON-NEGOTIABLE — set by Agent 1, do NOT change or question
 **Current Price:** {current_price:.6g}
 {action_hint}
-{entry_confirmed_hint}
+{setup_confirmed_hint}
 ### Agent 1's Strategic Analysis (AUTHORITATIVE — do not override)
 {a1_section}
 

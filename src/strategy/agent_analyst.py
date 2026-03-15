@@ -4,7 +4,7 @@ This agent makes the actual entry DECISION. Given a candidate that passed initia
 formula screening (sweep detected, score >= 35), the agent reasons about
 the full market context and returns one of:
 
-  ENTRY_CONFIRMED    — Take the trade at current price
+  SETUP_CONFIRMED    — Take the trade at current price
   WAIT_PULLBACK — Wait for pullback to a specific level (feeds entry_refiner)
   SKIP         — Don't take this trade, the context is wrong
 
@@ -36,7 +36,7 @@ logger = get_logger(__name__)
 class AgentDecision:
     """Result from the AI entry agent."""
 
-    action: str = "SKIP"  # ENTRY_CONFIRMED, WAIT_PULLBACK, SKIP
+    action: str = "SKIP"  # SETUP_CONFIRMED, WAIT_PULLBACK, SKIP
     direction: str = ""   # "LONG", "SHORT", or "" (for SKIP) — Agent 1 chooses
     confidence: float = 0.0  # 0-100
     reasoning: str = ""
@@ -76,10 +76,10 @@ Your job is to define WHAT the trade is, WHERE the levels are, and WHY the thesi
 
 ## Your Decision Options
 
-1. **ENTRY_CONFIRMED** with direction **LONG** or **SHORT** — The setup is structurally valid. \
+1. **SETUP_CONFIRMED** with direction **LONG** or **SHORT** — The setup is structurally valid. \
    Agent 2 will monitor 5-minute candles and find the optimal entry within your zone. \
    Use when: sweep + displacement confirmed, HTF aligned, good timing, favorable context. \
-   Note: ENTRY_CONFIRMED means "this setup passes strategic review" — Agent 2 handles all timing \
+   Note: SETUP_CONFIRMED means "this setup passes strategic review" — Agent 2 handles all timing \
    and will WAIT for proper 5m confirmation before executing. There is NO urgency to enter immediately. \
    You MUST still provide an entry zone — the structural feature price is currently at (OB, FVG, or \
    sweep level). Agent 2 needs this to know WHERE to look for 5m confirmation.
@@ -120,7 +120,7 @@ Choppy and volatile markets are NOT reasons to SKIP. Crypto is inherently volati
 that's where the opportunity lies. A sweep in a volatile market is STILL a valid signal. \
 Only SKIP when there is a genuine structural reason (counter-trend on ALL timeframes, \
 manufactured/fake sweep, or extreme macro risk). If a sweep is confirmed and HTF has \
-ANY alignment (even just 4H), lean towards ENTRY_CONFIRMED or WAIT_PULLBACK — not SKIP.
+ANY alignment (even just 4H), lean towards SETUP_CONFIRMED or WAIT_PULLBACK — not SKIP.
 
 ## Risk Assessment
 Rate the overall risk as: low, medium, high, extreme
@@ -135,7 +135,7 @@ This helps the bot calibrate its other parameters. Ranging and choppy regimes ca
 produce excellent sweep trades — they often have cleaner liquidity grabs.
 
 ## ALWAYS Suggest Prices
-For ALL actions (including ENTRY_CONFIRMED and SKIP), always provide your best estimate for \
+For ALL actions (including SETUP_CONFIRMED and SKIP), always provide your best estimate for \
 suggested_entry, suggested_sl, and suggested_tp. This helps the trader see your analysis \
 even when you recommend skipping. Only use 0 if you truly cannot estimate a level.
 
@@ -148,7 +148,7 @@ structure requires a wider SL, or the direction is consistently wrong for this p
 - If recent trades were consistently profitable: lean towards entering — the current setup \
 conditions clearly work for this symbol.
 - If the holding times are very short with losses: the timing may be off — prefer WAIT_PULLBACK \
-over ENTRY_CONFIRMED to get a better entry.
+over SETUP_CONFIRMED to get a better entry.
 If no history is provided, treat the symbol as fresh with no prior data.
 
 Be decisive. Lean towards taking trades with good sweeps rather than skipping them. \
@@ -181,7 +181,7 @@ You MUST respond with a single JSON object and NOTHING else. No markdown, no exp
 
 The JSON object must have exactly these keys:
 {
-  "action": "ENTRY_CONFIRMED" | "WAIT_PULLBACK" | "SKIP",
+  "action": "SETUP_CONFIRMED" | "WAIT_PULLBACK" | "SKIP",
   "direction": "LONG" | "SHORT" | "",
   "confidence": <number 0-100>,
   "reasoning": "<5-8 sentence analysis with SPECIFIC price levels — see rules below>",
@@ -197,18 +197,18 @@ The JSON object must have exactly these keys:
 }
 
 Rules for direction:
-- For ENTRY_CONFIRMED and WAIT_PULLBACK: direction MUST be "LONG" or "SHORT" — you choose.
+- For SETUP_CONFIRMED and WAIT_PULLBACK: direction MUST be "LONG" or "SHORT" — you choose.
 - For SKIP: direction MUST be "" (empty string).
 
 Rules for numeric fields — ALWAYS provide your best price estimates for ALL actions:
-- suggested_entry: Your ideal entry price. For WAIT_PULLBACK use the zone midpoint. For ENTRY_CONFIRMED use the current price. For SKIP still provide where you WOULD enter if forced.
-- entry_zone_high / entry_zone_low: ALWAYS provide, even for ENTRY_CONFIRMED. \
-  For ENTRY_CONFIRMED: set to the structural feature price is currently at (the OB, FVG, or \
+- suggested_entry: Your ideal entry price. For WAIT_PULLBACK use the zone midpoint. For SETUP_CONFIRMED use the current price. For SKIP still provide where you WOULD enter if forced.
+- entry_zone_high / entry_zone_low: ALWAYS provide, even for SETUP_CONFIRMED. \
+  For SETUP_CONFIRMED: set to the structural feature price is currently at (the OB, FVG, or \
   retracement level). For WAIT_PULLBACK: the pullback target zone. For SKIP: your best estimate. \
   For LONGS: zone should be BELOW current price. For SHORTS: zone should be ABOVE current price.
 - must_reach_price: For WAIT_PULLBACK ONLY — the price that must be reached BEFORE the pullback begins. \
   For LONGS: resistance/swing high above entry_zone_high. For SHORTS: support/swing low below entry_zone_low. \
-  Set to 0 if the move already happened or for ENTRY_CONFIRMED/SKIP.
+  Set to 0 if the move already happened or for SETUP_CONFIRMED/SKIP.
 - invalidation_level: The price where the trade thesis is dead. ALWAYS provide this. \
   For LONGS: price below which the bullish thesis fails (e.g. below the sweep low). \
   For SHORTS: price above which the bearish thesis fails (e.g. above the sweep high).
@@ -242,7 +242,7 @@ Respond with ONLY the JSON object. No other text."""
 AGENT1_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
-        "action": {"type": "string", "enum": ["ENTRY_CONFIRMED", "WAIT_PULLBACK", "SKIP"]},
+        "action": {"type": "string", "enum": ["SETUP_CONFIRMED", "WAIT_PULLBACK", "SKIP"]},
         "direction": {"type": "string"},
         "confidence": {"type": "number"},
         "reasoning": {"type": "string"},
@@ -271,7 +271,7 @@ class AgentEntryAnalyst:
     """Gemini-powered entry agent with resilient API handling.
 
     Replaces the binary approve/reject LLM gate with an intelligent
-    decision-maker that chooses between ENTRY_CONFIRMED, WAIT_PULLBACK, and SKIP.
+    decision-maker that chooses between SETUP_CONFIRMED, WAIT_PULLBACK, and SKIP.
     """
 
     def __init__(self, config: Settings) -> None:
@@ -293,7 +293,7 @@ class AgentEntryAnalyst:
         self.total_requests = 0
         self.total_input_tokens = 0
         self.total_output_tokens = 0
-        self.total_entry_confirmed = 0
+        self.total_setup_confirmed = 0
         self.total_wait_pullback = 0
         self.total_skip = 0
         self.total_errors = 0
@@ -366,7 +366,7 @@ class AgentEntryAnalyst:
             AgentDecision with action, confidence, and reasoning.
         """
         if not self._should_try():
-            action = "ENTRY_CONFIRMED" if self._fallback_approve else "SKIP"
+            action = "SETUP_CONFIRMED" if self._fallback_approve else "SKIP"
             return AgentDecision(
                 action=action,
                 reasoning="Agent API unavailable (backoff), using fallback",
@@ -421,16 +421,16 @@ class AgentEntryAnalyst:
             decision.output_tokens = output_tokens
 
             # Enforce minimum confidence
-            if decision.action == "ENTRY_CONFIRMED" and decision.confidence < self._min_confidence:
+            if decision.action == "SETUP_CONFIRMED" and decision.confidence < self._min_confidence:
                 decision.action = "SKIP"
                 decision.reasoning = (
-                    f"ENTRY_CONFIRMED but confidence {decision.confidence:.0f} "
+                    f"SETUP_CONFIRMED but confidence {decision.confidence:.0f} "
                     f"< threshold {self._min_confidence:.0f}: {decision.reasoning}"
                 )
                 logger.info(
                     "agent_low_confidence_override",
                     symbol=signal.symbol,
-                    original_action="ENTRY_CONFIRMED",
+                    original_action="SETUP_CONFIRMED",
                     confidence=decision.confidence,
                     threshold=self._min_confidence,
                 )
@@ -454,8 +454,8 @@ class AgentEntryAnalyst:
                 decision = self._validate_suggestions(decision, signal)
 
             # Track action counts
-            if decision.action == "ENTRY_CONFIRMED":
-                self.total_entry_confirmed += 1
+            if decision.action == "SETUP_CONFIRMED":
+                self.total_setup_confirmed += 1
             elif decision.action == "WAIT_PULLBACK":
                 self.total_wait_pullback += 1
             else:
@@ -485,7 +485,7 @@ class AgentEntryAnalyst:
                 error=str(e),
                 latency_ms=round(latency_ms, 1),
             )
-            action = "ENTRY_CONFIRMED" if self._fallback_approve else "SKIP"
+            action = "SETUP_CONFIRMED" if self._fallback_approve else "SKIP"
             return AgentDecision(
                 action=action,
                 reasoning=f"Agent API error: {e}",
@@ -1068,11 +1068,11 @@ Analyze this setup and respond with your JSON decision."""
         )
         return {
             "total_requests": self.total_requests,
-            "total_entry_confirmed": self.total_entry_confirmed,
+            "total_setup_confirmed": self.total_setup_confirmed,
             "total_wait_pullback": self.total_wait_pullback,
             "total_skip": self.total_skip,
             "enter_rate": round(
-                self.total_entry_confirmed / self.total_requests * 100, 1
+                self.total_setup_confirmed / self.total_requests * 100, 1
             ) if self.total_requests > 0 else 0.0,
             "skip_rate": round(
                 self.total_skip / self.total_requests * 100, 1

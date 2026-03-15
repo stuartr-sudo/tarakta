@@ -132,7 +132,7 @@ class TestSweepAlignment:
             open_interest_usd=1_000_000,
             funding_rate=0.001,
             long_short_ratio=1.5,
-            sweep_direction="bullish",
+            sweep_direction="swing_low",
             in_kill_zone=False,
             in_post_kill_zone=False,
         )
@@ -145,7 +145,7 @@ class TestSweepAlignment:
             open_interest_usd=1_000_000,
             funding_rate=-0.001,
             long_short_ratio=0.5,
-            sweep_direction="bearish",
+            sweep_direction="swing_high",
             in_kill_zone=False,
             in_post_kill_zone=False,
         )
@@ -158,7 +158,7 @@ class TestSweepAlignment:
             open_interest_usd=1_000_000,
             funding_rate=-0.001,
             long_short_ratio=0.5,
-            sweep_direction="bullish",
+            sweep_direction="swing_low",
             in_kill_zone=False,
             in_post_kill_zone=False,
         )
@@ -184,7 +184,7 @@ class TestSweepAlignment:
             open_interest_usd=1_000_000,
             funding_rate=0.00005,
             long_short_ratio=1.0,
-            sweep_direction="bullish",
+            sweep_direction="swing_low",
             in_kill_zone=False,
             in_post_kill_zone=False,
         )

@@ -29,7 +29,7 @@ def _no_sweep():
 
 def _bullish_sweep():
     return SweepResult(
-        sweep_detected=True, sweep_direction="bullish",
+        sweep_detected=True, sweep_direction="swing_low",
         sweep_level=89.5, sweep_type="asian_low",
         target_level=110.0, sweep_depth=0.5,
     )
@@ -37,7 +37,7 @@ def _bullish_sweep():
 
 def _bearish_sweep():
     return SweepResult(
-        sweep_detected=True, sweep_direction="bearish",
+        sweep_detected=True, sweep_direction="swing_high",
         sweep_level=110.5, sweep_type="asian_high",
         target_level=90.0, sweep_depth=0.5,
     )

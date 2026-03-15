@@ -138,7 +138,7 @@ def simulate_pipeline(candles_1h, candles_4h, candles_1d):
 
             # R:R check
             entry = float(window_1h["close"].iloc[-1])
-            if sweep.sweep_direction == "bullish":
+            if sweep.sweep_direction == "swing_low":
                 sl = sweep.sweep_level * 0.995
                 tp = sweep.target_level if sweep.target_level > entry else entry + abs(entry - sl) * MIN_RR
                 sl_dist = abs(entry - sl)

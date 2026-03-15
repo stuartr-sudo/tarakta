@@ -1149,7 +1149,7 @@ class TradingEngine:
                         signals_saved += 1
                         continue
 
-                    # Agent says ENTRY_CONFIRMED — route through Agent 2 for confirmation
+                    # Agent says SETUP_CONFIRMED — route through Agent 2 for confirmation
                     # Agent 2 checks on the very first tick (no 5-minute wait)
                     # but MUST verify the 5m candle confirmation criteria Agent 1 specified
                     if (
@@ -1170,7 +1170,7 @@ class TradingEngine:
                         zone_l = agent_result.entry_zone_low
                         if zone_h and zone_l and zone_h > zone_l and zone_h > 0:
                             now = datetime.now(timezone.utc)
-                            # ENTRY_CONFIRMED gets 4 hours to find confirmation
+                            # SETUP_CONFIRMED gets 4 hours to find confirmation
                             expiry_seconds = 4 * 60 * 60  # 4 hours
                             invalidation = 0.0
                             if agent_result.invalidation_level and agent_result.invalidation_level > 0:
@@ -1193,7 +1193,7 @@ class TradingEngine:
                                 valid_for_candles=3,  # Short window
                                 direction=sweep_dir,
                                 original_suggested_entry=agent_result.suggested_entry or 0.0,
-                                must_reach_price=0.0,  # No must_reach_price gate for ENTRY_CONFIRMED
+                                must_reach_price=0.0,  # No must_reach_price gate for SETUP_CONFIRMED
                             )
                             plan.limit_price = plan.compute_limit_price()
                             signal.pullback_plan = plan
@@ -1207,11 +1207,11 @@ class TradingEngine:
                             signal.components["tp_price"] = pre_tp
                             signal.components["rr_ratio"] = round(pre_rr, 2) if pre_rr else None
 
-                        queued = self.main_entry_refiner.add_entry_confirmed(signal)
+                        queued = self.main_entry_refiner.add_setup_confirmed(signal)
                         if queued:
                             refiner_queued += 1
                             logger.info(
-                                "agent_entry_confirmed_queued",
+                                "agent_setup_confirmed_queued",
                                 symbol=signal.symbol,
                                 confidence=agent_result.confidence,
                                 regime=agent_result.market_regime,
@@ -1225,7 +1225,7 @@ class TradingEngine:
                                     "direction": signal.direction or "none",
                                     "score": signal.score,
                                     "reasons": signal.reasons + [
-                                        f"AGENT:ENTRY_CONFIRMED→AGENT2(conf={agent_result.confidence:.0f})"
+                                        f"AGENT:SETUP_CONFIRMED→AGENT2(conf={agent_result.confidence:.0f})"
                                     ],
                                     "components": {
                                         "volume_24h": vol_24h,
@@ -1243,7 +1243,7 @@ class TradingEngine:
 
                     # Fallback: if refiner unavailable, skip (don't blindly execute)
                     logger.warning(
-                        "agent_entry_confirmed_no_refiner",
+                        "agent_setup_confirmed_no_refiner",
                         symbol=signal.symbol,
                         confidence=agent_result.confidence,
                         reason="refiner unavailable or symbol already queued/in position",
@@ -1717,7 +1717,7 @@ class TradingEngine:
 
             # ── Pre-dispatch revalidation ──
             # Two paths: PullbackPlan signals get structured zone enforcement,
-            # ENTRY_CONFIRMED signals get the legacy drift check.
+            # SETUP_CONFIRMED signals get the legacy drift check.
             try:
                 ticker = await self.exchange.fetch_ticker(signal.symbol)
                 live_price = float(ticker.get("last", 0) or 0)
@@ -1772,7 +1772,7 @@ class TradingEngine:
                     signal.entry_price = live_price
 
                 else:
-                    # ── Legacy drift check for ENTRY_CONFIRMED signals ──
+                    # ── Legacy drift check for SETUP_CONFIRMED signals ──
                     if signal.entry_price > 0:
                         drift_pct = abs(live_price - signal.entry_price) / signal.entry_price
                         max_drift = 0.005  # 0.5%
@@ -1909,7 +1909,7 @@ class TradingEngine:
         When the refiner waited for a pullback that never came, instead of
         silently dropping the signal we ask the agent to look at it again
         with current market context.  The agent can:
-          - ENTRY_CONFIRMED  → execute immediately at current price
+          - SETUP_CONFIRMED  → execute immediately at current price
           - WAIT_PULLBACK → re-queue in refiner with a new zone
           - SKIP → drop for real this time
         """
@@ -2019,7 +2019,7 @@ class TradingEngine:
                 reasoning=result.reasoning[:120],
             )
 
-            if result.action == "ENTRY_CONFIRMED":
+            if result.action == "SETUP_CONFIRMED":
                 # Re-check: another path may have opened this symbol while agent was thinking
                 if signal.symbol in self.portfolio.open_positions:
                     logger.info(
@@ -2864,28 +2864,43 @@ class TradingEngine:
                         exit_signal.symbol, position, pnl_pct,
                     )
 
-        # Persist SL changes for open positions (catches breakeven moves, trailing SL, etc.)
+        # Persist SL changes and Agent 3 data for open positions
         for symbol, pos in self.portfolio.open_positions.items():
             if not pos.trade_id:
                 continue
+            update_fields: dict = {}
+
             # Track last persisted SL to avoid redundant DB writes
             last_sl = getattr(pos, "_last_persisted_sl", None)
             if last_sl is None:
                 # First tick — initialize tracking without writing
                 pos._last_persisted_sl = pos.stop_loss
-                continue
-            if pos.stop_loss != last_sl:
-                try:
-                    await self.repo.update_trade(pos.trade_id, {"stop_loss": pos.stop_loss})
-                    logger.info(
-                        "sl_persisted_to_db",
-                        symbol=symbol,
-                        old_sl=last_sl,
-                        new_sl=pos.stop_loss,
-                    )
-                except Exception as e:
-                    logger.warning("sl_persist_failed", symbol=symbol, error=str(e))
+            elif pos.stop_loss != last_sl:
+                update_fields["stop_loss"] = pos.stop_loss
                 pos._last_persisted_sl = pos.stop_loss
+
+            # Persist Agent 3 reasoning when it has a new decision
+            last_a3 = getattr(pos, "_last_persisted_agent3", None)
+            if pos.last_agent3_action and pos.last_agent3_action != last_a3:
+                update_fields["last_agent3_action"] = pos.last_agent3_action
+                update_fields["last_agent3_reasoning"] = pos.last_agent3_reasoning
+                update_fields["agent3_confidence"] = pos.agent3_confidence
+                if pos.last_agent3_sl:
+                    update_fields["last_agent3_sl"] = pos.last_agent3_sl
+                pos._last_persisted_agent3 = pos.last_agent3_action
+
+            if update_fields:
+                try:
+                    await self.repo.update_trade(pos.trade_id, update_fields)
+                    if "stop_loss" in update_fields:
+                        logger.info(
+                            "sl_persisted_to_db",
+                            symbol=symbol,
+                            old_sl=last_sl,
+                            new_sl=pos.stop_loss,
+                        )
+                except Exception as e:
+                    logger.warning("position_persist_failed", symbol=symbol, error=str(e))
 
         # Sync state
         self.state.current_balance = self.portfolio.current_balance

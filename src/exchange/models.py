@@ -76,6 +76,11 @@ class Position:
     current_tier: int = 0            # 0=no tiers hit, 1=TP1 hit, 2=TP2 hit
     confluence_score: float = 0.0    # confluence score at entry (for post-trade analysis)
     agent1_reasoning: str = ""       # Agent 1's thesis for Agent 3 context
+    # Agent 3 latest decision (written by monitor, saved to DB by core)
+    last_agent3_action: str = ""     # HOLD, TIGHTEN_SL, CLOSE_PARTIAL, CLOSE_FULL
+    last_agent3_reasoning: str = ""  # Agent 3's analysis text
+    agent3_confidence: float = 0.0   # 0-100
+    last_agent3_sl: str = ""         # "old → new" for SL changes
 
 
 @dataclass

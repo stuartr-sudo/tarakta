@@ -132,7 +132,7 @@ def trace_signal(symbol, candles_1h, candles_4h, candles_1d, target):
 
     # Entry
     entry = float(window_1h["close"].iloc[-1])
-    if sweep.sweep_direction == "bullish":
+    if sweep.sweep_direction == "swing_low":
         sl = sweep.sweep_level * 0.995
         tp = sweep.target_level if sweep.target_level > entry else entry + abs(entry - sl) * 3
     else:
@@ -150,7 +150,7 @@ def trace_signal(symbol, candles_1h, candles_4h, candles_1d, target):
     print(f"  Take Profit: ${tp:,.2f}  (opposite liquidity)")
     print(f"  Risk:       ${sl_dist:,.2f}  |  Reward: ${tp_dist:,.2f}  |  R:R: {rr:.1f}")
     print(f"  Thesis: MMs swept {sweep.sweep_type.replace('_', ' ')} at ${sweep.sweep_level:,.2f}, ")
-    if sweep.sweep_direction == "bullish":
+    if sweep.sweep_direction == "swing_low":
         print(f"           grabbed sell-side stops, now expect move UP toward ${tp:,.2f}")
     else:
         print(f"           grabbed buy-side stops, now expect move DOWN toward ${tp:,.2f}")

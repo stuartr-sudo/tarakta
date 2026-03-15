@@ -49,7 +49,7 @@ class TestSweepDetector:
         )
 
         assert result.sweep_detected is True
-        assert result.sweep_direction == "bullish"
+        assert result.sweep_direction == "swing_low"
         assert result.sweep_type == "asian_low"
         assert result.sweep_level == 94.0  # Wick extreme
         assert result.target_level == 105.0  # Opposite side (Asian high)
@@ -71,7 +71,7 @@ class TestSweepDetector:
         )
 
         assert result.sweep_detected is True
-        assert result.sweep_direction == "bearish"
+        assert result.sweep_direction == "swing_high"
         assert result.sweep_type == "asian_high"
         assert result.sweep_level == 106.0  # Wick extreme
         assert result.target_level == 95.0  # Opposite side (Asian low)
@@ -94,7 +94,7 @@ class TestSweepDetector:
         )
 
         assert result.sweep_detected is True
-        assert result.sweep_direction == "bullish"
+        assert result.sweep_direction == "swing_low"
         assert result.sweep_type == "swing_low"
         assert result.sweep_level == 89.0
         assert result.target_level == 110.0
@@ -117,7 +117,7 @@ class TestSweepDetector:
         )
 
         assert result.sweep_detected is True
-        assert result.sweep_direction == "bearish"
+        assert result.sweep_direction == "swing_high"
         assert result.sweep_type == "swing_high"
         assert result.sweep_level == 111.0
 

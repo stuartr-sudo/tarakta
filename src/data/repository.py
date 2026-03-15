@@ -38,6 +38,8 @@ class Repository:
         "original_stop_loss",
         "last_agent2_action", "last_agent2_reasoning", "last_agent2_urgency",
         "agent2_confidence", "agent2_check_count",
+        "last_agent3_action", "last_agent3_reasoning", "agent3_confidence",
+        "last_agent3_sl",
         "created_at", "updated_at",
     }
 

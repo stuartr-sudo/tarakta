@@ -168,7 +168,7 @@ async def main():
 
     # --- Step 6: Entry execution ---
     entry = float(window_1h["close"].iloc[-1])
-    if sweep.sweep_direction == "bullish":
+    if sweep.sweep_direction == "swing_low":
         sl = sweep.sweep_level * 0.995
         tp = sweep.target_level if sweep.target_level > entry else entry + abs(entry - sl) * 3
     else:
@@ -197,7 +197,7 @@ async def main():
         hit_sl = False
         for _, row in future.iterrows():
             ts = _
-            if sweep.sweep_direction == "bullish":
+            if sweep.sweep_direction == "swing_low":
                 if row["low"] <= sl:
                     hit_sl = True
                     print(f"   {ts}: SL HIT at ${sl:,.2f} (low was ${row['low']:,.2f}) -> LOSS")
@@ -218,7 +218,7 @@ async def main():
 
         if not hit_tp and not hit_sl:
             last_price = float(future["close"].iloc[-1])
-            unrealized = (last_price - entry) if sweep.sweep_direction == "bullish" else (entry - last_price)
+            unrealized = (last_price - entry) if sweep.sweep_direction == "swing_low" else (entry - last_price)
             print(f"   Neither TP nor SL hit in next 24 hours")
             print(f"   Last price: ${last_price:,.2f} (unrealized: ${unrealized:,.2f})")
 
@@ -226,7 +226,7 @@ async def main():
         print(f"   {'Time':>20s}  {'High':>10s}  {'Low':>10s}  {'Close':>10s}")
         for ts, row in future.iterrows():
             marker = ""
-            if sweep.sweep_direction == "bullish":
+            if sweep.sweep_direction == "swing_low":
                 if row["high"] >= tp:
                     marker = " <-- TP"
                 if row["low"] <= sl:

@@ -479,7 +479,7 @@ async function toggleDetail(row) {
     let agentHtml = '';
     const aa = data.agent_analysis;
     if (aa) {
-        const actionCls = aa.action === 'ENTRY_CONFIRMED' ? 'positive' : aa.action === 'SKIP' ? 'negative' : 'text-orange';
+        const actionCls = aa.action === 'SETUP_CONFIRMED' ? 'positive' : aa.action === 'SKIP' ? 'negative' : 'text-orange';
         const confPct = aa.confidence != null ? aa.confidence + '%' : '-';
         const riskCls = aa.risk_assessment === 'low' ? 'positive' : aa.risk_assessment === 'high' || aa.risk_assessment === 'extreme' ? 'negative' : '';
 
@@ -533,13 +533,32 @@ async function toggleDetail(row) {
         agent2Html += '</dl></div>';
     }
 
+    // Agent 3 (Position Manager) section
+    let agent3Html = '';
+    if (t.last_agent3_action && t.last_agent3_action !== 'HOLD') {
+        const a3Action = t.last_agent3_action;
+        const a3ActionCls = a3Action === 'TIGHTEN_SL' ? 'text-orange' : a3Action === 'CLOSE_FULL' ? 'negative' : a3Action === 'CLOSE_PARTIAL' ? 'text-orange' : '';
+        const a3Conf = t.agent3_confidence != null ? t.agent3_confidence + '%' : '-';
+        agent3Html = '<div class="detail-section agent-section"><h4>🛡️ Agent 3 (Position Manager)</h4>';
+        if (t.last_agent3_reasoning) {
+            agent3Html += '<div class="agent-reasoning">' + t.last_agent3_reasoning.replace(/\n/g, '<br>') + '</div>';
+        }
+        agent3Html += '<dl class="detail-meta agent-meta">';
+        agent3Html += '<dt>Action</dt><dd class="' + a3ActionCls + '">' + a3Action + '</dd>';
+        agent3Html += '<dt>Confidence</dt><dd>' + a3Conf + '</dd>';
+        if (t.last_agent3_sl) {
+            agent3Html += '<dt>SL Change</dt><dd class="mono">' + t.last_agent3_sl + '</dd>';
+        }
+        agent3Html += '</dl></div>';
+    }
+
     // Manual close button
     let closeBtn = '<div class="detail-section" style="grid-column:1/-1;border-top:1px solid rgba(255,255,255,0.06);padding-top:0.75rem;">' +
         '<button class="btn-close-trade" onclick="closeTrade(\'' + tradeId + '\', this)" ' +
         'data-symbol="' + (t.symbol || '') + '">' +
         '✕ Close Position at Market</button></div>';
 
-    td.innerHTML = '<div class="trade-detail-content" style="max-width:' + tableWidth + 'px;">' + meta + reasons + exitsHtml + agentHtml + agent2Html + closeBtn + '</div>';
+    td.innerHTML = '<div class="trade-detail-content" style="max-width:' + tableWidth + 'px;">' + meta + reasons + exitsHtml + agentHtml + agent2Html + agent3Html + closeBtn + '</div>';
 }
 
 async function closeTrade(tradeId, btn) {
@@ -1242,7 +1261,7 @@ function toggleRefinerDetail(row) {
     let agentHtml = '';
     const aa = comps.agent_analysis || null;
     if (aa) {
-        const actionCls = aa.action === 'ENTRY_CONFIRMED' ? 'positive' : aa.action === 'SKIP' ? 'negative' : 'text-orange';
+        const actionCls = aa.action === 'SETUP_CONFIRMED' ? 'positive' : aa.action === 'SKIP' ? 'negative' : 'text-orange';
         const confPct = aa.confidence != null ? aa.confidence + '%' : '-';
         const riskCls = (aa.risk_assessment === 'low') ? 'positive' : (aa.risk_assessment === 'high' || aa.risk_assessment === 'extreme') ? 'negative' : '';
 
@@ -1286,8 +1305,27 @@ function toggleRefinerDetail(row) {
         agent2Html += '</dl></div>';
     }
 
+    // --- Section 6: Agent 3 (Position Manager) ---
+    let agent3Html = '';
+    if (e.last_agent3_action && e.last_agent3_action !== 'HOLD') {
+        const a3Action = e.last_agent3_action;
+        const a3ActionCls = a3Action === 'TIGHTEN_SL' ? 'text-orange' : a3Action === 'CLOSE_FULL' ? 'negative' : a3Action === 'CLOSE_PARTIAL' ? 'text-orange' : '';
+        const a3Conf = e.agent3_confidence != null ? e.agent3_confidence + '%' : '-';
+        agent3Html = '<div class="detail-section agent-section"><h4>🛡️ Agent 3 (Position Manager)</h4>';
+        if (e.last_agent3_reasoning) {
+            agent3Html += '<div class="agent-reasoning">' + e.last_agent3_reasoning.replace(/\n/g, '<br>') + '</div>';
+        }
+        agent3Html += '<dl class="detail-meta agent-meta">';
+        agent3Html += '<dt>Action</dt><dd class="' + a3ActionCls + '">' + a3Action + '</dd>';
+        agent3Html += '<dt>Confidence</dt><dd>' + a3Conf + '</dd>';
+        if (e.last_agent3_sl) {
+            agent3Html += '<dt>SL Change</dt><dd class="mono">' + e.last_agent3_sl + '</dd>';
+        }
+        agent3Html += '</dl></div>';
+    }
+
     // Assemble
-    td.innerHTML = '<div class="trade-detail-content">' + statusHtml + zonesHtml + componentsHtml + agentHtml + agent2Html + '</div>';
+    td.innerHTML = '<div class="trade-detail-content">' + statusHtml + zonesHtml + componentsHtml + agentHtml + agent2Html + agent3Html + '</div>';
     detailRow.appendChild(td);
     row.after(detailRow);
 }
@@ -1305,7 +1343,7 @@ async function loadAgentStats() {
         const a = data.agent;
         document.getElementById('agent-model-badge').textContent = a.model || '--';
         document.getElementById('agent-requests').textContent = a.total_requests;
-        document.getElementById('agent-actions').textContent = a.total_entry_confirmed + ' / ' + a.total_wait_pullback + ' / ' + a.total_skip;
+        document.getElementById('agent-actions').textContent = a.total_setup_confirmed + ' / ' + a.total_wait_pullback + ' / ' + a.total_skip;
         document.getElementById('agent-cost').textContent = '$' + (a.total_cost_usd || 0).toFixed(4);
         document.getElementById('agent-avg-cost').textContent = '$' + (a.avg_cost_per_call_usd || 0).toFixed(4);
         document.getElementById('agent-tokens').textContent = (a.total_input_tokens || 0).toLocaleString() + ' / ' + (a.total_output_tokens || 0).toLocaleString();

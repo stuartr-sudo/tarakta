@@ -267,6 +267,11 @@ class PositionMonitor:
 
         decision = await self._position_agent.evaluate_position(context)
 
+        # Store Agent 3's decision on the Position for DB persistence
+        pos.last_agent3_action = decision.action
+        pos.last_agent3_reasoning = decision.reasoning
+        pos.agent3_confidence = decision.confidence
+
         if decision.action == "CLOSE_FULL":
             logger.info(
                 "agent3_close_full",
@@ -301,6 +306,7 @@ class PositionMonitor:
             if pos.direction == "long" and decision.suggested_sl > pos.stop_loss:
                 old_sl = pos.stop_loss
                 pos.stop_loss = decision.suggested_sl
+                pos.last_agent3_sl = f"{old_sl:.6g} → {decision.suggested_sl:.6g}"
                 logger.info(
                     "agent3_tighten_sl",
                     symbol=symbol,
@@ -312,6 +318,7 @@ class PositionMonitor:
             elif pos.direction == "short" and decision.suggested_sl < pos.stop_loss:
                 old_sl = pos.stop_loss
                 pos.stop_loss = decision.suggested_sl
+                pos.last_agent3_sl = f"{old_sl:.6g} → {decision.suggested_sl:.6g}"
                 logger.info(
                     "agent3_tighten_sl",
                     symbol=symbol,
