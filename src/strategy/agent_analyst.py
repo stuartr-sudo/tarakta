@@ -494,22 +494,192 @@ class AgentEntryAnalyst:
 
     def _build_prompt(self, signal: SignalCandidate, context: dict[str, Any]) -> str:
         """Build the user prompt with all signal and market context."""
+        ac = getattr(signal, "agent_context", {}) or {}
+
         # Key levels
         key_levels_str = "\n".join(
             f"  - {k}: {v:.6g}" for k, v in signal.key_levels.items()
         ) if signal.key_levels else "  None"
 
-        # Order block context
-        ob_info = "None"
-        if signal.ob_context:
-            ob = signal.ob_context
-            ob_info = f"{ob.direction} OB [{ob.bottom:.6g} - {ob.top:.6g}], strength={ob.strength:.2f}"
+        # ── HTF Market Structure (1H / 4H / Daily) ──
+        ms = ac.get("market_structure", {})
+        htf_lines = []
+        for tf_label, tf_key in [("1H", "1h"), ("4H", "4h"), ("Daily", "1d")]:
+            tf = ms.get(tf_key, {})
+            if tf:
+                trend = tf.get("trend", "unknown")
+                strength = tf.get("strength", 0)
+                bos = tf.get("last_bos", "none")
+                choch = tf.get("last_choch", "none")
+                htf_lines.append(
+                    f"  {tf_label}: trend={trend} (strength={strength:.2f}), "
+                    f"last BOS={bos}, last CHoCH={choch}"
+                )
+        htf_section = "\n".join(htf_lines) if htf_lines else "  Not available"
 
-        # FVG context
-        fvg_info = "None"
-        if signal.fvg_context:
-            fvg = signal.fvg_context
-            fvg_info = f"{fvg.direction} FVG [{fvg.bottom:.6g} - {fvg.top:.6g}]"
+        # ── Volume & RVOL ──
+        vol = ac.get("volume", {})
+        if vol:
+            rvol = vol.get("relative_volume", 0)
+            vol_trend = vol.get("volume_trend", "unknown")
+            disp_det = vol.get("displacement_detected", False)
+            disp_str = vol.get("displacement_strength", 0)
+            disp_dir = vol.get("displacement_direction", "")
+            vol_section = (
+                f"RVOL: {rvol:.2f}x (>1.5 elevated, >2.5 institutional) | "
+                f"Trend: {vol_trend}"
+            )
+            if disp_det:
+                vol_section += (
+                    f"\n  Displacement: {disp_dir}, "
+                    f"strength={disp_str:.2f}"
+                )
+        else:
+            vol_section = "Not available"
+
+        # ── Liquidity Pools ──
+        liq = ac.get("liquidity", {})
+        if liq and liq.get("active_pool_count", 0) > 0:
+            liq_lines = [f"Active pools: {liq['active_pool_count']}, Recent sweeps: {liq.get('recent_sweeps', 0)}"]
+            if liq.get("nearest_buy") is not None:
+                liq_lines.append(
+                    f"  Nearest buy-side liquidity: {liq['nearest_buy']:.6g} "
+                    f"({liq.get('buy_distance_pct', 0):.2f}% away)"
+                )
+            if liq.get("nearest_sell") is not None:
+                liq_lines.append(
+                    f"  Nearest sell-side liquidity: {liq['nearest_sell']:.6g} "
+                    f"({liq.get('sell_distance_pct', 0):.2f}% away)"
+                )
+            liq_section = "\n".join(liq_lines)
+        else:
+            liq_section = "No active liquidity pools detected"
+
+        # ── All Order Blocks (from agent_context, not just primary) ──
+        obs = ac.get("order_blocks", [])
+        if obs:
+            ob_lines = []
+            for ob in obs[:5]:
+                ob_lines.append(
+                    f"  - {ob['direction']} OB [{ob['bottom']:.6g} – {ob['top']:.6g}], "
+                    f"strength={ob['strength']:.2f}, {ob['distance_pct']:.2f}% away"
+                )
+            ob_section = "\n".join(ob_lines)
+            price_in_ob = ac.get("price_in_ob", False)
+            if price_in_ob:
+                ob_section += "\n  ⚠ Price is currently INSIDE an order block"
+        else:
+            ob_section = "  None detected"
+
+        # ── All Fair Value Gaps (from agent_context) ──
+        fvgs = ac.get("fair_value_gaps", [])
+        if fvgs:
+            fvg_lines = []
+            for fvg in fvgs[:5]:
+                fvg_lines.append(
+                    f"  - {fvg['direction']} FVG [{fvg['bottom']:.6g} – {fvg['top']:.6g}], "
+                    f"midpoint={fvg['midpoint']:.6g}, {fvg['distance_pct']:.2f}% away"
+                )
+            fvg_section = "\n".join(fvg_lines)
+            price_in_fvg = ac.get("price_in_fvg", False)
+            if price_in_fvg:
+                fvg_section += "\n  ⚠ Price is currently INSIDE a fair value gap"
+        else:
+            fvg_section = "  None detected"
+
+        # ── Score Breakdown (how the formula scored this signal) ──
+        comps = signal.components or {}
+        score_parts = []
+        component_labels = {
+            "sweep_detected": "Sweep Detected",
+            "displacement_confirmed": "Displacement Confirmed",
+            "pullback_confirmed": "Pullback Confirmed",
+            "htf_aligned": "HTF Aligned",
+            "timing_optimal": "Timing Optimal",
+            "leverage_aligned": "Leverage Aligned",
+            "weekly_cycle": "Weekly Cycle Adj",
+        }
+        for key, label in component_labels.items():
+            val = comps.get(key)
+            if val is not None and val != 0:
+                score_parts.append(f"{label}: {val:+.0f}")
+        score_section = (
+            f"Total Score: {signal.score:.0f} / 100 "
+            f"(threshold: {context.get('active_threshold', 60):.0f})\n  "
+            + " | ".join(score_parts)
+        ) if score_parts else f"Total Score: {signal.score:.0f}"
+
+        # ── Pre-computed Risk Levels (algorithmic fallback) ──
+        sl_price = context.get("sl_price")
+        tp_price = context.get("tp_price")
+        rr_ratio = context.get("rr_ratio")
+        risk_section = ""
+        if sl_price:
+            risk_section += f"Algorithmic SL: {sl_price:.6g}"
+        if tp_price:
+            risk_section += f" | TP: {tp_price:.6g}"
+        if rr_ratio:
+            risk_section += f" | R:R: {rr_ratio:.1f}"
+        if not risk_section:
+            risk_section = "Not computed (SL too wide for algorithm — you MUST provide structural SL/TP)"
+
+        # ── Leverage / Positioning Data ──
+        lev = ac.get("leverage", {})
+        lp = signal.leverage_profile
+        leverage_lines = []
+        if lp and hasattr(lp, 'funding_rate'):
+            leverage_lines.append(f"Funding Rate: {lp.funding_rate:.6f}")
+        if lp and hasattr(lp, 'open_interest_usd') and lp.open_interest_usd:
+            leverage_lines.append(f"Open Interest: ${lp.open_interest_usd:,.0f}")
+        if lev.get("long_short_ratio") is not None:
+            leverage_lines.append(f"Long/Short Ratio: {lev['long_short_ratio']:.2f}")
+        if lev.get("crowded_side"):
+            leverage_lines.append(
+                f"Crowded Side: {lev['crowded_side']} "
+                f"(intensity: {lev.get('crowding_intensity', 0):.2f})"
+            )
+        if lev.get("funding_bias"):
+            leverage_lines.append(f"Funding Bias: {lev['funding_bias']}")
+        if lev.get("judas_swing_probability", 0) > 0.3:
+            leverage_lines.append(
+                f"Judas Swing Probability: {lev['judas_swing_probability']:.2f}"
+            )
+        if lp and hasattr(lp, 'nearest_long_liq') and lp.nearest_long_liq:
+            leverage_lines.append(f"Nearest Long Liquidation: {lp.nearest_long_liq:.6g}")
+        if lp and hasattr(lp, 'nearest_short_liq') and lp.nearest_short_liq:
+            leverage_lines.append(f"Nearest Short Liquidation: {lp.nearest_short_liq:.6g}")
+        leverage_section = "\n  ".join(leverage_lines) if leverage_lines else "Not available"
+
+        # ── Pullback Status ──
+        pb = ac.get("pullback", {})
+        pullback_section = ""
+        if pb:
+            status = pb.get("pullback_status", "unknown")
+            retrace = pb.get("retracement_pct", 0)
+            thrust = pb.get("thrust_extreme", 0)
+            optimal = pb.get("optimal_entry", 0)
+            pullback_section = f"Status: {status}, Retracement: {retrace:.1f}%"
+            if thrust:
+                pullback_section += f", Thrust Extreme: {thrust:.6g}"
+            if optimal:
+                pullback_section += f", Optimal Entry: {optimal:.6g}"
+
+        # ── Session Timing ──
+        sess = signal.session_result
+        session_section = ""
+        if sess:
+            parts = []
+            if hasattr(sess, 'in_kill_zone') and sess.in_kill_zone:
+                parts.append("IN KILL ZONE")
+            if hasattr(sess, 'in_post_kill_zone') and sess.in_post_kill_zone:
+                parts.append("Post-Kill Zone (distribution phase)")
+            if hasattr(sess, 'asian_high') and sess.asian_high:
+                parts.append(f"Asian Range: {sess.asian_low:.6g} – {sess.asian_high:.6g}")
+            if hasattr(sess, 'london_high') and sess.london_high:
+                parts.append(f"London Range: {sess.london_low:.6g} – {sess.london_high:.6g}")
+            if hasattr(sess, 'ny_high') and sess.ny_high:
+                parts.append(f"NY Range: {sess.ny_low:.6g} – {sess.ny_high:.6g}")
+            session_section = " | ".join(parts) if parts else ""
 
         # Sweep details — directionally neutral
         sweep_info = "None"
@@ -521,6 +691,10 @@ class AgentEntryAnalyst:
                 f"Swept {swept_side} at {sr.sweep_level:.6g} "
                 f"(type: {level_type}, wick depth: {sr.sweep_depth:.4f})"
             )
+            if hasattr(sr, 'target_level') and sr.target_level:
+                sweep_info += f"\n  Opposite-side target: {sr.target_level:.6g}"
+            if hasattr(sr, 'htf_continuation') and sr.htf_continuation:
+                sweep_info += "\n  HTF continuation confirmed"
 
         # Sentiment
         sentiment = context.get("sentiment_score", 0.0)
@@ -577,7 +751,6 @@ class AgentEntryAnalyst:
                 conf = t.get("confluence_score")
                 entry_p = t.get("entry_price", 0) or 0
                 exit_p = t.get("exit_price", 0) or 0
-                # Calculate hold time if available
                 hold_str = ""
                 if t.get("entry_time") and t.get("exit_time"):
                     try:
@@ -605,7 +778,6 @@ class AgentEntryAnalyst:
             disp_high = fib['displacement_high']
             move = disp_high - disp_low
 
-            # Both directions
             bull_618 = disp_high - move * 0.618
             bull_786 = disp_high - move * 0.786
             bear_618 = disp_low + move * 0.618
@@ -623,11 +795,8 @@ class AgentEntryAnalyst:
         else:
             fib_section = "Not available (no displacement data)"
 
-        # Funding rate
-        funding_section = "N/A"
-        lp = signal.leverage_profile
-        if lp and hasattr(lp, 'funding_rate'):
-            funding_section = f"{lp.funding_rate:.6f}"
+        # ATR for volatility context
+        atr_section = f"1H ATR(14): {signal.atr_1h:.6g}" if signal.atr_1h else "Not available"
 
         return f"""\
 ## Entry Decision Request
@@ -636,25 +805,52 @@ class AgentEntryAnalyst:
 **Current Price:** {signal.entry_price:.6g}
 **Open Positions:** {open_count}
 
+### Signal Score Breakdown
+{score_section}
+
+### HTF Market Structure (trend alignment — CRITICAL for direction choice)
+{htf_section}
+
 ### Sweep Analysis
 {sweep_info}
+
+### Volume & Relative Volume
+{vol_section}
 
 ### Fibonacci Retracement (from displacement move)
 {fib_section}
 
+### Pullback Analysis
+{pullback_section if pullback_section else "No pullback data"}
+
 ### Key Structural Levels
 {key_levels_str}
 
-### Order Block: {ob_info}
-### Fair Value Gap: {fvg_info}
+### Order Blocks (nearest 5)
+{ob_section}
+
+### Fair Value Gaps (nearest 5)
+{fvg_section}
+
+### Liquidity Pools
+{liq_section}
+
+### Session Timing
+{session_section if session_section else "No session data"}
+
+### Volatility
+{atr_section}
+
+### Pre-Computed Risk Levels
+{risk_section}
+
+### Leverage & Positioning
+  {leverage_section}
 
 ### Market Context
 - BTC: {btc_section}
 - Sentiment: {sentiment:.1f} (range: -10 to +10, positive = bullish)
 {f"- {weekly_info}" if weekly_info else ""}
-
-### Funding Rate
-{funding_section}
 
 ### Recent Headlines
 {headlines_section}
