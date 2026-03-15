@@ -353,7 +353,7 @@ class EntryRefiner:
                     candle_high = float(candles_5m["high"].iloc[-1])
                     candle_low = float(candles_5m["low"].iloc[-1])
                     # Check both close and wick extremes
-                    check_price = candle_high if entry.pullback_plan.direction in ("bullish", "long") else candle_low
+                    check_price = candle_high if entry.pullback_plan.direction in ("bullish", "long", "swing_low") else candle_low
                     if not entry.pullback_plan.pullback_allowed(check_price):
                         if entry.check_count % 5 == 0:
                             logger.debug(

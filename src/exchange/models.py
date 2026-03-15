@@ -273,7 +273,7 @@ class PullbackPlan:
     max_chase_bps: float = 3.0        # Max basis points of slippage beyond zone edge
     zone_tolerance_bps: float = 2.0   # Tiny tolerance for zone boundary check
     valid_for_candles: int = 6         # Number of 5m candles (6 = 30 min)
-    direction: str = ""                # "bullish" or "bearish"
+    direction: str = ""                # "swing_low" (long setup) or "swing_high" (short setup)
     limit_price: float = 0.0          # Computed zone-aware limit price
     original_suggested_entry: float = 0.0  # Agent 1's suggested_entry
     zone_updates: int = 0              # How many times Agent 2 adjusted zone
@@ -299,7 +299,7 @@ class PullbackPlan:
 
     def slippage_ok(self, price: float) -> bool:
         """Check if price slippage from zone is within max_chase_bps."""
-        if self.direction in ("bullish", "long"):
+        if self.direction in ("bullish", "long", "swing_low"):
             # For longs, slippage = buying above zone_high
             if price <= self.zone_high:
                 return True
@@ -315,7 +315,7 @@ class PullbackPlan:
         """Check if price has broken the invalidation level."""
         if self.invalidation_level <= 0:
             return False
-        if self.direction in ("bullish", "long"):
+        if self.direction in ("bullish", "long", "swing_low"):
             return price < self.invalidation_level
         else:
             return price > self.invalidation_level
@@ -328,7 +328,7 @@ class PullbackPlan:
         """
         if self.must_reach_price <= 0 or self.must_reach_price_reached:
             return True
-        if self.direction in ("bullish", "long"):
+        if self.direction in ("bullish", "long", "swing_low"):
             # For longs: price must reach UP to must_reach_price
             if price >= self.must_reach_price:
                 self.must_reach_price_reached = True
@@ -354,7 +354,7 @@ class PullbackPlan:
         Shorts: upper quarter of zone (sell high).
         """
         zone_range = self.zone_high - self.zone_low
-        if self.direction in ("bullish", "long"):
+        if self.direction in ("bullish", "long", "swing_low"):
             return self.zone_low + 0.25 * zone_range
         else:
             return self.zone_high - 0.25 * zone_range
