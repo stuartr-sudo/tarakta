@@ -178,7 +178,7 @@ class PositionManagerAgent:
     """
 
     def __init__(self, config: Settings) -> None:
-        self._client: genai.AsyncClient | None = None
+        self._client: genai.Client | None = None
         self._api_key = config.agent_api_key
         self._model = getattr(config, "position_agent_model", "gemini-3-flash-preview")
         self._timeout = config.agent_timeout_seconds
@@ -208,10 +208,10 @@ class PositionManagerAgent:
             "gemini-3-flash-preview": (0.10, 0.01, 0.40),
         }
 
-    def _get_client(self) -> genai.AsyncClient:
+    def _get_client(self) -> genai.Client:
         if self._client is None:
-            self._client = genai.AsyncClient(api_key=self._api_key)
-        return self._client
+            self._client = genai.Client(api_key=self._api_key)
+        return self._client.aio
 
     def _should_try(self) -> bool:
         if not self._available:
@@ -245,24 +245,26 @@ class PositionManagerAgent:
 
         try:
             client = self._get_client()
-            interaction = await client.interactions.create(
+            from google.genai import types as _gentypes
+            response = await client.models.generate_content(
                 model=self._model,
-                system_instruction=POSITION_SYSTEM_PROMPT + POSITION_JSON_FORMAT,
-                input=prompt,
-                response_format=POSITION_RESPONSE_SCHEMA,
-                generation_config={
-                    "thinking_level": self._thinking_level,
-                    "temperature": 1.0,
-                },
+                contents=prompt,
+                config=_gentypes.GenerateContentConfig(
+                    system_instruction=POSITION_SYSTEM_PROMPT + POSITION_JSON_FORMAT,
+                    thinking_config=_gentypes.ThinkingConfig(thinking_level=self._thinking_level),
+                    response_mime_type="application/json",
+                    response_json_schema=POSITION_RESPONSE_SCHEMA,
+                    temperature=1.0,
+                ),
             )
 
             latency_ms = (time.time() - t0) * 1000
             self.total_requests += 1
 
             # Track tokens + cost
-            usage = interaction.usage
-            in_tok = getattr(usage, "input_tokens", 0) or 0
-            out_tok = getattr(usage, "output_tokens", 0) or 0
+            usage = response.usage_metadata
+            in_tok = getattr(usage, "prompt_token_count", 0) or 0
+            out_tok = getattr(usage, "candidates_token_count", 0) or 0
             self.total_input_tokens += in_tok
             self.total_output_tokens += out_tok
 
@@ -270,7 +272,7 @@ class PositionManagerAgent:
             cost = (in_tok * pricing[0] + out_tok * pricing[2]) / 1_000_000
             self.total_cost_usd += cost
 
-            decision = self._parse_response(interaction)
+            decision = self._parse_response(response)
             decision.latency_ms = latency_ms
             decision.input_tokens = in_tok
             decision.output_tokens = out_tok
@@ -398,16 +400,13 @@ class PositionManagerAgent:
 
 Evaluate this position and respond with your JSON decision. Default to HOLD unless you see clear evidence for action."""
 
-    def _parse_response(self, interaction) -> PositionDecision:
-        """Extract structured JSON from Gemini Interactions response."""
+    def _parse_response(self, response) -> PositionDecision:
+        """Extract structured JSON from Gemini response."""
         import json as _json
 
-        # Get the last text output from the interaction
-        text = None
-        for output in reversed(interaction.outputs):
-            if getattr(output, "text", None):
-                text = output.text.strip()
-                break
+        text = getattr(response, "text", None)
+        if text:
+            text = text.strip()
 
         if text:
             try:

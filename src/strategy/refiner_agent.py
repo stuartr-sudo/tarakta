@@ -319,7 +319,7 @@ class RefinerMonitorAgent:
     """
 
     def __init__(self, config: Settings) -> None:
-        self._client: genai.AsyncClient | None = None
+        self._client: genai.Client | None = None
         self._api_key = config.agent_api_key
         self._model = getattr(config, "agent_model", "gemini-3-flash-preview")
         # Agent 2 always uses flash — override any pro model from config
@@ -363,10 +363,10 @@ class RefinerMonitorAgent:
         logger.info("refiner_agent_model_switched", old_model=old, new_model=model)
         return self._model
 
-    def _get_client(self) -> genai.AsyncClient:
+    def _get_client(self) -> genai.Client:
         if self._client is None:
-            self._client = genai.AsyncClient(api_key=self._api_key)
-        return self._client
+            self._client = genai.Client(api_key=self._api_key)
+        return self._client.aio
 
     def _should_try(self) -> bool:
         if not self._available:
@@ -421,24 +421,26 @@ class RefinerMonitorAgent:
 
         try:
             client = self._get_client()
-            interaction = await client.interactions.create(
+            from google.genai import types as _gentypes
+            response = await client.models.generate_content(
                 model=self._model,
-                system_instruction=REFINER_SYSTEM_PROMPT + REFINER_JSON_FORMAT,
-                input=user_prompt,
-                response_format=REFINER_RESPONSE_SCHEMA,
-                generation_config={
-                    "thinking_level": self._thinking_level,
-                    "temperature": 1.0,
-                },
+                contents=user_prompt,
+                config=_gentypes.GenerateContentConfig(
+                    system_instruction=REFINER_SYSTEM_PROMPT + REFINER_JSON_FORMAT,
+                    thinking_config=_gentypes.ThinkingConfig(thinking_level=self._thinking_level),
+                    response_mime_type="application/json",
+                    response_json_schema=REFINER_RESPONSE_SCHEMA,
+                    temperature=1.0,
+                ),
             )
 
             latency_ms = (time.monotonic() - start) * 1000
             self._record_success()
 
             # Track token usage & cost
-            usage = interaction.usage
-            input_tokens = getattr(usage, "input_tokens", 0) or 0
-            output_tokens = getattr(usage, "output_tokens", 0) or 0
+            usage = response.usage_metadata
+            input_tokens = getattr(usage, "prompt_token_count", 0) or 0
+            output_tokens = getattr(usage, "candidates_token_count", 0) or 0
             self.total_input_tokens += input_tokens
             self.total_output_tokens += output_tokens
             self.total_requests += 1
@@ -453,7 +455,7 @@ class RefinerMonitorAgent:
             )
             self.total_cost_usd += call_cost
 
-            decision = self._parse_response(interaction)
+            decision = self._parse_response(response)
             decision.latency_ms = latency_ms
             decision.input_tokens = input_tokens
             decision.output_tokens = output_tokens
@@ -864,17 +866,13 @@ Run through the 3-step analysis: (1) price vs zone, (2) latest candle rejection 
 (3) structural confirmation. Check order book for liquidity support. \
 Reference specific numbers from the data in your reasoning."""
 
-    def _parse_response(self, interaction) -> RefinerDecision:
-        """Extract structured JSON from Gemini Interactions response."""
+    def _parse_response(self, response) -> RefinerDecision:
+        """Extract structured JSON from Gemini response."""
         import json as _json
 
-        # Get the last text output from the interaction
-        text = None
-        for output in reversed(interaction.outputs):
-            if getattr(output, "text", None):
-                text = output.text.strip()
-                break
-
+        text = getattr(response, "text", None)
+        if text:
+            text = text.strip()
         if text:
             try:
                 # Strip markdown code fences if present
@@ -891,8 +889,7 @@ Reference specific numbers from the data in your reasoning."""
 
         logger.warning(
             "refiner_agent_no_response",
-            status=getattr(interaction, "status", "unknown"),
-            output_count=len(interaction.outputs) if interaction.outputs else 0,
+            finish_reason=getattr(response.candidates[0] if response.candidates else None, "finish_reason", "unknown"),
         )
         return RefinerDecision(
             action="WAIT",
