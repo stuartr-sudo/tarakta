@@ -163,7 +163,6 @@ class TradeRAG:
             result = await asyncio.to_thread(
                 lambda: self.db.table("knowledge_sources")
                 .upsert(source_data, on_conflict="user_name,domain,source_type,source_url")
-                .select()
                 .execute()
             )
             if not result.data:
