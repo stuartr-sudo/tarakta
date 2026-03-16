@@ -120,8 +120,13 @@ Only proceed to Step 1 after must_reach_price shows "REACHED" or if no must_reac
 - If ABOVE zone (for longs):
   - For SETUP_CONFIRMED signals: this is expected. Focus on Step 2 candle confirmation.
   - For WAIT_PULLBACK signals: setup may have run without us → check for ABANDON
-- If BELOW zone (for longs) → price hasn't arrived → WAIT
+- If BELOW zone (for longs) → price hasn't arrived → check "Displacement Assessment" \
+to evaluate whether a retracement to the zone is realistic before defaulting to WAIT
 - Reverse all logic for shorts
+- **CRITICAL — check "Displacement Assessment" when price is far from zone:** \
+If the displacement data shows the zone requires a large retracement (>50%) of the \
+total move and the 5m candles show no momentum toward the zone, do NOT blindly WAIT. \
+Consider ADJUST_ZONE to a closer structural level, or ABANDON if the move has played out.
 
 ### Step 2: What does the latest 5m candle show?
 Read the MOST RECENT candle from the candle table:
@@ -184,6 +189,12 @@ New 5m price action has created a better reference point.
 - A new swing high/low has formed on 5m that shifts the optimal entry
 - The zone was wicked through but held — tighten the zone to the wick level
 - A new order block has printed that provides a better entry reference
+- **The displacement has already begun and the original zone is unreachable.** Check the \
+"Displacement Assessment" section: if the zone requires a retracement of >50% of the total \
+move AND price shows no momentum toward the zone (flat candles, low RVOL, no higher-lows \
+for shorts or lower-highs for longs), ADJUST the zone closer to current price using the \
+nearest 5m structural level (order block, FVG, or swing point) as the new reference. \
+Do NOT wait indefinitely for a retracement that the 5m data says is not coming.
 
 **You MUST provide:** adjusted_zone_high, adjusted_zone_low
 
@@ -197,6 +208,11 @@ The setup is invalidated by the live data.
 - BTC moved sharply against the trade (>1% in 5 minutes against the direction)
 - Agent 1's invalidation level has been breached (check "Agent 1's Strategic Analysis" — \
   if current price has closed beyond the invalidation price, ABANDON)
+- **The move has already played out.** If the "Displacement Assessment" shows price has \
+moved >3% from the sweep level, the zone requires a retracement of >60% of the total move, \
+AND 3+ consecutive checks show no price progress toward the zone — the pullback entry is \
+dead. The move happened without us. ABANDON rather than waiting for a retracement that \
+statistically will not reach the original zone.
 
 **You MUST provide:** invalidation_reason
 
@@ -769,6 +785,17 @@ class RefinerMonitorAgent:
         else:
             sweep_section = "Not available"
 
+        # ── Section 13a-ii: Displacement assessment ──
+        disp = ctx.get("displacement_assessment", {})
+        if disp:
+            displacement_section = (
+                f"- **Price has moved {disp['displacement_from_sweep_pct']:.2f}% from the sweep level**\n"
+                f"- Zone is {disp['zone_distance_from_price_pct']:.2f}% away from current price\n"
+                f"- Reaching the zone requires a {disp['zone_retrace_of_move_pct']:.1f}% retracement of the move"
+            )
+        else:
+            displacement_section = ""
+
         # ── Section 13b: PullbackPlan context ──
         plan_ctx = ctx.get("pullback_plan")
         if plan_ctx:
@@ -843,6 +870,9 @@ class RefinerMonitorAgent:
 
 ### Sweep Details
 {sweep_section}
+
+### Displacement Assessment (how far has the move already gone?)
+{displacement_section if displacement_section else "Not available"}
 
 ### Entry Zone
 - **Source:** {zone_source}

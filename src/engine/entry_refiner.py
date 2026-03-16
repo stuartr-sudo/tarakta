@@ -969,8 +969,9 @@ class EntryRefiner:
         # Also grab the simple bonus if leverage profile is missing
         leverage_bonus = getattr(signal, "leverage_bonus", None)
 
-        # Sweep details (type, depth, level)
+        # Sweep details (type, depth, level) + displacement assessment
         sweep_info = {}
+        displacement_assessment = {}
         if signal.sweep_result:
             sr = signal.sweep_result
             sweep_info = {
@@ -979,6 +980,26 @@ class EntryRefiner:
                 "sweep_depth": round(sr.sweep_depth, 6),
                 "sweep_level": sr.sweep_level,
             }
+            # Calculate how far price has moved from the sweep level
+            if sr.sweep_level > 0 and current_price > 0:
+                displacement_from_sweep_pct = abs(current_price - sr.sweep_level) / sr.sweep_level * 100
+                # How far price needs to travel to reach the entry zone
+                if direction in ("short", "bearish"):
+                    # For shorts: sweep is above, price dropped below, zone is between
+                    zone_distance_from_price_pct = (zone_top - current_price) / current_price * 100 if zone_top > current_price else 0.0
+                    total_move = sr.sweep_level - current_price if sr.sweep_level > current_price else 0.0
+                    zone_retrace_of_move_pct = ((zone_top - current_price) / total_move * 100) if total_move > 0 else 0.0
+                else:
+                    # For longs: sweep is below, price rose above, zone is between
+                    zone_distance_from_price_pct = (current_price - zone_bottom) / current_price * 100 if current_price > zone_bottom else 0.0
+                    total_move = current_price - sr.sweep_level if current_price > sr.sweep_level else 0.0
+                    zone_retrace_of_move_pct = ((current_price - zone_bottom) / total_move * 100) if total_move > 0 else 0.0
+
+                displacement_assessment = {
+                    "displacement_from_sweep_pct": round(displacement_from_sweep_pct, 2),
+                    "zone_distance_from_price_pct": round(zone_distance_from_price_pct, 2),
+                    "zone_retrace_of_move_pct": round(zone_retrace_of_move_pct, 2),
+                }
 
         # Pre-computed SL/TP from algorithmic calculation (Agent 1 context)
         # These give Agent 2 concrete price targets to use
@@ -1023,6 +1044,7 @@ class EntryRefiner:
             "leverage": leverage,
             "leverage_bonus": leverage_bonus,
             "sweep_info": sweep_info,
+            "displacement_assessment": displacement_assessment,
             "agent1_sl": agent1_sl,
             "agent1_tp": agent1_tp,
             "agent1_rr": agent1_rr,
