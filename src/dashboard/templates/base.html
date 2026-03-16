@@ -11,6 +11,24 @@
     {% set current_page = request.url.path %}
     {% set mode = (state.mode | default('paper')) if state else 'paper' %}
 
+    <!-- Instance Tabs -->
+    {% if all_instances is defined and all_instances | length > 1 %}
+    <div class="instance-tabs">
+        {% for inst in all_instances %}
+        {% set iid = inst.instance_id if inst.instance_id is defined else inst %}
+        <a href="?instance={{ iid }}"
+           class="instance-tab {{ 'active' if iid == active_instance else '' }}">
+            {{ iid | upper }}
+            {% if inst.total_pnl_usd is defined and inst.total_pnl_usd is not none %}
+            <span class="instance-pnl {{ 'positive' if inst.total_pnl_usd >= 0 else 'negative' }}">
+                ${{ '%.2f' | format(inst.total_pnl_usd) }}
+            </span>
+            {% endif %}
+        </a>
+        {% endfor %}
+    </div>
+    {% endif %}
+
     <!-- Mode Banner -->
     <div class="mode-banner {{ mode }}">
         {% if mode == 'paper' %}
@@ -24,6 +42,9 @@
             <span class="market-badge">{{ m | upper }}</span>
             {% endfor %}
         </span>
+        {% endif %}
+        {% if active_instance is defined and active_instance != config.instance_id %}
+        <span style="margin-left:12px;font-weight:700;">Viewing: {{ active_instance | upper }}</span>
         {% endif %}
     </div>
 

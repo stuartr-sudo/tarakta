@@ -28,6 +28,11 @@ def create_dashboard_app(config: Settings, repo: Repository, exchange=None, engi
     app.state.engine = engine
     app.state.engines = engines or {}
 
+    # Build repo lookup for multi-instance dashboard viewing
+    # Key = instance_id, value = Repository scoped to that instance
+    from src.data.db import Database as _DB
+    app.state.repos = {config.instance_id: repo}
+
     # Register routes
     from src.dashboard.routes import create_router as create_page_router
     from src.dashboard.api import create_router as create_api_router

@@ -26,6 +26,10 @@ class MarketConfig(BaseModel):
 
 
 class Settings(BaseSettings):
+    # Instance isolation — each deployed instance gets a unique ID
+    # Set INSTANCE_ID env var to run multiple bots against the same Supabase
+    instance_id: str = "main"
+
     # Exchange (Binance — legacy flat fields, still work for single-market crypto)
     exchange_name: str = "binance"
     binance_api_key: str = ""

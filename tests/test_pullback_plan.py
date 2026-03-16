@@ -218,7 +218,7 @@ class TestPullbackPlanConfigDefaults:
         defaults = Settings.model_fields
         assert defaults["pullback_zone_tolerance_bps"].default == 2.0
         assert defaults["pullback_max_chase_bps"].default == 3.0
-        assert defaults["pullback_valid_candles"].default == 6
+        assert defaults["pullback_valid_candles"].default == 96
         assert defaults["pullback_use_limit_in_zone"].default is True
 
 

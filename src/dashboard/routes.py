@@ -27,13 +27,51 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
     # Build list of enabled markets for nav display
     enabled_markets = [name for name, mc in config.markets.items() if mc.enabled]
 
+    def _get_repo_for_request(request: Request) -> Repository:
+        """Return a Repository scoped to the requested instance_id.
+
+        If ``?instance=<id>`` is in the query string and a matching repo exists
+        in ``app.state.repos``, use it.  Otherwise fall back to the primary repo.
+        For instances that don't have a pre-built repo (they run on a different
+        deployment), create one on the fly sharing the same DB connection.
+        """
+        requested = request.query_params.get("instance")
+        if not requested or requested == config.instance_id:
+            return repo
+
+        repos: dict = getattr(request.app.state, "repos", {})
+        if requested in repos:
+            return repos[requested]
+
+        # Create a view-only repo for the other instance (shares DB connection)
+        other_repo = Repository(repo.db, instance_id=requested)
+        repos[requested] = other_repo
+        return other_repo
+
+    def _instance_id_for_request(request: Request) -> str:
+        return request.query_params.get("instance") or config.instance_id
+
     async def _base_context(request: Request) -> dict:
         """Common context for all authenticated pages (mode banner, nav)."""
+        active_repo = _get_repo_for_request(request)
+        active_instance = _instance_id_for_request(request)
         try:
-            state = await repo.get_engine_state()
+            state = await active_repo.get_engine_state()
         except Exception:
             state = None
         role = request.session.get("role", "viewer")
+
+        # Fetch list of all known instances for tab switcher
+        all_instances = []
+        try:
+            all_instances = await repo.get_all_instances()
+        except Exception:
+            pass
+        # Always include the current instance even if DB is empty
+        instance_ids = [i.get("instance_id") for i in all_instances]
+        if config.instance_id not in instance_ids:
+            all_instances.insert(0, {"instance_id": config.instance_id})
+
         return {
             "request": request,
             "state": state,
@@ -41,6 +79,8 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             "role": role,
             "enabled_markets": enabled_markets,
             "db_offline": state is None,
+            "active_instance": active_instance,
+            "all_instances": all_instances,
         }
 
     @router.get("/login", response_class=HTMLResponse)
@@ -84,11 +124,12 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
     @login_required
     async def dashboard_home(request: Request):
         ctx = await _base_context(request)
+        active_repo = _get_repo_for_request(request)
         try:
-            ctx["snapshot"] = await repo.get_latest_snapshot() or {}
-            ctx["trades"] = await repo.get_open_trades(mode=config.trading_mode)
-            ctx["signals"] = await repo.get_recent_signals(limit=10)
-            ctx["stats"] = await repo.get_trade_stats(mode=config.trading_mode)
+            ctx["snapshot"] = await active_repo.get_latest_snapshot() or {}
+            ctx["trades"] = await active_repo.get_open_trades(mode=config.trading_mode)
+            ctx["signals"] = await active_repo.get_recent_signals(limit=10)
+            ctx["stats"] = await active_repo.get_trade_stats(mode=config.trading_mode)
         except Exception:
             ctx["snapshot"] = {}
             ctx["trades"] = []
@@ -116,11 +157,12 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
     @login_required
     async def trades_page(request: Request):
         ctx = await _base_context(request)
+        active_repo = _get_repo_for_request(request)
         status = request.query_params.get("status", "all")
         page = int(request.query_params.get("page", 1))
         try:
-            ctx["trades"] = await repo.get_trades(status=status, mode=config.trading_mode, page=page, per_page=25)
-            ctx["stats"] = await repo.get_trade_stats(mode=config.trading_mode)
+            ctx["trades"] = await active_repo.get_trades(status=status, mode=config.trading_mode, page=page, per_page=25)
+            ctx["stats"] = await active_repo.get_trade_stats(mode=config.trading_mode)
         except Exception:
             ctx["trades"] = []
             ctx["stats"] = {}
@@ -133,9 +175,10 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
     @login_required
     async def signals_page(request: Request):
         ctx = await _base_context(request)
+        active_repo = _get_repo_for_request(request)
         page = int(request.query_params.get("page", 1))
         try:
-            ctx["signals"] = await repo.get_signals(page=page, per_page=50)
+            ctx["signals"] = await active_repo.get_signals(page=page, per_page=50)
         except Exception:
             ctx["signals"] = []
             ctx["db_offline"] = True
@@ -177,7 +220,6 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             getattr(config, "position_agent_enabled", False),
         )
         # Agent models always start at config default on restart (cost-safe)
-        # Runtime changes via Settings are session-only
         overrides = state.get("config_overrides") or {}
         if not isinstance(overrides, dict):
             overrides = {}

@@ -157,12 +157,23 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         _dash_exchange = _DashboardExchange(exchange_name, api_key, api_secret, account_type=account_type)
 
     _all_engines = engines or {}
+    _instance_repos: dict[str, Repository] = {repo.instance_id: repo}
+
+    def _repo_for(request: Request) -> Repository:
+        """Return a Repository scoped to the ?instance= query param."""
+        requested = request.query_params.get("instance")
+        if not requested or requested == repo.instance_id:
+            return repo
+        if requested not in _instance_repos:
+            _instance_repos[requested] = Repository(repo.db, instance_id=requested)
+        return _instance_repos[requested]
 
     @router.get("/portfolio")
     @login_required
     async def get_portfolio(request: Request):
-        snapshot = await repo.get_latest_snapshot()
-        history = await repo.get_snapshot_history(hours=168)
+        r = _repo_for(request)
+        snapshot = await r.get_latest_snapshot()
+        history = await r.get_snapshot_history(hours=168)
         return {
             "current": snapshot,
             "history": history,
@@ -173,19 +184,22 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
     async def get_open_trades(request: Request):
         from src.config import Settings
         _cfg = Settings()
-        trades = await repo.get_open_trades(mode=_cfg.trading_mode)
+        r = _repo_for(request)
+        trades = await r.get_open_trades(mode=_cfg.trading_mode)
         return {"trades": trades}
 
     @router.get("/stats")
     @login_required
     async def get_stats(request: Request):
         mode = request.query_params.get("mode")
-        return await repo.get_trade_stats(mode=mode)
+        r = _repo_for(request)
+        return await r.get_trade_stats(mode=mode)
 
     @router.get("/signals/recent")
     @login_required
     async def get_recent_signals(request: Request):
-        signals = await repo.get_recent_signals(limit=20)
+        r = _repo_for(request)
+        signals = await r.get_recent_signals(limit=20)
         return {"signals": signals}
 
     @router.get("/unrealized-pnl")
@@ -195,7 +209,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         from src.config import Settings
         _cfg = Settings()
         try:
-            trades = await repo.get_open_trades(mode=_cfg.trading_mode)
+            trades = await _repo_for(request).get_open_trades(mode=_cfg.trading_mode)
         except Exception as e:
             logger.error("unrealized_pnl_db_failed", error=str(e))
             return {"positions": [], "total_unrealized": 0, "error": "DB error"}
@@ -865,7 +879,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 result["refiner_agent"] = {"enabled": False, "total_requests": 0}
 
             # Agent-tagged trade performance
-            closed_trades = await repo.get_trades(status="closed", per_page=500)
+            closed_trades = await _repo_for(request).get_trades(status="closed", per_page=500)
             agent_trades = [t for t in closed_trades if t.get("test_group") == "agent"]
             if agent_trades:
                 wins = sum(1 for t in agent_trades if (t.get("pnl_usd") or 0) > 0)
@@ -966,7 +980,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         page = int(request.query_params.get("page", 1))
         per_page = 25
         offset = (page - 1) * per_page
-        rows = await repo.get_closed_trades_with_signals(
+        rows = await _repo_for(request).get_closed_trades_with_signals(
             mode=_cfg.trading_mode, limit=per_page, offset=offset,
         )
 
@@ -1009,7 +1023,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         """Aggregated stats for analytics charts — computed in Python from closed trades."""
         from src.config import Settings
         _cfg = Settings()
-        rows = await repo.get_closed_trades_with_signals(
+        rows = await _repo_for(request).get_closed_trades_with_signals(
             mode=_cfg.trading_mode, limit=500, offset=0,
         )
 

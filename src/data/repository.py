@@ -17,10 +17,15 @@ def _exec(query):
 
 
 class Repository:
-    """All CRUD operations for trades, signals, snapshots, engine state."""
+    """All CRUD operations for trades, signals, snapshots, engine state.
 
-    def __init__(self, db: Database) -> None:
+    Every query is scoped to ``instance_id`` so multiple bot instances can
+    share the same Supabase database without interfering with each other.
+    """
+
+    def __init__(self, db: Database, instance_id: str = "main") -> None:
         self.db = db
+        self.instance_id = instance_id
 
     # --- Trades ---
 
@@ -40,10 +45,13 @@ class Repository:
         "agent2_confidence", "agent2_check_count",
         "last_agent3_action", "last_agent3_reasoning", "agent3_confidence",
         "last_agent3_sl",
+        "instance_id",
         "created_at", "updated_at",
     }
 
     async def insert_trade(self, trade: dict[str, Any]) -> dict:
+        # Tag with instance_id
+        trade["instance_id"] = self.instance_id
         # Only send columns that exist in the DB schema
         clean = {k: v for k, v in trade.items() if k in self._TRADE_COLUMNS}
         try:
@@ -184,7 +192,11 @@ class Repository:
         return result.data or []
 
     async def get_open_trades(self, mode: str | None = None) -> list[dict]:
-        query = self.db.table("trades").select("*").eq("status", "open")
+        query = (
+            self.db.table("trades").select("*")
+            .eq("status", "open")
+            .eq("instance_id", self.instance_id)
+        )
         if mode:
             query = query.eq("mode", mode)
         result = await asyncio.to_thread(_exec, query.order("entry_time", desc=True))
@@ -193,12 +205,7 @@ class Repository:
     async def get_recent_trades_for_symbol(
         self, symbol: str, limit: int = 5, mode: str | None = None
     ) -> list[dict]:
-        """Fetch recent closed trades for a specific symbol (for Agent 1 feedback loop).
-
-        Returns trades ordered by exit_time desc with fields useful for pattern recognition:
-        direction, entry_price, exit_price, pnl_usd, pnl_percent, exit_reason,
-        entry_time, exit_time, confluence_score.
-        """
+        """Fetch recent closed trades for a specific symbol (for Agent 1 feedback loop)."""
         select_fields = (
             "direction, entry_price, exit_price, pnl_usd, pnl_percent, "
             "exit_reason, entry_time, exit_time, confluence_score, stop_loss, take_profit"
@@ -209,6 +216,7 @@ class Repository:
                 .select(select_fields)
                 .eq("symbol", symbol)
                 .eq("status", "closed")
+                .eq("instance_id", self.instance_id)
                 .order("exit_time", desc=True)
                 .limit(limit)
             )
@@ -223,7 +231,7 @@ class Repository:
     async def get_trades(
         self, status: str = "all", mode: str | None = None, page: int = 1, per_page: int = 25
     ) -> list[dict]:
-        query = self.db.table("trades").select("*")
+        query = self.db.table("trades").select("*").eq("instance_id", self.instance_id)
         if status != "all":
             query = query.eq("status", status)
         if mode:
@@ -243,6 +251,7 @@ class Repository:
             self.db.table("trades")
             .select("pnl_usd")
             .eq("status", "closed")
+            .eq("instance_id", self.instance_id)
             .gte("exit_time", today)
         )
         if mode:
@@ -259,7 +268,11 @@ class Repository:
         """Sum partial_exits.pnl_usd created today for still-open trades."""
         try:
             # Get open trade IDs (optionally filtered by mode)
-            open_query = self.db.table("trades").select("id").eq("status", "open")
+            open_query = (
+                self.db.table("trades").select("id")
+                .eq("status", "open")
+                .eq("instance_id", self.instance_id)
+            )
             if mode:
                 open_query = open_query.eq("mode", mode)
             open_result = await asyncio.to_thread(_exec, open_query)
@@ -282,7 +295,11 @@ class Repository:
     async def get_open_trade_partial_pnl(self, mode: str | None = None) -> float:
         """Sum all partial_exits.pnl_usd for currently open trades."""
         try:
-            open_query = self.db.table("trades").select("id").eq("status", "open")
+            open_query = (
+                self.db.table("trades").select("id")
+                .eq("status", "open")
+                .eq("instance_id", self.instance_id)
+            )
             if mode:
                 open_query = open_query.eq("mode", mode)
             open_result = await asyncio.to_thread(_exec, open_query)
@@ -302,7 +319,11 @@ class Repository:
             return 0.0
 
     async def get_trade_stats(self, mode: str | None = None) -> dict:
-        query = self.db.table("trades").select("*").eq("status", "closed")
+        query = (
+            self.db.table("trades").select("*")
+            .eq("status", "closed")
+            .eq("instance_id", self.instance_id)
+        )
         if mode:
             query = query.eq("mode", mode)
         result = await asyncio.to_thread(_exec, query)
@@ -352,6 +373,7 @@ class Repository:
     # --- Signals ---
 
     async def insert_signal(self, signal: dict[str, Any]) -> dict:
+        signal["instance_id"] = self.instance_id
         try:
             result = await asyncio.to_thread(_exec, self.db.table("signals").insert(signal))
             return result.data[0] if result.data else {}
@@ -375,17 +397,14 @@ class Repository:
             return None
 
     async def get_signal_by_symbol_recent(self, symbol: str) -> dict | None:
-        """Fallback: fetch the most recent acted-on signal with agent_analysis for a symbol.
-
-        Only returns signals where acted_on=True to avoid showing SKIP analysis
-        from a later scan cycle that didn't produce the trade.
-        """
+        """Fallback: fetch the most recent acted-on signal with agent_analysis for a symbol."""
         try:
             result = await asyncio.to_thread(
                 _exec,
                 self.db.table("signals")
                 .select("components")
                 .eq("symbol", symbol)
+                .eq("instance_id", self.instance_id)
                 .eq("acted_on", True)
                 .not_.is_("components->agent_analysis", "null")
                 .order("created_at", desc=True)
@@ -399,6 +418,7 @@ class Repository:
                 self.db.table("signals")
                 .select("components")
                 .eq("symbol", symbol)
+                .eq("instance_id", self.instance_id)
                 .not_.is_("components->agent_analysis", "null")
                 .order("created_at", desc=True)
                 .limit(1),
@@ -409,17 +429,14 @@ class Repository:
             return None
 
     async def link_signal_to_trade(self, symbol: str, trade_id: str) -> None:
-        """Link the most recent unlinked signal for a symbol to a trade_id.
-
-        Called when the entry refiner opens a trade from a WAIT_PULLBACK signal,
-        so the dashboard can later display the agent analysis.
-        """
+        """Link the most recent unlinked signal for a symbol to a trade_id."""
         try:
             await asyncio.to_thread(
                 _exec,
                 self.db.table("signals")
                 .update({"trade_id": trade_id, "acted_on": True})
                 .eq("symbol", symbol)
+                .eq("instance_id", self.instance_id)
                 .is_("trade_id", "null")
                 .not_.is_("components->agent_analysis", "null")
                 .order("created_at", desc=True)
@@ -429,11 +446,7 @@ class Repository:
             logger.debug("link_signal_to_trade_failed", error=str(e), symbol=symbol)
 
     async def update_signal_components(self, symbol: str, trade_id: str, extra: dict) -> None:
-        """Merge extra data (e.g. refiner_journey) into an existing signal's components JSON.
-
-        Finds the signal linked to trade_id, reads its current components,
-        merges `extra` into it, and writes back.
-        """
+        """Merge extra data (e.g. refiner_journey) into an existing signal's components JSON."""
         try:
             result = await asyncio.to_thread(
                 _exec,
@@ -459,10 +472,7 @@ class Repository:
     async def get_closed_trades_with_signals(
         self, mode: str, limit: int = 50, offset: int = 0
     ) -> list[dict]:
-        """Fetch closed trades joined with their signal data for the analytics page.
-
-        Returns trades with embedded signal components (agent_analysis, refiner_journey, etc.).
-        """
+        """Fetch closed trades joined with their signal data for the analytics page."""
         try:
             # Fetch closed trades
             result = await asyncio.to_thread(
@@ -471,6 +481,7 @@ class Repository:
                 .select("*")
                 .eq("status", "closed")
                 .eq("mode", mode)
+                .eq("instance_id", self.instance_id)
                 .order("exit_time", desc=True)
                 .range(offset, offset + limit - 1),
             )
@@ -507,7 +518,11 @@ class Repository:
     async def get_recent_signals(self, limit: int = 10) -> list[dict]:
         result = await asyncio.to_thread(
             _exec,
-            self.db.table("signals").select("*").order("created_at", desc=True).limit(limit),
+            self.db.table("signals")
+            .select("*")
+            .eq("instance_id", self.instance_id)
+            .order("created_at", desc=True)
+            .limit(limit),
         )
         return result.data or []
 
@@ -517,6 +532,7 @@ class Repository:
             _exec,
             self.db.table("signals")
             .select("*")
+            .eq("instance_id", self.instance_id)
             .order("created_at", desc=True)
             .range(offset, offset + per_page - 1),
         )
@@ -525,6 +541,7 @@ class Repository:
     # --- Portfolio Snapshots ---
 
     async def insert_snapshot(self, snapshot: dict[str, Any]) -> dict:
+        snapshot["instance_id"] = self.instance_id
         result = await asyncio.to_thread(
             _exec, self.db.table("portfolio_snapshots").insert(snapshot)
         )
@@ -535,6 +552,7 @@ class Repository:
             _exec,
             self.db.table("portfolio_snapshots")
             .select("*")
+            .eq("instance_id", self.instance_id)
             .order("created_at", desc=True)
             .limit(1),
         )
@@ -545,51 +563,59 @@ class Repository:
             _exec,
             self.db.table("portfolio_snapshots")
             .select("*")
+            .eq("instance_id", self.instance_id)
             .order("created_at", desc=True)
             .limit(hours * 4),
         )
         return list(reversed(result.data or []))
 
-    # --- Engine State (singleton) ---
+    # --- Engine State (per-instance) ---
 
     async def get_engine_state(self) -> dict | None:
         result = await asyncio.to_thread(
-            _exec, self.db.table("engine_state").select("*").eq("id", 1)
+            _exec,
+            self.db.table("engine_state")
+            .select("*")
+            .eq("instance_id", self.instance_id),
         )
         return result.data[0] if result.data else None
 
     async def upsert_engine_state(self, state: dict[str, Any]) -> dict:
-        state["id"] = 1
+        state["instance_id"] = self.instance_id
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
         result = await asyncio.to_thread(
-            _exec, self.db.table("engine_state").upsert(state)
+            _exec, self.db.table("engine_state").upsert(state, on_conflict="instance_id")
         )
         return result.data[0] if result.data else {}
 
     async def reset_mode_data(self, mode: str) -> dict:
-        """Reset trades and snapshots for a specific mode (e.g. 'paper' or 'flipped_paper').
-
-        Returns summary of what was deleted.
-        """
+        """Reset trades and snapshots for a specific mode (e.g. 'paper' or 'flipped_paper')."""
         deleted = {"trades": 0, "snapshots": 0}
 
-        # Delete trades for this mode
+        # Delete trades for this mode and instance
         try:
             result = await asyncio.to_thread(
                 _exec,
-                self.db.table("trades").delete().eq("mode", mode).gte("created_at", "1970-01-01"),
+                self.db.table("trades")
+                .delete()
+                .eq("mode", mode)
+                .eq("instance_id", self.instance_id)
+                .gte("created_at", "1970-01-01"),
             )
             deleted["trades"] = len(result.data) if result.data else 0
             logger.info("reset_mode_trades", mode=mode, count=deleted["trades"])
         except Exception as e:
             logger.warning("reset_mode_trades_failed", mode=mode, error=str(e))
 
-        # Delete portfolio snapshots (shared — only clear if resetting main)
+        # Delete portfolio snapshots for this instance
         if mode not in ("flipped_paper", "custom_paper"):
             try:
                 result = await asyncio.to_thread(
                     _exec,
-                    self.db.table("portfolio_snapshots").delete().neq("id", 0),
+                    self.db.table("portfolio_snapshots")
+                    .delete()
+                    .eq("instance_id", self.instance_id)
+                    .neq("id", 0),
                 )
                 deleted["snapshots"] = len(result.data) if result.data else 0
                 logger.info("reset_mode_snapshots", mode=mode, count=deleted["snapshots"])
@@ -599,44 +625,198 @@ class Repository:
         return deleted
 
     async def wipe_all_data(self) -> None:
-        """Nuclear reset — delete ALL data from every table. Used by FORCE_RESET."""
-        # Tables with integer PK (use neq id 0)
-        int_pk_tables = ["engine_state", "portfolio_snapshots", "error_log"]
-        # Tables with UUID PK (use gte created_at)
-        uuid_pk_tables = ["signals", "partial_exits", "reversals", "trades"]
-        # Tables with composite PK
-        timestamp_tables = ["candle_cache"]
-
-        for table in int_pk_tables:
-            try:
-                await asyncio.to_thread(
-                    _exec, self.db.table(table).delete().neq("id", 0)
-                )
-                logger.info("wipe_table_ok", table=table)
-            except Exception as e:
-                logger.warning("wipe_table_failed", table=table, error=str(e))
-
-        for table in uuid_pk_tables:
+        """Nuclear reset — delete ALL data for THIS INSTANCE from every table."""
+        # Trades, signals, partial_exits for this instance
+        for table in ["signals", "trades"]:
             try:
                 await asyncio.to_thread(
                     _exec,
-                    self.db.table(table).delete().gte("created_at", "1970-01-01"),
+                    self.db.table(table)
+                    .delete()
+                    .eq("instance_id", self.instance_id)
+                    .gte("created_at", "1970-01-01"),
                 )
-                logger.info("wipe_table_ok", table=table)
+                logger.info("wipe_table_ok", table=table, instance_id=self.instance_id)
             except Exception as e:
                 logger.warning("wipe_table_failed", table=table, error=str(e))
 
-        for table in timestamp_tables:
-            try:
+        # Partial exits linked to this instance's trades
+        try:
+            open_result = await asyncio.to_thread(
+                _exec,
+                self.db.table("trades").select("id").eq("instance_id", self.instance_id),
+            )
+            trade_ids = [t["id"] for t in (open_result.data or [])]
+            if trade_ids:
                 await asyncio.to_thread(
                     _exec,
-                    self.db.table(table).delete().gte("timestamp", "1970-01-01"),
+                    self.db.table("partial_exits")
+                    .delete()
+                    .in_("trade_id", trade_ids)
+                    .gte("created_at", "1970-01-01"),
                 )
-                logger.info("wipe_table_ok", table=table)
-            except Exception as e:
-                logger.warning("wipe_table_failed", table=table, error=str(e))
+        except Exception:
+            pass
 
-        logger.info("wipe_all_data_complete")
+        # Engine state for this instance
+        try:
+            await asyncio.to_thread(
+                _exec,
+                self.db.table("engine_state")
+                .delete()
+                .eq("instance_id", self.instance_id),
+            )
+            logger.info("wipe_table_ok", table="engine_state", instance_id=self.instance_id)
+        except Exception as e:
+            logger.warning("wipe_table_failed", table="engine_state", error=str(e))
+
+        # Portfolio snapshots for this instance
+        try:
+            await asyncio.to_thread(
+                _exec,
+                self.db.table("portfolio_snapshots")
+                .delete()
+                .eq("instance_id", self.instance_id)
+                .neq("id", 0),
+            )
+            logger.info("wipe_table_ok", table="portfolio_snapshots", instance_id=self.instance_id)
+        except Exception as e:
+            logger.warning("wipe_table_failed", table="portfolio_snapshots", error=str(e))
+
+        # Candle cache is shared — don't wipe
+        logger.info("wipe_all_data_complete", instance_id=self.instance_id)
+
+    # --- Trade Lessons (shared across instances — self-improving feedback loop) ---
+
+    async def insert_lesson(self, lesson: dict[str, Any]) -> dict:
+        """Insert a new AI-generated trade lesson."""
+        try:
+            result = await asyncio.to_thread(
+                _exec, self.db.table("trade_lessons").insert(lesson)
+            )
+            return result.data[0] if result.data else {}
+        except Exception as e:
+            logger.warning("insert_lesson_failed", error=str(e))
+            return {}
+
+    async def get_recent_lessons(
+        self,
+        applies_to: str | None = None,
+        limit: int = 10,
+        min_severity: str | None = None,
+    ) -> list[dict]:
+        """Fetch recent lessons, optionally filtered by agent and severity."""
+        try:
+            query = (
+                self.db.table("trade_lessons")
+                .select("*")
+                .order("created_at", desc=True)
+                .limit(limit)
+            )
+            if applies_to:
+                query = query.contains("applies_to", [applies_to])
+            if min_severity == "high":
+                query = query.in_("severity", ["high", "critical"])
+            elif min_severity == "critical":
+                query = query.eq("severity", "critical")
+            result = await asyncio.to_thread(_exec, query)
+            return result.data or []
+        except Exception as e:
+            logger.warning("get_recent_lessons_failed", error=str(e))
+            return []
+
+    async def get_lessons_for_symbol(self, symbol: str, limit: int = 5) -> list[dict]:
+        """Fetch recent lessons for a specific symbol."""
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("trade_lessons")
+                .select("*")
+                .eq("symbol", symbol)
+                .order("created_at", desc=True)
+                .limit(limit),
+            )
+            return result.data or []
+        except Exception as e:
+            logger.warning("get_lessons_for_symbol_failed", symbol=symbol, error=str(e))
+            return []
+
+    async def increment_lesson_applied(self, lesson_id: str) -> None:
+        """Increment times_applied for a lesson (called when lesson is shown to an agent)."""
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("trade_lessons").select("times_applied").eq("id", lesson_id),
+            )
+            if result.data:
+                current = result.data[0].get("times_applied", 0) or 0
+                await asyncio.to_thread(
+                    _exec,
+                    self.db.table("trade_lessons")
+                    .update({"times_applied": current + 1})
+                    .eq("id", lesson_id),
+                )
+        except Exception:
+            pass  # Non-critical
+
+    async def mark_lesson_helped(self, lesson_id: str) -> None:
+        """Mark that a lesson contributed to a winning trade."""
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("trade_lessons")
+                .select("times_helped, times_applied")
+                .eq("id", lesson_id),
+            )
+            if result.data:
+                helped = (result.data[0].get("times_helped", 0) or 0) + 1
+                applied = result.data[0].get("times_applied", 0) or 1
+                effectiveness = helped / max(applied, 1)
+                await asyncio.to_thread(
+                    _exec,
+                    self.db.table("trade_lessons")
+                    .update({"times_helped": helped, "effectiveness": round(effectiveness, 3)})
+                    .eq("id", lesson_id),
+                )
+        except Exception:
+            pass  # Non-critical
+
+    async def get_lesson_stats(self) -> dict:
+        """Get summary stats for the lesson system."""
+        try:
+            result = await asyncio.to_thread(
+                _exec, self.db.table("trade_lessons").select("severity, outcome, lesson_type")
+            )
+            lessons = result.data or []
+            if not lessons:
+                return {"total": 0}
+            return {
+                "total": len(lessons),
+                "by_type": {t: sum(1 for l in lessons if l.get("lesson_type") == t)
+                            for t in set(l.get("lesson_type", "") for l in lessons)},
+                "by_outcome": {o: sum(1 for l in lessons if l.get("outcome") == o)
+                               for o in ("win", "loss")},
+                "by_severity": {s: sum(1 for l in lessons if l.get("severity") == s)
+                                for s in ("low", "medium", "high", "critical")},
+            }
+        except Exception as e:
+            logger.warning("get_lesson_stats_failed", error=str(e))
+            return {"total": 0}
+
+    # --- All Instances (for dashboard instance switcher) ---
+
+    async def get_all_instances(self) -> list[dict]:
+        """Fetch all known instance IDs and their current state."""
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("engine_state")
+                .select("instance_id, status, mode, current_balance, daily_pnl_usd, total_pnl_usd, updated_at")
+                .order("instance_id"),
+            )
+            return result.data or []
+        except Exception:
+            return []
 
     # --- Error Log ---
 
@@ -659,7 +839,7 @@ class Repository:
         except Exception as e:
             logger.error("failed_to_log_error", error=str(e))
 
-    # --- Candle Cache ---
+    # --- Candle Cache (shared across instances) ---
 
     async def get_cached_candles(
         self, symbol: str, timeframe: str, limit: int = 200

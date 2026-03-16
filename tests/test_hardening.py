@@ -706,11 +706,11 @@ class TestRollbackToggles:
             assert isinstance(val, bool), f"{toggle} must be bool, got {type(val)}"
 
     def test_schema_defaults_are_safe(self):
-        """Schema-level defaults for AI features should be disabled (opt-in)."""
-        # Check the class-level defaults, not env-contaminated values
-        assert Settings.model_fields["agent_enabled"].default is False
-        assert Settings.model_fields["refiner_agent_enabled"].default is False
-        assert Settings.model_fields["position_agent_enabled"].default is False
+        """Schema-level defaults for AI features should have safe values."""
+        # Agents are enabled by default but require API key to actually run
+        assert Settings.model_fields["agent_enabled"].default is True
+        assert Settings.model_fields["refiner_agent_enabled"].default is True
+        assert Settings.model_fields["position_agent_enabled"].default is True
 
 
 # ═══════════════════════════════════════════════════════════════════════

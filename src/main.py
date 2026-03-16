@@ -73,9 +73,9 @@ async def main() -> None:
 
     logger.info("tarakta_starting", mode=config.trading_mode, markets=list(config.markets.keys()))
 
-    # Database
+    # Database (scoped to this instance)
     db = Database(config.supabase_url, config.supabase_key)
-    repo = Repository(db)
+    repo = Repository(db, instance_id=config.instance_id)
 
     # Create engines for each enabled market
     engines: dict[str, TradingEngine] = {}
