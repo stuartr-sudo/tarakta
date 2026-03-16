@@ -136,7 +136,6 @@ class Settings(BaseSettings):
     agent_timeout_seconds: float = 60.0  # 60s timeout for large prompts
     agent_min_score: float = 35.0  # Minimum formula score to send to agent (sweep detected)
     agent_min_confidence: float = 50.0  # Agent must be >= this confident to approve
-    agent_fallback_approve: bool = False  # If API fails, SKIP trade (never enter blind)
     agent_split_ratio: float = 1.0  # 1.0 = ALL qualifying signals go through agent
 
     # Refiner Monitor Agent (Agent 2 — tactical entry timing on 5m candles)

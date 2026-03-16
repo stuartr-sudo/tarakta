@@ -279,7 +279,6 @@ class AgentEntryAnalyst:
         self._api_key = config.agent_api_key
         self._model = config.agent_model
         self._timeout = config.agent_timeout_seconds
-        self._fallback_approve = config.agent_fallback_approve
         self._min_confidence = config.agent_min_confidence
         self._max_sl_pct = config.max_sl_pct
         self._available = bool(config.agent_api_key)
@@ -366,10 +365,9 @@ class AgentEntryAnalyst:
             AgentDecision with action, confidence, and reasoning.
         """
         if not self._should_try():
-            action = "SETUP_CONFIRMED" if self._fallback_approve else "SKIP"
             return AgentDecision(
-                action=action,
-                reasoning="Agent API unavailable (backoff), using fallback",
+                action="SKIP",
+                reasoning="Agent API unavailable (backoff) — skipping trade (never enter blind)",
                 error="api_backoff",
             )
 
@@ -485,10 +483,9 @@ class AgentEntryAnalyst:
                 error=str(e),
                 latency_ms=round(latency_ms, 1),
             )
-            action = "SETUP_CONFIRMED" if self._fallback_approve else "SKIP"
             return AgentDecision(
-                action=action,
-                reasoning=f"Agent API error: {e}",
+                action="SKIP",
+                reasoning=f"Agent API error: {e} — skipping trade (never enter blind)",
                 latency_ms=latency_ms,
                 error=str(e),
             )
@@ -743,7 +740,15 @@ class AgentEntryAnalyst:
             history_lines = []
             wins = sum(1 for t in symbol_history if (t.get("pnl_usd") or 0) > 0)
             losses = len(symbol_history) - wins
-            history_lines.append(f"  Last {len(symbol_history)} trades: {wins}W / {losses}L")
+            total = len(symbol_history)
+            streak_type = ""
+            if losses == total and total >= 2:
+                streak_type = f" (current losing streak: {losses})"
+            elif wins == total and total >= 2:
+                streak_type = f" (current winning streak: {wins})"
+            history_lines.append(
+                f"  EXACTLY {total} closed trade(s) found: {wins}W / {losses}L{streak_type}"
+            )
             for t in symbol_history:
                 pnl = t.get("pnl_usd", 0) or 0
                 pnl_pct = t.get("pnl_percent", 0) or 0

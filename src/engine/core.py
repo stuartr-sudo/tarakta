@@ -540,14 +540,10 @@ class TradingEngine:
                 logger.info("runtime_settings_restored", keys=list(restore_kwargs.keys()))
 
         # Start hyper-watchlist monitor loop (checks every 2.5 min on 5m candles)
+        # NOTE: Watchlist is NOT restored across restarts — clean slate every time.
+        # Restored entries lose critical signal data (sweep_result, agent_context)
+        # and can graduate as hollow placeholders, leading to blind trades.
         if self.watchlist_monitor:
-            # Restore watchlist state from DB (crypto engine only — other engines
-            # share the same DB state and would incorrectly load crypto symbols)
-            if db_state and self._market_name == "crypto":
-                wl_overrides = (db_state.get("config_overrides") or {})
-                wl_data = wl_overrides.get("watchlist_monitor")
-                if wl_data:
-                    self.watchlist_monitor.restore_state(wl_data)
             self._watchlist_task = asyncio.create_task(self.watchlist_monitor.run_loop())
             self._background_tasks.add(self._watchlist_task)
             self._watchlist_task.add_done_callback(self._background_tasks.discard)
@@ -571,16 +567,8 @@ class TradingEngine:
             except Exception as e:
                 logger.warning("rag_backfill_failed", error=str(e)[:100])
 
-        # Restore consensus monitor state (main bot)
-        if self.consensus_monitor and db_state:
-            consensus_overrides = (db_state.get("config_overrides") or {})
-            consensus_data = consensus_overrides.get("consensus_monitor")
-            if consensus_data:
-                self.consensus_monitor.restore_state(consensus_data)
-                logger.info(
-                    "consensus_monitor_restored",
-                    queued=len(self.consensus_monitor.queue),
-                )
+        # NOTE: Consensus monitor is NOT restored across restarts — clean slate.
+        # Same reasoning as watchlist: restored entries use hollow placeholder signals.
 
         # Run an immediate scan on startup if scanning is active and no recent scan
         if self._scanning_active:
