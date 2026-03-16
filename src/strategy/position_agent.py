@@ -22,9 +22,10 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from google import genai
-
 from src.config import Settings
+from src.strategy.llm_client import (
+    LLMResult, generate_json, is_openai_model, MODEL_PRICING,
+)
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -185,14 +186,18 @@ class PositionManagerAgent:
     """
 
     def __init__(self, config: Settings) -> None:
-        self._client: genai.Client | None = None
-        self._api_key = config.agent_api_key
         self._model = getattr(config, "position_agent_model", "gemini-3-flash-preview")
         self._timeout = config.agent_timeout_seconds
-        self._available = bool(config.agent_api_key) and getattr(
+        self._thinking_level = "minimal"  # Agent 3: simple SL checks, fast
+
+        # Route API key based on model provider
+        if is_openai_model(self._model):
+            self._api_key = config.openai_api_key
+        else:
+            self._api_key = config.agent_api_key
+        self._available = bool(self._api_key) and getattr(
             config, "position_agent_enabled", False
         )
-        self._thinking_level = "minimal"  # Agent 3: simple SL checks, fast
 
         # Backoff state
         self._fail_count = 0
@@ -210,15 +215,7 @@ class PositionManagerAgent:
         self.total_cost_usd = 0.0
 
         # Pricing per 1M tokens (input, cached_input, output)
-        self._pricing: dict[str, tuple[float, float, float]] = {
-            "gemini-3-pro-preview": (1.25, 0.125, 10.00),
-            "gemini-3-flash-preview": (0.10, 0.01, 0.40),
-        }
-
-    def _get_client(self) -> genai.Client:
-        if self._client is None:
-            self._client = genai.Client(api_key=self._api_key)
-        return self._client.aio
+        self._pricing = MODEL_PRICING
 
     def _should_try(self) -> bool:
         if not self._available:
@@ -251,27 +248,23 @@ class PositionManagerAgent:
         t0 = time.time()
 
         try:
-            client = self._get_client()
-            from google.genai import types as _gentypes
-            response = await client.models.generate_content(
+            result = await generate_json(
                 model=self._model,
-                contents=prompt,
-                config=_gentypes.GenerateContentConfig(
-                    system_instruction=POSITION_SYSTEM_PROMPT + POSITION_JSON_FORMAT,
-                    thinking_config=_gentypes.ThinkingConfig(thinking_level=self._thinking_level),
-                    response_mime_type="application/json",
-                    response_json_schema=POSITION_RESPONSE_SCHEMA,
-                    temperature=1.0,
-                ),
+                api_key=self._api_key,
+                system_prompt=POSITION_SYSTEM_PROMPT + POSITION_JSON_FORMAT,
+                user_prompt=prompt,
+                json_schema=POSITION_RESPONSE_SCHEMA,
+                thinking_level=self._thinking_level,
+                temperature=1.0,
+                timeout=self._timeout,
             )
 
             latency_ms = (time.time() - t0) * 1000
             self.total_requests += 1
 
             # Track tokens + cost
-            usage = response.usage_metadata
-            in_tok = getattr(usage, "prompt_token_count", 0) or 0
-            out_tok = getattr(usage, "candidates_token_count", 0) or 0
+            in_tok = result.input_tokens
+            out_tok = result.output_tokens
             self.total_input_tokens += in_tok
             self.total_output_tokens += out_tok
 
@@ -279,7 +272,7 @@ class PositionManagerAgent:
             cost = (in_tok * pricing[0] + out_tok * pricing[2]) / 1_000_000
             self.total_cost_usd += cost
 
-            decision = self._parse_response(response)
+            decision = self._parse_response(result.text)
             decision.latency_ms = latency_ms
             decision.input_tokens = in_tok
             decision.output_tokens = out_tok
@@ -463,11 +456,10 @@ Evaluate this position and respond with your JSON decision. Default to HOLD unle
             lines.append("No market structure data available.")
         return "\n".join(lines)
 
-    def _parse_response(self, response) -> PositionDecision:
-        """Extract structured JSON from Gemini response."""
+    def _parse_response(self, text: str) -> PositionDecision:
+        """Extract structured JSON from LLM response text."""
         import json as _json
 
-        text = getattr(response, "text", None)
         if text:
             text = text.strip()
 
@@ -492,4 +484,4 @@ Evaluate this position and respond with your JSON decision. Default to HOLD unle
         return PositionDecision(action="HOLD", reasoning="Failed to parse response")
 
     async def close(self) -> None:
-        self._client = None
+        pass  # Clients cached in llm_client module

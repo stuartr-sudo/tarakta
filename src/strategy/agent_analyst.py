@@ -23,9 +23,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from google import genai
-
 from src.config import Settings
+from src.strategy.llm_client import (
+    LLMResult, generate_json, is_openai_model, MODEL_PRICING,
+)
 from src.exchange.models import SignalCandidate
 from src.utils.logging import get_logger
 
@@ -275,14 +276,18 @@ class AgentEntryAnalyst:
     """
 
     def __init__(self, config: Settings) -> None:
-        self._client: genai.Client | None = None
-        self._api_key = config.agent_api_key
         self._model = config.agent_model
         self._timeout = config.agent_timeout_seconds
         self._min_confidence = config.agent_min_confidence
         self._max_sl_pct = config.max_sl_pct
-        self._available = bool(config.agent_api_key)
         self._thinking_level = "high"  # Agent 1: strategic analysis needs deep thinking
+
+        # Route API key based on model provider
+        if is_openai_model(self._model):
+            self._api_key = config.openai_api_key
+        else:
+            self._api_key = config.agent_api_key
+        self._available = bool(self._api_key)
 
         # Backoff state (exponential backoff on API failures)
         self._fail_count = 0
@@ -299,10 +304,7 @@ class AgentEntryAnalyst:
         self.total_cost_usd = 0.0
 
         # Pricing per 1M tokens by model (input, cached_input, output)
-        self._pricing: dict[str, tuple[float, float, float]] = {
-            "gemini-3-pro-preview": (1.25, 0.125, 10.00),
-            "gemini-3-flash-preview": (0.10, 0.01, 0.40),
-        }
+        self._pricing = MODEL_PRICING
 
         # Available models for runtime switching
         self.available_models = list(self._pricing.keys())
@@ -315,11 +317,6 @@ class AgentEntryAnalyst:
         self._model = model
         logger.info("agent_model_switched", old_model=old, new_model=model)
         return self._model
-
-    def _get_client(self) -> genai.Client:
-        if self._client is None:
-            self._client = genai.Client(api_key=self._api_key)
-        return self._client.aio
 
     def _should_try(self) -> bool:
         if not self._available:
@@ -375,30 +372,26 @@ class AgentEntryAnalyst:
         start = time.monotonic()
 
         try:
-            client = self._get_client()
             system_prompt = (SYSTEM_PROMPT + JSON_FORMAT_INSTRUCTION).replace(
                 "{max_sl_pct}", str(round(self._max_sl_pct * 100, 1))
             )
-            from google.genai import types as _gentypes
-            response = await client.models.generate_content(
+            result = await generate_json(
                 model=self._model,
-                contents=user_prompt,
-                config=_gentypes.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    thinking_config=_gentypes.ThinkingConfig(thinking_level=self._thinking_level),
-                    response_mime_type="application/json",
-                    response_json_schema=AGENT1_RESPONSE_SCHEMA,
-                    temperature=1.0,
-                ),
+                api_key=self._api_key,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                json_schema=AGENT1_RESPONSE_SCHEMA,
+                thinking_level=self._thinking_level,
+                temperature=1.0,
+                timeout=self._timeout,
             )
 
             latency_ms = (time.monotonic() - start) * 1000
             self._record_success()
 
             # Track token usage & cost
-            usage = response.usage_metadata
-            input_tokens = getattr(usage, "prompt_token_count", 0) or 0
-            output_tokens = getattr(usage, "candidates_token_count", 0) or 0
+            input_tokens = result.input_tokens
+            output_tokens = result.output_tokens
             self.total_input_tokens += input_tokens
             self.total_output_tokens += output_tokens
             self.total_requests += 1
@@ -413,7 +406,7 @@ class AgentEntryAnalyst:
             )
             self.total_cost_usd += call_cost
 
-            decision = self._parse_response(response)
+            decision = self._parse_response(result.text)
             decision.latency_ms = latency_ms
             decision.input_tokens = input_tokens
             decision.output_tokens = output_tokens
@@ -921,11 +914,10 @@ Analyze this setup and respond with your JSON decision."""
             "Be objective: if the setup is exhausted or unclear, SKIP.\n"
         )
 
-    def _parse_response(self, response) -> AgentDecision:
-        """Extract structured JSON from Gemini response."""
+    def _parse_response(self, text: str) -> AgentDecision:
+        """Extract structured JSON from LLM response text."""
         import json as _json
 
-        text = getattr(response, "text", None)
         if text:
             text = text.strip()
         if text:
@@ -939,10 +931,7 @@ Analyze this setup and respond with your JSON decision."""
                 logger.warning("agent_json_parse_failed", error=str(e),
                                content_preview=text[:200])
 
-        logger.warning(
-            "agent_no_response",
-            finish_reason=getattr(response.candidates[0] if response.candidates else None, "finish_reason", "unknown"),
-        )
+        logger.warning("agent_no_response", text_preview=text[:100] if text else "empty")
         return AgentDecision(
             action="SKIP",
             reasoning="No parseable response from agent",
@@ -1137,4 +1126,4 @@ Analyze this setup and respond with your JSON decision."""
         }
 
     async def close(self) -> None:
-        self._client = None
+        pass  # Clients cached in llm_client module

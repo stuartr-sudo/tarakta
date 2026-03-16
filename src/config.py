@@ -133,29 +133,31 @@ class Settings(BaseSettings):
     # Hugging Face Inference API
     hf_api_token: str = ""  # For FinBERT sentiment + zero-shot classification
 
-    # AI Entry Agent (Gemini — two-agent architecture for entry decisions)
-    agent_enabled: bool = True  # Auto-enabled when AGENT_API_KEY is set
+    # AI Entry Agent (supports Gemini and OpenAI models)
+    # Set AGENT_MODEL to a Gemini model (gemini-3-pro-preview) → uses AGENT_API_KEY
+    # Set AGENT_MODEL to an OpenAI model (gpt-4o, gpt-4.1) → uses OPENAI_API_KEY
+    agent_enabled: bool = True  # Auto-enabled when API key is set
     agent_api_key: str = ""  # Gemini API key (set AGENT_API_KEY in .env)
-    agent_model: str = "gemini-3-pro-preview"  # Agent 1: pro for strategic analysis
+    agent_model: str = "gemini-3-pro-preview"  # Agent 1: pro/gpt-4o for strategic analysis
     agent_timeout_seconds: float = 60.0  # 60s timeout for large prompts
     agent_min_score: float = 35.0  # Minimum formula score to send to agent (sweep detected)
     agent_min_confidence: float = 50.0  # Agent must be >= this confident to approve
     agent_split_ratio: float = 1.0  # 1.0 = ALL qualifying signals go through agent
 
     # Refiner Monitor Agent (Agent 2 — tactical entry timing on 5m candles)
-    # Shares agent_api_key and agent_model with Agent 1
+    # Shares agent_model with Agent 1 (Gemini: auto-downgrades to flash)
     refiner_agent_enabled: bool = True
     refiner_agent_check_interval_minutes: float = 5.0  # Agent 2 runs every 5 min per signal
 
     # Position Manager Agent (Agent 3 — AI-powered position monitoring)
-    # Shares agent_api_key with Agent 1/2; runs every 5 min per open position
-    position_agent_enabled: bool = True  # Auto-enabled when AGENT_API_KEY is set
-    position_agent_model: str = "gemini-3-flash-preview"  # Flash for frequent 5-min checks
+    # Uses position_agent_model; auto-routes API key by model provider
+    position_agent_enabled: bool = True  # Auto-enabled when API key is set
+    position_agent_model: str = "gemini-3-flash-preview"  # Flash/gpt-4o-mini for frequent checks
     position_agent_check_interval_minutes: float = 5.0  # How often to check each position
 
     # RAG Knowledge Base — trade history retrieval for Agent 1 & 2
     rag_enabled: bool = False               # Master toggle for RAG trade knowledge
-    openai_api_key: str = ""                # For text-embedding-3-small (RAG embeddings)
+    openai_api_key: str = ""                # For OpenAI models + RAG embeddings
     rag_backfill_on_startup: bool = True    # Backfill recent trades into RAG on engine start
     rag_max_results: int = 5               # Max RAG results to include in agent prompts
 
