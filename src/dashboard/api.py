@@ -564,7 +564,6 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
 
             # Create fresh engine state
             state = {
-                "id": 1,
                 "mode": _cfg.trading_mode,
                 "status": "running",
                 "current_balance": _cfg.initial_balance,
@@ -922,6 +921,13 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 if not engine.position_agent:
                     return {"error": "Agent 3 not available (no API key or disabled)"}
                 engine.position_agent._model = model
+                # Switch API key to match the new provider
+                from src.strategy.llm_client import is_openai_model
+                engine.position_agent._api_key = (
+                    engine.position_agent._openai_api_key
+                    if is_openai_model(model)
+                    else engine.position_agent._gemini_api_key
+                )
                 active = model
                 db_field = "agent3_model"
             elif agent_key == "agent2":

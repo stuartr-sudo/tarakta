@@ -190,11 +190,10 @@ class PositionManagerAgent:
         self._timeout = config.agent_timeout_seconds
         self._thinking_level = "minimal"  # Agent 3: simple SL checks, fast
 
-        # Route API key based on model provider
-        if is_openai_model(self._model):
-            self._api_key = config.openai_api_key
-        else:
-            self._api_key = config.agent_api_key
+        # Store both API keys so runtime model switching works across providers
+        self._gemini_api_key = config.agent_api_key
+        self._openai_api_key = config.openai_api_key
+        self._api_key = self._openai_api_key if is_openai_model(self._model) else self._gemini_api_key
         self._available = bool(self._api_key) and getattr(
             config, "position_agent_enabled", False
         )

@@ -226,7 +226,8 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx["agent1_model"] = config.agent_model
         ctx["agent2_model"] = config.agent_model
         ctx["agent3_model"] = getattr(config, "position_agent_model", "gemini-3-flash-preview")
-        ctx["available_agent_models"] = ["gemini-3-pro-preview", "gemini-3-flash-preview"]
+        from src.strategy.llm_client import MODEL_PRICING
+        ctx["available_agent_models"] = sorted(MODEL_PRICING.keys())
         # Leverage & margin (same source as dashboard)
         main_settings = overrides.get("main_bot_settings", {}) or {}
         ctx["main_leverage"] = main_settings.get("leverage", config.leverage)

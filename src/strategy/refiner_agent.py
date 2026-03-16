@@ -364,11 +364,10 @@ class RefinerMonitorAgent:
         self._max_sl_pct = getattr(config, "max_sl_pct", 0.15)
         self._thinking_level = "low"  # Agent 2 refine: fast tactical decisions
 
-        # Route API key based on model provider
-        if is_openai_model(self._model):
-            self._api_key = config.openai_api_key
-        else:
-            self._api_key = config.agent_api_key
+        # Store both API keys so runtime model switching works across providers
+        self._gemini_api_key = config.agent_api_key
+        self._openai_api_key = config.openai_api_key
+        self._api_key = self._openai_api_key if is_openai_model(self._model) else self._gemini_api_key
         self._available = bool(self._api_key)
 
         # Backoff state (mirrors Agent 1)
@@ -398,6 +397,9 @@ class RefinerMonitorAgent:
             raise ValueError(f"Unknown model: {model}. Available: {self.available_models}")
         old = self._model
         self._model = model
+        # Switch API key to match the new provider
+        self._api_key = self._openai_api_key if is_openai_model(model) else self._gemini_api_key
+        self._available = bool(self._api_key)
         logger.info("refiner_agent_model_switched", old_model=old, new_model=model)
         return self._model
 
