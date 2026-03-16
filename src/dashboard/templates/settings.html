@@ -208,6 +208,59 @@
     </div>
 </div>
 
+<!-- Agent 3: Position Manager -->
+<div class="panel" style="border-left: 3px solid {{ '#22c55e' if position_agent_enabled else '#64748b' }};">
+    <div class="panel-header">
+        <h2>Agent 3 — Position Manager</h2>
+        <span class="status-badge {{ 'open' if position_agent_enabled else 'paper' }}">
+            {{ 'ON' if position_agent_enabled else 'OFF' }}
+        </span>
+    </div>
+    <div class="panel-body">
+        <p class="text-muted mode-description">
+            {% if position_agent_enabled %}
+            AI manages <strong>open positions</strong>: tightens stop-losses, closes partial/full positions
+            based on market structure changes, funding rates, and momentum shifts. Runs every {{ config.position_agent_check_interval_minutes }} min per position.
+            {% else %}
+            When enabled, a third AI agent monitors open positions and can tighten stop-losses,
+            take partial profits, or close positions early based on real-time market analysis.
+            {% endif %}
+        </p>
+        {% if not config.agent_api_key %}
+        <p class="text-muted" style="color: var(--orange);">
+            Set AGENT_API_KEY in environment to use AI agents.
+        </p>
+        {% elif role == 'admin' %}
+        <table class="config-table" style="margin-bottom:0.75rem;">
+            <tr>
+                <td style="width:100px;">Model</td>
+                <td>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <select id="agent3-model-select" style="font-size:0.8rem; padding:4px 8px; background:var(--bg-card); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; cursor:pointer;">
+                            {% for m in available_agent_models %}
+                            <option value="{{ m }}" {{ 'selected' if m == agent3_model else '' }}>{{ m }}</option>
+                            {% endfor %}
+                        </select>
+                        <span id="agent3-model-status" style="font-size:0.7rem; color:var(--text-muted);"></span>
+                    </div>
+                </td>
+            </tr>
+            <tr><td>Check Interval</td><td><strong>{{ config.position_agent_check_interval_minutes }} min</strong></td></tr>
+            <tr><td>Actions</td><td class="text-muted">HOLD · TIGHTEN_SL · CLOSE_PARTIAL · CLOSE_FULL</td></tr>
+        </table>
+        <form method="post" action="/settings/toggle-position-agent">
+            {% if position_agent_enabled %}
+            <button type="submit" class="btn primary">Disable Agent 3</button>
+            {% else %}
+            <button type="submit" class="btn danger">Enable Agent 3</button>
+            {% endif %}
+        </form>
+        {% else %}
+        <p class="text-muted">View-only access. Agent toggle requires admin login.</p>
+        {% endif %}
+    </div>
+</div>
+
 <!-- Risk & Trading Settings (editable for admin) -->
 {% if role == 'admin' %}
 <div class="panel" style="border-left: 3px solid #8b5cf6;">
@@ -462,6 +515,8 @@ const agent1Sel = document.getElementById('agent1-model-select');
 if (agent1Sel) agent1Sel.addEventListener('change', () => switchAgentModel('agent1', 'agent1-model-select'));
 const agent2Sel = document.getElementById('agent2-model-select');
 if (agent2Sel) agent2Sel.addEventListener('change', () => switchAgentModel('agent2', 'agent2-model-select'));
+const agent3Sel = document.getElementById('agent3-model-select');
+if (agent3Sel) agent3Sel.addEventListener('change', () => switchAgentModel('agent3', 'agent3-model-select'));
 </script>
 {% endif %}
 {% endblock %}

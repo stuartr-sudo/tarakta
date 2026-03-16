@@ -56,7 +56,11 @@ class PositionMonitor:
         market_filter=None,
         candle_manager=None,
     ) -> list[ExitSignal]:
-        """Check all open positions against current prices.
+        """Check all open positions against current prices (algorithmic SL/TP only).
+
+        IMPORTANT: Agent 3 is NOT called here. Call run_agent3_checks() separately
+        AFTER processing algorithmic exits, so that slow LLM calls never block
+        time-critical TP/SL execution.
 
         Args:
             positions: Map of symbol -> Position
@@ -68,7 +72,7 @@ class PositionMonitor:
         if atr_values is None:
             atr_values = {}
         exits: list[ExitSignal] = []
-        current_prices: dict[str, float] = {}  # Cache for Agent 3 reuse
+        current_prices: dict[str, float] = {}
 
         for symbol, pos in positions.items():
             try:
@@ -94,58 +98,78 @@ class PositionMonitor:
             if exit_signal:
                 exits.append(exit_signal)
 
-        # --- Agent 3 (Position Manager) — runs after algorithmic loop ---
-        if self._position_agent:
-            import time as _time
-            now_ts = _time.time()
-            exited_symbols = {e.symbol for e in exits}
+        # Cache prices for equity/drawdown calculation
+        self.last_prices = current_prices
+        return exits
 
-            for symbol, pos in positions.items():
-                # Skip if already exited by algorithmic logic
-                if symbol in exited_symbols:
-                    continue
-                # Skip if no price data
-                if symbol not in current_prices:
-                    continue
-                # Throttle: only check every N minutes per symbol
-                last_check = self._agent3_last_check.get(symbol, 0)
-                if now_ts - last_check < self._agent3_interval:
-                    continue
+    async def run_agent3_checks(
+        self, positions: dict[str, Position], exchange,
+        atr_values: dict[str, float] | None = None,
+        exited_symbols: set[str] | None = None,
+        market_filter=None,
+        candle_manager=None,
+    ) -> list[ExitSignal]:
+        """Run Agent 3 position management checks separately from algorithmic SL/TP.
 
-                self._agent3_last_check[symbol] = now_ts
+        Called AFTER algorithmic exits have been processed, so slow LLM calls
+        never delay time-critical TP/SL execution.
+        """
+        if not self._position_agent:
+            return []
+        if atr_values is None:
+            atr_values = {}
+        if exited_symbols is None:
+            exited_symbols = set()
 
-                # Req 7: per-symbol concurrency lock — prevent overlapping evaluations
-                if symbol not in self._agent3_locks:
-                    self._agent3_locks[symbol] = asyncio.Lock()
-                lock = self._agent3_locks[symbol]
-                if lock.locked():
-                    logger.debug("agent3_skipped_locked", symbol=symbol)
-                    continue
+        import time as _time
+        now_ts = _time.time()
+        current_prices = self.last_prices  # Reuse prices from check_positions
+        exits: list[ExitSignal] = []
 
-                try:
-                    async with lock:
-                        agent3_exit = await self._run_agent3(
+        for symbol, pos in positions.items():
+            if symbol in exited_symbols:
+                continue
+            if symbol not in current_prices:
+                continue
+            last_check = self._agent3_last_check.get(symbol, 0)
+            if now_ts - last_check < self._agent3_interval:
+                continue
+
+            self._agent3_last_check[symbol] = now_ts
+
+            if symbol not in self._agent3_locks:
+                self._agent3_locks[symbol] = asyncio.Lock()
+            lock = self._agent3_locks[symbol]
+            if lock.locked():
+                logger.debug("agent3_skipped_locked", symbol=symbol)
+                continue
+
+            try:
+                async with lock:
+                    agent3_exit = await asyncio.wait_for(
+                        self._run_agent3(
                             symbol, pos, current_prices[symbol],
                             atr_values.get(symbol, 0.0), market_filter,
                             exchange=exchange,
                             candle_manager=candle_manager,
-                        )
-                        if agent3_exit:
-                            # Req 8: shadow mode — log but don't act
-                            if self._agent3_shadow_mode:
-                                logger.info(
-                                    "agent3_shadow_mode_decision",
-                                    symbol=symbol,
-                                    reason=agent3_exit.reason,
-                                    price=agent3_exit.price,
-                                )
-                            else:
-                                exits.append(agent3_exit)
-                except Exception as e:
-                    logger.warning("agent3_check_failed", symbol=symbol, error=str(e))
+                        ),
+                        timeout=60,  # 60s max for LLM + data fetching
+                    )
+                    if agent3_exit:
+                        if self._agent3_shadow_mode:
+                            logger.info(
+                                "agent3_shadow_mode_decision",
+                                symbol=symbol,
+                                reason=agent3_exit.reason,
+                                price=agent3_exit.price,
+                            )
+                        else:
+                            exits.append(agent3_exit)
+            except asyncio.TimeoutError:
+                logger.warning("agent3_timeout", symbol=symbol, timeout=60)
+            except Exception as e:
+                logger.warning("agent3_check_failed", symbol=symbol, error=str(e))
 
-        # Cache prices for equity/drawdown calculation
-        self.last_prices = current_prices
         return exits
 
     async def _run_agent3(
@@ -272,7 +296,69 @@ class PositionMonitor:
         pos.last_agent3_reasoning = decision.reasoning
         pos.agent3_confidence = decision.confidence
 
+        # ══════════════════════════════════════════════════════════════
+        # HARD GUARDRAILS — these CANNOT be bypassed by the LLM
+        # ══════════════════════════════════════════════════════════════
+
+        is_close_action = decision.action in ("CLOSE_FULL", "CLOSE_PARTIAL")
+
+        # 1. Minimum confidence: CLOSE needs 70+, CLOSE_FULL needs 80+
+        min_conf = 80 if decision.action == "CLOSE_FULL" else 70
+        if is_close_action and decision.confidence < min_conf:
+            logger.info(
+                "agent3_blocked_low_confidence",
+                symbol=symbol, action=decision.action,
+                confidence=decision.confidence, min_required=min_conf,
+            )
+            decision.action = "HOLD"
+
+        # 2. Minimum hold time: no closes in the first 30 minutes
+        if is_close_action and held_minutes < 30:
+            logger.info(
+                "agent3_blocked_too_early",
+                symbol=symbol, action=decision.action,
+                held_minutes=f"{held_minutes:.0f}", min_required=30,
+            )
+            decision.action = "HOLD"
+
+        # 3. No closing at a loss — that's what the SL is for
+        if is_close_action and unrealized_rr < 0:
+            logger.info(
+                "agent3_blocked_negative_rr",
+                symbol=symbol, action=decision.action,
+                unrealized_rr=f"{unrealized_rr:.2f}",
+            )
+            decision.action = "HOLD"
+
+        # 4. Cooldown: no back-to-back closes — must wait 15 min after last close action
+        last_close_ts = getattr(pos, "_agent3_last_close_ts", 0)
+        import time as _time_guard
+        if is_close_action and (_time_guard.time() - last_close_ts) < 900:  # 15 min
+            logger.info(
+                "agent3_blocked_cooldown",
+                symbol=symbol, action=decision.action,
+                seconds_since_last=f"{_time_guard.time() - last_close_ts:.0f}",
+            )
+            decision.action = "HOLD"
+
+        # 5. CLOSE_FULL requires unrealized_rr < 0.3 OR 2+ TP tiers already filled
+        #    (i.e. only close-full if trade is barely profitable OR already won)
         if decision.action == "CLOSE_FULL":
+            tiers_filled = sum(1 for t in (pos.tp_tiers or []) if t.filled)
+            if unrealized_rr >= 0.3 and tiers_filled < 2:
+                # Trade is profitable and hasn't hit 2 TPs — let the algo handle it
+                logger.info(
+                    "agent3_blocked_profitable_trade",
+                    symbol=symbol, unrealized_rr=f"{unrealized_rr:.2f}",
+                    tiers_filled=tiers_filled,
+                    reasoning=decision.reasoning[:100],
+                )
+                decision.action = "HOLD"
+
+        # ══════════════════════════════════════════════════════════════
+
+        if decision.action == "CLOSE_FULL":
+            pos._agent3_last_close_ts = _time_guard.time()
             logger.info(
                 "agent3_close_full",
                 symbol=symbol,
@@ -284,6 +370,7 @@ class PositionMonitor:
             return ExitSignal(symbol=symbol, reason="agent3_closed", price=current_price)
 
         elif decision.action == "CLOSE_PARTIAL" and decision.partial_close_pct > 0:
+            pos._agent3_last_close_ts = _time_guard.time()
             partial_qty = pos.quantity * min(decision.partial_close_pct, 0.5)  # Cap at 50%
             logger.info(
                 "agent3_close_partial",

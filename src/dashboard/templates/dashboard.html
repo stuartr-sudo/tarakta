@@ -252,6 +252,12 @@
                                         <span class="tp-tier-price">{% if tier.price %}${{ "%.4f" | format(tier.price | float) }}{% else %}Trail{% endif %}</span>
                                         <span class="tp-tier-pct">({{ (tier.pct * 100) | int }}%)</span>
                                         {% if tier.filled %}<span class="tp-tier-check">✓</span>{% endif %}
+                                        {% if tier.filled and t.tier_pnl and tier.level|string in t.tier_pnl %}
+                                            {% set tp_pnl = t.tier_pnl[tier.level|string] | float %}
+                                            <span class="tp-tier-pnl {{ 'positive' if tp_pnl >= 0 else 'negative' }}" style="font-size:0.65rem; margin-left:4px;">
+                                                {{ '+' if tp_pnl >= 0 else '' }}${{ "%.2f" | format(tp_pnl) }}
+                                            </span>
+                                        {% endif %}
                                     </div>
                                     {% endfor %}
                                 </div>
@@ -758,6 +764,25 @@ function renderPnlData(data) {
                         tierRow.appendChild(check);
                     } else if (!isFilled && check) {
                         check.remove();
+                    }
+                    // Add/remove tier P&L
+                    let pnlSpan = tierRow.querySelector('.tp-tier-pnl');
+                    const tierPnl = pos.tier_pnl && pos.tier_pnl[String(tier.level)];
+                    if (isFilled && tierPnl !== undefined) {
+                        const pnlVal = parseFloat(tierPnl);
+                        const pnlCls = pnlVal >= 0 ? 'positive' : 'negative';
+                        const pnlText = (pnlVal >= 0 ? '+' : '') + '$' + pnlVal.toFixed(2);
+                        if (!pnlSpan) {
+                            pnlSpan = document.createElement('span');
+                            pnlSpan.className = 'tp-tier-pnl ' + pnlCls;
+                            pnlSpan.style.fontSize = '0.65rem';
+                            pnlSpan.style.marginLeft = '4px';
+                            tierRow.appendChild(pnlSpan);
+                        }
+                        pnlSpan.className = 'tp-tier-pnl ' + pnlCls;
+                        pnlSpan.textContent = pnlText;
+                    } else if (pnlSpan) {
+                        pnlSpan.remove();
                     }
                 });
             }

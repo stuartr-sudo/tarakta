@@ -60,9 +60,10 @@ class TradingEngine:
         self.risk_manager = RiskManager(config, exchange=exchange)
         self.circuit_breaker = CircuitBreaker(config)
         self.order_executor = OrderExecutor(exchange, self.risk_manager, config)
-        # Agent 3 (Position Manager) — instantiate if enabled
+        # Agent 3 (Position Manager) — always instantiate if API key exists
+        # Runtime toggle via settings page controls whether it's wired into the monitor
         self.position_agent = None
-        if getattr(config, "position_agent_enabled", False) and config.agent_api_key:
+        if config.agent_api_key:
             from src.strategy.position_agent import PositionManagerAgent
             self.position_agent = PositionManagerAgent(config)
 
@@ -2504,6 +2505,28 @@ class TradingEngine:
         if not has_main_positions:
             return
 
+        # Sync Agent 3 runtime toggle from DB (check every ~5 monitor ticks)
+        if self.position_agent and hasattr(self, "_agent3_sync_counter"):
+            self._agent3_sync_counter += 1
+        else:
+            self._agent3_sync_counter = 0
+        if self.position_agent and self._agent3_sync_counter % 5 == 0:
+            try:
+                db_state = await self.repo.get_engine_state() or {}
+                agent3_enabled = db_state.get(
+                    "position_agent_enabled",
+                    getattr(self.config, "position_agent_enabled", False),
+                )
+                current_agent = self.position_monitor._position_agent
+                if agent3_enabled and current_agent is None:
+                    self.position_monitor._position_agent = self.position_agent
+                    logger.info("position_agent_enabled_at_runtime")
+                elif not agent3_enabled and current_agent is not None:
+                    self.position_monitor._position_agent = None
+                    logger.info("position_agent_disabled_at_runtime")
+            except Exception:
+                pass
+
         # Liquidation proximity check for leveraged positions
         from src.exchange.models import ExitSignal
         liq_exits: list[ExitSignal] = []
@@ -2768,6 +2791,86 @@ class TradingEngine:
                     await self._post_win_reassessment(
                         exit_signal.symbol, position, pnl_pct,
                     )
+
+        # --- Agent 3 (Position Manager) — runs AFTER algorithmic exits are executed ---
+        # This ensures slow LLM calls never block time-critical TP/SL execution.
+        exited_symbols = {e.symbol for e in exits}
+        agent3_exits = await self.position_monitor.run_agent3_checks(
+            self.portfolio.open_positions, self.exchange,
+            atr_values=atr_values,
+            exited_symbols=exited_symbols,
+            market_filter=self.market_filter,
+            candle_manager=self.candle_manager,
+        )
+        for exit_signal in agent3_exits:
+            position = self.portfolio.open_positions.get(exit_signal.symbol)
+            if not position:
+                continue
+            if exit_signal.is_partial and exit_signal.partial_quantity > 0:
+                order_result, pnl = await self.order_executor.execute_partial_exit(
+                    symbol=exit_signal.symbol,
+                    position=position,
+                    reason=exit_signal.reason,
+                    current_price=exit_signal.price,
+                    quantity=exit_signal.partial_quantity,
+                    tier=exit_signal.tier,
+                )
+                if order_result:
+                    self.portfolio.record_partial_exit(
+                        symbol=exit_signal.symbol,
+                        exit_price=order_result.avg_price or exit_signal.price,
+                        quantity=order_result.filled_quantity or exit_signal.partial_quantity,
+                        fee=order_result.fee,
+                    )
+                    cost_basis = exit_signal.partial_quantity * position.entry_price
+                    pnl_pct = (pnl / cost_basis * 100) if cost_basis > 0 else 0
+                    await self.repo.log_partial_exit(
+                        trade_id=position.trade_id,
+                        tier=exit_signal.tier,
+                        exit_price=order_result.avg_price or exit_signal.price,
+                        exit_quantity=order_result.filled_quantity or exit_signal.partial_quantity,
+                        exit_order_id=order_result.order_id,
+                        exit_reason=exit_signal.reason,
+                        pnl_usd=round(pnl, 4),
+                        pnl_percent=round(pnl_pct, 2),
+                        fees_usd=order_result.fee,
+                        remaining_quantity=position.quantity,
+                        new_stop_loss=position.stop_loss,
+                    )
+            else:
+                order_result, pnl = await self.order_executor.execute_exit(
+                    symbol=exit_signal.symbol,
+                    position=position,
+                    reason=exit_signal.reason,
+                    current_price=exit_signal.price,
+                )
+                if order_result:
+                    total_pnl = pnl
+                    total_fees = order_result.fee
+                    if position.tp_tiers and position.current_tier > 0:
+                        try:
+                            partial_exits = await self.repo.get_partial_exits(position.trade_id)
+                            total_pnl += sum(float(pe.get("pnl_usd", 0)) for pe in partial_exits)
+                            total_fees += sum(float(pe.get("fees_usd", 0)) for pe in partial_exits)
+                        except Exception as e:
+                            logger.warning("partial_exit_sum_failed", error=str(e))
+                    orig_cost = (position.original_quantity * position.entry_price) if position.original_quantity else position.cost_usd
+                    pnl_pct = (total_pnl / orig_cost * 100) if orig_cost > 0 else 0
+                    await self.repo.close_trade(
+                        trade_id=position.trade_id,
+                        exit_price=order_result.avg_price or exit_signal.price,
+                        exit_quantity=order_result.filled_quantity or position.quantity,
+                        exit_order_id=order_result.order_id,
+                        exit_reason=exit_signal.reason,
+                        pnl_usd=round(total_pnl, 4),
+                        pnl_percent=round(pnl_pct, 2),
+                        fees_usd=round(total_fees, 4),
+                    )
+                    self.portfolio.record_exit(exit_signal.symbol, order_result.avg_price or exit_signal.price, order_result.fee)
+                    if exit_signal.reason in ("sl_hit", "stale_close"):
+                        self.risk_manager.record_stop_out(exit_signal.symbol)
+                    self.adaptive_threshold.record_outcome(is_win=(total_pnl > 0))
+                    self.state.open_positions.pop(exit_signal.symbol, None)
 
         # Persist SL changes and Agent 3 data for open positions
         for symbol, pos in self.portfolio.open_positions.items():

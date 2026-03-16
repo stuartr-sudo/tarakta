@@ -172,6 +172,10 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             "refiner_agent_enabled",
             getattr(config, "refiner_agent_enabled", False),
         )
+        ctx["position_agent_enabled"] = state.get(
+            "position_agent_enabled",
+            getattr(config, "position_agent_enabled", False),
+        )
         # Agent models always start at config default on restart (cost-safe)
         # Runtime changes via Settings are session-only
         overrides = state.get("config_overrides") or {}
@@ -179,6 +183,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             overrides = {}
         ctx["agent1_model"] = config.agent_model
         ctx["agent2_model"] = config.agent_model
+        ctx["agent3_model"] = getattr(config, "position_agent_model", "gemini-3-flash-preview")
         ctx["available_agent_models"] = ["gemini-3-pro-preview", "gemini-3-flash-preview"]
         # Leverage & margin (same source as dashboard)
         main_settings = overrides.get("main_bot_settings", {}) or {}
@@ -209,6 +214,21 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             await repo.upsert_engine_state(state)
         else:
             await repo.upsert_engine_state({"refiner_agent_enabled": True})
+        return RedirectResponse(url="/settings", status_code=303)
+
+    @router.post("/settings/toggle-position-agent")
+    @admin_required
+    async def toggle_position_agent(request: Request):
+        state = await repo.get_engine_state()
+        if state:
+            current = state.get(
+                "position_agent_enabled",
+                getattr(config, "position_agent_enabled", False),
+            )
+            state["position_agent_enabled"] = not current
+            await repo.upsert_engine_state(state)
+        else:
+            await repo.upsert_engine_state({"position_agent_enabled": True})
         return RedirectResponse(url="/settings", status_code=303)
 
     return router

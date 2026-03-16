@@ -256,6 +256,25 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             })
             total_unrealized += unrealized
 
+        # Fetch partial exit P&L per tier for all open trades
+        trade_ids = [p["trade_id"] for p in positions if p.get("trade_id")]
+        tier_pnl_map: dict[str, dict[int, float]] = {}  # trade_id → {tier → pnl}
+        if trade_ids:
+            try:
+                for tid in trade_ids:
+                    partial_exits = await repo.get_partial_exits(tid)
+                    if partial_exits:
+                        tier_pnl_map[tid] = {}
+                        for pe in partial_exits:
+                            tier = int(pe.get("tier", 0))
+                            pnl = float(pe.get("pnl_usd", 0))
+                            tier_pnl_map[tid][tier] = tier_pnl_map[tid].get(tier, 0) + pnl
+            except Exception as e:
+                logger.debug("tier_pnl_fetch_failed", error=str(e))
+
+        for pos in positions:
+            pos["tier_pnl"] = tier_pnl_map.get(pos.get("trade_id"), {})
+
         return {
             "positions": positions,
             "total_unrealized": round(total_unrealized, 4),
@@ -885,7 +904,13 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 return {"error": "engine not running"}
 
             # Switch the correct agent
-            if agent_key == "agent2":
+            if agent_key == "agent3":
+                if not engine.position_agent:
+                    return {"error": "Agent 3 not available (no API key or disabled)"}
+                engine.position_agent._model = model
+                active = model
+                db_field = "agent3_model"
+            elif agent_key == "agent2":
                 if not engine.refiner_agent:
                     return {"error": "Agent 2 not available (no API key)"}
                 active = engine.refiner_agent.set_model(model)

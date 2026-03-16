@@ -130,7 +130,7 @@ class Settings(BaseSettings):
     hf_api_token: str = ""  # For FinBERT sentiment + zero-shot classification
 
     # AI Entry Agent (Gemini — two-agent architecture for entry decisions)
-    agent_enabled: bool = False
+    agent_enabled: bool = True  # Auto-enabled when AGENT_API_KEY is set
     agent_api_key: str = ""  # Gemini API key (set AGENT_API_KEY in .env)
     agent_model: str = "gemini-3-pro-preview"  # Agent 1: pro for strategic analysis
     agent_timeout_seconds: float = 60.0  # 60s timeout for large prompts
@@ -145,7 +145,7 @@ class Settings(BaseSettings):
 
     # Position Manager Agent (Agent 3 — AI-powered position monitoring)
     # Shares agent_api_key with Agent 1/2; runs every 5 min per open position
-    position_agent_enabled: bool = False
+    position_agent_enabled: bool = True  # Auto-enabled when AGENT_API_KEY is set
     position_agent_model: str = "gemini-3-flash-preview"  # Flash for frequent 5-min checks
     position_agent_check_interval_minutes: float = 5.0  # How often to check each position
 
