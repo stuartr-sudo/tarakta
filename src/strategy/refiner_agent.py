@@ -75,10 +75,11 @@ verify that the latest 5m candle shows a rejection pattern (wick ratio > 1.0, en
 higher-low/lower-high, or volume spike) at the entry zone. If no rejection candle exists yet, \
 your answer is WAIT. "SETUP_CONFIRMED" from Agent 1 means "the setup passed strategic review" \
 — it does NOT mean you should rush to enter. Take your time finding optimal 5m confirmation.
-5. **Use Agent 1's levels and thesis as your reference.** Agent 1 provides the entry zone, \
-SL, TP, invalidation level, and structural thesis. Apply your OWN 5m expertise to decide \
-timing. If Agent 1's reasoning mentions structural levels, use those as reference points — \
-but decide timing yourself based on what the 5m candles show. \
+5. **Use Agent 1's levels as your STARTING reference — but the entry zone is yours to adjust.** \
+Agent 1 provides the initial entry zone, SL, TP, invalidation level, and structural thesis. \
+The DIRECTION and THESIS are locked. But the ENTRY ZONE is tactical — if 5m price action \
+or the Displacement Assessment shows Agent 1's zone is unreachable, you have full authority \
+to ADJUST_ZONE to a better level. Apply your OWN 5m expertise to decide timing and zone placement. \
 Default 5m confirmation: wick ratio > 1.0 at zone boundary, candle close in trade direction, RVOL > 1.0.
 6. **If you ABANDON**, it must be because of concrete evidence: 5m structural invalidation \
 (BOS against, candle body closed through invalidation), OR the Displacement Assessment shows \
@@ -866,7 +867,7 @@ class RefinerMonitorAgent:
 **Current Price:** {current_price:.6g}
 {action_hint}
 {setup_confirmed_hint}
-### Agent 1's Strategic Analysis (AUTHORITATIVE — do not override)
+### Agent 1's Strategic Analysis (direction & thesis are FINAL — entry zone is adjustable)
 {a1_section}
 
 ### Pre-Computed Levels (use these for your SL/TP)
