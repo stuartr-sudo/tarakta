@@ -288,6 +288,15 @@ class AgentEntryAnalyst:
         self._api_key = self._openai_api_key if is_openai_model(self._model) else self._gemini_api_key
         self._available = bool(self._api_key)
 
+        logger.info(
+            "agent1_init",
+            model=self._model,
+            is_openai=is_openai_model(self._model),
+            has_openai_key=bool(self._openai_api_key),
+            has_gemini_key=bool(self._gemini_api_key),
+            available=self._available,
+        )
+
         # Backoff state (exponential backoff on API failures)
         self._fail_count = 0
         self._backoff_until = 0.0
@@ -322,8 +331,11 @@ class AgentEntryAnalyst:
 
     def _should_try(self) -> bool:
         if not self._available:
+            logger.debug("agent1_unavailable", reason="no_api_key", model=self._model)
             return False
         if time.time() < self._backoff_until:
+            remaining = self._backoff_until - time.time()
+            logger.debug("agent1_in_backoff", remaining_s=round(remaining, 1), fail_count=self._fail_count)
             return False
         return True
 
@@ -364,10 +376,11 @@ class AgentEntryAnalyst:
             AgentDecision with action, confidence, and reasoning.
         """
         if not self._should_try():
+            reason = "no API key for model" if not self._available else "backoff from previous failure"
             return AgentDecision(
                 action="SKIP",
-                reasoning="Agent API unavailable (backoff) — skipping trade (never enter blind)",
-                error="api_backoff",
+                reasoning=f"Agent 1 unavailable ({reason}) — skipping trade (never enter blind)",
+                error="api_unavailable" if not self._available else "api_backoff",
             )
 
         user_prompt = self._build_prompt(signal, context)
