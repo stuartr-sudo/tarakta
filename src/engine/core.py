@@ -824,6 +824,20 @@ class TradingEngine:
                 # --- AI Agent Early Decision (runs BEFORE refiner so agent controls the flow) ---
                 agent_early_decision = None  # None = agent not active, let refiner decide
                 agent_analysis_data = None
+
+                # Skip Agent 1 entirely if this symbol is already queued for Agent 2.
+                # Agent 1's job is done once it says WAIT_PULLBACK — Agent 2 monitors from here.
+                # This prevents wasting GPT-5 calls (and timeouts) on repeat scanner detections.
+                if (
+                    self.main_entry_refiner
+                    and signal.symbol in self.main_entry_refiner.get_queued_symbols()
+                ):
+                    logger.info(
+                        "agent1_skipped_already_in_refiner",
+                        symbol=signal.symbol,
+                    )
+                    continue
+
                 if agent_runtime_enabled and self.agent_analyst:
                     # Pre-calculate SL/TP for agent context
                     pre_sl = self.order_executor._calculate_stop_loss(signal)
@@ -2053,6 +2067,17 @@ class TradingEngine:
                 continue
 
             # --- AI Agent gate for watchlist signals ---
+            # Skip Agent 1 if symbol is already queued for Agent 2
+            if (
+                self.main_entry_refiner
+                and graduated.symbol in self.main_entry_refiner.get_queued_symbols()
+            ):
+                logger.info(
+                    "watchlist_agent1_skipped_already_in_refiner",
+                    symbol=graduated.symbol,
+                )
+                continue
+
             agent_skip = False
             if self.config.agent_enabled and self.agent_analyst:
                 try:

@@ -346,14 +346,20 @@ class EntryRefiner:
                 if candles_5m is None or candles_5m.empty or len(candles_5m) < 10:
                     continue
 
-                # Phase gate: must_reach_price must be reached before zone entry is allowed
+                # Phase gate: must_reach_price tracking + algorithmic-only block.
+                # Always update the must_reach tracking so the flag flips when price arrives.
+                # When Agent 2 is active, do NOT block — Agent 2 is smart enough to
+                # observe the setup and decide to WAIT itself. Only block the algorithmic
+                # fallback path (no Agent 2).
                 if entry.pullback_plan and entry.pullback_plan.must_reach_price > 0:
                     last_close = float(candles_5m["close"].iloc[-1])
                     candle_high = float(candles_5m["high"].iloc[-1])
                     candle_low = float(candles_5m["low"].iloc[-1])
-                    # Check both close and wick extremes
                     check_price = candle_high if entry.pullback_plan.direction in ("bullish", "long", "swing_low") else candle_low
-                    if not entry.pullback_plan.pullback_allowed(check_price):
+                    # Update tracking (may flip must_reach_price_reached to True)
+                    entry.pullback_plan.pullback_allowed(check_price)
+                    # Only block if no Agent 2 — Agent 2 handles this gate itself
+                    if not self.refiner_agent and not entry.pullback_plan.must_reach_price_reached:
                         if entry.check_count % 5 == 0:
                             logger.debug(
                                 "refiner_waiting_must_reach_price",

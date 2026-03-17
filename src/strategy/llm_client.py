@@ -5,6 +5,7 @@ based on the model name. Client instances are cached per (provider, api_key).
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 from dataclasses import dataclass
 from typing import Any
@@ -74,7 +75,10 @@ def _get_gemini_client(api_key: str):
 def _get_openai_client(api_key: str):
     if api_key not in _openai_clients:
         from openai import AsyncOpenAI
-        _openai_clients[api_key] = AsyncOpenAI(api_key=api_key)
+        _openai_clients[api_key] = AsyncOpenAI(
+            api_key=api_key,
+            timeout=180.0,  # 3-min hard cap — GPT-5 can be slow with thinking
+        )
     return _openai_clients[api_key]
 
 
@@ -173,21 +177,26 @@ async def _call_openai(
     client = _get_openai_client(api_key)
     patched = _patch_schema_for_openai(json_schema)
 
-    response = await client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "response",
-                "strict": True,
-                "schema": patched,
+    # asyncio.wait_for enforces a HARD total-request timeout.
+    # The SDK's httpx timeout only limits time-between-bytes, which
+    # doesn't fire when GPT-5 sends keepalive bytes during thinking.
+    response = await asyncio.wait_for(
+        client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "response",
+                    "strict": True,
+                    "schema": patched,
+                },
             },
-        },
-        temperature=temperature,
+            temperature=temperature,
+        ),
         timeout=timeout,
     )
 

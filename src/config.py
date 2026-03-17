@@ -139,7 +139,7 @@ class Settings(BaseSettings):
     agent_enabled: bool = True  # Auto-enabled when API key is set
     agent_api_key: str = ""  # Gemini API key (set AGENT_API_KEY in .env)
     agent_model: str = "gemini-3-pro-preview"  # Agent 1: pro/gpt-4o for strategic analysis
-    agent_timeout_seconds: float = 60.0  # 60s timeout for large prompts
+    agent_timeout_seconds: float = 150.0  # GPT-5 with thinking takes 100-120s typically
     agent_min_score: float = 35.0  # Minimum formula score to send to agent (sweep detected)
     agent_min_confidence: float = 50.0  # Agent must be >= this confident to approve
     agent_split_ratio: float = 1.0  # 1.0 = ALL qualifying signals go through agent
