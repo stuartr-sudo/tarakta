@@ -889,7 +889,6 @@ class TradingEngine:
                             )
                             # No-lookahead: exclude trades closed < 5 min ago (Req 5)
                             if symbol_history:
-                                from datetime import timedelta
                                 cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
                                 symbol_history = [
                                     t for t in symbol_history
@@ -2102,7 +2101,6 @@ class TradingEngine:
                             )
                             # No-lookahead: exclude trades closed < 5 min ago (Req 5)
                             if wl_symbol_history:
-                                from datetime import timedelta
                                 cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
                                 wl_symbol_history = [
                                     t for t in wl_symbol_history
