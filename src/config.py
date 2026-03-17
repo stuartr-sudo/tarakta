@@ -156,7 +156,7 @@ class Settings(BaseSettings):
     position_agent_check_interval_minutes: float = 5.0  # How often to check each position
 
     # RAG Knowledge Base — trade history retrieval for Agent 1 & 2
-    rag_enabled: bool = False               # Master toggle for RAG trade knowledge
+    rag_enabled: bool = True                # RAG trade knowledge for Agent 1 & 2
     openai_api_key: str = ""                # For OpenAI models + RAG embeddings
     rag_backfill_on_startup: bool = True    # Backfill recent trades into RAG on engine start
     rag_max_results: int = 5               # Max RAG results to include in agent prompts
