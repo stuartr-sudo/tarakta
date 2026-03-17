@@ -18,6 +18,7 @@ from src.config import Settings
 from src.exchange.models import (
     OrderResult,
     Position,
+    PositionSize,
     ProgressiveFillResult,
     PullbackPlan,
     SignalCandidate,
@@ -221,6 +222,32 @@ class OrderExecutor:
                 ask_depth_usd=f"{ask_depth_usd:.0f}",
                 volume_24h=f"{quote_vol_24h:,.0f}",
             )
+
+            # ── Liquidity-scaled sizing: reduce position for less liquid tokens ──
+            if self.config.liquidity_scaling_enabled:
+                notional = pos_size.quantity * signal.entry_price
+                vol_scale = min(1.0, quote_vol_24h / self.config.liquidity_full_size_volume_usd)
+                depth_scale = min(1.0, relevant_depth / (notional * 2)) if notional > 0 else 1.0
+                liquidity_scale = max(self.config.liquidity_min_scale, min(vol_scale, depth_scale))
+                if liquidity_scale < 1.0:
+                    original_qty = pos_size.quantity
+                    pos_size = PositionSize(
+                        valid=True,
+                        quantity=pos_size.quantity * liquidity_scale,
+                        cost_usd=pos_size.cost_usd * liquidity_scale,
+                        risk_usd=pos_size.risk_usd * liquidity_scale,
+                        risk_pct=pos_size.risk_pct * liquidity_scale,
+                    )
+                    logger.info(
+                        "liquidity_scaled_position",
+                        symbol=signal.symbol,
+                        scale=f"{liquidity_scale:.2f}",
+                        vol_scale=f"{vol_scale:.2f}",
+                        depth_scale=f"{depth_scale:.2f}",
+                        original_qty=f"{original_qty:.6f}",
+                        adjusted_qty=f"{pos_size.quantity:.6f}",
+                        volume_24h=f"{quote_vol_24h:,.0f}",
+                    )
 
             # ── Hard zone gate for PullbackPlan entries ──
             plan = getattr(signal, "pullback_plan", None)

@@ -28,7 +28,7 @@ class MarketConfig(BaseModel):
 class Settings(BaseSettings):
     # Instance isolation — each deployed instance gets a unique ID
     # Set INSTANCE_ID env var to run multiple bots against the same Supabase
-    instance_id: str = "main"
+    instance_id: str = "expanded"
 
     # Exchange (Binance — legacy flat fields, still work for single-market crypto)
     exchange_name: str = "binance"
@@ -122,12 +122,17 @@ class Settings(BaseSettings):
     reversal_cooldown_minutes: int = 120   # Legacy, inactive
 
     # Scanning
-    scan_interval_minutes: int = 15  # Scan every 15 min to catch pullback entries
-    min_volume_usd: float = 20_000_000  # $20M min 24h volume — filters to top ~100 coins
-    quality_filter: bool = True  # Only scan established coins (QUALITY_BASES whitelist)
+    scan_interval_minutes: int = 5  # Scan every 5 min — faster discovery across expanded universe
+    min_volume_usd: float = 5_000_000  # $5M min 24h volume — include mid-cap tokens
+    quality_filter: bool = False  # Scan ALL Binance Futures pairs, not just whitelist
     max_position_volume_pct: float = 0.001  # Position size must be < 0.1% of 24h volume
     max_spread_pct: float = 0.002  # Max 0.2% bid-ask spread — skip illiquid pairs
-    min_ob_depth_usd: float = 1000.0  # Min $1,000 depth at best bid/ask — ensures exit liquidity
+    min_ob_depth_usd: float = 5000.0  # Min $5K depth at best bid/ask — raised for mid-cap safety
+
+    # Liquidity-scaled position sizing — reduce size for less liquid tokens
+    liquidity_scaling_enabled: bool = True
+    liquidity_full_size_volume_usd: float = 100_000_000  # Full size only at $100M+ 24h volume
+    liquidity_min_scale: float = 0.10  # Floor: never less than 10% of base position size
     quote_currencies: list[str] = Field(default_factory=lambda: ["USD", "USDT"])
 
     # Hugging Face Inference API
