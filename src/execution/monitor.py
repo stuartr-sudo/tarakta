@@ -94,9 +94,9 @@ class PositionMonitor:
                 continue
 
             atr = atr_values.get(symbol, 0.0)
-            exit_signal = self._evaluate_position(symbol, pos, current_price, atr, trading_hours)
-            if exit_signal:
-                exits.append(exit_signal)
+            exit_signals = self._evaluate_position(symbol, pos, current_price, atr, trading_hours)
+            if exit_signals:
+                exits.extend(exit_signals)
 
         # Cache prices for equity/drawdown calculation
         self.last_prices = current_prices
@@ -287,6 +287,11 @@ class PositionMonitor:
             "candles_5m": candles_5m,
             "candles_1h": candles_1h,
             "market_structure": market_structure,
+            # TP tier details for EXTEND_TP3 decisions
+            "tp_tiers": [
+                {"level": t.level, "price": t.price, "filled": t.filled}
+                for t in (pos.tp_tiers or [])
+            ],
         }
 
         decision = await self._position_agent.evaluate_position(context)
@@ -297,96 +302,64 @@ class PositionMonitor:
         pos.agent3_confidence = decision.confidence
 
         # ══════════════════════════════════════════════════════════════
-        # HARD GUARDRAILS — these CANNOT be bypassed by the LLM
+        # HARD GUARDRAILS — Agent 3 can ONLY tighten SL or extend TP3
         # ══════════════════════════════════════════════════════════════
 
-        is_close_action = decision.action in ("CLOSE_FULL", "CLOSE_PARTIAL")
-
-        # 1. Minimum confidence: CLOSE needs 70+, CLOSE_FULL needs 80+
-        min_conf = 80 if decision.action == "CLOSE_FULL" else 70
-        if is_close_action and decision.confidence < min_conf:
-            logger.info(
-                "agent3_blocked_low_confidence",
+        # Block any close attempts — Agent 3 CANNOT close trades
+        if decision.action in ("CLOSE_FULL", "CLOSE_PARTIAL"):
+            logger.warning(
+                "agent3_blocked_close_attempt",
                 symbol=symbol, action=decision.action,
-                confidence=decision.confidence, min_required=min_conf,
+                reasoning=decision.reasoning[:100],
             )
             decision.action = "HOLD"
 
-        # 2. Minimum hold time: no closes in the first 30 minutes
-        if is_close_action and held_minutes < 30:
-            logger.info(
-                "agent3_blocked_too_early",
-                symbol=symbol, action=decision.action,
-                held_minutes=f"{held_minutes:.0f}", min_required=30,
-            )
+        # Minimum confidence guardrails
+        if decision.action == "EXTEND_TP3" and decision.confidence < 60:
+            logger.info("agent3_blocked_low_confidence", symbol=symbol,
+                        action="EXTEND_TP3", confidence=decision.confidence, min_required=60)
+            decision.action = "HOLD"
+        elif decision.action == "TIGHTEN_SL" and decision.confidence < 50:
+            logger.info("agent3_blocked_low_confidence", symbol=symbol,
+                        action="TIGHTEN_SL", confidence=decision.confidence, min_required=50)
             decision.action = "HOLD"
 
-        # 3. No closing at a loss — that's what the SL is for
-        if is_close_action and unrealized_rr < 0:
-            logger.info(
-                "agent3_blocked_negative_rr",
-                symbol=symbol, action=decision.action,
-                unrealized_rr=f"{unrealized_rr:.2f}",
-            )
-            decision.action = "HOLD"
-
-        # 4. Cooldown: no back-to-back closes — must wait 15 min after last close action
-        last_close_ts = getattr(pos, "_agent3_last_close_ts", 0)
-        import time as _time_guard
-        if is_close_action and (_time_guard.time() - last_close_ts) < 900:  # 15 min
-            logger.info(
-                "agent3_blocked_cooldown",
-                symbol=symbol, action=decision.action,
-                seconds_since_last=f"{_time_guard.time() - last_close_ts:.0f}",
-            )
-            decision.action = "HOLD"
-
-        # 5. CLOSE_FULL requires unrealized_rr < 0.3 OR 2+ TP tiers already filled
-        #    (i.e. only close-full if trade is barely profitable OR already won)
-        if decision.action == "CLOSE_FULL":
+        # EXTEND_TP3 only after TP1 filled
+        if decision.action == "EXTEND_TP3":
             tiers_filled = sum(1 for t in (pos.tp_tiers or []) if t.filled)
-            if unrealized_rr >= 0.3 and tiers_filled < 2:
-                # Trade is profitable and hasn't hit 2 TPs — let the algo handle it
-                logger.info(
-                    "agent3_blocked_profitable_trade",
-                    symbol=symbol, unrealized_rr=f"{unrealized_rr:.2f}",
-                    tiers_filled=tiers_filled,
-                    reasoning=decision.reasoning[:100],
-                )
+            if tiers_filled < 1:
+                logger.info("agent3_blocked_extend_no_tp1", symbol=symbol)
                 decision.action = "HOLD"
 
         # ══════════════════════════════════════════════════════════════
 
-        if decision.action == "CLOSE_FULL":
-            pos._agent3_last_close_ts = _time_guard.time()
-            logger.info(
-                "agent3_close_full",
-                symbol=symbol,
-                direction=pos.direction,
-                unrealized_rr=f"{unrealized_rr:.2f}",
-                reasoning=decision.reasoning[:200],
-                confidence=decision.confidence,
-            )
-            return ExitSignal(symbol=symbol, reason="agent3_closed", price=current_price)
-
-        elif decision.action == "CLOSE_PARTIAL" and decision.partial_close_pct > 0:
-            pos._agent3_last_close_ts = _time_guard.time()
-            partial_qty = pos.quantity * min(decision.partial_close_pct, 0.5)  # Cap at 50%
-            logger.info(
-                "agent3_close_partial",
-                symbol=symbol,
-                partial_pct=f"{decision.partial_close_pct:.0%}",
-                partial_qty=partial_qty,
-                reasoning=decision.reasoning[:200],
-                confidence=decision.confidence,
-            )
-            return ExitSignal(
-                symbol=symbol,
-                reason="agent3_partial",
-                price=current_price,
-                is_partial=True,
-                partial_quantity=partial_qty,
-            )
+        if decision.action == "EXTEND_TP3" and getattr(decision, "suggested_tp", 0) > 0:
+            tier3 = next((t for t in (pos.tp_tiers or []) if t.level == 3 and not t.filled), None)
+            if tier3 and tier3.price:
+                if pos.direction == "long" and decision.suggested_tp > tier3.price:
+                    # Max extension: 2x original distance from entry
+                    original_dist = tier3.price - pos.entry_price
+                    max_tp3 = pos.entry_price + (original_dist * 2)
+                    new_tp3 = min(decision.suggested_tp, max_tp3)
+                    old_tp3 = tier3.price
+                    tier3.price = new_tp3
+                    pos._tp_extended = True
+                    logger.info("agent3_extend_tp3", symbol=symbol,
+                                old=old_tp3, new=new_tp3,
+                                reasoning=decision.reasoning[:200],
+                                confidence=decision.confidence)
+                elif pos.direction == "short" and decision.suggested_tp < tier3.price:
+                    original_dist = pos.entry_price - tier3.price
+                    min_tp3 = pos.entry_price - (original_dist * 2)
+                    new_tp3 = max(decision.suggested_tp, min_tp3)
+                    old_tp3 = tier3.price
+                    tier3.price = new_tp3
+                    pos._tp_extended = True
+                    logger.info("agent3_extend_tp3", symbol=symbol,
+                                old=old_tp3, new=new_tp3,
+                                reasoning=decision.reasoning[:200],
+                                confidence=decision.confidence)
+            return None  # No ExitSignal — target adjustment only
 
         elif decision.action == "TIGHTEN_SL" and decision.suggested_sl > 0:
             # Validate: can only tighten (move SL in profitable direction)
@@ -437,8 +410,8 @@ class PositionMonitor:
     def _evaluate_position(
         self, symbol: str, pos: Position, current_price: float, atr: float,
         trading_hours: TradingHours | None = None,
-    ) -> ExitSignal | None:
-        """Evaluate a single position for exit conditions."""
+    ) -> list[ExitSignal]:
+        """Evaluate a single position for exit conditions. Returns list of ExitSignals."""
         if pos.direction == "long":
             return self._evaluate_long(symbol, pos, current_price, atr, trading_hours)
         else:
@@ -447,7 +420,7 @@ class PositionMonitor:
     def _evaluate_long(
         self, symbol: str, pos: Position, current_price: float, atr: float,
         trading_hours: TradingHours | None = None,
-    ) -> ExitSignal | None:
+    ) -> list[ExitSignal]:
         # Update high water mark
         if current_price > pos.high_water_mark:
             pos.high_water_mark = current_price
@@ -462,10 +435,11 @@ class PositionMonitor:
                 reason = "sl_hit"
             logger.info(reason, symbol=symbol, direction="long",
                         price=current_price, sl=pos.stop_loss, original_sl=pos.original_stop_loss)
-            return ExitSignal(symbol=symbol, reason=reason, price=current_price)
+            return [ExitSignal(symbol=symbol, reason=reason, price=current_price)]
 
-        # 2. Progressive TP tiers (if enabled)
+        # 2. Progressive TP tiers (if enabled) — collect ALL hit tiers per cycle
         if pos.tp_tiers:
+            tp_exits = []
             for tier in pos.tp_tiers:
                 if tier.filled or tier.price is None:
                     continue
@@ -474,20 +448,22 @@ class PositionMonitor:
                         f"tp{tier.level}_hit", symbol=symbol, direction="long",
                         price=current_price, tp=tier.price, quantity=tier.quantity,
                     )
-                    return ExitSignal(
+                    tp_exits.append(ExitSignal(
                         symbol=symbol,
                         reason=f"tp{tier.level}_hit",
                         price=current_price,
                         is_partial=True,
                         partial_quantity=tier.quantity,
                         tier=tier.level,
-                    )
+                    ))
+            if tp_exits:
+                return tp_exits
             # All priced tiers checked; fall through to trailing stop
         elif pos.take_profit and current_price >= pos.take_profit:
             # Legacy single TP mode
             logger.info("tp_hit", symbol=symbol, direction="long",
                         price=current_price, tp=pos.take_profit)
-            return ExitSignal(symbol=symbol, reason="tp_hit", price=current_price)
+            return [ExitSignal(symbol=symbol, reason="tp_hit", price=current_price)]
 
         # 3. Early breakeven protection — move SL to entry once 0.5R in profit
         #    (only if SL hasn't already been moved above entry by TP1 hit)
@@ -526,7 +502,7 @@ class PositionMonitor:
                         unrealized_rr=f"{stale_rr:.2f}",
                         max_hold_hours=self.max_hold_hours,
                     )
-                    return ExitSignal(symbol=symbol, reason="stale_close", price=current_price)
+                    return [ExitSignal(symbol=symbol, reason="stale_close", price=current_price)]
 
         # 5. ATR-based trailing stop — use original SL distance for R:R calculation
         if sl_distance > 0:
@@ -551,15 +527,15 @@ class PositionMonitor:
                 if trailing_sl > pos.stop_loss:
                     pos.stop_loss = trailing_sl
                 if current_price <= trailing_sl:
-                    return ExitSignal(symbol=symbol, reason="trailing_stop",
-                                      price=current_price)
+                    return [ExitSignal(symbol=symbol, reason="trailing_stop",
+                                      price=current_price)]
 
-        return None
+        return []
 
     def _evaluate_short(
         self, symbol: str, pos: Position, current_price: float, atr: float,
         trading_hours: TradingHours | None = None,
-    ) -> ExitSignal | None:
+    ) -> list[ExitSignal]:
         # Update low water mark (for shorts, lower is better)
         if current_price < pos.high_water_mark:
             pos.high_water_mark = current_price
@@ -574,10 +550,11 @@ class PositionMonitor:
                 reason = "sl_hit"
             logger.info(reason, symbol=symbol, direction="short",
                         price=current_price, sl=pos.stop_loss, original_sl=pos.original_stop_loss)
-            return ExitSignal(symbol=symbol, reason=reason, price=current_price)
+            return [ExitSignal(symbol=symbol, reason=reason, price=current_price)]
 
-        # 2. Progressive TP tiers (if enabled)
+        # 2. Progressive TP tiers (if enabled) — collect ALL hit tiers per cycle
         if pos.tp_tiers:
+            tp_exits = []
             for tier in pos.tp_tiers:
                 if tier.filled or tier.price is None:
                     continue
@@ -586,19 +563,21 @@ class PositionMonitor:
                         f"tp{tier.level}_hit", symbol=symbol, direction="short",
                         price=current_price, tp=tier.price, quantity=tier.quantity,
                     )
-                    return ExitSignal(
+                    tp_exits.append(ExitSignal(
                         symbol=symbol,
                         reason=f"tp{tier.level}_hit",
                         price=current_price,
                         is_partial=True,
                         partial_quantity=tier.quantity,
                         tier=tier.level,
-                    )
+                    ))
+            if tp_exits:
+                return tp_exits
         elif pos.take_profit and current_price <= pos.take_profit:
             # Legacy single TP mode
             logger.info("tp_hit", symbol=symbol, direction="short",
                         price=current_price, tp=pos.take_profit)
-            return ExitSignal(symbol=symbol, reason="tp_hit", price=current_price)
+            return [ExitSignal(symbol=symbol, reason="tp_hit", price=current_price)]
 
         # 3. Early breakeven protection — move SL to entry once 0.5R in profit
         #    (only if SL hasn't already been moved below entry by TP1 hit)
@@ -637,7 +616,7 @@ class PositionMonitor:
                         unrealized_rr=f"{stale_rr:.2f}",
                         max_hold_hours=self.max_hold_hours,
                     )
-                    return ExitSignal(symbol=symbol, reason="stale_close", price=current_price)
+                    return [ExitSignal(symbol=symbol, reason="stale_close", price=current_price)]
 
         # 5. ATR-based trailing stop for shorts — use original SL distance for R:R calculation
         if sl_distance > 0:
@@ -661,7 +640,7 @@ class PositionMonitor:
                 if trailing_sl < pos.stop_loss:
                     pos.stop_loss = trailing_sl
                 if current_price >= trailing_sl:
-                    return ExitSignal(symbol=symbol, reason="trailing_stop",
-                                      price=current_price)
+                    return [ExitSignal(symbol=symbol, reason="trailing_stop",
+                                      price=current_price)]
 
-        return None
+        return []

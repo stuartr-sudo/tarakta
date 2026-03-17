@@ -35,9 +35,10 @@ logger = get_logger(__name__)
 class PositionDecision:
     """Result from Agent 3 — position management decision."""
 
-    action: str = "HOLD"  # HOLD, TIGHTEN_SL, CLOSE_PARTIAL, CLOSE_FULL
+    action: str = "HOLD"  # HOLD, TIGHTEN_SL, EXTEND_TP3
     suggested_sl: float = 0.0  # New SL for TIGHTEN_SL (must be tighter than current)
-    partial_close_pct: float = 0.0  # 0.0-1.0 for CLOSE_PARTIAL
+    suggested_tp: float = 0.0  # New TP3 price for EXTEND_TP3 (must extend, not tighten)
+    partial_close_pct: float = 0.0  # Deprecated — kept for backward compat, not used
     reasoning: str = ""
     confidence: float = 0.0  # 0-100
     latency_ms: float = 0.0
@@ -53,16 +54,16 @@ open positions and recommend management actions based on current market conditio
 ## Context
 The algorithmic system already handles:
 - Hard stop-loss execution (price hits SL → immediate exit)
-- Progressive take-profit tiers (0.70R / 0.95R / 1.5R partial closes)
+- Progressive take-profit tiers (TP1 at +2%, TP2 at +3%, TP3 at +4% from entry — partial closes of 33%/33%/34%)
 - ATR-based trailing stop activation (after 2R profit)
 - Breakeven stop (after 0.5R profit)
 - Stale position close (held too long without progress)
 
 Your role is to provide SUPPLEMENTARY intelligence that algorithms miss:
-- Detecting deteriorating market structure before SL is hit
-- Identifying momentum exhaustion or reversal signals
-- Recognizing when to lock in profit early due to macro changes
 - Spotting opportunities to tighten SL based on new structure
+- Identifying when momentum supports extending TP3 further to capture more profit
+
+**IMPORTANT: You CANNOT close trades. You can only adjust SL and extend TP3.**
 
 ## Your Decision Options
 
@@ -86,47 +87,41 @@ You see new structure that allows a tighter SL without premature exit.
 **Example:** LONG entered at 0.500, current SL at 0.480, new swing low formed at 0.492.
 TIGHTEN_SL to 0.490 (just below new swing low, still tighter/higher than current 0.480).
 
-### 3. CLOSE_PARTIAL — Close a percentage of the position
-Take some profit off the table while keeping exposure.
+### 3. EXTEND_TP3 — Move the final take-profit target further out
+When momentum is strong and structure supports continuation, extend TP3 to capture more profit \
+on the runner portion (the final 34% of the position).
 
-**Percentage guidance (system caps at 50% per action):**
-- 25%: Conservative — small amount off the table
-- 50%: Maximum allowed per single action — significant profit-taking
-Note: the system will cap any value above 50% down to 50%.
-
-**When to use:**
-- Approaching strong resistance/support with momentum fading
-- BTC making a sharp counter-move
-- Funding rate shifting against the position
-- Position has significant unrealized profit but TP tiers haven't triggered
-
-### 4. CLOSE_FULL — Exit the entire position
-The thesis is invalidated or risk/reward no longer justifies holding.
+**Constraints:**
+- Can only EXTEND (move TP3 further from entry, never closer)
+- For LONGS: new TP3 must be HIGHER than current TP3
+- For SHORTS: new TP3 must be LOWER than current TP3
+- Maximum extension: 2x the original TP3 distance from entry
+- Only available after TP1 has been filled (trade must already be winning)
 
 **When to use:**
-- Clear break of structure against position direction
-- BTC in freefall/parabolic against your direction
-- Fundamental catalyst changed (major news, exchange issues)
-- Position is marginally profitable but structure has broken down
+- BOS (break of structure) in the trade direction on 1H or 4H
+- Strong displacement with follow-through volume
+- No significant S/R levels between current TP3 and proposed new TP3
+- Trend on higher timeframes strongly supports the trade direction
+- Market structure shows clear continuation pattern (higher highs/lows for longs, lower highs/lows for shorts)
+
+**When NOT to use:**
+- Momentum is fading (decreasing volume, doji candles)
+- Strong S/R level sits between current TP3 and proposed extension
+- BTC is moving against the trade direction
+
+**Example:** SHORT entered at 1.000, TP3 at 0.960 (+4%). 1H shows BOS bearish with strong \
+displacement, 4H trend bearish. EXTEND_TP3 to 0.940 (extending the target to capture more \
+of the move). Max allowed would be 0.920 (2x the original 0.040 distance).
 
 ## Important Rules
 - **HOLD is the default.** You should HOLD in 80%+ of evaluations. Only recommend action when \
-  you see clear, specific, unambiguous evidence. A minor dip or single red candle is NOT evidence.
+  you see clear, specific, unambiguous evidence.
 - **Never widen SL.** You can only move it in the profitable direction.
-- **Never override hard SL/TP.** The algorithmic system handles execution.
-- **Be extremely conservative with CLOSE_FULL and CLOSE_PARTIAL.** These are irreversible. \
-  The algorithmic SL/TP system already handles exits — your job is to catch rare edge cases, \
-  not second-guess every price movement. If the trade hasn't hit its SL, the thesis may still be valid.
-- **TIGHTEN_SL is almost always better than CLOSE.** If you're worried about a position, \
-  tighten the stop-loss first rather than closing. This protects profit while letting the \
-  trade play out. Only use CLOSE when structure is clearly and definitively broken.
-- **TP tier progress matters.** If 2+ TP tiers are completed and less than 50% of the position \
-  remains, be more willing to CLOSE_FULL — the trade has already achieved its primary objective. \
-  Protecting remaining profit is more important than squeezing the last tier.
+- **Never override hard SL/TP.** The algorithmic system handles TP1/TP2 execution.
 - **Don't panic on short-term noise.** A 5-minute red candle does not invalidate a trade thesis. \
-  Look at the 1H structure and trend before recommending any close action.
-- **Confidence must match the action severity.** TIGHTEN_SL: 50+. CLOSE_PARTIAL: 65+. \
-  CLOSE_FULL: 75+. Below these thresholds, default to HOLD.
+  Look at the 1H structure and trend before recommending any action.
+- **Confidence must match the action.** TIGHTEN_SL: 50+. EXTEND_TP3: 60+. Below these, default to HOLD.
 
 ## Glossary
 - **SL** — Stop Loss: price where the trade exits at a loss
@@ -147,19 +142,18 @@ POSITION_JSON_FORMAT = """
 You MUST respond with a single JSON object and NOTHING else. No markdown, no explanation.
 
 {
-  "action": "HOLD" | "TIGHTEN_SL" | "CLOSE_PARTIAL" | "CLOSE_FULL",
+  "action": "HOLD" | "TIGHTEN_SL" | "EXTEND_TP3",
   "suggested_sl": <number or 0>,
-  "partial_close_pct": <number 0-1 or 0>,
+  "suggested_tp": <number or 0>,
   "reasoning": "<2-3 sentence analysis with specific prices>",
   "confidence": <number 0-100>
 }
 
 Rules:
-- For HOLD: suggested_sl=0, partial_close_pct=0
+- For HOLD: suggested_sl=0, suggested_tp=0
 - For TIGHTEN_SL: provide the new SL price in suggested_sl
-- For CLOSE_PARTIAL: provide the percentage as a decimal (0.25 = 25%) in partial_close_pct
-- For CLOSE_FULL: suggested_sl=0, partial_close_pct=0
-- confidence: how sure you are about your recommendation (50+ for action, below 50 = HOLD)
+- For EXTEND_TP3: provide the new TP3 price in suggested_tp (must be further from entry than current TP3)
+- confidence: how sure you are about your recommendation (50+ for TIGHTEN_SL, 60+ for EXTEND_TP3, below = HOLD)
 
 Respond with ONLY the JSON object. No other text."""
 
@@ -168,13 +162,13 @@ Respond with ONLY the JSON object. No other text."""
 POSITION_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
-        "action": {"type": "string", "enum": ["HOLD", "TIGHTEN_SL", "CLOSE_PARTIAL", "CLOSE_FULL"]},
+        "action": {"type": "string", "enum": ["HOLD", "TIGHTEN_SL", "EXTEND_TP3"]},
         "suggested_sl": {"type": "number"},
-        "partial_close_pct": {"type": "number"},
+        "suggested_tp": {"type": "number"},
         "reasoning": {"type": "string"},
         "confidence": {"type": "number"},
     },
-    "required": ["action", "suggested_sl", "partial_close_pct", "reasoning", "confidence"],
+    "required": ["action", "suggested_sl", "suggested_tp", "reasoning", "confidence"],
 }
 
 
@@ -297,10 +291,8 @@ class PositionManagerAgent:
             action = decision.action.upper()
             if action == "TIGHTEN_SL":
                 self.total_tighten += 1
-            elif action == "CLOSE_PARTIAL":
-                self.total_partial += 1
-            elif action == "CLOSE_FULL":
-                self.total_close += 1
+            elif action == "EXTEND_TP3":
+                self.total_extend = getattr(self, "total_extend", 0) + 1
             else:
                 self.total_hold += 1
 
@@ -388,9 +380,10 @@ class PositionManagerAgent:
 - Unrealized R: {unrealized_rr:+.2f}R
 - Time Held: {held_str}
 
-### Position Size
+### Position Size & TP Tiers
 - TP Tier: {current_tier} / 3 tiers completed
 - Remaining: {qty_pct:.0f}% of original ({remaining_qty:.6g} / {original_qty:.6g})
+{self._format_tp_tiers(ctx.get("tp_tiers", []))}
 
 ### Volatility
 - ATR (1H): {atr:.6g} ({atr_pct:.2f}% of price)
@@ -411,6 +404,19 @@ class PositionManagerAgent:
 {candles_1h_section}
 
 Evaluate this position and respond with your JSON decision. Default to HOLD unless you see clear evidence for action."""
+
+    @staticmethod
+    def _format_tp_tiers(tiers: list[dict]) -> str:
+        """Format TP tier info for the prompt."""
+        if not tiers:
+            return ""
+        lines = []
+        for t in tiers:
+            status = "FILLED" if t.get("filled") else "PENDING"
+            price = t.get("price")
+            price_str = f"{price:.6g}" if price else "trailing"
+            lines.append(f"- TP{t['level']}: {price_str} [{status}]")
+        return "\n".join(lines)
 
     @staticmethod
     def _format_candle_table(candles: list[dict], timeframe: str) -> str:
@@ -468,11 +474,12 @@ Evaluate this position and respond with your JSON decision. Default to HOLD unle
                     text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
                 data = _json.loads(text)
                 action = str(data.get("action", "HOLD")).upper()
-                if action not in ("HOLD", "TIGHTEN_SL", "CLOSE_PARTIAL", "CLOSE_FULL"):
+                if action not in ("HOLD", "TIGHTEN_SL", "EXTEND_TP3"):
                     action = "HOLD"
                 return PositionDecision(
                     action=action,
                     suggested_sl=float(data.get("suggested_sl", 0)),
+                    suggested_tp=float(data.get("suggested_tp", 0)),
                     partial_close_pct=float(data.get("partial_close_pct", 0)),
                     reasoning=str(data.get("reasoning", "")),
                     confidence=float(data.get("confidence", 0)),

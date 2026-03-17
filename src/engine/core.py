@@ -2897,6 +2897,22 @@ class TradingEngine:
                     update_fields["last_agent3_sl"] = pos.last_agent3_sl
                 pos._last_persisted_agent3 = pos.last_agent3_action
 
+            # Persist EXTEND_TP3 changes to the database
+            if getattr(pos, "_tp_extended", False) and pos.tp_tiers:
+                update_fields["tp_tiers"] = [
+                    {
+                        "level": t.level,
+                        "price": t.price,
+                        "pct": t.pct,
+                        "quantity": t.quantity,
+                        "filled": t.filled,
+                        "fill_price": t.fill_price,
+                        "fill_time": t.fill_time.isoformat() if t.fill_time else None,
+                    }
+                    for t in pos.tp_tiers
+                ]
+                pos._tp_extended = False
+
             if update_fields:
                 try:
                     await self.repo.update_trade(pos.trade_id, update_fields)

@@ -7,8 +7,6 @@ Agent 2 replaces the algorithmic rejection detection in the entry refiner.
 It runs every 5 minutes on queued signals and returns concrete parameters:
   - ENTER: exact entry_price, stop_loss, take_profit, position_size_modifier
   - WAIT: stay in queue, reasoning stored for continuity on next check
-  - ADJUST_ZONE: update zone boundaries based on new structure
-  - ABANDON: remove from queue, setup is invalidated
 
 Agent 2 has reasoning continuity — its previous analysis is included in each
 prompt so it can build on its own observations across checks.
@@ -35,16 +33,16 @@ logger = get_logger(__name__)
 class RefinerDecision:
     """Result from Agent 2 — tactical entry timing decision."""
 
-    action: str = "WAIT"  # ENTER, WAIT, ADJUST_ZONE, ABANDON
+    action: str = "WAIT"  # ENTER, WAIT
     entry_price: float = 0.0  # Exact price for ENTER
-    adjusted_zone_high: float = 0.0  # New zone top for ADJUST_ZONE
-    adjusted_zone_low: float = 0.0  # New zone bottom for ADJUST_ZONE
+    adjusted_zone_high: float = 0.0  # Deprecated — kept for backward compat
+    adjusted_zone_low: float = 0.0  # Deprecated — kept for backward compat
     stop_loss: float = 0.0  # Concrete SL price
     take_profit: float = 0.0  # Concrete TP price
     position_size_modifier: float = 1.0  # 0.25-1.5 scale factor
     reasoning: str = ""
     urgency: str = "low"  # low / medium / high
-    invalidation_reason: str = ""  # For ABANDON
+    invalidation_reason: str = ""  # Deprecated — kept for backward compat
     confidence: float = 0.0  # 0-100
     latency_ms: float = 0.0
     error: str | None = None
@@ -60,32 +58,21 @@ based on live 5-minute price action data.
 1. **Agent 1 is the strategic authority.** You MUST NOT question, override, or re-evaluate \
 Agent 1's thesis, direction, or trade rationale. The DIRECTION (LONG/SHORT) is FINAL. \
 You cannot flip it, second-guess it, or suggest a different direction.
-2. **Your ONLY job is timing.** Decide WHETHER to enter NOW, WAIT for better 5m confirmation, \
-ADJUST the entry zone, or ABANDON if structure is broken — but NEVER because you disagree \
-with the direction or thesis.
-3. **NEVER say ENTER unless price is INSIDE the entry zone.** Check "Price vs Zone" — if it \
-says "ABOVE zone" or "BELOW zone", you CANNOT enter. The entry zone is where we \
-want to get filled. If price hasn't pulled back into the zone yet, we are NOT entering. \
-Do NOT say ENTER just because price is "close to" the zone or "approaching" the zone. \
-INSIDE means between zone_bottom and zone_top. \
-**However, if price is far from the zone, you MUST check the "Displacement Assessment".** \
-If the zone requires >50% retracement and 5m candles show no momentum toward it, \
-you should ADJUST_ZONE or ABANDON — do NOT default to WAIT when the zone is clearly unreachable.
-4. **NEVER enter without 5m candle confirmation.** Even if price IS in the zone, you MUST \
-verify that the latest 5m candle shows a rejection pattern (wick ratio > 1.0, engulfing, \
-higher-low/lower-high, or volume spike) at the entry zone. If no rejection candle exists yet, \
-your answer is WAIT. "SETUP_CONFIRMED" from Agent 1 means "the setup passed strategic review" \
-— it does NOT mean you should rush to enter. Take your time finding optimal 5m confirmation.
-5. **Use Agent 1's levels as your STARTING reference — but the entry zone is yours to adjust.** \
-Agent 1 provides the initial entry zone, SL, TP, invalidation level, and structural thesis. \
-The DIRECTION and THESIS are locked. But the ENTRY ZONE is tactical — if 5m price action \
-or the Displacement Assessment shows Agent 1's zone is unreachable, you have full authority \
-to ADJUST_ZONE to a better level. Apply your OWN 5m expertise to decide timing and zone placement. \
-Default 5m confirmation: wick ratio > 1.0 at zone boundary, candle close in trade direction, RVOL > 1.0.
-6. **If you ABANDON**, it must be because of concrete evidence: 5m structural invalidation \
-(BOS against, candle body closed through invalidation), OR the Displacement Assessment shows \
-the zone is unreachable (>50% retracement required with no momentum after 3+ checks). \
-NEVER abandon because you disagree with Agent 1's thesis or direction.
+2. **Your ONLY job is finding the right moment to pull the trigger.** Decide WHETHER to \
+ENTER NOW or WAIT for better 5m confirmation — but NEVER because you disagree with the \
+direction or thesis.
+3. **Price zone is a GUIDE, not a hard gate for continuations.** If the original zone has \
+already been reached and a rejection occurred (even hours ago in older candles), the setup is \
+ALREADY WORKING. Price may have moved past the zone — that's a CONTINUATION, not a miss. \
+ENTER at current price for continuations.
+4. **Scan ALL candles for rejection evidence.** Check EVERY candle in the table, not just the \
+most recent one. A rejection that occurred 2-4 hours ago (in older candles) is STILL VALID. \
+Look for: wick into/past the zone with wick:body > 1.0, bearish/bullish engulfing at zone, \
+or volume spike with reversal at zone. If you find rejection evidence in ANY candle, the \
+rejection requirement IS MET.
+5. **Use Agent 1's levels as your STARTING reference.** Agent 1 provides the initial entry \
+zone, SL, TP, invalidation level, and structural thesis. The DIRECTION and THESIS are locked. \
+Apply your OWN 5m expertise to decide timing.
 
 ## Context
 Agent 1 (the strategic analyst) has already approved this trade setup, chosen the direction, \
@@ -105,46 +92,27 @@ For EVERY check, you must perform these concrete data checks:
 If the "Pending Order Plan" section shows a must_reach_price that is "NOT YET REACHED", \
 your answer is WAIT. Period. Do not evaluate the zone or candles.
 
-This gate exists because Agent 1 expects price to move to an extreme BEFORE pulling back. \
-If price hasn't reached that extreme yet, any zone contact is price PASSING THROUGH on the \
-way to the extreme — not a pullback. Entering now would put you in a losing position while \
-waiting for the actual pullback.
-
 Only proceed to Step 1 after must_reach_price shows "REACHED" or if no must_reach_price is set.
 
-### Step 1: Where is price relative to the entry zone?
-- Read current_price and compare to zone_top / zone_bottom
-- If INSIDE the zone → check HOW price got there:
-  - Look at the last 3-5 candles. Is price moving TOWARD the zone from the pullback side? \
-    (For longs: price dropping into zone from above = correct pullback. \
-     For shorts: price rising into zone from below = correct pullback.)
-  - Or is price moving THROUGH the zone from the opposite side? \
-    (For longs: price rising through zone from below = pass-through, NOT a pullback.)
-  - If passing through → WAIT (price hasn't peaked and pulled back yet)
-  - If pulling back into zone → proceed to Step 2
-- If ABOVE zone (for longs):
-  - For SETUP_CONFIRMED signals: this is expected. Focus on Step 2 candle confirmation.
-  - For WAIT_PULLBACK signals: setup may have run without us → check for ABANDON
-- If BELOW zone (for longs) → price hasn't arrived → check "Displacement Assessment" \
-to evaluate whether a retracement to the zone is realistic. If it isn't, ADJUST_ZONE or ABANDON
-- Reverse all logic for shorts
-- **CRITICAL — Displacement Assessment is MANDATORY when price is outside the zone:** \
-If the displacement data shows the zone requires a retracement of >50% of the total move, \
-you MUST act — this is NOT optional. Check the 5m candles: \
-  → If there is NO momentum toward the zone (flat candles, low RVOL, no retracement candles): \
-    **ADJUST_ZONE** to the nearest 5m structural level closer to current price. \
-  → If 3+ checks have passed with no progress toward the zone: **ABANDON** — the move played out. \
-  → Only WAIT if the 5m candles show active momentum TOWARD the zone (consecutive candles closing \
-    in the zone's direction with increasing volume).
+### Step 1: Has a rejection occurred at or near the entry zone?
+Scan ALL candles in the table (not just the latest) looking for rejection evidence:
+- A candle with a wick into/past the zone boundary with wick:body ratio > 1.0
+- A bearish engulfing (shorts) or bullish engulfing (longs) at or near the zone
+- A volume spike candle at the zone showing reversal
+- A sequence of candles forming higher-lows (longs) or lower-highs (shorts) at the zone
 
-### Step 2: What does the latest 5m candle show?
-Read the MOST RECENT candle from the candle table:
-- **For long entries:** Does the candle have a lower wick into/below the zone? \
-Is the close above the zone bottom? Is the body bullish (close > open)?
-- **For short entries:** Does the candle have an upper wick into/above the zone? \
-Is the close below the zone top? Is the body bearish (close < open)?
-- **Wick ratio:** Calculate (wick length) / (body size). Ratio > 1.0 = strong rejection
-- **Volume:** Compare the latest candle's volume to the previous 3-5 candles. Higher = confirmation
+**If rejection found in ANY candle (even hours ago):** Proceed to Step 2 — the rejection \
+requirement is MET. Note which candle showed the rejection.
+
+**If NO rejection found anywhere:** WAIT — price hasn't tested the zone yet.
+
+### Step 2: Is this a live rejection or a continuation?
+- **Live rejection (price is currently IN or near the zone):** Classic setup. Use current price \
+as entry_price. Standard confidence based on rejection quality.
+- **Continuation (rejection occurred in older candles, price has moved in the trade direction):** \
+The setup is ALREADY WORKING. Price has moved past the zone after rejecting — this confirms \
+the thesis. ENTER at current price with high confidence. This is the ideal scenario: \
+the market has already proven the thesis correct.
 
 ### Step 3: Do the structural levels confirm?
 - Is price at or near an ORDER BLOCK? (check the OB list for one within 0.2% of current price)
@@ -152,78 +120,37 @@ Is the close below the zone top? Is the body bearish (close < open)?
 - Does MARKET STRUCTURE support the direction? (check trend per timeframe)
 - Is there LIQUIDITY on the opposite side? (that's where TP targets live)
 
-### Step 4: Make your decision based on what the data shows
-- **All 3 steps confirm** → ENTER with high confidence (70-90)
-- **Steps 1-2 confirm but Step 3 is neutral** → ENTER with moderate confidence (50-70)
-- **Step 1 says price is in zone but Step 2 shows no rejection yet** → WAIT (candle still forming)
-- **Step 1 says price hasn't reached zone** → WAIT (price approaching)
-- **Structure is broken against the trade** → ABANDON
+### Step 4: Make your decision
+- **Rejection found + structure confirms** → ENTER with high confidence (70-90)
+- **Rejection found but structure neutral** → ENTER with moderate confidence (50-70)
+- **Continuation (past rejection + price moving in direction)** → ENTER with high confidence (75-90)
+- **No rejection found yet** → WAIT
+- **must_reach_price not reached** → WAIT
 
 ## Your Decision Options
 
 ### 1. ENTER — Execute the trade NOW
-You have confirmed on the 5m chart that price IS INSIDE the entry zone AND rejecting.
+You have confirmed rejection evidence in the candle data.
 
-**MANDATORY PRE-CHECK before saying ENTER:**
-- Read "Price vs Zone" — it MUST say "INSIDE zone". If it says ABOVE or BELOW → WAIT.
-- If distance from zone > 0% → WAIT. Do not round down. 0.01% above = ABOVE = WAIT.
-
-**Concrete ENTER criteria (ALL must be true):**
-- Price is INSIDE the zone (between zone_bottom and zone_top) — this is non-negotiable
-- Price wicked into the zone AND the candle closed back in the trade direction
-- The rejection candle has a wick-to-body ratio > 1.0 at the zone
-- OR: Price formed a higher-low (long) or lower-high (short) inside the zone over 2+ candles
-- OR: An engulfing candle formed at the zone boundary
-- Volume on the rejection candle is above average (compare to prior candles in the table)
+**Concrete ENTER criteria (at least ONE must be true):**
+- Price wicked into the zone AND a candle closed back in the trade direction (wick ratio > 1.0)
+- Price formed a higher-low (long) or lower-high (short) at/near the zone over 2+ candles
+- An engulfing candle formed at the zone boundary
+- **CONTINUATION:** Rejection occurred in an older candle and price has since moved in the \
+trade direction — the thesis is confirmed, ENTER at current price
 
 **You MUST provide:** entry_price, stop_loss, take_profit, position_size_modifier, confidence
-**entry_price MUST be inside the zone.** If current price is above zone_top, do NOT enter.
 
 ### 2. WAIT — Check again in 5 minutes
-The setup is still valid but the entry condition is NOT yet confirmed in the data.
+No rejection evidence found yet in any candle.
 
 **When to WAIT:**
-- Price has not reached the entry zone yet (check "Price vs Zone" section)
-- Price is in the zone but no rejection candle has formed (current candle is still undecided)
+- Price has not reached the entry zone yet
+- No rejection pattern visible in any candle in the table
+- must_reach_price has not been reached
 - BTC just made a sharp move — wait for the next candle to see if it stabilizes
-- Volume is below average — no institutional participation visible yet
 
-Note: the system automatically expires signals after their time window. You do not need to \
-track staleness — evaluate each check independently with fresh data.
-
-### 3. ADJUST_ZONE — Update zone boundaries
-New 5m price action has created a better reference point.
-
-**When to ADJUST:**
-- A new swing high/low has formed on 5m that shifts the optimal entry
-- The zone was wicked through but held — tighten the zone to the wick level
-- A new order block has printed that provides a better entry reference
-- **The displacement has already begun and the original zone is unreachable.** Check the \
-"Displacement Assessment" section: if the zone requires a retracement of >50% of the total \
-move AND price shows no momentum toward the zone (flat candles, low RVOL, no higher-lows \
-for shorts or lower-highs for longs), ADJUST the zone closer to current price using the \
-nearest 5m structural level (order block, FVG, or swing point) as the new reference. \
-Do NOT wait indefinitely for a retracement that the 5m data says is not coming.
-
-**You MUST provide:** adjusted_zone_high, adjusted_zone_low
-
-### 4. ABANDON — Remove from queue
-The setup is invalidated by the live data.
-
-**Concrete ABANDON criteria:**
-- A 5m candle CLOSED with its BODY beyond the zone (not just a wick)
-- Break of structure (BOS) against the trade direction: new lower-low (for longs) or higher-high (for shorts)
-- Multiple consecutive candles closing against the trade direction
-- BTC moved sharply against the trade (>1% in 5 minutes against the direction)
-- Agent 1's invalidation level has been breached (check "Agent 1's Strategic Analysis" — \
-  if current price has closed beyond the invalidation price, ABANDON)
-- **The move has already played out.** If the "Displacement Assessment" shows price has \
-moved >3% from the sweep level, the zone requires a retracement of >60% of the total move, \
-AND 3+ consecutive checks show no price progress toward the zone — the pullback entry is \
-dead. The move happened without us. ABANDON rather than waiting for a retracement that \
-statistically will not reach the original zone.
-
-**You MUST provide:** invalidation_reason
+Note: the system automatically expires signals after their time window.
 
 ## Setting Stop Loss & Take Profit
 
@@ -236,7 +163,7 @@ statistically will not reach the original zone.
 ### Take Profit:
 - Use Agent 1's TP from the "Pre-Computed Levels" section
 - Cross-reference with structural levels visible on 5m
-- The system uses progressive TP tiers (0.70R, 0.95R, 1.5R) automatically — your TP is the overall target
+- The system uses progressive TP tiers (TP1 +2%, TP2 +3%, TP3 +4%) automatically — your TP is the overall target
 
 ### Position Size Modifier:
 - 1.0 = standard size (most entries)
@@ -254,9 +181,6 @@ If order book data is provided, use it as additional confirmation:
 - **Bid imbalance (positive ratio):** More buyers than sellers — supports long entries
 - **Ask imbalance (negative ratio):** More sellers than buyers — supports short entries
 - **Wide spread (>0.05%):** Low liquidity — reduce position_size_modifier (use 0.5-0.75)
-- **Walls:** Large resting orders at specific prices. A bid wall below entry zone = extra support for \
-longs. An ask wall above zone = extra resistance for shorts. Walls in the wrong direction \
-(bid wall above for longs = likely to sell into your entry) are a warning sign.
 - If order book is unavailable, skip this analysis step entirely — do NOT penalize the signal.
 
 ## Reading 5-Minute Candles — Key Metrics
@@ -267,24 +191,16 @@ For each candle in the table, extract:
 - **Sequence:** Are the last 2-3 candles forming higher-lows (bullish) or lower-highs (bearish)?
 - **Body size relative to range:** Small body + long wicks = indecision. Large body = conviction
 
-## Glossary (standard terms used in the data context)
-
-- **SL** — Stop Loss: price where the trade exits at a loss
-- **TP** — Take Profit: price where the trade exits at a profit
-- **R:R** — Risk-to-Reward Ratio: TP distance / SL distance (e.g. 2:1 = TP is 2x SL distance)
-- **OB** — Order Block: institutional supply/demand zone (bullish OB = last down-candle before rally; bearish OB = last up-candle before drop)
-- **FVG** — Fair Value Gap: three-candle imbalance where candle 1 and candle 3 don't overlap — price tends to fill this gap
-- **BOS** — Break of Structure: swing high/low broken, confirming trend direction
-- **CHoCH** — Change of Character: first break against the trend, signaling potential reversal
-- **OTE** — Optimal Trade Entry: the 61.8%–78.6% Fibonacci retracement zone
-- **HTF** — Higher Timeframe (4H, Daily): trend/bias direction
-- **LTF** — Lower Timeframe (5m, 15m): your execution timeframe
-- **RVOL** — Relative Volume: current volume vs average (>1.5 = elevated, >2.5 = institutional)
-- **Displacement** — Large-bodied candle with above-average volume showing institutional order flow
+## Glossary
+- **SL** — Stop Loss  |  **TP** — Take Profit  |  **R:R** — Risk-to-Reward Ratio
+- **OB** — Order Block  |  **FVG** — Fair Value Gap  |  **BOS** — Break of Structure
+- **CHoCH** — Change of Character  |  **OTE** — Optimal Trade Entry (61.8-78.6% Fib)
+- **HTF** — Higher Timeframe (4H, Daily)  |  **LTF** — Lower Timeframe (5m, 15m)
+- **RVOL** — Relative Volume (>1.5 = elevated)  |  **ATR** — Average True Range
+- **Displacement** — Large-bodied candle with above-average volume
 - **Liquidity Sweep** — Price wicked through a key level to trigger stops, then reversed
-- **Wick Ratio** — Length of the rejection wick divided by candle body size (>1.0 = rejection signal, >2.0 = strong rejection)
-- **Pin Bar** — A candle with a small body and a long wick (2x+ body) showing rejection from a level
-- **Engulfing** — A candle whose body fully encompasses the previous candle's body, showing momentum shift"""
+- **Wick Ratio** — Rejection wick / body size (>1.0 = rejection, >2.0 = strong)
+- **Engulfing** — Candle body fully encompasses prior candle's body"""
 
 
 REFINER_JSON_FORMAT = """
@@ -295,30 +211,26 @@ You MUST respond with a single JSON object and NOTHING else. No markdown, no exp
 
 The JSON object must have exactly these keys:
 {
-  "action": "ENTER" | "WAIT" | "ADJUST_ZONE" | "ABANDON",
+  "action": "ENTER" | "WAIT",
   "entry_price": <number or 0>,
   "stop_loss": <number or 0>,
   "take_profit": <number or 0>,
-  "adjusted_zone_high": <number or 0>,
-  "adjusted_zone_low": <number or 0>,
   "position_size_modifier": <number 0.25-1.5>,
   "confidence": <number 0-100>,
   "urgency": "low" | "medium" | "high",
-  "reasoning": "<2-4 sentence tactical analysis>",
-  "invalidation_reason": "<string, empty if not ABANDON>"
+  "reasoning": "<2-4 sentence tactical analysis>"
 }
 
 Rules:
 - For ENTER: entry_price, stop_loss, take_profit MUST be non-zero. position_size_modifier between 0.25-1.5.
 - For WAIT: all price fields can be 0. Explain what specific data condition you are waiting for.
-- For ADJUST_ZONE: adjusted_zone_high and adjusted_zone_low MUST be non-zero. Other prices can be 0.
-- For ABANDON: invalidation_reason MUST be non-empty. All prices can be 0.
 - reasoning: ALWAYS provide 2-4 sentences that REFERENCE SPECIFIC DATA from the context:
   cite actual candle prices, wick ratios, volume numbers, OB/FVG levels. \
   Never say vague things like "waiting for confirmation" — say exactly WHAT you checked \
-  and WHAT the numbers showed. Example: "Latest 5m candle wicked to 0.01892 (inside zone \
-  0.01890-0.01910) with a 2.3x wick ratio and 145% RVOL, confirming bullish rejection."
-- confidence: 0-100, based on how many of the 3 analysis steps confirmed.
+  and WHAT the numbers showed. Example: "Candle at 23:15 wicked to 0.01892 (inside zone \
+  0.01890-0.01910) with a 2.3x wick ratio and 145% RVOL, confirming bullish rejection. \
+  Price has since moved to 0.01850 — this is a continuation, entering now."
+- confidence: 0-100, based on how many of the analysis steps confirmed.
 
 Respond with ONLY the JSON object. No other text."""
 
@@ -327,23 +239,19 @@ Respond with ONLY the JSON object. No other text."""
 REFINER_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
-        "action": {"type": "string", "enum": ["ENTER", "WAIT", "ADJUST_ZONE", "ABANDON"]},
+        "action": {"type": "string", "enum": ["ENTER", "WAIT"]},
         "entry_price": {"type": "number"},
         "stop_loss": {"type": "number"},
         "take_profit": {"type": "number"},
-        "adjusted_zone_high": {"type": "number"},
-        "adjusted_zone_low": {"type": "number"},
         "position_size_modifier": {"type": "number"},
         "confidence": {"type": "number"},
         "urgency": {"type": "string", "enum": ["low", "medium", "high"]},
         "reasoning": {"type": "string"},
-        "invalidation_reason": {"type": "string"},
     },
     "required": [
         "action", "entry_price", "stop_loss", "take_profit",
-        "adjusted_zone_high", "adjusted_zone_low",
         "position_size_modifier", "confidence", "urgency",
-        "reasoning", "invalidation_reason",
+        "reasoning",
     ],
 }
 
@@ -497,12 +405,8 @@ class RefinerMonitorAgent:
             # Track action counts
             if decision.action == "ENTER":
                 self.total_enter += 1
-            elif decision.action == "WAIT":
+            else:
                 self.total_wait += 1
-            elif decision.action == "ADJUST_ZONE":
-                self.total_adjust += 1
-            elif decision.action == "ABANDON":
-                self.total_abandon += 1
 
             logger.info(
                 "refiner_agent_decision",
@@ -849,9 +753,10 @@ class RefinerMonitorAgent:
         setup_confirmed_hint = ""
         if ctx.get("setup_confirmed_mode"):
             setup_confirmed_hint = (
-                "\n**SETUP_CONFIRMED:** Agent 1 has validated the setup. There is no rush — "
-                "wait for proper 5m candle confirmation (rejection pattern, wick ratio > 1.0, RVOL > 1.0) "
-                "at the entry zone. If the latest 5m candle shows no rejection → WAIT.\n"
+                "\n**SETUP_CONFIRMED:** Agent 1 has validated the setup. Scan ALL candles in the "
+                "table for rejection evidence at the entry zone. If a rejection occurred in ANY "
+                "candle (even hours ago) and price has moved in the trade direction, this is a "
+                "CONTINUATION — ENTER at current price.\n"
             )
 
         return f"""\
@@ -890,7 +795,7 @@ class RefinerMonitorAgent:
 {plan_section}### Pullback / Displacement Metrics
 {pullback_section}
 
-### Last 15 Five-Minute Candles (newest first)
+### Last 50 Five-Minute Candles (newest first)
 {candles_table}
 
 ### BTC Macro Context
@@ -990,22 +895,19 @@ Reference specific numbers from the data in your reasoning."""
     def _data_to_decision(self, data: dict) -> RefinerDecision:
         """Convert parsed dict to RefinerDecision."""
         action = data.get("action", "WAIT").upper()
-        # Normalize action
-        if action not in ("ENTER", "WAIT", "ADJUST_ZONE", "ABANDON"):
+        # Normalize action — only ENTER and WAIT are valid
+        if action not in ("ENTER", "WAIT"):
             action = "WAIT"
 
         return RefinerDecision(
             action=action,
             entry_price=float(data.get("entry_price", 0) or 0),
-            adjusted_zone_high=float(data.get("adjusted_zone_high", 0) or 0),
-            adjusted_zone_low=float(data.get("adjusted_zone_low", 0) or 0),
             stop_loss=float(data.get("stop_loss", 0) or 0),
             take_profit=float(data.get("take_profit", 0) or 0),
             position_size_modifier=float(data.get("position_size_modifier", 1.0) or 1.0),
             confidence=float(data.get("confidence", 0) or 0),
             urgency=str(data.get("urgency", "low") or "low"),
             reasoning=str(data.get("reasoning", "") or ""),
-            invalidation_reason=str(data.get("invalidation_reason", "") or ""),
         )
 
     def _validate_decision(
@@ -1130,42 +1032,9 @@ Reference specific numbers from the data in your reasoning."""
             # Clamp position_size_modifier
             decision.position_size_modifier = max(0.25, min(1.5, decision.position_size_modifier))
 
-        elif decision.action == "ADJUST_ZONE":
-            # Must have new zone boundaries
-            if decision.adjusted_zone_high <= 0 or decision.adjusted_zone_low <= 0:
-                logger.warning(
-                    "refiner_agent_adjust_no_zone",
-                    symbol=context.get("symbol", "?"),
-                )
-                decision.action = "WAIT"
-                decision.reasoning = f"ADJUST_ZONE downgraded to WAIT: no zone provided. {decision.reasoning}"
-                return decision
-
-            if decision.adjusted_zone_high <= decision.adjusted_zone_low:
-                logger.warning(
-                    "refiner_agent_adjust_inverted_zone",
-                    symbol=context.get("symbol", "?"),
-                )
-                decision.action = "WAIT"
-                decision.reasoning = f"ADJUST_ZONE downgraded to WAIT: inverted zone. {decision.reasoning}"
-                return decision
-
-            # Zone width sanity check (max 10% of price)
-            if current_price > 0:
-                zone_width = (decision.adjusted_zone_high - decision.adjusted_zone_low) / current_price
-                if zone_width > 0.10:
-                    logger.warning(
-                        "refiner_agent_adjust_zone_too_wide",
-                        symbol=context.get("symbol", "?"),
-                        width_pct=f"{zone_width:.2%}",
-                    )
-                    decision.action = "WAIT"
-                    decision.reasoning = f"ADJUST_ZONE downgraded to WAIT: zone too wide ({zone_width:.1%}). {decision.reasoning}"
-                    return decision
-
-        elif decision.action == "ABANDON":
-            if not decision.invalidation_reason:
-                decision.invalidation_reason = decision.reasoning or "No reason provided"
+        # Any non-ENTER action is treated as WAIT
+        elif decision.action != "WAIT":
+            decision.action = "WAIT"
 
         return decision
 
@@ -1180,13 +1049,10 @@ Reference specific numbers from the data in your reasoning."""
             "total_requests": self.total_requests,
             "total_enter": self.total_enter,
             "total_wait": self.total_wait,
-            "total_adjust": self.total_adjust,
-            "total_abandon": self.total_abandon,
+            "total_adjust": getattr(self, "total_adjust", 0),
+            "total_abandon": getattr(self, "total_abandon", 0),
             "enter_rate": round(
                 self.total_enter / self.total_requests * 100, 1
-            ) if self.total_requests > 0 else 0.0,
-            "abandon_rate": round(
-                self.total_abandon / self.total_requests * 100, 1
             ) if self.total_requests > 0 else 0.0,
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,

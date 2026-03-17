@@ -342,7 +342,7 @@ class EntryRefiner:
                         pass  # Non-critical — the pre-dispatch gate will catch it
 
                 # Fetch 5m candles and check for pullback
-                candles_5m = await self.candles.get_candles(symbol, "5m", limit=30)
+                candles_5m = await self.candles.get_candles(symbol, "5m", limit=60)
                 if candles_5m is None or candles_5m.empty or len(candles_5m) < 10:
                     continue
 
@@ -817,51 +817,22 @@ class EntryRefiner:
             )
             if shadow:
                 return None  # Shadow mode: log only, don't create signal
+
+            # HARD GATE BYPASS: Force the pullback_plan to accept Agent 2's chosen price.
+            # Needed for continuation setups where price has moved past the original zone.
+            if entry.pullback_plan:
+                entry.pullback_plan.zone_high = max(
+                    entry.pullback_plan.zone_high, decision.entry_price * 1.001
+                )
+                entry.pullback_plan.zone_low = min(
+                    entry.pullback_plan.zone_low, decision.entry_price * 0.999
+                )
+                entry.pullback_plan.limit_price = entry.pullback_plan.compute_limit_price()
+
             return self._create_refined_signal_from_agent(entry, decision)
 
-        elif decision.action == "ADJUST_ZONE":
-            logger.info(
-                "refiner_agent2_adjust_zone",
-                symbol=entry.symbol,
-                new_zone=f"{round(decision.adjusted_zone_low, 6)}-{round(decision.adjusted_zone_high, 6)}",
-                confidence=decision.confidence,
-                agent2_check=entry.agent2_check_count,
-                shadow=shadow,
-            )
-            if not shadow:
-                # Only adjust zone in live mode, not shadow
-                entry.ote_zone_top = decision.adjusted_zone_high
-                entry.ote_zone_bottom = decision.adjusted_zone_low
-                entry.zone_source = "agent2_adjusted"
-                # Sync PullbackPlan — update zone but do NOT reset expiry
-                if entry.pullback_plan is not None:
-                    entry.pullback_plan.zone_high = decision.adjusted_zone_high
-                    entry.pullback_plan.zone_low = decision.adjusted_zone_low
-                    entry.pullback_plan.limit_price = entry.pullback_plan.compute_limit_price()
-                    entry.pullback_plan.zone_updates += 1
-                    logger.info(
-                        "pullback_plan_zone_adjusted",
-                        symbol=entry.symbol,
-                        new_zone=entry.pullback_plan.zone_str(),
-                        new_limit=round(entry.pullback_plan.limit_price, 6),
-                        zone_updates=entry.pullback_plan.zone_updates,
-                        age_seconds=round(entry.pullback_plan.age_seconds, 1),
-                    )
-            return None
-
-        elif decision.action == "ABANDON":
-            entry._agent_abandoned = True
-            entry._agent_abandon_reason = decision.invalidation_reason
-            logger.info(
-                "refiner_agent2_abandon",
-                symbol=entry.symbol,
-                reason=decision.invalidation_reason[:200],
-                confidence=decision.confidence,
-                agent2_check=entry.agent2_check_count,
-            )
-            return None
-
-        else:  # WAIT
+        else:
+            # Treats WAIT or any other response as implicit wait
             if entry.agent2_check_count % 3 == 0:
                 logger.debug(
                     "refiner_agent2_wait",
@@ -903,7 +874,7 @@ class EntryRefiner:
 
         # Build compact candle table (last 15 candles, newest first)
         candle_rows = []
-        tail = candles_5m.tail(15).iloc[::-1]  # Reverse for newest first
+        tail = candles_5m.tail(50).iloc[::-1]  # Reverse for newest first
         for _, row in tail.iterrows():
             c_open = float(row["open"])
             c_high = float(row["high"])
