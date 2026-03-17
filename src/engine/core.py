@@ -1334,7 +1334,7 @@ class TradingEngine:
                         # If refiner queue is full, fall through to immediate entry
 
                 # --- Daily trade limit (Chill phase) ---
-                if self.state.daily_trade_count >= self.config.max_daily_trades:
+                if self.config.max_daily_trades > 0 and self.state.daily_trade_count >= self.config.max_daily_trades:
                     logger.info(
                         "daily_trade_limit_reached",
                         symbol=signal.symbol,
@@ -1858,7 +1858,7 @@ class TradingEngine:
                 continue
 
             # Daily trade limit
-            if self.state.daily_trade_count >= self.config.max_daily_trades:
+            if self.config.max_daily_trades > 0 and self.state.daily_trade_count >= self.config.max_daily_trades:
                 continue
 
             # Risk validation
@@ -2050,7 +2050,7 @@ class TradingEngine:
         for signal in ready_signals:
             if signal.symbol in self.portfolio.open_positions:
                 continue
-            if self.state.daily_trade_count >= self.config.max_daily_trades:
+            if self.config.max_daily_trades > 0 and self.state.daily_trade_count >= self.config.max_daily_trades:
                 continue
 
             try:
@@ -2157,7 +2157,7 @@ class TradingEngine:
                 continue
 
             # Daily trade limit check
-            if self.state.daily_trade_count >= self.config.max_daily_trades:
+            if self.config.max_daily_trades > 0 and self.state.daily_trade_count >= self.config.max_daily_trades:
                 logger.info("watchlist_signal_skipped_daily_limit")
                 continue
 

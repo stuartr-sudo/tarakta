@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     min_sl_pct: float = 0.02  # Minimum SL distance = 2% of entry price
     max_sl_pct: float = 0.05  # Maximum SL distance = 5% of entry (skip trades needing wider stops)
     cooldown_hours: float = 0.5  # 30 min cooldown after SL (was 2h — too restrictive)
-    max_daily_trades: int = 50  # High ceiling — agent + drawdown safety will self-regulate
+    max_daily_trades: int = 0  # 0 = unlimited — agent + drawdown safety will self-regulate
     min_trade_usd: float = 150.0  # Minimum margin per trade ($150 × leverage = min notional)
 
     # Progressive take-profit tiers (0.70R / 0.95R / 1.5R)
