@@ -89,10 +89,10 @@ BTC macro context, and your own previous analysis for reasoning continuity.
 For EVERY check, you must perform these concrete data checks:
 
 ### Step 0: Check the must_reach_price gate
-If the "Pending Order Plan" section shows a must_reach_price that is "NOT YET REACHED", \
-your answer is WAIT. Period. Do not evaluate the zone or candles.
-
-Only proceed to Step 1 after must_reach_price shows "REACHED" or if no must_reach_price is set.
+If a must_reach_price is set and shows "NOT YET REACHED", note it but still proceed to \
+Step 1 — the system applies a tolerance automatically. Focus on whether the displacement \
+move has clearly occurred (price moved significantly from the sweep level). If displacement \
+is evident in the candle data, treat the gate as satisfied and continue evaluation.
 
 ### Step 1: Has a rejection occurred at or near the entry zone?
 Scan ALL candles in the table (not just the latest) looking for rejection evidence:
@@ -360,13 +360,16 @@ class RefinerMonitorAgent:
             )
 
         user_prompt = self._build_prompt(context)
+        # Sanitize prompt: strip null bytes and control chars that break JSON serialization
+        user_prompt = user_prompt.replace("\x00", "")
+        system_prompt = REFINER_SYSTEM_PROMPT + REFINER_JSON_FORMAT
         start = time.monotonic()
 
         try:
             result = await generate_json(
                 model=self._model,
                 api_key=self._api_key,
-                system_prompt=REFINER_SYSTEM_PROMPT + REFINER_JSON_FORMAT,
+                system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 json_schema=REFINER_RESPONSE_SCHEMA,
                 thinking_level=self._thinking_level,
@@ -425,18 +428,69 @@ class RefinerMonitorAgent:
 
         except Exception as e:
             latency_ms = (time.monotonic() - start) * 1000
+            error_str = str(e)
+
+            # If OpenAI returns 400 (bad request), try Gemini as fallback
+            if (
+                is_openai_model(self._model)
+                and "400" in error_str
+                and self._gemini_api_key
+            ):
+                logger.warning(
+                    "refiner_agent_openai_400_fallback_to_gemini",
+                    symbol=context.get("symbol", "?"),
+                    error=error_str[:150],
+                )
+                try:
+                    fallback_model = "gemini-3-flash-preview"
+                    result = await generate_json(
+                        model=fallback_model,
+                        api_key=self._gemini_api_key,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        json_schema=REFINER_RESPONSE_SCHEMA,
+                        thinking_level=self._thinking_level,
+                        temperature=1.0,
+                        timeout=self._timeout,
+                    )
+                    latency_ms = (time.monotonic() - start) * 1000
+                    self._record_success()
+                    decision = self._parse_response(result.text)
+                    decision.latency_ms = latency_ms
+                    decision.input_tokens = result.input_tokens
+                    decision.output_tokens = result.output_tokens
+                    decision = self._validate_decision(decision, context)
+                    if decision.action == "ENTER":
+                        self.total_enter += 1
+                    else:
+                        self.total_wait += 1
+                    logger.info(
+                        "refiner_agent_decision_via_gemini_fallback",
+                        symbol=context.get("symbol", "?"),
+                        action=decision.action,
+                        confidence=decision.confidence,
+                        latency_ms=round(latency_ms, 1),
+                    )
+                    return decision
+                except Exception as fallback_e:
+                    logger.warning(
+                        "refiner_agent_gemini_fallback_also_failed",
+                        symbol=context.get("symbol", "?"),
+                        error=str(fallback_e)[:150],
+                    )
+
             self._record_failure()
             logger.warning(
                 "refiner_agent_failed",
                 symbol=context.get("symbol", "?"),
-                error=str(e),
+                error=error_str,
                 latency_ms=round(latency_ms, 1),
             )
             return RefinerDecision(
                 action="WAIT",
                 reasoning=f"Agent 2 API error: {e}",
                 latency_ms=latency_ms,
-                error=str(e),
+                error=error_str,
             )
 
     def _build_prompt(self, ctx: dict[str, Any]) -> str:
@@ -915,7 +969,7 @@ Reference specific numbers from the data in your reasoning."""
     ) -> RefinerDecision:
         """Validate and sanitize Agent 2's decision."""
         direction = context.get("direction", "")
-        is_long = direction.lower() in ("bullish", "long") if direction else False
+        is_long = direction.lower() in ("bullish", "long", "swing_low") if direction else False
         current_price = context.get("current_price", 0)
 
         if decision.action == "ENTER":

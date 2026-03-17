@@ -353,9 +353,13 @@ class EntryRefiner:
                 # fallback path (no Agent 2).
                 if entry.pullback_plan and entry.pullback_plan.must_reach_price > 0:
                     last_close = float(candles_5m["close"].iloc[-1])
-                    candle_high = float(candles_5m["high"].iloc[-1])
-                    candle_low = float(candles_5m["low"].iloc[-1])
-                    check_price = candle_high if entry.pullback_plan.direction in ("bullish", "long", "swing_low") else candle_low
+                    is_long_dir = entry.pullback_plan.direction in ("bullish", "long", "swing_low")
+                    # Check ALL candles' highs/lows — the displacement may have
+                    # already happened before the trade was queued
+                    if is_long_dir:
+                        check_price = float(candles_5m["high"].max())
+                    else:
+                        check_price = float(candles_5m["low"].min())
                     # Update tracking (may flip must_reach_price_reached to True)
                     entry.pullback_plan.pullback_allowed(check_price)
                     # Only block if no Agent 2 — Agent 2 handles this gate itself

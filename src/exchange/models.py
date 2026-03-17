@@ -320,22 +320,27 @@ class PullbackPlan:
         else:
             return price > self.invalidation_level
 
-    def check_must_reach_price(self, price: float) -> bool:
-        """Check if price has reached the must_reach_price gate.
+    def check_must_reach_price(self, price: float, tolerance_pct: float = 0.02) -> bool:
+        """Check if price has reached the must_reach_price gate (with tolerance).
 
         Returns True if the gate has been reached (or no gate set).
         Once reached, must_reach_price_reached is permanently set to True.
+
+        tolerance_pct: How close price needs to get (0.02 = within 2%).
+            Example: must_reach=100, tolerance=0.02 → longs pass at 98+.
         """
         if self.must_reach_price <= 0 or self.must_reach_price_reached:
             return True
         if self.direction in ("bullish", "long", "swing_low"):
-            # For longs: price must reach UP to must_reach_price
-            if price >= self.must_reach_price:
+            # For longs: price must reach within tolerance of must_reach_price
+            threshold = self.must_reach_price * (1 - tolerance_pct)
+            if price >= threshold:
                 self.must_reach_price_reached = True
                 return True
         else:
-            # For shorts: price must reach DOWN to must_reach_price
-            if price <= self.must_reach_price:
+            # For shorts: price must reach within tolerance of must_reach_price
+            threshold = self.must_reach_price * (1 + tolerance_pct)
+            if price <= threshold:
                 self.must_reach_price_reached = True
                 return True
         return False
