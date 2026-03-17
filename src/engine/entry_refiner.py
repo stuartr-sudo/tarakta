@@ -1050,6 +1050,8 @@ class EntryRefiner:
             "symbol_history": getattr(signal, "_symbol_history", []) or [],
             # RAG knowledge — similar past trades from knowledge base
             "rag_context": getattr(signal, "_rag_context", "") or "",
+            # Learned lessons from post-mortems
+            "lessons_context": getattr(signal, "_lessons_context", "") or "",
         }
 
     def _create_refined_signal_from_agent(

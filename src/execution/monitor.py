@@ -30,6 +30,7 @@ class PositionMonitor:
         stale_close_below_rr: float = 0.0,
         position_agent=None,
         position_agent_interval_minutes: float = 15.0,
+        repo=None,
     ) -> None:
         self.trailing_activation_rr = trailing_activation_rr
         self.trailing_atr_multiplier = trailing_atr_multiplier
@@ -40,6 +41,9 @@ class PositionMonitor:
         # Throttle repeated ticker errors: only log per symbol once per 5 min
         self._ticker_error_last_logged: dict[str, datetime] = {}
         self._ticker_error_throttle_seconds = 300
+
+        # Repository — for lesson retrieval in Agent 3
+        self._repo = repo
 
         # Agent 3 (Position Manager) — AI-powered position monitoring
         self._position_agent = position_agent
@@ -293,6 +297,18 @@ class PositionMonitor:
                 for t in (pos.tp_tiers or [])
             ],
         }
+
+        # Inject learned lessons for Agent 3
+        if self._repo:
+            try:
+                from src.strategy.lesson_generator import format_lessons_for_prompt
+                lessons_ctx = await format_lessons_for_prompt(
+                    self._repo, "agent3", symbol=symbol, max_lessons=5,
+                )
+                if lessons_ctx:
+                    context["lessons_context"] = lessons_ctx
+            except Exception:
+                pass
 
         decision = await self._position_agent.evaluate_position(context)
 

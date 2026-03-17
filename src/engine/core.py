@@ -32,6 +32,7 @@ from src.strategy.scanner import AltcoinScanner
 from src.strategy.sentiment import SentimentFilter
 from src.strategy.trade_analyzer import TradeAnalyzer
 from src.data.rag import TradeRAG
+from src.strategy.lesson_generator import TradeLessonGenerator, format_lessons_for_prompt
 from src.utils.logging import get_logger
 from src.utils.time_utils import is_new_day
 
@@ -77,6 +78,7 @@ class TradingEngine:
             position_agent_interval_minutes=getattr(
                 config, "position_agent_check_interval_minutes", 5.0
             ),
+            repo=repo,
         )
         # Req 8: wire shadow mode from config
         self.position_monitor._agent3_shadow_mode = getattr(
@@ -161,6 +163,12 @@ class TradingEngine:
             from src.data.db import Database as _DB
             self.trade_rag = TradeRAG(repo.db, config.openai_api_key)
             logger.info("rag_knowledge_base_ready")
+
+        # Trade Lesson Generator — AI post-mortem after every closed trade
+        self.lesson_generator: TradeLessonGenerator | None = None
+        if config.agent_api_key:
+            self.lesson_generator = TradeLessonGenerator(config, repo)
+            logger.info("lesson_generator_ready")
 
         # AI entry agent (Gemini — intelligent decision-maker)
         self.agent_analyst: AgentEntryAnalyst | None = None
@@ -918,6 +926,18 @@ class TradingEngine:
                     # Attach RAG context to signal so Agent 2 can also access it
                     signal._rag_context = rag_context
 
+                    # Retrieve learned lessons for Agent 1
+                    lessons_context = ""
+                    try:
+                        lessons_context = await format_lessons_for_prompt(
+                            self.repo, "agent1", symbol=signal.symbol, max_lessons=8,
+                        )
+                    except Exception:
+                        pass
+
+                    # Attach lessons to signal so Agent 2 can also access them
+                    signal._lessons_context = lessons_context
+
                     ai_context = {
                         "sentiment_score": early_sentiment,
                         "adjusted_score": signal.score,
@@ -930,6 +950,7 @@ class TradingEngine:
                         "ml_win_probability": None,
                         "symbol_history": symbol_history,
                         "rag_context": rag_context,
+                        "lessons_context": lessons_context,
                         **ai_perf_context,
                     }
 
@@ -1670,6 +1691,106 @@ class TradingEngine:
                 await self.trade_rag.ingest_trade(trades[0])
         except Exception as e:
             logger.debug("rag_post_close_ingest_failed", error=str(e)[:80])
+
+    async def _run_postmortem(self, position, exit_price: float, total_pnl: float,
+                               pnl_pct: float, exit_reason: str, holding_seconds: float) -> None:
+        """Run AI post-mortem lesson generation and ingest lessons into RAG.
+
+        Runs under semaphore to limit concurrent API calls. Designed to be
+        launched as a background task so it doesn't block trade execution.
+        """
+        if not self.lesson_generator:
+            return
+
+        async with self._postmortem_semaphore:
+            try:
+                # Fetch full trade record for agent reasoning fields
+                trade_data = await self.repo.get_trades_by_ids([position.trade_id])
+                trade = trade_data[0] if trade_data else {}
+
+                # Get recent lessons to avoid repeating them
+                recent_lessons = await self.repo.get_recent_lessons(limit=5)
+
+                lessons = await self.lesson_generator.generate_lessons(
+                    trade_id=position.trade_id,
+                    symbol=position.symbol,
+                    direction=position.direction,
+                    entry_price=position.entry_price,
+                    exit_price=exit_price,
+                    pnl_usd=total_pnl,
+                    pnl_percent=pnl_pct,
+                    exit_reason=exit_reason,
+                    confluence_score=position.confluence_score,
+                    holding_seconds=holding_seconds,
+                    stop_loss=float(trade.get("stop_loss", 0) or 0),
+                    take_profit=float(trade.get("take_profit", 0) or 0),
+                    agent1_reasoning=position.agent1_reasoning or trade.get("agent1_reasoning", ""),
+                    agent2_reasoning=trade.get("last_agent2_reasoning", ""),
+                    agent3_reasoning=position.last_agent3_reasoning or "",
+                    btc_trend=trade.get("btc_trend", ""),
+                    signal_reasons=trade.get("signal_reasons") or [],
+                    current_tier=position.current_tier,
+                    recent_lessons=recent_lessons,
+                )
+
+                # Ingest each lesson into RAG as a knowledge chunk
+                if lessons and self.trade_rag:
+                    for lesson in lessons:
+                        await self._rag_ingest_lesson(position, lesson)
+
+                if lessons:
+                    logger.info(
+                        "postmortem_complete",
+                        trade_id=position.trade_id,
+                        symbol=position.symbol,
+                        num_lessons=len(lessons),
+                    )
+
+            except Exception as e:
+                logger.warning(
+                    "postmortem_failed",
+                    trade_id=position.trade_id,
+                    error=str(e)[:100],
+                )
+
+    async def _rag_ingest_lesson(self, position, lesson: dict) -> None:
+        """Ingest a single post-mortem lesson into RAG as a knowledge chunk."""
+        if not self.trade_rag:
+            return
+        try:
+            # Build a synthetic trade-like dict for the RAG ingestion
+            lesson_text = lesson.get("lesson", "")
+            severity = lesson.get("severity", "medium")
+            lesson_type = lesson.get("lesson_type", "entry")
+            outcome = lesson.get("outcome", "loss")
+
+            lesson_trade = {
+                "id": f"{position.trade_id}_lesson_{lesson_type}",
+                "symbol": position.symbol,
+                "direction": position.direction,
+                "pnl_usd": lesson.get("pnl_usd", 0),
+                "pnl_percent": lesson.get("pnl_percent", 0),
+                "entry_price": position.entry_price,
+                "exit_price": 0,
+                "exit_reason": f"lesson:{lesson_type}",
+                "confluence_score": lesson.get("confluence_score", 0),
+                "stop_loss": 0,
+                "take_profit": 0,
+                "signal_reasons": f"[{severity.upper()} LESSON] {lesson_text}",
+                "last_agent2_reasoning": "",
+            }
+            await self.trade_rag.ingest_trade(lesson_trade)
+        except Exception as e:
+            logger.debug("rag_lesson_ingest_failed", error=str(e)[:80])
+
+    def _launch_postmortem(self, position, exit_price: float, total_pnl: float,
+                            pnl_pct: float, exit_reason: str, holding_seconds: float) -> None:
+        """Launch post-mortem as a background task."""
+        task = asyncio.create_task(
+            self._run_postmortem(position, exit_price, total_pnl, pnl_pct, exit_reason, holding_seconds)
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def _process_refined_entries(self) -> None:
         """Process signals refined on 5m candles (post-sweep entry refinement).
@@ -2790,6 +2911,12 @@ class TradingEngine:
                     # --- RAG knowledge ingestion ---
                     await self._rag_ingest_closed_trade(position.trade_id)
 
+                    # --- AI Post-mortem (lesson generation + RAG ingestion) ---
+                    self._launch_postmortem(
+                        position, order_result.avg_price or exit_signal.price,
+                        total_pnl, pnl_pct, exit_signal.reason, holding_seconds,
+                    )
+
                     # --- Adaptive threshold update (Strategy C) ---
                     self.adaptive_threshold.record_outcome(is_win=(total_pnl > 0))
 
@@ -3303,6 +3430,12 @@ class TradingEngine:
 
         # RAG knowledge ingestion
         await self._rag_ingest_closed_trade(existing_position.trade_id)
+
+        # AI Post-mortem (lesson generation + RAG ingestion)
+        self._launch_postmortem(
+            existing_position, order_result.avg_price or current_price,
+            total_pnl, pnl_pct, "opposite_signal_reversal", holding_seconds,
+        )
 
         self.adaptive_threshold.record_outcome(is_win=(total_pnl > 0))
 

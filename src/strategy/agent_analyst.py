@@ -877,7 +877,7 @@ class AgentEntryAnalyst:
 
 ### Similar Past Trades (RAG Knowledge Base)
 {context.get("rag_context", "  Not available")}
-
+{context.get("lessons_context", "")}
 ### Scanner Observations (factual only — directional conclusions removed)
 {chr(10).join(f"  - {r}" for r in self._neutralize_reasons(signal.reasons))}
 {self._reassessment_section(context)}

@@ -402,7 +402,7 @@ class PositionManagerAgent:
 {candles_5m_section}
 
 {candles_1h_section}
-
+{ctx.get("lessons_context", "")}
 Evaluate this position and respond with your JSON decision. Default to HOLD unless you see clear evidence for action."""
 
     @staticmethod
