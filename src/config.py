@@ -70,13 +70,12 @@ class Settings(BaseSettings):
     max_daily_trades: int = 0  # 0 = unlimited — agent + drawdown safety will self-regulate
     min_trade_usd: float = 150.0  # Minimum margin per trade ($150 × leverage = min notional)
 
-    # Progressive take-profit tiers (0.70R / 0.95R / 1.5R)
-    # Tight TPs — lock profit early, don't let winners turn to losers
+    # Progressive take-profit tiers
     # TP1 hit → close 33%, move SL to breakeven
     # TP2 hit → close 33%, move SL to TP1 price
     # TP3 hit → close remaining 34%
     tp_tiers_enabled: bool = True
-    # Tiers spread at 33%, 66%, 100% of the TP target distance
+    # Tiers spread at 64%, 82%, 100% of the TP target distance — let winners run
     tp1_pct: float = 0.33   # close 33% at TP1
     tp2_pct: float = 0.33   # close 33% at TP2
     tp3_pct: float = 0.34   # remaining 34%
@@ -91,10 +90,10 @@ class Settings(BaseSettings):
     trailing_atr_multiplier: float = 1.5  # Trail at 1.5x ATR from high water mark
 
     # Early breakeven protection — move SL to entry price once trade is 0.5R in profit
-    breakeven_activation_rr: float = 0.5  # Move SL to entry at 0.5R profit (before TP1)
+    breakeven_activation_rr: float = 1.0  # Move SL to entry at 1.0R profit (let trades breathe)
 
-    # Stale trade auto-close — close losing trades that haven't worked out
-    max_hold_hours: float = 8.0  # Auto-close trades open longer than this IF in negative
+    # Stale trade auto-close — DISABLED (let SL/TP handle exits naturally)
+    max_hold_hours: float = 0.0  # 0 = disabled — no time-based auto-close
     stale_close_below_rr: float = 0.0  # Only auto-close if trade is in the red (negative PnL)
 
     # Weekly cycle — Fake Move Monday & Mid-Week Reversal (ICT concepts)
@@ -121,8 +120,8 @@ class Settings(BaseSettings):
 
     # Scanning
     scan_interval_minutes: int = 5  # Scan every 5 min — faster discovery across expanded universe
-    min_volume_usd: float = 5_000_000  # $5M min 24h volume — include mid-cap tokens
-    quality_filter: bool = False  # Scan ALL Binance Futures pairs, not just whitelist
+    min_volume_usd: float = 20_000_000  # $20M min 24h volume — top ~100 liquid coins only
+    quality_filter: bool = True  # Only scan established coins (QUALITY_BASES whitelist)
     max_position_volume_pct: float = 0.001  # Position size must be < 0.1% of 24h volume
     max_spread_pct: float = 0.002  # Max 0.2% bid-ask spread — skip illiquid pairs
     min_ob_depth_usd: float = 5000.0  # Min $5K depth at best bid/ask — raised for mid-cap safety

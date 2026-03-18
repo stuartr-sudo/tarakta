@@ -1086,18 +1086,19 @@ class OrderExecutor:
     ) -> list[TakeProfitTier]:
         """Build 3-tier progressive TP plan spread across the full TP target.
 
-        Tiers at 33%, 66%, and 100% of the distance from entry to tp_price.
+        Tiers at 64%, 82%, and 100% of the distance from entry to tp_price.
+        Let winners run — don't take profit too early.
         """
         is_long = direction == "long"
         tp_distance = abs(tp_price - entry_price)
 
         if is_long:
-            tp1_price = entry_price + tp_distance * 0.33
-            tp2_price = entry_price + tp_distance * 0.66
+            tp1_price = entry_price + tp_distance * 0.64
+            tp2_price = entry_price + tp_distance * 0.82
             tp3_price = entry_price + tp_distance
         else:
-            tp1_price = entry_price - tp_distance * 0.33
-            tp2_price = entry_price - tp_distance * 0.66
+            tp1_price = entry_price - tp_distance * 0.64
+            tp2_price = entry_price - tp_distance * 0.82
             tp3_price = entry_price - tp_distance
 
         tp1_qty = round(quantity * self.config.tp1_pct, 8)
