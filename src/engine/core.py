@@ -328,13 +328,30 @@ class TradingEngine:
                 )
                 logger.info("engine_fresh_start", balance=self.config.initial_balance)
 
-        # Agent models: always start with config default (cost-safe).
-        # Users can switch at runtime via Settings — changes are session-only
-        # to prevent accidental lock-in on expensive models across restarts.
-        if self.agent_analyst:
-            logger.info("agent1_model_default", model=self.config.agent_model)
-        if self.refiner_agent:
-            logger.info("agent2_model_default", model=self.config.agent_model)
+        # Restore agent models from DB overrides (saved via Settings page)
+        if saved:
+            overrides = saved.get("config_overrides") or {}
+            if isinstance(overrides, dict):
+                agent_models = overrides.get("agent_models") or {}
+                if self.agent_analyst and agent_models.get("agent1"):
+                    self.agent_analyst.set_model(agent_models["agent1"])
+                    logger.info("agent1_model_restored", model=agent_models["agent1"])
+                elif self.agent_analyst:
+                    logger.info("agent1_model_default", model=self.config.agent_model)
+                if self.refiner_agent and agent_models.get("agent2"):
+                    self.refiner_agent.set_model(agent_models["agent2"])
+                    logger.info("agent2_model_restored", model=agent_models["agent2"])
+                elif self.refiner_agent:
+                    logger.info("agent2_model_default", model=self.config.agent_model)
+                if self.position_agent and agent_models.get("agent3"):
+                    from src.strategy.llm_client import is_openai_model
+                    self.position_agent._model = agent_models["agent3"]
+                    self.position_agent._api_key = (
+                        self.position_agent._openai_api_key
+                        if is_openai_model(agent_models["agent3"])
+                        else self.position_agent._gemini_api_key
+                    )
+                    logger.info("agent3_model_restored", model=agent_models["agent3"])
 
         self.portfolio = PortfolioTracker(
             initial_balance=self.state.current_balance,
