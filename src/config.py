@@ -70,15 +70,12 @@ class Settings(BaseSettings):
     max_daily_trades: int = 0  # 0 = unlimited — agent + drawdown safety will self-regulate
     min_trade_usd: float = 150.0  # Minimum margin per trade ($150 × leverage = min notional)
 
-    # Progressive take-profit tiers (0.70R / 0.95R / 1.5R)
-    # Tight TPs — lock profit early, don't let winners turn to losers
+    # Progressive take-profit tiers
     # TP1 hit → close 33%, move SL to breakeven
     # TP2 hit → close 33%, move SL to TP1 price
     # TP3 hit → close remaining 34%
     tp_tiers_enabled: bool = True
-    tp1_rr: float = 0.70    # TP1 at 0.70R — lock in early profit
-    tp2_rr: float = 0.95    # TP2 at 0.95R — near 1:1 R:R
-    tp3_rr: float = 1.50    # TP3 at 1.5R — close remaining
+    # Tiers spread at 64%, 82%, 100% of the TP target distance — let winners run
     tp1_pct: float = 0.33   # close 33% at TP1
     tp2_pct: float = 0.33   # close 33% at TP2
     tp3_pct: float = 0.34   # remaining 34%
@@ -92,11 +89,11 @@ class Settings(BaseSettings):
     trailing_activation_rr: float = 0.5  # Activate trailing after 0.5R profit
     trailing_atr_multiplier: float = 1.5  # Trail at 1.5x ATR from high water mark
 
-    # Early breakeven protection — move SL to entry price once trade is 0.5R in profit
-    breakeven_activation_rr: float = 0.5  # Move SL to entry at 0.5R profit (before TP1)
+    # Early breakeven protection — move SL to entry price once trade is 1.0R in profit
+    breakeven_activation_rr: float = 1.0  # Move SL to entry at 1.0R profit (let trades breathe)
 
-    # Stale trade auto-close — close losing trades that haven't worked out
-    max_hold_hours: float = 8.0  # Auto-close trades open longer than this IF in negative
+    # Stale trade auto-close — DISABLED (let SL/TP handle exits naturally)
+    max_hold_hours: float = 0.0  # 0 = disabled — no time-based auto-close
     stale_close_below_rr: float = 0.0  # Only auto-close if trade is in the red (negative PnL)
 
     # Weekly cycle — Fake Move Monday & Mid-Week Reversal (ICT concepts)

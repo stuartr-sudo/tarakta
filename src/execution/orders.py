@@ -390,6 +390,7 @@ class OrderExecutor:
                 sl_price=sl_price,
                 quantity=qty,
                 direction=direction,
+                tp_price=tp_price,
             )
             position.take_profit = position.tp_tiers[0].price
             tp_tiers_data = [
@@ -1054,19 +1055,24 @@ class OrderExecutor:
         sl_price: float,
         quantity: float,
         direction: str,
+        tp_price: float = 0.0,
     ) -> list[TakeProfitTier]:
-        """Build 3-tier progressive TP plan: 33% at 0.70R, 33% at 0.95R, 34% at 1.5R."""
-        sl_distance = abs(entry_price - sl_price)
+        """Build 3-tier progressive TP plan spread across the full TP target.
+
+        Tiers at 64%, 82%, and 100% of the distance from entry to tp_price.
+        Let winners run — don't take profit too early.
+        """
         is_long = direction == "long"
+        tp_distance = abs(tp_price - entry_price)
 
         if is_long:
-            tp1_price = entry_price + sl_distance * self.config.tp1_rr
-            tp2_price = entry_price + sl_distance * self.config.tp2_rr
-            tp3_price = entry_price + sl_distance * self.config.tp3_rr
+            tp1_price = entry_price + tp_distance * 0.64
+            tp2_price = entry_price + tp_distance * 0.82
+            tp3_price = entry_price + tp_distance
         else:
-            tp1_price = entry_price - sl_distance * self.config.tp1_rr
-            tp2_price = entry_price - sl_distance * self.config.tp2_rr
-            tp3_price = entry_price - sl_distance * self.config.tp3_rr
+            tp1_price = entry_price - tp_distance * 0.64
+            tp2_price = entry_price - tp_distance * 0.82
+            tp3_price = entry_price - tp_distance
 
         tp1_qty = round(quantity * self.config.tp1_pct, 8)
         tp2_qty = round(quantity * self.config.tp2_pct, 8)
