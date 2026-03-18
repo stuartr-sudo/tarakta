@@ -76,9 +76,7 @@ class Settings(BaseSettings):
     # TP2 hit → close 33%, move SL to TP1 price
     # TP3 hit → close remaining 34%
     tp_tiers_enabled: bool = True
-    tp1_rr: float = 0.70    # TP1 at 0.70R — lock in early profit
-    tp2_rr: float = 0.95    # TP2 at 0.95R — near 1:1 R:R
-    tp3_rr: float = 1.50    # TP3 at 1.5R — close remaining
+    # Tiers spread at 33%, 66%, 100% of the TP target distance
     tp1_pct: float = 0.33   # close 33% at TP1
     tp2_pct: float = 0.33   # close 33% at TP2
     tp3_pct: float = 0.34   # remaining 34%
