@@ -1,4 +1,4 @@
-"""Unified LLM client — supports Gemini and OpenAI with a single interface.
+"""Unified LLM client — supports Gemini, OpenAI, and Anthropic with a single interface.
 
 All agents call `generate_json()` which routes to the correct provider
 based on the model name. Client instances are cached per (provider, api_key).
@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,12 +19,29 @@ logger = get_logger(__name__)
 # Provider detection
 # ---------------------------------------------------------------------------
 _OPENAI_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-")
+_ANTHROPIC_PREFIXES = ("claude-",)
 
 
 def is_openai_model(model: str) -> bool:
     """Return True if model name belongs to OpenAI."""
     m = model.lower()
     return any(m.startswith(p) for p in _OPENAI_PREFIXES)
+
+
+def is_anthropic_model(model: str) -> bool:
+    """Return True if model name belongs to Anthropic."""
+    m = model.lower()
+    return any(m.startswith(p) for p in _ANTHROPIC_PREFIXES)
+
+
+def get_api_key_for_model(model: str, *, openai_key: str, anthropic_key: str, gemini_key: str) -> str:
+    """Return the correct API key for a given model."""
+    if is_openai_model(model):
+        return openai_key
+    elif is_anthropic_model(model):
+        return anthropic_key
+    else:
+        return gemini_key
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +63,9 @@ MODEL_PRICING: dict[str, tuple[float, float, float]] = {
     "gpt-5.4": (2.00, 0.50, 8.00),
     "gpt-5.4-mini-2026-03-17": (0.40, 0.10, 1.60),
     "o3-mini": (1.10, 0.55, 4.40),
+    # Anthropic
+    "claude-sonnet-4-6": (3.00, 0.30, 15.00),
+    "claude-haiku-4-5-20251001": (0.80, 0.08, 4.00),
 }
 
 
@@ -65,6 +86,7 @@ class LLMResult:
 # ---------------------------------------------------------------------------
 _gemini_clients: dict[str, Any] = {}
 _openai_clients: dict[str, Any] = {}
+_anthropic_clients: dict[str, Any] = {}
 
 
 def _get_gemini_client(api_key: str):
@@ -82,6 +104,16 @@ def _get_openai_client(api_key: str):
             timeout=180.0,  # 3-min hard cap — GPT-5 can be slow with thinking
         )
     return _openai_clients[api_key]
+
+
+def _get_anthropic_client(api_key: str):
+    if api_key not in _anthropic_clients:
+        from anthropic import AsyncAnthropic
+        _anthropic_clients[api_key] = AsyncAnthropic(
+            api_key=api_key,
+            timeout=180.0,
+        )
+    return _anthropic_clients[api_key]
 
 
 # ---------------------------------------------------------------------------
@@ -120,10 +152,17 @@ async def generate_json(
 ) -> LLMResult:
     """Call an LLM and return structured JSON text.
 
-    Automatically routes to Gemini or OpenAI based on model name.
+    Automatically routes to Gemini, OpenAI, or Anthropic based on model name.
     """
     if is_openai_model(model):
         return await _call_openai(
+            model=model, api_key=api_key,
+            system_prompt=system_prompt, user_prompt=user_prompt,
+            json_schema=json_schema, temperature=temperature,
+            timeout=timeout,
+        )
+    elif is_anthropic_model(model):
+        return await _call_anthropic(
             model=model, api_key=api_key,
             system_prompt=system_prompt, user_prompt=user_prompt,
             json_schema=json_schema, temperature=temperature,
@@ -208,4 +247,48 @@ async def _call_openai(
         text=text,
         input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
         output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Anthropic implementation — uses tool_use for structured JSON output
+# ---------------------------------------------------------------------------
+async def _call_anthropic(
+    *, model: str, api_key: str, system_prompt: str, user_prompt: str,
+    json_schema: dict, temperature: float, timeout: float,
+) -> LLMResult:
+    client = _get_anthropic_client(api_key)
+
+    # Use tool_use to enforce structured JSON output — most reliable method
+    tool_def = {
+        "name": "respond",
+        "description": "Return the structured analysis response",
+        "input_schema": json_schema,
+    }
+
+    response = await asyncio.wait_for(
+        client.messages.create(
+            model=model,
+            max_tokens=4096,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+            tools=[tool_def],
+            tool_choice={"type": "tool", "name": "respond"},
+            temperature=temperature,
+        ),
+        timeout=timeout,
+    )
+
+    # Extract the tool_use block's input as the JSON response
+    text = ""
+    for block in response.content:
+        if block.type == "tool_use":
+            text = json.dumps(block.input)
+            break
+
+    usage = response.usage
+    return LLMResult(
+        text=text,
+        input_tokens=getattr(usage, "input_tokens", 0) or 0,
+        output_tokens=getattr(usage, "output_tokens", 0) or 0,
     )

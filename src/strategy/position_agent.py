@@ -24,7 +24,8 @@ from typing import Any
 
 from src.config import Settings
 from src.strategy.llm_client import (
-    LLMResult, generate_json, is_openai_model, MODEL_PRICING,
+    LLMResult, generate_json, is_openai_model, is_anthropic_model,
+    get_api_key_for_model, MODEL_PRICING,
 )
 from src.utils.logging import get_logger
 
@@ -184,10 +185,16 @@ class PositionManagerAgent:
         self._timeout = config.agent_timeout_seconds
         self._thinking_level = "minimal"  # Agent 3: simple SL checks, fast
 
-        # Store both API keys so runtime model switching works across providers
+        # Store all API keys so runtime model switching works across providers
         self._gemini_api_key = config.agent_api_key
         self._openai_api_key = config.openai_api_key
-        self._api_key = self._openai_api_key if is_openai_model(self._model) else self._gemini_api_key
+        self._anthropic_api_key = getattr(config, "anthropic_api_key", "")
+        self._api_key = get_api_key_for_model(
+            self._model,
+            openai_key=self._openai_api_key,
+            anthropic_key=self._anthropic_api_key,
+            gemini_key=self._gemini_api_key,
+        )
         self._available = bool(self._api_key) and getattr(
             config, "position_agent_enabled", False
         )

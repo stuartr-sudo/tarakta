@@ -25,7 +25,8 @@ from typing import Any
 
 from src.config import Settings
 from src.strategy.llm_client import (
-    LLMResult, generate_json, is_openai_model, MODEL_PRICING,
+    LLMResult, generate_json, is_openai_model, is_anthropic_model,
+    get_api_key_for_model, MODEL_PRICING,
 )
 from src.exchange.models import SignalCandidate
 from src.utils.logging import get_logger
@@ -282,18 +283,26 @@ class AgentEntryAnalyst:
         self._max_sl_pct = config.max_sl_pct
         self._thinking_level = "high"  # Agent 1: strategic analysis needs deep thinking
 
-        # Store both API keys so runtime model switching works across providers
+        # Store all API keys so runtime model switching works across providers
         self._gemini_api_key = config.agent_api_key
         self._openai_api_key = config.openai_api_key
-        self._api_key = self._openai_api_key if is_openai_model(self._model) else self._gemini_api_key
+        self._anthropic_api_key = getattr(config, "anthropic_api_key", "")
+        self._api_key = get_api_key_for_model(
+            self._model,
+            openai_key=self._openai_api_key,
+            anthropic_key=self._anthropic_api_key,
+            gemini_key=self._gemini_api_key,
+        )
         self._available = bool(self._api_key)
 
         logger.info(
             "agent1_init",
             model=self._model,
             is_openai=is_openai_model(self._model),
+            is_anthropic=is_anthropic_model(self._model),
             has_openai_key=bool(self._openai_api_key),
             has_gemini_key=bool(self._gemini_api_key),
+            has_anthropic_key=bool(self._anthropic_api_key),
             available=self._available,
         )
 
@@ -324,7 +333,12 @@ class AgentEntryAnalyst:
         old = self._model
         self._model = model
         # Switch API key to match the new provider
-        self._api_key = self._openai_api_key if is_openai_model(model) else self._gemini_api_key
+        self._api_key = get_api_key_for_model(
+            model,
+            openai_key=self._openai_api_key,
+            anthropic_key=self._anthropic_api_key,
+            gemini_key=self._gemini_api_key,
+        )
         self._available = bool(self._api_key)
         logger.info("agent_model_switched", old_model=old, new_model=model)
         return self._model

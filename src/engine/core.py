@@ -344,12 +344,13 @@ class TradingEngine:
                 elif self.refiner_agent:
                     logger.info("agent2_model_default", model=self.config.agent_model)
                 if self.position_agent and agent_models.get("agent3"):
-                    from src.strategy.llm_client import is_openai_model
+                    from src.strategy.llm_client import get_api_key_for_model
                     self.position_agent._model = agent_models["agent3"]
-                    self.position_agent._api_key = (
-                        self.position_agent._openai_api_key
-                        if is_openai_model(agent_models["agent3"])
-                        else self.position_agent._gemini_api_key
+                    self.position_agent._api_key = get_api_key_for_model(
+                        agent_models["agent3"],
+                        openai_key=self.position_agent._openai_api_key,
+                        anthropic_key=self.position_agent._anthropic_api_key,
+                        gemini_key=self.position_agent._gemini_api_key,
                     )
                     logger.info("agent3_model_restored", model=agent_models["agent3"])
 
