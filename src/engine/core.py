@@ -98,6 +98,9 @@ class TradingEngine:
         )
         self._scan_cycle = 0  # Track scan cycles for signal persistence
 
+        # Symbol entry lock — prevents duplicate entries across async execution gaps
+        self._entering_symbols: set[str] = set()
+
         # Hyper-Watchlist Monitor — fast 5m monitoring for near-miss signals
         self._watchlist_queue: asyncio.Queue = asyncio.Queue()
         self.watchlist_monitor: WatchlistMonitor | None = (
@@ -1606,15 +1609,21 @@ class TradingEngine:
                             pct_of_volume=round(max_position_cost / vol_24h_check * 100, 4),
                             max_pct=self.config.max_position_volume_pct * 100,
                         )
+                    elif not self._can_enter_symbol(signal.symbol):
+                        logger.info("primary_duplicate_blocked", symbol=signal.symbol)
                     else:
                         # Execute entry (with optional agent SL/TP overrides)
-                        position, order_result, trade_record = await self.order_executor.execute_entry(
-                            signal=signal,
-                            current_balance=self.portfolio.current_balance,
-                            mode=self.state.mode,
-                            sl_override=sl_override,
-                            tp_override=tp_override,
-                        )
+                        self._entering_symbols.add(signal.symbol)
+                        try:
+                            position, order_result, trade_record = await self.order_executor.execute_entry(
+                                signal=signal,
+                                current_balance=self.portfolio.current_balance,
+                                mode=self.state.mode,
+                                sl_override=sl_override,
+                                tp_override=tp_override,
+                            )
+                        finally:
+                            self._entering_symbols.discard(signal.symbol)
 
                         if position and trade_record:
                             # Store confluence score on position for post-trade analysis
@@ -1977,7 +1986,13 @@ class TradingEngine:
                 logger.warning("refiner_live_price_check_failed", symbol=signal.symbol, error=str(e)[:80])
                 continue  # Do NOT fall through to execution without validation
 
+            # Duplicate entry guard
+            if not self._can_enter_symbol(signal.symbol):
+                logger.info("refiner_duplicate_blocked", symbol=signal.symbol)
+                continue
+
             # Execute the trade (with Agent 2 SL/TP overrides if available)
+            self._entering_symbols.add(signal.symbol)
             try:
                 sl_override = getattr(signal, "_agent2_sl", None)
                 tp_override = getattr(signal, "_agent2_tp", None)
@@ -2050,6 +2065,8 @@ class TradingEngine:
                     symbol=signal.symbol,
                     error=str(e),
                 )
+            finally:
+                self._entering_symbols.discard(signal.symbol)
 
     async def _process_consensus_graduations(self) -> None:
         """Process signals that graduated from the consensus monitor.
@@ -2095,6 +2112,11 @@ class TradingEngine:
                 logger.warning("consensus_risk_check_failed", error=str(e))
                 continue
 
+            if not self._can_enter_symbol(signal.symbol):
+                logger.info("consensus_duplicate_blocked", symbol=signal.symbol)
+                continue
+
+            self._entering_symbols.add(signal.symbol)
             try:
                 position, order_result, trade_record = (
                     await self.order_executor.execute_entry(
@@ -2132,6 +2154,8 @@ class TradingEngine:
                     symbol=signal.symbol,
                     error=str(e),
                 )
+            finally:
+                self._entering_symbols.discard(signal.symbol)
 
     async def _process_watchlist_graduations(self) -> None:
         """Process signals that graduated from the hyper-watchlist.
@@ -2597,8 +2621,8 @@ class TradingEngine:
             if agent_skip:
                 continue
 
-            # Idempotency guard: skip if symbol already in open positions (Req 2)
-            if graduated.symbol in self.state.open_positions:
+            # Idempotency guard: skip if symbol already in open positions or being entered
+            if not self._can_enter_symbol(graduated.symbol):
                 logger.warning(
                     "watchlist_duplicate_entry_blocked",
                     symbol=graduated.symbol,
@@ -2606,6 +2630,7 @@ class TradingEngine:
                 continue
 
             # Execute the trade
+            self._entering_symbols.add(graduated.symbol)
             try:
                 position, order_result, trade_record = (
                     await self.order_executor.execute_entry(
@@ -2622,6 +2647,7 @@ class TradingEngine:
                             "watchlist_duplicate_post_exec_blocked",
                             symbol=graduated.symbol,
                         )
+                        self._entering_symbols.discard(graduated.symbol)
                         continue
 
                     # Match all other entry paths: confluence score, DB persistence, portfolio, state
@@ -2655,6 +2681,8 @@ class TradingEngine:
                     symbol=graduated.symbol,
                     error=str(e),
                 )
+            finally:
+                self._entering_symbols.discard(graduated.symbol)
 
     async def _monitor_tick(self) -> None:
         """Check open positions for SL/TP/trailing stop + liquidation proximity."""
@@ -3597,6 +3625,16 @@ class TradingEngine:
             await self.repo.insert_snapshot(snapshot)
         except Exception as e:
             logger.error("state_persist_failed", error=str(e))
+
+    def _can_enter_symbol(self, symbol: str) -> bool:
+        """Check if a symbol can be entered (not already open or being entered)."""
+        if symbol in self.portfolio.open_positions:
+            return False
+        if symbol in self.state.open_positions:
+            return False
+        if symbol in self._entering_symbols:
+            return False
+        return True
 
     async def _reconcile_positions(self) -> None:
         """Cross-check open positions in state against trade records in DB.
