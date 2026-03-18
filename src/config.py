@@ -135,9 +135,11 @@ class Settings(BaseSettings):
     # Hugging Face Inference API
     hf_api_token: str = ""  # For FinBERT sentiment + zero-shot classification
 
-    # AI Entry Agent (supports Gemini and OpenAI models)
+    # AI Entry Agent (supports Gemini, OpenAI, and Anthropic models)
     # Set AGENT_MODEL to a Gemini model (gemini-3-pro-preview) → uses AGENT_API_KEY
     # Set AGENT_MODEL to an OpenAI model (gpt-4o, gpt-4.1) → uses OPENAI_API_KEY
+    # Set AGENT_MODEL to a Claude model (claude-sonnet-4-6) → uses ANTHROPIC_API_KEY
+    anthropic_api_key: str = ""  # Anthropic API key (set ANTHROPIC_API_KEY in .env)
     agent_enabled: bool = True  # Auto-enabled when API key is set
     agent_api_key: str = ""  # Gemini API key (set AGENT_API_KEY in .env)
     agent_model: str = "gemini-3-pro-preview"  # Agent 1: pro/gpt-4o for strategic analysis

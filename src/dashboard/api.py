@@ -922,11 +922,12 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                     return {"error": "Agent 3 not available (no API key or disabled)"}
                 engine.position_agent._model = model
                 # Switch API key to match the new provider
-                from src.strategy.llm_client import is_openai_model
-                engine.position_agent._api_key = (
-                    engine.position_agent._openai_api_key
-                    if is_openai_model(model)
-                    else engine.position_agent._gemini_api_key
+                from src.strategy.llm_client import get_api_key_for_model
+                engine.position_agent._api_key = get_api_key_for_model(
+                    model,
+                    openai_key=engine.position_agent._openai_api_key,
+                    anthropic_key=engine.position_agent._anthropic_api_key,
+                    gemini_key=engine.position_agent._gemini_api_key,
                 )
                 active = model
                 db_field = "agent3_model"
