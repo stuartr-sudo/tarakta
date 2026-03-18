@@ -614,7 +614,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         "max_daily_drawdown":          (float, 0.05, 0.30),
         "entry_threshold":             (float, 30.0, 90.0),
         "min_rr_ratio":                (float, 1.0,  5.0),
-        "max_hold_hours":              (float, 1.0,  24.0),
+        "max_hold_hours":              (float, 0.0,  168.0),
         "circuit_breaker_pct":         (float, 0.05, 0.30),
         "max_sl_pct":                  (float, 0.02, 0.10),
         "cooldown_hours":              (float, 0.0,  24.0),
