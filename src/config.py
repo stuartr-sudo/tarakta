@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     breakeven_activation_rr: float = 0.5  # Move SL to entry at 0.5R profit (before TP1)
 
     # Stale trade auto-close — close losing trades that haven't worked out
-    max_hold_hours: float = 4.0  # Auto-close trades open longer than this IF in negative
+    max_hold_hours: float = 8.0  # Auto-close trades open longer than this IF in negative
     stale_close_below_rr: float = 0.0  # Only auto-close if trade is in the red (negative PnL)
 
     # Weekly cycle — Fake Move Monday & Mid-Week Reversal (ICT concepts)
