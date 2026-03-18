@@ -219,13 +219,14 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             "position_agent_enabled",
             getattr(config, "position_agent_enabled", False),
         )
-        # Agent models always start at config default on restart (cost-safe)
+        # Load agent models from DB overrides if saved, else config defaults
         overrides = state.get("config_overrides") or {}
         if not isinstance(overrides, dict):
             overrides = {}
-        ctx["agent1_model"] = config.agent_model
-        ctx["agent2_model"] = config.agent_model
-        ctx["agent3_model"] = getattr(config, "position_agent_model", "gemini-3-flash-preview")
+        agent_models = overrides.get("agent_models") or {}
+        ctx["agent1_model"] = agent_models.get("agent1", config.agent_model)
+        ctx["agent2_model"] = agent_models.get("agent2", config.agent_model)
+        ctx["agent3_model"] = agent_models.get("agent3", getattr(config, "position_agent_model", "gemini-3-flash-preview"))
         from src.strategy.llm_client import MODEL_PRICING
         ctx["available_agent_models"] = sorted(MODEL_PRICING.keys())
         # Leverage & margin (same source as dashboard)
