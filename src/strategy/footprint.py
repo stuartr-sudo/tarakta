@@ -37,6 +37,7 @@ class FootprintAnalyzer:
         sweep_level: float,
         current_price: float,
         trade_limit: int = 1000,
+        sweep_oi_usd: float = 0.0,
     ) -> FootprintResult:
         """Run full order flow analysis for a signal.
 
@@ -48,6 +49,7 @@ class FootprintAnalyzer:
         sweep_level : The price level that was swept.
         current_price : Current market price of the symbol.
         trade_limit : Number of recent trades to fetch (default 1000).
+        sweep_oi_usd : Open interest in USD at sweep detection time (0 = unavailable).
         """
         is_bullish = "low" in sweep_direction  # swing_low, asian_low, ny_low etc.
 
@@ -73,18 +75,46 @@ class FootprintAnalyzer:
         # 4. Cumulative delta direction (accelerating in reversal direction?)
         cum_delta_confirms = self._evaluate_cumulative_delta(trades, is_bullish)
 
-        # 5. OI check
+        # 5. OI change comparison (sweep time vs now)
         oi_change_pct = 0.0
         oi_confirms = False
         try:
             oi_data = await exchange.fetch_open_interest(symbol)
-            oi_usd = oi_data.get("open_interest_usd", 0)
-            # We can't compare to a previous snapshot in this stateless call,
-            # so instead we check the direction of the most recent OI move
-            # relative to recent price action. For now: if OI is available,
-            # the OI check is neutral (neither confirms nor rejects).
-            # Future improvement: cache OI at sweep detection time.
-            oi_confirms = True  # neutral — don't penalise when we can't compare
+            current_oi = oi_data.get("open_interest_usd", 0)
+
+            if sweep_oi_usd > 0 and current_oi > 0:
+                oi_change_pct = (current_oi - sweep_oi_usd) / sweep_oi_usd
+
+                # OI rising during sweep = new positions opening = continuation likely (bad for reversal)
+                # OI dropping during sweep = positions closing = exhaustion (good for reversal)
+                # OI rising + reversal direction delta = fresh conviction (good)
+                delta_direction_ok_here = (delta_pct > 0 and is_bullish) or (delta_pct < 0 and not is_bullish)
+
+                if oi_change_pct < -0.005:
+                    # OI dropped >0.5% — positions are closing, sweep is exhausting
+                    oi_confirms = True
+                    logger.info("footprint_oi_exhaustion", symbol=symbol,
+                                oi_change=f"{oi_change_pct:+.2%}",
+                                sweep_oi=f"${sweep_oi_usd:,.0f}",
+                                current_oi=f"${current_oi:,.0f}")
+                elif oi_change_pct > 0.005 and delta_direction_ok_here:
+                    # OI rising BUT delta supports reversal = fresh conviction entering reversal side
+                    oi_confirms = True
+                    logger.info("footprint_oi_fresh_conviction", symbol=symbol,
+                                oi_change=f"{oi_change_pct:+.2%}",
+                                delta_pct=f"{delta_pct:+.2%}")
+                elif oi_change_pct > 0.005 and not delta_direction_ok_here:
+                    # OI rising AND delta opposes reversal = new positions driving continuation (TRAP)
+                    oi_confirms = False
+                    logger.info("footprint_oi_trap_detected", symbol=symbol,
+                                oi_change=f"{oi_change_pct:+.2%}",
+                                delta_pct=f"{delta_pct:+.2%}")
+                else:
+                    # OI flat — neutral
+                    oi_confirms = True
+            else:
+                # No sweep OI to compare — fail open
+                oi_confirms = True
         except Exception:
             oi_confirms = True  # fail open
 
@@ -125,6 +155,15 @@ class FootprintAnalyzer:
 
         # OI component (15%)
         oi_score = 1.0 if oi_confirms else 0.0
+        if oi_change_pct != 0:
+            if oi_confirms:
+                reasons.append(f"OI change {oi_change_pct:+.2%} supports reversal")
+            else:
+                reasons.append(f"OI change {oi_change_pct:+.2%} suggests trap (continuation)")
+        elif sweep_oi_usd == 0:
+            reasons.append("OI comparison unavailable (no sweep baseline)")
+        else:
+            reasons.append("OI flat since sweep")
 
         confidence = (
             0.35 * delta_score

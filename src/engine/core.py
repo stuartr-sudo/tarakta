@@ -1636,6 +1636,7 @@ class TradingEngine:
                                 sweep_level=getattr(signal.sweep_result, "sweep_level", 0.0) or 0.0,
                                 current_price=signal.entry_price,
                                 trade_limit=self.config.footprint_trade_limit,
+                                sweep_oi_usd=getattr(signal, "sweep_oi_usd", 0.0) or 0.0,
                             )
                             footprint_passed = footprint_result.passed
                             logger.info(
@@ -2091,6 +2092,7 @@ class TradingEngine:
                         sweep_level=getattr(signal.sweep_result, "sweep_level", 0.0) or 0.0,
                         current_price=signal.entry_price,
                         trade_limit=self.config.footprint_trade_limit,
+                        sweep_oi_usd=getattr(signal, "sweep_oi_usd", 0.0) or 0.0,
                     )
                     logger.info(
                         "footprint_check",
@@ -3010,7 +3012,34 @@ class TradingEngine:
                         ]
                     await self.repo.update_trade(position.trade_id, update_data)
 
-                    # Position stays in state — NOT removed
+                    # Check if ALL tiers are filled → close the trade (dust cleanup)
+                    all_filled = all(t.filled for t in position.tp_tiers)
+                    if all_filled:
+                        logger.info("all_tp_tiers_filled_closing", symbol=exit_signal.symbol,
+                                    remaining_qty=position.quantity)
+                        # Accumulate PnL from all partial exits
+                        total_pnl = 0.0
+                        total_fees = 0.0
+                        try:
+                            partial_exits = await self.repo.get_partial_exits(position.trade_id)
+                            total_pnl = sum(float(pe.get("pnl_usd", 0)) for pe in partial_exits)
+                            total_fees = sum(float(pe.get("fees_usd", 0)) for pe in partial_exits)
+                        except Exception as e:
+                            logger.warning("partial_exit_sum_failed", error=str(e))
+                        orig_cost = (position.original_quantity * position.entry_price) if position.original_quantity else position.cost_usd
+                        pnl_pct = (total_pnl / orig_cost * 100) if orig_cost > 0 else 0
+                        last_fill_price = order_result.avg_price or exit_signal.price
+                        await self.repo.close_trade(
+                            trade_id=position.trade_id,
+                            exit_price=last_fill_price,
+                            exit_quantity=position.original_quantity or position.quantity,
+                            pnl_usd=round(total_pnl, 4),
+                            pnl_percent=round(pnl_pct, 2),
+                            exit_reason="all_tp_hit",
+                            fees_usd=total_fees,
+                        )
+                        self.portfolio.close_position(exit_signal.symbol)
+                        self._active_symbols.discard(exit_signal.symbol)
 
             else:
                 # --- FULL EXIT (SL, trailing stop, legacy TP, circuit breaker) ---
@@ -3154,6 +3183,33 @@ class TradingEngine:
                         remaining_quantity=position.quantity,
                         new_stop_loss=position.stop_loss,
                     )
+
+                    # Check if ALL tiers are filled → close the trade (dust cleanup)
+                    if position.tp_tiers and all(t.filled for t in position.tp_tiers):
+                        logger.info("all_tp_tiers_filled_closing", symbol=exit_signal.symbol,
+                                    remaining_qty=position.quantity)
+                        total_pnl = 0.0
+                        total_fees = 0.0
+                        try:
+                            partial_exits = await self.repo.get_partial_exits(position.trade_id)
+                            total_pnl = sum(float(pe.get("pnl_usd", 0)) for pe in partial_exits)
+                            total_fees = sum(float(pe.get("fees_usd", 0)) for pe in partial_exits)
+                        except Exception as e:
+                            logger.warning("partial_exit_sum_failed", error=str(e))
+                        orig_cost = (position.original_quantity * position.entry_price) if position.original_quantity else position.cost_usd
+                        pnl_pct = (total_pnl / orig_cost * 100) if orig_cost > 0 else 0
+                        last_fill_price = order_result.avg_price or exit_signal.price
+                        await self.repo.close_trade(
+                            trade_id=position.trade_id,
+                            exit_price=last_fill_price,
+                            exit_quantity=position.original_quantity or position.quantity,
+                            pnl_usd=round(total_pnl, 4),
+                            pnl_percent=round(pnl_pct, 2),
+                            exit_reason="all_tp_hit",
+                            fees_usd=total_fees,
+                        )
+                        self.portfolio.close_position(exit_signal.symbol)
+                        self._active_symbols.discard(exit_signal.symbol)
             else:
                 order_result, pnl = await self.order_executor.execute_exit(
                     symbol=exit_signal.symbol,
