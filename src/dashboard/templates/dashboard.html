@@ -420,7 +420,7 @@ async function toggleDetail(row) {
 
     if (!_detailCache[tradeId]) {
         try {
-            const resp = await fetch('/api/trades/' + tradeId + '/detail');
+            const resp = await fetch(apiUrl('/api/trades/' + tradeId + '/detail'));
             _detailCache[tradeId] = await resp.json();
         } catch (e) {
             td.innerHTML = '<div style="padding:1rem;color:var(--red);">Failed to load</div>';
@@ -575,7 +575,7 @@ async function closeTrade(tradeId, btn) {
     btn.textContent = 'Closing...';
 
     try {
-        const resp = await fetch('/api/trades/' + tradeId + '/close', { method: 'POST' });
+        const resp = await fetch(apiUrl('/api/trades/' + tradeId + '/close'), { method: 'POST' });
         const data = await resp.json();
         if (data.success) {
             const pnlSign = data.pnl_usd >= 0 ? '+' : '';
@@ -605,7 +605,7 @@ async function closeTrade(tradeId, btn) {
 // ── Chart + live data ──────────────────────────────────────
 async function loadChart() {
     try {
-        const resp = await fetch('/api/portfolio');
+        const resp = await fetch(apiUrl('/api/portfolio'));
         const data = await resp.json();
         if (!data.history || data.history.length === 0) {
             document.getElementById('balanceChart').parentElement.innerHTML =
@@ -861,7 +861,7 @@ async function loadUnrealizedPnl() {
     try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 25000);
-        const resp = await fetch('/api/unrealized-pnl', { signal: controller.signal });
+        const resp = await fetch(apiUrl('/api/unrealized-pnl'), { signal: controller.signal });
         clearTimeout(timeout);
         const data = await resp.json();
 
@@ -920,7 +920,7 @@ async function confirmNuke() {
     btn.textContent = 'NUKING...';
 
     try {
-        const resp = await fetch('/api/nuke', { method: 'POST' });
+        const resp = await fetch(apiUrl('/api/nuke'), { method: 'POST' });
         const data = await resp.json();
 
         if (data.success) {
@@ -952,7 +952,7 @@ async function confirmResetMain() {
     if (!ok) return;
 
     try {
-        const resp = await fetch('/api/reset/main', { method: 'POST' });
+        const resp = await fetch(apiUrl('/api/reset/main'), { method: 'POST' });
         const data = await resp.json();
         if (data.success) {
             alert('Main bot reset complete.\n\nTrades deleted: ' + (data.deleted.trades || 0) + '\nBalance reset to: $' + data.balance_reset);
@@ -970,7 +970,7 @@ let _mainScanning = false;
 
 async function loadMainStatus() {
     try {
-        const resp = await fetch('/api/main/status');
+        const resp = await fetch(apiUrl('/api/main/status'));
         const data = await resp.json();
         _mainScanning = data.scanning_active;
         updateMainButton();
@@ -1001,7 +1001,7 @@ async function toggleMainBot() {
     const wantStart = !_mainScanning;
     try {
         const url = wantStart ? '/api/main/begin' : '/api/main/stop';
-        const resp = await fetch(url, { method: 'POST' });
+        const resp = await fetch(apiUrl(url), { method: 'POST' });
         const data = await resp.json();
         if (data.success) {
             _mainScanning = wantStart;
@@ -1029,9 +1029,9 @@ async function softRefreshStats() {
     try {
         // Fetch live stats from DB (ground truth) and portfolio snapshot in parallel
         const [statsResp, portfolioResp, openResp] = await Promise.all([
-            fetch('/api/stats?mode=' + _tradingMode),
-            fetch('/api/portfolio'),
-            fetch('/api/trades/open'),
+            fetch(apiUrl('/api/stats?mode=' + _tradingMode)),
+            fetch(apiUrl('/api/portfolio')),
+            fetch(apiUrl('/api/trades/open')),
         ]);
         const stats = await statsResp.json();
         const data = await portfolioResp.json();
@@ -1103,7 +1103,7 @@ const _refinerCache = {};
 
 async function loadRefinerQueue() {
     try {
-        const resp = await fetch('/api/refiner/main');
+        const resp = await fetch(apiUrl('/api/refiner/main'));
         const data = await resp.json();
         const panel = document.getElementById('refiner-panel');
         const badge = document.getElementById('refiner-badge');
@@ -1358,7 +1358,7 @@ function toggleRefinerDetail(row) {
 // --- AI Agent Stats ---
 async function loadAgentStats() {
     try {
-        const resp = await fetch('/api/agent-stats');
+        const resp = await fetch(apiUrl('/api/agent-stats'));
         const data = await resp.json();
         const panel = document.getElementById('agent-panel');
         if (!panel) return;

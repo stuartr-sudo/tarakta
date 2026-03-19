@@ -201,7 +201,7 @@ async function toggleDetail(row) {
     // Fetch if not cached
     if (!_detailCache[tradeId]) {
         try {
-            const resp = await fetch('/api/trades/' + tradeId + '/detail');
+            const resp = await fetch(apiUrl('/api/trades/' + tradeId + '/detail'));
             _detailCache[tradeId] = await resp.json();
         } catch (e) {
             td.innerHTML = '<div class="detail-loading">Failed to load details</div>';

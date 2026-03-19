@@ -260,7 +260,7 @@
     // ── Load summary ──────────────────────────────
     async function loadSummary() {
         try {
-            const res = await fetch('/api/analytics/summary');
+            const res = await fetch(apiUrl('/api/analytics/summary'));
             const data = await res.json();
             if (!data.total) {
                 document.getElementById('loadingMsg').textContent = 'No closed trades yet. Analytics will appear after your first closed trade.';
@@ -366,7 +366,7 @@
     async function loadJournal(page) {
         currentPage = page;
         try {
-            const res = await fetch(`/api/analytics/trades?page=${page}`);
+            const res = await fetch(apiUrl(`/api/analytics/trades?page=${page}`));
             const data = await res.json();
             const trades = data.trades || [];
             const tbody = document.getElementById('journalBody');
