@@ -86,6 +86,17 @@ class TradingEngine:
         )
         self.scanner = AltcoinScanner(candle_manager, config)
 
+        # Footprint analyzer — order flow confirmation gate
+        self.footprint_analyzer = None
+        if config.footprint_enabled:
+            from src.strategy.footprint import FootprintAnalyzer
+            self.footprint_analyzer = FootprintAnalyzer(
+                min_delta_pct=config.footprint_min_delta_pct,
+                absorption_threshold=config.footprint_absorption_threshold,
+                min_confidence=config.footprint_min_confidence,
+            )
+            logger.info("footprint_analyzer_ready")
+
         # Market-level cross-reference filters (BTC gate, breadth, persistence, funding, correlation)
         self.market_filter = MarketFilter(
             btc_macro_gate_enabled=getattr(config, "btc_macro_gate_enabled", True),
@@ -1611,8 +1622,85 @@ class TradingEngine:
                         )
                     elif not self._can_enter_symbol(signal.symbol):
                         logger.info("primary_duplicate_blocked", symbol=signal.symbol)
+                    elif self.footprint_analyzer and signal.sweep_result and not (
+                        self.config.footprint_longs_only and signal.direction == "bearish"
+                    ):
+                        # Footprint order flow confirmation gate
+                        footprint_passed = True
+                        footprint_result = None
+                        try:
+                            footprint_result = await self.footprint_analyzer.analyze(
+                                exchange=self.exchange,
+                                symbol=signal.symbol,
+                                sweep_direction=getattr(signal.sweep_result, "sweep_type", "") or "",
+                                sweep_level=getattr(signal.sweep_result, "sweep_level", 0.0) or 0.0,
+                                current_price=signal.entry_price,
+                                trade_limit=self.config.footprint_trade_limit,
+                            )
+                            footprint_passed = footprint_result.passed
+                            logger.info(
+                                "footprint_check",
+                                symbol=signal.symbol,
+                                passed=footprint_passed,
+                                confidence=round(footprint_result.confidence, 3),
+                                delta_pct=round(footprint_result.delta_pct, 4),
+                                absorption=round(footprint_result.absorption_score, 3),
+                            )
+                        except Exception as e:
+                            logger.warning("footprint_check_error", symbol=signal.symbol, error=str(e))
+
+                        if not footprint_passed:
+                            logger.info(
+                                "trade_rejected_footprint",
+                                symbol=signal.symbol,
+                                direction=signal.direction,
+                                reasons=footprint_result.reasons if footprint_result else [],
+                            )
+                            # Store footprint data on the signal for analysis
+                            if footprint_result:
+                                signal_components["footprint"] = {
+                                    "passed": False,
+                                    "confidence": footprint_result.confidence,
+                                    "delta_pct": footprint_result.delta_pct,
+                                    "absorption": footprint_result.absorption_score,
+                                    "cum_delta": footprint_result.cumulative_delta_confirms,
+                                }
+                        else:
+                            # Footprint passed — store data and proceed to entry
+                            if footprint_result:
+                                signal_components["footprint"] = {
+                                    "passed": True,
+                                    "confidence": footprint_result.confidence,
+                                    "delta_pct": footprint_result.delta_pct,
+                                    "absorption": footprint_result.absorption_score,
+                                    "cum_delta": footprint_result.cumulative_delta_confirms,
+                                }
+                            self._entering_symbols.add(signal.symbol)
+                            try:
+                                position, order_result, trade_record = await self.order_executor.execute_entry(
+                                    signal=signal,
+                                    current_balance=self.portfolio.current_balance,
+                                    mode=self.state.mode,
+                                    sl_override=sl_override,
+                                    tp_override=tp_override,
+                                )
+
+                                if position and trade_record:
+                                    position.confluence_score = signal.score
+                                    if agent_analysis_data:
+                                        position.agent1_reasoning = agent_analysis_data.get("reasoning", "")
+                                    trade_record["test_group"] = test_group
+                                    db_trade = await self.repo.insert_trade(trade_record)
+                                    if db_trade:
+                                        position.trade_id = db_trade.get("id", "")
+                                    self.portfolio.record_entry(position)
+                                    self.state.open_positions[signal.symbol] = position
+                                    trades_entered += 1
+                                    self.state.daily_trade_count += 1
+                            finally:
+                                self._entering_symbols.discard(signal.symbol)
                     else:
-                        # Execute entry (with optional agent SL/TP overrides)
+                        # Execute entry (no footprint gate or footprint skipped for shorts)
                         self._entering_symbols.add(signal.symbol)
                         try:
                             position, order_result, trade_record = await self.order_executor.execute_entry(

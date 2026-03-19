@@ -203,6 +203,14 @@ class Settings(BaseSettings):
     pullback_valid_candles: int = 96            # Number of 5m candles before expiry (96 = 8h)
     pullback_use_limit_in_zone: bool = True     # Place limit orders at zone levels (not best bid/ask)
 
+    # Footprint Analysis — order flow confirmation gate
+    footprint_enabled: bool = False
+    footprint_min_delta_pct: float = 0.10       # Min net delta as % of total volume
+    footprint_absorption_threshold: float = 0.30
+    footprint_min_confidence: float = 0.40      # Min weighted confidence to pass
+    footprint_trade_limit: int = 1000           # Recent trades to fetch
+    footprint_longs_only: bool = False          # Only apply to long entries
+
     # Market Consensus Check — portfolio + BTC alignment before entry
     consensus_enabled: bool = True
     consensus_portfolio_penalty: float = 10.0    # Score penalty when portfolio bias alone disagrees
