@@ -217,6 +217,23 @@ class LeverageProfile:
 
 
 @dataclass
+class FootprintResult:
+    """Order flow confirmation result for a sweep signal."""
+    passed: bool
+    confidence: float                     # 0.0 - 1.0
+    delta: float                          # Net aggressive volume (positive = buy pressure)
+    delta_pct: float                      # Delta as % of total volume
+    absorption_score: float               # 0.0 - 1.0
+    cumulative_delta_confirms: bool
+    oi_change_pct: float                  # OI change since sweep
+    oi_confirms: bool
+    total_volume: float
+    buy_volume: float
+    sell_volume: float
+    reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SignalCandidate:
     score: float
     direction: str | None

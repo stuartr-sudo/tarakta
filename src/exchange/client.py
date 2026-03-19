@@ -461,6 +461,29 @@ class BinanceFuturesClient:
         }
 
     @async_retry(max_attempts=3, base_delay=5.0, exceptions=(ccxt.NetworkError, ccxt.ExchangeNotAvailable))
+    async def fetch_trades(self, symbol: str, limit: int = 1000) -> list[dict]:
+        """Fetch recent aggregated trades for order flow analysis.
+
+        Each trade has a ``side`` field from the taker's perspective:
+        ``"buy"`` = aggressive buyer, ``"sell"`` = aggressive seller.
+        """
+        async with self._semaphore:
+            await self._rate_limit_wait()
+            trades = await self.exchange.fetch_trades(symbol, limit=limit)
+            self._last_request_time = time.time()
+
+        return [
+            {
+                "price": float(t["price"]),
+                "amount": float(t["amount"]),
+                "cost": float(t.get("cost", 0)),
+                "side": t["side"],
+                "timestamp": t["timestamp"],
+            }
+            for t in trades
+        ]
+
+    @async_retry(max_attempts=3, base_delay=5.0, exceptions=(ccxt.NetworkError, ccxt.ExchangeNotAvailable))
     async def fetch_funding_rate(self, symbol: str) -> dict:
         """Fetch current funding rate for a futures symbol.
 
