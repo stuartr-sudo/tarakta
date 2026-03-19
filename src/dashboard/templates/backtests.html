@@ -273,7 +273,7 @@
 
     async function loadData() {
         try {
-            const resp = await fetch('/api/backtests');
+            const resp = await fetch(apiUrl('/api/backtests'));
             const data = await resp.json();
             const backtests = data.backtests || [];
 
@@ -290,14 +290,14 @@
             const promises = [];
             if (origFile) {
                 promises.push(
-                    fetch('/api/backtests/' + origFile.filename)
+                    fetch(apiUrl('/api/backtests/' + origFile.filename))
                         .then(r => r.json())
                         .then(d => { originalData = d; })
                 );
             }
             if (flipFile) {
                 promises.push(
-                    fetch('/api/backtests/' + flipFile.filename)
+                    fetch(apiUrl('/api/backtests/' + flipFile.filename))
                         .then(r => r.json())
                         .then(d => { flippedData = d; })
                 );

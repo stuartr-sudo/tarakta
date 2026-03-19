@@ -450,7 +450,7 @@ async function saveSetting(payload) {
     st.textContent = 'Saving...';
     st.style.color = '#f59e0b';
     try {
-        const resp = await fetch('/api/main/settings', {
+        const resp = await fetch(apiUrl('/api/main/settings'), {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(payload),
@@ -490,7 +490,7 @@ async function switchAgentModel(agentKey, selectId) {
     status.textContent = 'Saving...';
     status.style.color = '#f59e0b';
     try {
-        const resp = await fetch('/api/agent-model', {
+        const resp = await fetch(apiUrl('/api/agent-model'), {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({agent: agentKey, model: model}),

@@ -49,15 +49,16 @@
     </div>
 
     <!-- Navigation -->
+    {% set _iq = '?instance=' ~ active_instance if active_instance is defined and active_instance != config.instance_id else '' %}
     <nav class="top-nav">
         <a href="/" class="brand">Tarakta</a>
         <div class="nav-links">
-            <a href="/" class="{{ 'active' if current_page == '/' else '' }}">Dashboard</a>
-            <a href="/trades" class="{{ 'active' if current_page == '/trades' else '' }}">Trades</a>
-            <a href="/signals" class="{{ 'active' if current_page == '/signals' else '' }}">Signals</a>
-            <a href="/analytics" class="{{ 'active' if current_page == '/analytics' else '' }}">Analytics</a>
-            <a href="/chart" class="{{ 'active' if current_page == '/chart' else '' }}">Chart</a>
-            <a href="/settings" class="{{ 'active' if current_page == '/settings' else '' }}">Settings</a>
+            <a href="/{{ _iq }}" class="{{ 'active' if current_page == '/' else '' }}">Dashboard</a>
+            <a href="/trades{{ _iq }}" class="{{ 'active' if current_page == '/trades' else '' }}">Trades</a>
+            <a href="/signals{{ _iq }}" class="{{ 'active' if current_page == '/signals' else '' }}">Signals</a>
+            <a href="/analytics{{ _iq }}" class="{{ 'active' if current_page == '/analytics' else '' }}">Analytics</a>
+            <a href="/chart{{ _iq }}" class="{{ 'active' if current_page == '/chart' else '' }}">Chart</a>
+            <a href="/settings{{ _iq }}" class="{{ 'active' if current_page == '/settings' else '' }}">Settings</a>
         </div>
         <div class="nav-right">
             <div class="scan-timer" id="scanTimer">
@@ -122,6 +123,15 @@
         update();
         setInterval(update, 1000);
     })();
+    </script>
+    <script>
+    /* Global helper: append ?instance= to API URLs so all tabs fetch the right data */
+    const _ACTIVE_INSTANCE = '{{ active_instance | default("") }}';
+    function apiUrl(path) {
+        if (!_ACTIVE_INSTANCE) return path;
+        const sep = path.includes('?') ? '&' : '?';
+        return path + sep + 'instance=' + encodeURIComponent(_ACTIVE_INSTANCE);
+    }
     </script>
     {% block scripts %}{% endblock %}
 </body>
