@@ -420,6 +420,10 @@ class PaperExchange:
         """Delegate to live exchange."""
         return self.live.get_24h_volume(symbol)
 
+    async def fetch_trades(self, symbol: str, limit: int = 1000) -> list[dict]:
+        """Delegate to live exchange for real trade data (footprint analysis)."""
+        return await self.live.fetch_trades(symbol, limit=limit)
+
     async def fetch_open_interest(self, symbol: str) -> dict:
         """Delegate to live exchange."""
         return await self.live.fetch_open_interest(symbol)
