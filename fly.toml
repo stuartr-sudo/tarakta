@@ -1,4 +1,4 @@
-app = "tarakta"
+app = "tarakta-expanded"
 primary_region = "ams"
 
 [build]
@@ -8,6 +8,8 @@ primary_region = "ams"
   LOG_LEVEL = "INFO"
   LOG_FORMAT = "json"
   PORT = "8080"
+  INSTANCE_ID = "footprint"
+  FOOTPRINT_ENABLED = "true"
   POSITION_AGENT_ENABLED = "true"
 
 [http_service]
