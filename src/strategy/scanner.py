@@ -352,6 +352,8 @@ class AltcoinScanner:
                 )
 
                 signal.leverage_profile = profile
+                # Cache OI at sweep time for footprint comparison
+                signal.sweep_oi_usd = oi_data.get("open_interest_usd", 0.0)
 
                 # Apply leverage bonus scoring
                 bonus = self._score_leverage(profile)

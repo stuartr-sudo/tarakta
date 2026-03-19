@@ -271,6 +271,8 @@ class SignalCandidate:
     agent_context: dict = field(default_factory=dict)
     # Pullback plan for WAIT_PULLBACK entries (formal pending order contract)
     pullback_plan: PullbackPlan | None = None
+    # Open Interest at sweep detection time (for footprint OI comparison)
+    sweep_oi_usd: float = 0.0
 
 
 @dataclass
