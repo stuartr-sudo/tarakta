@@ -2079,6 +2079,39 @@ class TradingEngine:
                 logger.info("refiner_duplicate_blocked", symbol=signal.symbol)
                 continue
 
+            # Footprint order flow confirmation gate (same as primary path)
+            if self.footprint_analyzer and signal.sweep_result and not (
+                self.config.footprint_longs_only and signal.direction == "bearish"
+            ):
+                try:
+                    fp_result = await self.footprint_analyzer.analyze(
+                        exchange=self.exchange,
+                        symbol=signal.symbol,
+                        sweep_direction=getattr(signal.sweep_result, "sweep_type", "") or "",
+                        sweep_level=getattr(signal.sweep_result, "sweep_level", 0.0) or 0.0,
+                        current_price=signal.entry_price,
+                        trade_limit=self.config.footprint_trade_limit,
+                    )
+                    logger.info(
+                        "footprint_check",
+                        symbol=signal.symbol,
+                        passed=fp_result.passed,
+                        confidence=round(fp_result.confidence, 3),
+                        delta_pct=round(fp_result.delta_pct, 4),
+                        path="refiner",
+                    )
+                    if not fp_result.passed:
+                        logger.info(
+                            "trade_rejected_footprint",
+                            symbol=signal.symbol,
+                            direction=signal.direction,
+                            path="refiner",
+                            reasons=fp_result.reasons,
+                        )
+                        continue
+                except Exception as e:
+                    logger.warning("footprint_check_error", symbol=signal.symbol, error=str(e))
+
             # Execute the trade (with Agent 2 SL/TP overrides if available)
             self._entering_symbols.add(signal.symbol)
             try:
