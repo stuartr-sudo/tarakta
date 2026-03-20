@@ -1053,15 +1053,21 @@ Reference specific numbers from the data in your reasoning."""
                 return decision
 
             # Validate R:R >= 1.5
+            # Use Agent 1's original plan R:R if available — Agent 2's
+            # entry price drifts with current price and can collapse R:R
+            # even when the original trade thesis is still valid.
+            a1_rr = context.get("agent1_rr")
             sl_distance = abs(decision.entry_price - decision.stop_loss)
             tp_distance = abs(decision.take_profit - decision.entry_price)
-            if sl_distance > 0:
-                rr = tp_distance / sl_distance
-                if rr < 1.5:
+            rr = (tp_distance / sl_distance) if sl_distance > 0 else 0
+            plan_rr = a1_rr if a1_rr and a1_rr > 0 else rr
+            if plan_rr < 1.5 and rr < 1.5:
+                if sl_distance > 0:
                     logger.warning(
                         "refiner_agent_low_rr",
                         symbol=context.get("symbol", "?"),
                         rr=round(rr, 2),
+                        plan_rr=round(plan_rr, 2),
                     )
                     decision.action = "WAIT"
                     decision.reasoning = (
