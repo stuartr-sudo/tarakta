@@ -3958,15 +3958,29 @@ class TradingEngine:
             # Use remaining_quantity if partial exits have occurred
             qty = float(t.get("remaining_quantity") or t.get("entry_quantity", 0))
 
+            # Fetch current price so high_water_mark isn't reset to entry
+            # on restart — prevents trailing stops from firing incorrectly
+            entry_px = float(t.get("entry_price", 0))
+            try:
+                ticker = await self.exchange.fetch_ticker(symbol)
+                current_px = float(ticker.get("last", entry_px))
+            except Exception:
+                current_px = entry_px
+            direction_str = t.get("direction", "long")
+            if direction_str == "long":
+                hwm = max(entry_px, current_px)
+            else:
+                hwm = min(entry_px, current_px) if current_px > 0 else entry_px
+
             position = Position(
                 trade_id=t["id"],
                 symbol=symbol,
-                direction=t.get("direction", "long"),
-                entry_price=float(t.get("entry_price", 0)),
+                direction=direction_str,
+                entry_price=entry_px,
                 quantity=qty,
                 stop_loss=float(t.get("stop_loss", 0)),
                 take_profit=float(t.get("take_profit")) if t.get("take_profit") else None,
-                high_water_mark=float(t.get("entry_price", 0)),
+                high_water_mark=hwm,
                 entry_time=datetime.fromisoformat(t["entry_time"]) if t.get("entry_time") else datetime.now(timezone.utc),
                 cost_usd=cost_usd,
                 leverage=leverage,
