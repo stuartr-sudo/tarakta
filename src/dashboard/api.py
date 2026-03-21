@@ -904,7 +904,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
     async def set_agent_model(request: Request):
         """Switch agent model at runtime and persist to DB.
 
-        Body: {"agent": "agent1"|"agent2", "model": "gemini-3-pro-preview"|"gemini-3-flash-preview"}
+        Body: {"agent": "agent1"|"agent2"|"agent3", "model": "gpt-5.4-mini"|"gpt-5-mini"|"gpt-5.4-nano"}
         Backwards-compatible: {"model": "..."} still switches Agent 1.
         """
         try:

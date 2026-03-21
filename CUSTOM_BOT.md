@@ -29,7 +29,7 @@ The Custom Bot is a **fully simulated** shadow trader built on the `FlippedTrade
 | **Strategy pipeline** | Full (sentiment, LLM, adaptive threshold, watchlist) | Simplified (sweep + displacement + pullback + HTF + timing only) |
 | **Direction** | Direct signal direction | Configurable flip modes |
 | **Sentiment filter** | Yes (CryptoBERT) | No |
-| **LLM analysis** | Yes (Claude) | No |
+| **LLM analysis** | Yes (OpenAI) | No |
 | **Adaptive threshold** | Yes (55-85 range) | No (fixed 60) |
 | **Watchlist monitor** | Yes (near-miss to 5m) | No |
 | **Circuit breaker** | Yes | No |
