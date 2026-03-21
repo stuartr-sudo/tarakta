@@ -908,6 +908,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         Backwards-compatible: {"model": "..."} still switches Agent 1.
         """
         try:
+            from src.strategy.llm_client import MODEL_PRICING
             body = await request.json()
             model = body.get("model", "").strip()
             agent_key = body.get("agent", "agent1").strip()
@@ -921,14 +922,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 if not engine.position_agent:
                     return {"error": "Agent 3 not available (no API key or disabled)"}
                 engine.position_agent._model = model
-                # Switch API key to match the new provider
-                from src.strategy.llm_client import get_api_key_for_model
-                engine.position_agent._api_key = get_api_key_for_model(
-                    model,
-                    openai_key=engine.position_agent._openai_api_key,
-                    anthropic_key=engine.position_agent._anthropic_api_key,
-                    gemini_key=engine.position_agent._gemini_api_key,
-                )
+                engine.position_agent._api_key = engine.config.openai_api_key
                 active = model
                 db_field = "agent3_model"
             elif agent_key == "agent2":
@@ -967,7 +961,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 "available_models": (
                     engine.agent_analyst.available_models
                     if engine.agent_analyst
-                    else ["gemini-3-pro-preview", "gemini-3-flash-preview"]
+                    else list(MODEL_PRICING.keys())
                 ),
             }
             return result
