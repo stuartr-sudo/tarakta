@@ -17,7 +17,7 @@ from typing import Any
 
 from src.config import Settings
 from src.strategy.llm_client import (
-    generate_json, is_openai_model, MODEL_PRICING,
+    generate_json, MODEL_PRICING,
 )
 from src.data.repository import Repository
 from src.utils.logging import get_logger
@@ -92,7 +92,7 @@ Rules:
 
 Respond with ONLY the JSON object. No other text."""
 
-# Gemini structured output schema
+# Structured output schema
 LESSON_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -123,15 +123,11 @@ class TradeLessonGenerator:
     """
 
     def __init__(self, config: Settings, repo: Repository) -> None:
-        self._model = getattr(config, "position_agent_model", "gemini-3-flash-preview")
+        self._model = config.refiner_agent_model
         self._timeout = config.agent_timeout_seconds
         self._repo = repo
 
-        # Route API key based on model provider
-        if is_openai_model(self._model):
-            self._api_key = config.openai_api_key
-        else:
-            self._api_key = config.agent_api_key
+        self._api_key = config.openai_api_key
         self._available = bool(self._api_key)
 
         # Stats
@@ -205,7 +201,6 @@ class TradeLessonGenerator:
                 system_prompt=LESSON_SYSTEM_PROMPT + LESSON_JSON_FORMAT,
                 user_prompt=prompt,
                 json_schema=LESSON_RESPONSE_SCHEMA,
-                thinking_level="low",
                 temperature=1.0,
                 timeout=self._timeout,
             )
