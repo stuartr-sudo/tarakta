@@ -210,7 +210,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
     async def settings_page(request: Request):
         ctx = await _base_context(request)
         state = ctx.get("state") or {}
-        ctx["agent1_enabled"] = bool(config.agent_api_key and config.agent_enabled)
+        ctx["agent1_enabled"] = bool(config.openai_api_key and config.agent_enabled)
         ctx["refiner_agent_enabled"] = state.get(
             "refiner_agent_enabled",
             getattr(config, "refiner_agent_enabled", False),
@@ -225,8 +225,8 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             overrides = {}
         agent_models = overrides.get("agent_models") or {}
         ctx["agent1_model"] = agent_models.get("agent1", config.agent_model)
-        ctx["agent2_model"] = agent_models.get("agent2", config.agent_model)
-        ctx["agent3_model"] = agent_models.get("agent3", getattr(config, "position_agent_model", "gemini-3-flash-preview"))
+        ctx["agent2_model"] = agent_models.get("agent2", config.refiner_agent_model)
+        ctx["agent3_model"] = agent_models.get("agent3", config.position_agent_model)
         from src.strategy.llm_client import MODEL_PRICING
         ctx["available_agent_models"] = sorted(MODEL_PRICING.keys())
         # Leverage & margin (same source as dashboard)

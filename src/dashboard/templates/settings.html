@@ -124,9 +124,9 @@
                 and decides whether to enter, wait for pullback, or skip.
                 {% endif %}
             </p>
-            {% if not config.agent_api_key %}
+            {% if not config.openai_api_key %}
             <p class="text-muted" style="color: var(--orange);">
-                Set AGENT_API_KEY in environment to use AI agents.
+                Set OPENAI_API_KEY in environment to use AI agents.
             </p>
             {% else %}
             <table class="config-table" style="margin-bottom:0.75rem;">
@@ -172,9 +172,9 @@
                 moment to enter — with exact entry price, stop loss, take profit, and position size.
                 {% endif %}
             </p>
-            {% if not config.agent_api_key %}
+            {% if not config.openai_api_key %}
             <p class="text-muted" style="color: var(--orange);">
-                Set AGENT_API_KEY in environment to use AI agents.
+                Set OPENAI_API_KEY in environment to use AI agents.
             </p>
             {% elif role == 'admin' %}
             <table class="config-table" style="margin-bottom:0.75rem;">
@@ -226,9 +226,9 @@
             take partial profits, or close positions early based on real-time market analysis.
             {% endif %}
         </p>
-        {% if not config.agent_api_key %}
+        {% if not config.openai_api_key %}
         <p class="text-muted" style="color: var(--orange);">
-            Set AGENT_API_KEY in environment to use AI agents.
+            Set OPENAI_API_KEY in environment to use AI agents.
         </p>
         {% elif role == 'admin' %}
         <table class="config-table" style="margin-bottom:0.75rem;">
