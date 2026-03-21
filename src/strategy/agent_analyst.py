@@ -1,4 +1,4 @@
-"""Agent 1 — AI-powered strategic entry agent using Gemini Interactions API.
+"""Agent 1 — AI-powered strategic entry agent.
 
 This agent makes the actual entry DECISION. Given a candidate that passed initial
 formula screening (sweep detected, score >= 35), the agent reasons about
@@ -14,7 +14,7 @@ This gives us an edge because:
     correlations, recent performance patterns) that formulas can't capture
   - The agent can adapt its reasoning without code changes
 
-Uses Gemini Interactions API for structured output with
+Uses OpenAI structured output with
 resilience patterns: lazy client, exponential backoff, cost tracking.
 """
 from __future__ import annotations
@@ -25,8 +25,7 @@ from typing import Any
 
 from src.config import Settings
 from src.strategy.llm_client import (
-    LLMResult, generate_json, is_openai_model, is_anthropic_model,
-    get_api_key_for_model, MODEL_PRICING,
+    LLMResult, generate_json, MODEL_PRICING,
 )
 from src.exchange.models import SignalCandidate
 from src.utils.logging import get_logger
@@ -240,7 +239,7 @@ FORBIDDEN vague phrases — NEVER use these without a price:
 Respond with ONLY the JSON object. No other text."""
 
 
-# Gemini structured output schema for Agent 1
+# Structured output schema for Agent 1
 AGENT1_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -270,7 +269,7 @@ AGENT1_RESPONSE_SCHEMA = {
 
 
 class AgentEntryAnalyst:
-    """Gemini-powered entry agent with resilient API handling.
+    """AI-powered entry agent with resilient API handling.
 
     Replaces the binary approve/reject LLM gate with an intelligent
     decision-maker that chooses between SETUP_CONFIRMED, WAIT_PULLBACK, and SKIP.
@@ -281,28 +280,12 @@ class AgentEntryAnalyst:
         self._timeout = config.agent_timeout_seconds
         self._min_confidence = config.agent_min_confidence
         self._max_sl_pct = config.max_sl_pct
-        self._thinking_level = "high"  # Agent 1: strategic analysis needs deep thinking
-
-        # Store all API keys so runtime model switching works across providers
-        self._gemini_api_key = config.agent_api_key
-        self._openai_api_key = config.openai_api_key
-        self._anthropic_api_key = getattr(config, "anthropic_api_key", "")
-        self._api_key = get_api_key_for_model(
-            self._model,
-            openai_key=self._openai_api_key,
-            anthropic_key=self._anthropic_api_key,
-            gemini_key=self._gemini_api_key,
-        )
+        self._api_key = config.openai_api_key
         self._available = bool(self._api_key)
 
         logger.info(
             "agent1_init",
             model=self._model,
-            is_openai=is_openai_model(self._model),
-            is_anthropic=is_anthropic_model(self._model),
-            has_openai_key=bool(self._openai_api_key),
-            has_gemini_key=bool(self._gemini_api_key),
-            has_anthropic_key=bool(self._anthropic_api_key),
             available=self._available,
         )
 
@@ -332,14 +315,6 @@ class AgentEntryAnalyst:
             raise ValueError(f"Unknown model: {model}. Available: {self.available_models}")
         old = self._model
         self._model = model
-        # Switch API key to match the new provider
-        self._api_key = get_api_key_for_model(
-            model,
-            openai_key=self._openai_api_key,
-            anthropic_key=self._anthropic_api_key,
-            gemini_key=self._gemini_api_key,
-        )
-        self._available = bool(self._api_key)
         logger.info("agent_model_switched", old_model=old, new_model=model)
         return self._model
 
@@ -410,7 +385,6 @@ class AgentEntryAnalyst:
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 json_schema=AGENT1_RESPONSE_SCHEMA,
-                thinking_level=self._thinking_level,
                 temperature=1.0,
                 timeout=self._timeout,
             )
@@ -425,7 +399,7 @@ class AgentEntryAnalyst:
             self.total_output_tokens += output_tokens
             self.total_requests += 1
 
-            # Calculate cost in USD (no cached token distinction for Gemini)
+            # Calculate cost in USD
             price_in, _price_cached, price_out = self._pricing.get(
                 self._model, (1.25, 0.125, 10.00)
             )
