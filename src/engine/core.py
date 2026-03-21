@@ -64,7 +64,7 @@ class TradingEngine:
         # Agent 3 (Position Manager) — always instantiate if API key exists
         # Runtime toggle via settings page controls whether it's wired into the monitor
         self.position_agent = None
-        if config.agent_api_key:
+        if config.openai_api_key:
             from src.strategy.position_agent import PositionManagerAgent
             self.position_agent = PositionManagerAgent(config)
 
@@ -127,11 +127,11 @@ class TradingEngine:
         # Agent 2 — Refiner Monitor (tactical entry timing)
         # Always create if API key exists so runtime toggle works instantly
         self.refiner_agent: RefinerMonitorAgent | None = None
-        if config.agent_api_key:
+        if config.openai_api_key:
             self.refiner_agent = RefinerMonitorAgent(config)
             logger.info(
                 "refiner_agent_created",
-                model=config.agent_model,
+                model=config.refiner_agent_model,
                 enabled=getattr(config, "refiner_agent_enabled", False),
                 check_interval=f"{getattr(config, 'refiner_agent_check_interval_minutes', 5.0)}min",
             )
@@ -180,13 +180,13 @@ class TradingEngine:
 
         # Trade Lesson Generator — AI post-mortem after every closed trade
         self.lesson_generator: TradeLessonGenerator | None = None
-        if config.agent_api_key:
+        if config.openai_api_key:
             self.lesson_generator = TradeLessonGenerator(config, repo)
             logger.info("lesson_generator_ready")
 
-        # AI entry agent (Gemini — intelligent decision-maker)
+        # AI entry agent
         self.agent_analyst: AgentEntryAnalyst | None = None
-        if config.agent_api_key:
+        if config.openai_api_key:
             self.agent_analyst = AgentEntryAnalyst(config)
             logger.info(
                 "agent_analyst_ready",
@@ -356,16 +356,10 @@ class TradingEngine:
                     self.refiner_agent.set_model(agent_models["agent2"])
                     logger.info("agent2_model_restored", model=agent_models["agent2"])
                 elif self.refiner_agent:
-                    logger.info("agent2_model_default", model=self.config.agent_model)
+                    logger.info("agent2_model_default", model=self.config.refiner_agent_model)
                 if self.position_agent and agent_models.get("agent3"):
-                    from src.strategy.llm_client import get_api_key_for_model
                     self.position_agent._model = agent_models["agent3"]
-                    self.position_agent._api_key = get_api_key_for_model(
-                        agent_models["agent3"],
-                        openai_key=self.position_agent._openai_api_key,
-                        anthropic_key=self.position_agent._anthropic_api_key,
-                        gemini_key=self.position_agent._gemini_api_key,
-                    )
+                    self.position_agent._api_key = self.config.openai_api_key
                     logger.info("agent3_model_restored", model=agent_models["agent3"])
 
         self.portfolio = PortfolioTracker(
