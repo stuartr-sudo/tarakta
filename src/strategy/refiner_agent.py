@@ -11,7 +11,7 @@ It runs every 5 minutes on queued signals and returns concrete parameters:
 Agent 2 has reasoning continuity — its previous analysis is included in each
 prompt so it can build on its own observations across checks.
 
-Uses Gemini Interactions API (JSON response format), mirroring Agent 1's
+Uses OpenAI structured output (JSON response format), mirroring Agent 1's
 resilience patterns (lazy client, exponential backoff, cost tracking).
 """
 from __future__ import annotations
@@ -22,8 +22,7 @@ from typing import Any
 
 from src.config import Settings
 from src.strategy.llm_client import (
-    LLMResult, generate_json, is_openai_model, is_anthropic_model,
-    get_api_key_for_model, MODEL_PRICING,
+    LLMResult, generate_json, MODEL_PRICING,
 )
 from src.utils.logging import get_logger
 
@@ -236,7 +235,7 @@ Rules:
 Respond with ONLY the JSON object. No other text."""
 
 
-# Gemini structured output schema for Agent 2
+# Structured output schema for Agent 2
 REFINER_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -260,29 +259,16 @@ REFINER_RESPONSE_SCHEMA = {
 class RefinerMonitorAgent:
     """Agent 2 — AI-powered tactical entry timing.
 
-    Mirrors Agent 1's infrastructure: lazy Gemini AsyncClient, exponential
-    backoff, token/cost tracking, JSON response parsing with fallbacks.
+    Mirrors Agent 1's infrastructure: exponential backoff, token/cost tracking,
+    JSON response parsing with fallbacks.
     """
 
     def __init__(self, config: Settings) -> None:
-        self._model = getattr(config, "agent_model", "gemini-3-flash-preview")
-        # Agent 2 always uses flash for Gemini — override pro model
-        if not is_openai_model(self._model) and "pro" in self._model:
-            self._model = "gemini-3-flash-preview"
+        self._model = config.refiner_agent_model
         self._timeout = config.agent_timeout_seconds
         self._max_sl_pct = getattr(config, "max_sl_pct", 0.15)
-        self._thinking_level = "low"  # Agent 2 refine: fast tactical decisions
 
-        # Store all API keys so runtime model switching works across providers
-        self._gemini_api_key = config.agent_api_key
-        self._openai_api_key = config.openai_api_key
-        self._anthropic_api_key = getattr(config, "anthropic_api_key", "")
-        self._api_key = get_api_key_for_model(
-            self._model,
-            openai_key=self._openai_api_key,
-            anthropic_key=self._anthropic_api_key,
-            gemini_key=self._gemini_api_key,
-        )
+        self._api_key = config.openai_api_key
         self._available = bool(self._api_key)
 
         # Backoff state (mirrors Agent 1)
@@ -312,14 +298,6 @@ class RefinerMonitorAgent:
             raise ValueError(f"Unknown model: {model}. Available: {self.available_models}")
         old = self._model
         self._model = model
-        # Switch API key to match the new provider
-        self._api_key = get_api_key_for_model(
-            model,
-            openai_key=self._openai_api_key,
-            anthropic_key=self._anthropic_api_key,
-            gemini_key=self._gemini_api_key,
-        )
-        self._available = bool(self._api_key)
         logger.info("refiner_agent_model_switched", old_model=old, new_model=model)
         return self._model
 
@@ -384,7 +362,6 @@ class RefinerMonitorAgent:
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 json_schema=REFINER_RESPONSE_SCHEMA,
-                thinking_level=self._thinking_level,
                 temperature=1.0,
                 timeout=self._timeout,
             )
@@ -441,55 +418,6 @@ class RefinerMonitorAgent:
         except Exception as e:
             latency_ms = (time.monotonic() - start) * 1000
             error_str = str(e)
-
-            # If OpenAI returns 400 (bad request), try Gemini as fallback
-            if (
-                is_openai_model(self._model)
-                and "400" in error_str
-                and self._gemini_api_key
-            ):
-                logger.warning(
-                    "refiner_agent_openai_400_fallback_to_gemini",
-                    symbol=context.get("symbol", "?"),
-                    error=error_str[:150],
-                )
-                try:
-                    fallback_model = "gemini-3-flash-preview"
-                    result = await generate_json(
-                        model=fallback_model,
-                        api_key=self._gemini_api_key,
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        json_schema=REFINER_RESPONSE_SCHEMA,
-                        thinking_level=self._thinking_level,
-                        temperature=1.0,
-                        timeout=self._timeout,
-                    )
-                    latency_ms = (time.monotonic() - start) * 1000
-                    self._record_success()
-                    decision = self._parse_response(result.text)
-                    decision.latency_ms = latency_ms
-                    decision.input_tokens = result.input_tokens
-                    decision.output_tokens = result.output_tokens
-                    decision = self._validate_decision(decision, context)
-                    if decision.action == "ENTER":
-                        self.total_enter += 1
-                    else:
-                        self.total_wait += 1
-                    logger.info(
-                        "refiner_agent_decision_via_gemini_fallback",
-                        symbol=context.get("symbol", "?"),
-                        action=decision.action,
-                        confidence=decision.confidence,
-                        latency_ms=round(latency_ms, 1),
-                    )
-                    return decision
-                except Exception as fallback_e:
-                    logger.warning(
-                        "refiner_agent_gemini_fallback_also_failed",
-                        symbol=context.get("symbol", "?"),
-                        error=str(fallback_e)[:150],
-                    )
 
             self._record_failure()
             logger.warning(
