@@ -588,8 +588,8 @@ On startup, all state is restored from the database.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `llm_enabled` | False | Enable Claude analysis |
-| `llm_model` | `"claude-haiku-4-5-20251001"` | Claude model |
+| `llm_enabled` | False | Enable AI analysis |
+| `llm_model` | `"gpt-5.4-mini"` | OpenAI model |
 | `llm_split_ratio` | 0.5 | Fraction of trades sent to LLM |
 | `llm_min_confidence` | 40.0 | Minimum LLM confidence to approve |
 | `llm_fallback_approve` | True | Approve on API failure |
