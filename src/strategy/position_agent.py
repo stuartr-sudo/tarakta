@@ -13,8 +13,8 @@ Decisions:
 Key constraint: Agent 3 cannot widen the SL or override hard SL/TP levels.
 If the API call fails, the algorithmic logic has already run — no action taken.
 
-Uses the same infrastructure as Agent 1 and Agent 2: lazy Gemini AsyncClient,
-exponential backoff, cost tracking, JSON response parsing.
+Uses the same infrastructure as Agent 1 and Agent 2: exponential backoff,
+cost tracking, JSON response parsing.
 """
 from __future__ import annotations
 
@@ -24,8 +24,7 @@ from typing import Any
 
 from src.config import Settings
 from src.strategy.llm_client import (
-    LLMResult, generate_json, is_openai_model, is_anthropic_model,
-    get_api_key_for_model, MODEL_PRICING,
+    generate_json, MODEL_PRICING,
 )
 from src.utils.logging import get_logger
 
@@ -159,7 +158,7 @@ Rules:
 Respond with ONLY the JSON object. No other text."""
 
 
-# Gemini structured output schema for Agent 3
+# Structured output schema for Agent 3
 POSITION_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -181,20 +180,10 @@ class PositionManagerAgent:
     """
 
     def __init__(self, config: Settings) -> None:
-        self._model = getattr(config, "position_agent_model", "gemini-3-flash-preview")
+        self._model = config.position_agent_model
         self._timeout = config.agent_timeout_seconds
-        self._thinking_level = "minimal"  # Agent 3: simple SL checks, fast
 
-        # Store all API keys so runtime model switching works across providers
-        self._gemini_api_key = config.agent_api_key
-        self._openai_api_key = config.openai_api_key
-        self._anthropic_api_key = getattr(config, "anthropic_api_key", "")
-        self._api_key = get_api_key_for_model(
-            self._model,
-            openai_key=self._openai_api_key,
-            anthropic_key=self._anthropic_api_key,
-            gemini_key=self._gemini_api_key,
-        )
+        self._api_key = config.openai_api_key
         self._available = bool(self._api_key) and getattr(
             config, "position_agent_enabled", False
         )
@@ -254,7 +243,6 @@ class PositionManagerAgent:
                 system_prompt=POSITION_SYSTEM_PROMPT + POSITION_JSON_FORMAT,
                 user_prompt=prompt,
                 json_schema=POSITION_RESPONSE_SCHEMA,
-                thinking_level=self._thinking_level,
                 temperature=1.0,
                 timeout=self._timeout,
             )
