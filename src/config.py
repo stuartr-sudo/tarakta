@@ -130,28 +130,23 @@ class Settings(BaseSettings):
     # Hugging Face Inference API
     hf_api_token: str = ""  # For FinBERT sentiment + zero-shot classification
 
-    # AI Entry Agent (supports Gemini, OpenAI, and Anthropic models)
-    # Set AGENT_MODEL to a Gemini model (gemini-3-pro-preview) → uses AGENT_API_KEY
-    # Set AGENT_MODEL to an OpenAI model (gpt-4o, gpt-4.1) → uses OPENAI_API_KEY
-    # Set AGENT_MODEL to a Claude model (claude-sonnet-4-6) → uses ANTHROPIC_API_KEY
-    anthropic_api_key: str = ""  # Anthropic API key (set ANTHROPIC_API_KEY in .env)
+    # AI Entry Agent (OpenAI models only)
+    # All agents use OPENAI_API_KEY for authentication
     agent_enabled: bool = True  # Auto-enabled when API key is set
-    agent_api_key: str = ""  # Gemini API key (set AGENT_API_KEY in .env)
-    agent_model: str = "gemini-3-pro-preview"  # Agent 1: pro/gpt-4o for strategic analysis
+    agent_model: str = "gpt-5.4-mini"  # Agent 1: strategic entry analysis
     agent_timeout_seconds: float = 150.0  # GPT-5 with thinking takes 100-120s typically
     agent_min_score: float = 35.0  # Minimum formula score to send to agent (sweep detected)
     agent_min_confidence: float = 50.0  # Agent must be >= this confident to approve
     agent_split_ratio: float = 1.0  # 1.0 = ALL qualifying signals go through agent
 
     # Refiner Monitor Agent (Agent 2 — tactical entry timing on 5m candles)
-    # Shares agent_model with Agent 1 (Gemini: auto-downgrades to flash)
     refiner_agent_enabled: bool = True
+    refiner_agent_model: str = "gpt-5-mini"  # Agent 2: tactical timing (separate from Agent 1)
     refiner_agent_check_interval_minutes: float = 5.0  # Agent 2 runs every 5 min per signal
 
     # Position Manager Agent (Agent 3 — AI-powered position monitoring)
-    # Uses position_agent_model; auto-routes API key by model provider
     position_agent_enabled: bool = True  # Auto-enabled when API key is set
-    position_agent_model: str = "gemini-3-flash-preview"  # Flash/gpt-4o-mini for frequent checks
+    position_agent_model: str = "gpt-5.4-nano"  # Agent 3: position management (cheapest model)
     position_agent_check_interval_minutes: float = 5.0  # How often to check each position
 
     # RAG Knowledge Base — trade history retrieval for Agent 1 & 2
