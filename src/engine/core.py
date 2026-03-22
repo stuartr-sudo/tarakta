@@ -347,20 +347,33 @@ class TradingEngine:
             overrides = saved.get("config_overrides") or {}
             if isinstance(overrides, dict):
                 agent_models = overrides.get("agent_models") or {}
+                from src.strategy.llm_client import MODEL_PRICING
                 if self.agent_analyst and agent_models.get("agent1"):
-                    self.agent_analyst.set_model(agent_models["agent1"])
-                    logger.info("agent1_model_restored", model=agent_models["agent1"])
+                    saved_model = agent_models["agent1"]
+                    if saved_model in MODEL_PRICING:
+                        self.agent_analyst.set_model(saved_model)
+                        logger.info("agent1_model_restored", model=saved_model)
+                    else:
+                        logger.warning("agent1_model_stale", saved=saved_model, using=self.config.agent_model)
                 elif self.agent_analyst:
                     logger.info("agent1_model_default", model=self.config.agent_model)
                 if self.refiner_agent and agent_models.get("agent2"):
-                    self.refiner_agent.set_model(agent_models["agent2"])
-                    logger.info("agent2_model_restored", model=agent_models["agent2"])
+                    saved_model = agent_models["agent2"]
+                    if saved_model in MODEL_PRICING:
+                        self.refiner_agent.set_model(saved_model)
+                        logger.info("agent2_model_restored", model=saved_model)
+                    else:
+                        logger.warning("agent2_model_stale", saved=saved_model, using=self.config.refiner_agent_model)
                 elif self.refiner_agent:
                     logger.info("agent2_model_default", model=self.config.refiner_agent_model)
                 if self.position_agent and agent_models.get("agent3"):
-                    self.position_agent._model = agent_models["agent3"]
-                    self.position_agent._api_key = self.config.openai_api_key
-                    logger.info("agent3_model_restored", model=agent_models["agent3"])
+                    saved_model = agent_models["agent3"]
+                    if saved_model in MODEL_PRICING:
+                        self.position_agent._model = saved_model
+                        self.position_agent._api_key = self.config.openai_api_key
+                        logger.info("agent3_model_restored", model=saved_model)
+                    else:
+                        logger.warning("agent3_model_stale", saved=saved_model, using=self.config.position_agent_model)
 
         self.portfolio = PortfolioTracker(
             initial_balance=self.state.current_balance,
