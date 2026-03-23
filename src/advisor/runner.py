@@ -155,8 +155,8 @@ async def run_advisor(
     if not api_key:
         return {"analysis": "Error: ANTHROPIC_API_KEY not set", "cost_usd": 0, "structured": {}}
 
-    # Step 1: Fetch missed signals
-    signals = await fetch_missed_signals(db, instance_id=instance_id, min_score=55.0, days_back=7)
+    # Step 1: Fetch missed signals (larger pool so we can find ones with candle data)
+    signals = await fetch_missed_signals(db, instance_id=instance_id, min_score=55.0, days_back=7, limit=100)
     logger.info("advisor_signals_fetched", count=len(signals))
 
     if not signals:
@@ -167,7 +167,15 @@ async def run_advisor(
         }
 
     # Step 2: Simulate outcomes for high-scoring signals
-    high_scoring = [s for s in signals if (s.get("score") or 0) >= 65][:15]
+    # Exclude signals less than 6 hours old (not enough forward candle data)
+    from datetime import datetime, timedelta, timezone
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=6)
+    simulatable = [
+        s for s in signals
+        if (s.get("score") or 0) >= 65
+        and s.get("created_at", "") < cutoff.isoformat()
+    ]
+    high_scoring = simulatable[:15]
     simulations = []
     for sig in high_scoring:
         outcome = await _simulate_signal(db, sig)
