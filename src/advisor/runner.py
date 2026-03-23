@@ -136,6 +136,25 @@ async def _simulate_signal(db, signal: dict) -> dict[str, Any] | None:
     return outcome
 
 
+async def _fetch_older_signals(db, instance_id: str, min_score: float, before: str, limit: int = 50) -> list:
+    """Fetch missed signals older than `before` timestamp for simulation."""
+    def _exec(q):
+        return q.execute()
+
+    result = await asyncio.to_thread(
+        _exec,
+        db.table("signals")
+        .select("*")
+        .eq("acted_on", False)
+        .eq("instance_id", instance_id)
+        .gte("score", min_score)
+        .lt("created_at", before)
+        .order("score", desc=True)  # highest scores first for simulation
+        .limit(limit),
+    )
+    return result.data or []
+
+
 async def run_advisor(
     db,
     instance_id: str = "main",
@@ -155,8 +174,8 @@ async def run_advisor(
     if not api_key:
         return {"analysis": "Error: ANTHROPIC_API_KEY not set", "cost_usd": 0, "structured": {}}
 
-    # Step 1: Fetch missed signals (larger pool so we can find ones with candle data)
-    signals = await fetch_missed_signals(db, instance_id=instance_id, min_score=55.0, days_back=7, limit=100)
+    # Step 1a: Fetch recent missed signals for context (what's happening now)
+    signals = await fetch_missed_signals(db, instance_id=instance_id, min_score=55.0, days_back=7, limit=30)
     logger.info("advisor_signals_fetched", count=len(signals))
 
     if not signals:
@@ -166,23 +185,22 @@ async def run_advisor(
             "structured": {},
         }
 
-    # Step 2: Simulate outcomes for high-scoring signals
-    # Exclude signals less than 6 hours old (not enough forward candle data)
+    # Step 1b: Fetch OLDER signals specifically for simulation (need 6h+ of forward data)
     from datetime import datetime, timedelta, timezone
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=6)
-    simulatable = [
-        s for s in signals
-        if (s.get("score") or 0) >= 65
-        and s.get("created_at", "") < cutoff.isoformat()
-    ]
-    high_scoring = simulatable[:15]
+
+    sim_cutoff = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    older_signals = await _fetch_older_signals(db, instance_id, min_score=60.0, before=sim_cutoff, limit=50)
+    logger.info("advisor_older_signals_fetched", count=len(older_signals))
+
+    # Step 2: Simulate outcomes for older high-scoring signals
+    high_scoring = [s for s in older_signals if (s.get("score") or 0) >= 65][:15]
     simulations = []
     for sig in high_scoring:
         outcome = await _simulate_signal(db, sig)
         if outcome:
             simulations.append(outcome)
 
-    logger.info("advisor_simulations_complete", simulated=len(simulations), total_signals=len(signals))
+    logger.info("advisor_simulations_complete", simulated=len(simulations), candidates=len(high_scoring))
 
     # Step 3: Build context for Claude
     signal_summary = []
