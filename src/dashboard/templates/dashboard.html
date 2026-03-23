@@ -194,6 +194,36 @@
 </div>
 {% endif %}
 
+<!-- Trade Advisor (Claude) -->
+{% if role == 'admin' %}
+<div class="panel" id="advisor-panel" style="border-left: 3px solid #06b6d4;">
+    <div class="panel-header">
+        <h2>Trade Advisor
+            <span class="badge" style="background:#06b6d4; color:#fff; font-size:0.75rem;">Claude</span>
+        </h2>
+        <div style="display:flex; align-items:center; gap:8px;">
+            <select id="advisor-days" style="padding:4px 8px; border-radius:4px; background:var(--bg-card); color:var(--text-primary); border:1px solid var(--border); font-size:0.8rem;">
+                <option value="3">Last 3 days</option>
+                <option value="7" selected>Last 7 days</option>
+                <option value="14">Last 14 days</option>
+            </select>
+            <button id="advisor-run-btn" class="btn" onclick="runAdvisor()" style="font-size:0.8rem; padding:4px 12px; background:#06b6d4; color:#fff; border:none; cursor:pointer;">
+                Analyze Missed Signals
+            </button>
+        </div>
+    </div>
+    <div class="panel-body" style="padding:12px 16px;">
+        <div id="advisor-status" style="font-size:0.8rem; color:var(--text-muted);">
+            Click "Analyze Missed Signals" to run the advisor. It will review signals the bot detected but didn't trade, simulate their outcomes, and recommend entry criteria changes.
+        </div>
+        <div id="advisor-result" style="display:none; margin-top:12px;">
+            <div id="advisor-cost" style="font-size:0.7rem; color:var(--text-muted); margin-bottom:8px;"></div>
+            <div id="advisor-analysis" style="font-size:0.85rem; line-height:1.6; white-space:pre-wrap; max-height:500px; overflow-y:auto; padding:12px; background:var(--bg-body); border-radius:6px; border:1px solid var(--border);"></div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
 <!-- Open Positions (full width) -->
 <div class="panel">
     <div class="panel-header">
@@ -1381,5 +1411,45 @@ async function loadAgentStats() {
 
 loadAgentStats();
 setInterval(loadAgentStats, 30000);
+
+// --- Trade Advisor ---
+async function runAdvisor() {
+    const btn = document.getElementById('advisor-run-btn');
+    const status = document.getElementById('advisor-status');
+    const resultDiv = document.getElementById('advisor-result');
+    const analysisDiv = document.getElementById('advisor-analysis');
+    const costDiv = document.getElementById('advisor-cost');
+    const days = document.getElementById('advisor-days').value;
+
+    btn.disabled = true;
+    btn.textContent = 'Running...';
+    status.textContent = 'Advisor is analyzing missed signals — this may take 30-60 seconds...';
+    resultDiv.style.display = 'none';
+
+    try {
+        const resp = await fetch(apiUrl('/api/advisor/run'), {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                instance_id: _ACTIVE_INSTANCE || 'main',
+                prompt: 'Analyze missed trading signals from the past ' + days + ' days. Fetch the signals, simulate outcomes for the high-scoring ones, and give me a full analysis with recommendations.'
+            })
+        });
+        const data = await resp.json();
+        if (data.error) {
+            status.textContent = 'Error: ' + data.error;
+        } else {
+            status.textContent = 'Analysis complete.';
+            costDiv.textContent = 'Cost: $' + (data.cost_usd || 0).toFixed(4);
+            analysisDiv.textContent = data.analysis || 'No analysis returned.';
+            resultDiv.style.display = 'block';
+        }
+    } catch (e) {
+        status.textContent = 'Failed: ' + e.message;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Analyze Missed Signals';
+    }
+}
 </script>
 {% endblock %}
