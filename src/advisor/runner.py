@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 from claude_agent_sdk import (
@@ -39,20 +41,60 @@ Your job is to analyze missed trading signals and determine:
 
 ## Output format
 
-Produce a structured analysis with:
+First, produce your analysis in plain text with:
 - **Summary**: X missed signals analyzed, Y would have been winners (Z% win rate)
-- **Top missed opportunities**: List the best trades that were missed, with symbol, direction, and simulated PnL
+- **Top missed opportunities**: List the best trades that were missed
 - **Pattern analysis**: What the winning signals had in common
-- **Recommendations**: Specific changes to entry criteria (e.g., "lower minimum score threshold from 70 to 62 for signals with both sweep and displacement")
+- **Recommendations**: Specific changes to entry criteria
 
-Be specific and data-driven. Reference actual signal scores, components, and simulated outcomes.
+Then, at the END of your response, output a structured JSON block wrapped in \
+```json fences with exactly these fields:
+
+```json
+{
+  "signals_analyzed": <int>,
+  "simulated_winners": <int>,
+  "simulated_losers": <int>,
+  "win_rate_pct": <float>,
+  "top_missed": [
+    {"symbol": "...", "direction": "...", "score": <float>, "pnl_pct": <float>}
+  ],
+  "patterns": {
+    "common_components": "...",
+    "avg_winner_score": <float>,
+    "typical_direction": "..."
+  },
+  "recommendations": [
+    "Specific recommendation 1",
+    "Specific recommendation 2"
+  ]
+}
+```
+
+This JSON block is machine-parsed — be precise with the format.
 """
+
+
+def _parse_structured_output(analysis: str) -> dict[str, Any] | None:
+    """Extract the JSON block from the advisor's analysis text."""
+    # Find the last ```json ... ``` block
+    pattern = r"```json\s*\n(.*?)\n\s*```"
+    matches = re.findall(pattern, analysis, re.DOTALL)
+    if not matches:
+        return None
+
+    try:
+        return json.loads(matches[-1])
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("advisor_json_parse_failed", raw=matches[-1][:200])
+        return None
 
 
 async def run_advisor(
     db,
     instance_id: str = "main",
     prompt: str | None = None,
+    store: bool = True,
 ) -> dict[str, Any]:
     """Run the trade advisor and return its analysis.
 
@@ -60,9 +102,10 @@ async def run_advisor(
         db: Supabase database client.
         instance_id: Bot instance ID.
         prompt: Optional custom prompt (default analyzes all missed signals).
+        store: Whether to store insights in the DB (default True).
 
     Returns:
-        Dict with 'analysis' text and 'cost_usd'.
+        Dict with 'analysis' text, 'cost_usd', and 'structured' parsed data.
     """
     from src.advisor.tools import build_advisor_tools
 
@@ -101,4 +144,17 @@ async def run_advisor(
     analysis = "\n".join(analysis_parts)
     logger.info("advisor_complete", analysis_length=len(analysis), cost_usd=cost_usd)
 
-    return {"analysis": analysis, "cost_usd": cost_usd}
+    # Parse structured output from the analysis
+    structured = _parse_structured_output(analysis) or {}
+
+    # Store insights in DB
+    if store and structured:
+        try:
+            from src.advisor.insights import store_insight
+
+            insight_data = {**structured, "full_analysis": analysis, "cost_usd": cost_usd}
+            await store_insight(db, instance_id, insight_data)
+        except Exception as e:
+            logger.error("advisor_store_failed", error=str(e))
+
+    return {"analysis": analysis, "cost_usd": cost_usd, "structured": structured}
