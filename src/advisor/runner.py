@@ -1,18 +1,18 @@
-"""Run the trade advisor agent using Claude Agent SDK."""
+"""Run the trade advisor using the Anthropic API directly.
+
+This avoids the Claude Agent SDK which can't run as root in Docker.
+Instead, we gather all data in Python and send it to Claude in a single API call.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import re
 from typing import Any
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ResultMessage,
-    TextBlock,
-    query,
-)
+import pandas as pd
 
 from src.utils.logging import get_logger
 
@@ -25,19 +25,6 @@ Your job is to analyze missed trading signals and determine:
 1. Which missed signals would have been profitable trades
 2. Why the bot's entry criteria might be too conservative
 3. Specific, actionable recommendations to improve hit rate
-
-## How to work
-
-1. First, call get_missed_signals to fetch recent signals that were detected but never traded.
-2. For each high-scoring signal (score >= 65), call simulate_outcome to see what would have happened.
-   - Use the signal's current_price as entry_price
-   - Use the signal's direction
-   - Use the signal's created_at as signal_time
-   - Use default SL/TP percentages (2% SL, 4% TP) unless the signal components suggest different levels
-3. Analyze the pattern of results:
-   - What percentage of missed signals would have been winners?
-   - Are there common characteristics among the winners?
-   - What does this tell us about the bot's entry criteria?
 
 ## Output format
 
@@ -77,7 +64,6 @@ This JSON block is machine-parsed — be precise with the format.
 
 def _parse_structured_output(analysis: str) -> dict[str, Any] | None:
     """Extract the JSON block from the advisor's analysis text."""
-    # Find the last ```json ... ``` block
     pattern = r"```json\s*\n(.*?)\n\s*```"
     matches = re.findall(pattern, analysis, re.DOTALL)
     if not matches:
@@ -90,6 +76,66 @@ def _parse_structured_output(analysis: str) -> dict[str, Any] | None:
         return None
 
 
+async def _simulate_signal(db, signal: dict) -> dict[str, Any] | None:
+    """Simulate outcome for a single missed signal."""
+    from src.advisor.outcome_simulator import simulate_trade_outcome
+
+    symbol = signal.get("symbol", "")
+    signal_time = signal.get("created_at", "")
+    entry_price = signal.get("current_price") or signal.get("price")
+    direction_raw = signal.get("direction", "bullish")
+
+    if not entry_price or not symbol:
+        return None
+
+    direction = "long" if "bull" in str(direction_raw).lower() else "short"
+    is_long = direction == "long"
+    sl_pct = 0.02
+    tp_pct = 0.04
+    sl = entry_price * (1 - sl_pct) if is_long else entry_price * (1 + sl_pct)
+    tp = entry_price * (1 + tp_pct) if is_long else entry_price * (1 - tp_pct)
+
+    def _exec(q):
+        return q.execute()
+
+    try:
+        result = await asyncio.to_thread(
+            _exec,
+            db.table("candle_cache")
+            .select("*")
+            .eq("symbol", symbol)
+            .eq("timeframe", "1h")
+            .gte("timestamp", signal_time)
+            .order("timestamp", desc=False)
+            .limit(96),
+        )
+        rows = result.data or []
+    except Exception as e:
+        logger.warning("advisor_candle_fetch_failed", symbol=symbol, error=str(e))
+        return None
+
+    if len(rows) < 5:
+        return None
+
+    df = pd.DataFrame(rows)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    df = df.set_index("timestamp").sort_index()
+
+    outcome = simulate_trade_outcome(
+        candles=df,
+        entry_price=entry_price,
+        stop_loss=sl,
+        take_profit=tp,
+        direction=direction,
+    )
+    outcome["symbol"] = symbol
+    outcome["direction"] = direction
+    outcome["entry_price"] = entry_price
+    outcome["score"] = signal.get("score", 0)
+    outcome["signal_type"] = signal.get("signal_type", "")
+    return outcome
+
+
 async def run_advisor(
     db,
     instance_id: str = "main",
@@ -98,53 +144,114 @@ async def run_advisor(
 ) -> dict[str, Any]:
     """Run the trade advisor and return its analysis.
 
-    Args:
-        db: Supabase database client.
-        instance_id: Bot instance ID.
-        prompt: Optional custom prompt (default analyzes all missed signals).
-        store: Whether to store insights in the DB (default True).
-
-    Returns:
-        Dict with 'analysis' text, 'cost_usd', and 'structured' parsed data.
+    Gathers missed signals and simulations in Python, then sends
+    everything to Claude in a single API call (no Agent SDK needed).
     """
-    from src.advisor.tools import build_advisor_tools
+    import httpx
 
-    server = build_advisor_tools(db, instance_id=instance_id)
+    from src.advisor.missed_signals import fetch_missed_signals
 
-    default_prompt = (
-        "Analyze the missed trading signals from the past 7 days. "
-        "Fetch the signals, simulate outcomes for the high-scoring ones, "
-        "and give me a full analysis with recommendations."
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return {"analysis": "Error: ANTHROPIC_API_KEY not set", "cost_usd": 0, "structured": {}}
+
+    # Step 1: Fetch missed signals
+    signals = await fetch_missed_signals(db, instance_id=instance_id, min_score=55.0, days_back=7)
+    logger.info("advisor_signals_fetched", count=len(signals))
+
+    if not signals:
+        return {
+            "analysis": "No missed signals found in the past 7 days.",
+            "cost_usd": 0,
+            "structured": {},
+        }
+
+    # Step 2: Simulate outcomes for high-scoring signals
+    high_scoring = [s for s in signals if (s.get("score") or 0) >= 65][:15]
+    simulations = []
+    for sig in high_scoring:
+        outcome = await _simulate_signal(db, sig)
+        if outcome:
+            simulations.append(outcome)
+
+    logger.info("advisor_simulations_complete", simulated=len(simulations), total_signals=len(signals))
+
+    # Step 3: Build context for Claude
+    signal_summary = []
+    for s in signals[:30]:
+        signal_summary.append({
+            "symbol": s.get("symbol"),
+            "score": s.get("score"),
+            "direction": s.get("direction"),
+            "signal_type": s.get("signal_type"),
+            "created_at": str(s.get("created_at", ""))[:19],
+            "current_price": s.get("current_price"),
+        })
+
+    sim_summary = []
+    for sim in simulations:
+        sim_summary.append({
+            "symbol": sim.get("symbol"),
+            "direction": sim.get("direction"),
+            "score": sim.get("score"),
+            "outcome": sim.get("outcome"),
+            "pnl_pct": sim.get("pnl_pct"),
+            "candles_held": sim.get("candles_held"),
+            "max_favorable": sim.get("max_favorable_pct"),
+        })
+
+    data_context = (
+        f"## Missed Signals ({len(signals)} total, showing top 30)\n\n"
+        f"```json\n{json.dumps(signal_summary, indent=2, default=str)}\n```\n\n"
+        f"## Simulation Results ({len(simulations)} signals simulated with 2% SL / 4% TP)\n\n"
+        f"```json\n{json.dumps(sim_summary, indent=2, default=str)}\n```"
     )
 
-    options = ClaudeAgentOptions(
-        system_prompt=ADVISOR_SYSTEM_PROMPT,
-        mcp_servers={"advisor": server},
-        allowed_tools=[
-            "mcp__advisor__get_missed_signals",
-            "mcp__advisor__simulate_outcome",
-        ],
-        permission_mode="bypassPermissions",
-        max_turns=15,
+    user_message = prompt or (
+        "Analyze these missed trading signals and simulation results. "
+        "Identify patterns, calculate win rates, and provide recommendations "
+        "to make the bot less conservative on entry.\n\n"
+        + data_context
     )
 
-    analysis_parts: list[str] = []
-    cost_usd = 0.0
+    # Step 4: Call Claude API directly
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 4096,
+                "system": ADVISOR_SYSTEM_PROMPT,
+                "messages": [{"role": "user", "content": user_message}],
+            },
+        )
 
-    async for message in query(prompt=prompt or default_prompt, options=options):
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    analysis_parts.append(block.text)
-        elif isinstance(message, ResultMessage):
-            cost_usd = message.total_cost_usd or 0.0
-            if message.is_error:
-                logger.error("advisor_agent_error", cost=cost_usd)
+    if resp.status_code != 200:
+        error_msg = f"Anthropic API error {resp.status_code}: {resp.text[:300]}"
+        logger.error("advisor_api_error", status=resp.status_code, body=resp.text[:300])
+        return {"analysis": error_msg, "cost_usd": 0, "structured": {}}
 
-    analysis = "\n".join(analysis_parts)
-    logger.info("advisor_complete", analysis_length=len(analysis), cost_usd=cost_usd)
+    data = resp.json()
+    analysis = ""
+    for block in data.get("content", []):
+        if block.get("type") == "text":
+            analysis += block["text"]
 
-    # Parse structured output from the analysis
+    # Estimate cost from usage
+    usage = data.get("usage", {})
+    input_tokens = usage.get("input_tokens", 0)
+    output_tokens = usage.get("output_tokens", 0)
+    # Claude Sonnet pricing: $3/M input, $15/M output
+    cost_usd = (input_tokens * 3 / 1_000_000) + (output_tokens * 15 / 1_000_000)
+
+    logger.info("advisor_complete", analysis_length=len(analysis), cost_usd=round(cost_usd, 4))
+
+    # Parse structured output
     structured = _parse_structured_output(analysis) or {}
 
     # Store insights in DB
@@ -157,4 +264,4 @@ async def run_advisor(
         except Exception as e:
             logger.error("advisor_store_failed", error=str(e))
 
-    return {"analysis": analysis, "cost_usd": cost_usd, "structured": structured}
+    return {"analysis": analysis, "cost_usd": round(cost_usd, 4), "structured": structured}
