@@ -818,10 +818,12 @@ class RefinerMonitorAgent:
 ### Similar Past Trades (RAG Knowledge Base)
 {ctx.get("rag_context", "  Not available")}
 {ctx.get("lessons_context", "")}
+{ctx.get("advisor_insights", "")}
 Run through the 3-step analysis: (1) price vs zone, (2) latest candle rejection signals, \
 (3) structural confirmation. Check order book for liquidity support. \
 If previous trades on this symbol show repeated losses, demand stronger 5m confirmation. \
 Use similar past trade outcomes from the knowledge base to inform your confidence level. \
+If advisor insights suggest the bot has been too conservative, factor that into your ENTER vs WAIT decision. \
 Reference specific numbers from the data in your reasoning."""
 
     @staticmethod

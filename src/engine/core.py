@@ -978,6 +978,15 @@ class TradingEngine:
                     # Attach lessons to signal so Agent 2 can also access them
                     signal._lessons_context = lessons_context
 
+                    # Fetch advisor insights for Agent 1 context
+                    advisor_insights_text = ""
+                    try:
+                        from src.advisor.insights import get_recent_insights, format_insights_for_agent
+                        insights = await get_recent_insights(self.repo.db, self.config.instance_id)
+                        advisor_insights_text = format_insights_for_agent(insights)
+                    except Exception:
+                        pass  # Advisor insights are optional
+
                     ai_context = {
                         "sentiment_score": early_sentiment,
                         "adjusted_score": signal.score,
@@ -991,6 +1000,7 @@ class TradingEngine:
                         "symbol_history": symbol_history,
                         "rag_context": rag_context,
                         "lessons_context": lessons_context,
+                        "advisor_insights": advisor_insights_text,
                         **ai_perf_context,
                     }
 

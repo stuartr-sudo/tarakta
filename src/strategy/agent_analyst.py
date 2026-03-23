@@ -862,7 +862,7 @@ class AgentEntryAnalyst:
 
 ### Symbol Trade History
 {symbol_history_section}
-
+{context.get("advisor_insights", "")}
 ### Similar Past Trades (RAG Knowledge Base)
 {context.get("rag_context", "  Not available")}
 {context.get("lessons_context", "")}

@@ -802,6 +802,15 @@ class EntryRefiner:
             entry, candles_5m, zone_top, zone_bottom, direction, order_book_data,
         )
 
+        # Inject advisor insights into Agent 2 context
+        try:
+            from src.advisor.insights import get_recent_insights, format_insights_for_agent
+            db = self.candles.repo.db
+            insights = await get_recent_insights(db, self.config.instance_id)
+            context["advisor_insights"] = format_insights_for_agent(insights)
+        except Exception:
+            context["advisor_insights"] = ""
+
         decision = await self.refiner_agent.evaluate_entry(context)
 
         # Always store reasoning for continuity on next check
