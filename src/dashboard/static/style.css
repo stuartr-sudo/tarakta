@@ -1158,3 +1158,89 @@ p { margin: 0 0 0.5rem; }
 .text-orange {
     color: #f59e0b;
 }
+
+/* ---- Usage Page ---- */
+
+.alert-banner-amber {
+    background: rgba(245, 158, 11, 0.2);
+    color: #f59e0b;
+    text-align: center;
+    padding: 8px;
+    font-weight: 600;
+    font-size: 0.85rem;
+}
+
+.alert-banner-red {
+    background: rgba(239, 68, 68, 0.25);
+    color: #ef4444;
+    text-align: center;
+    padding: 8px;
+    font-weight: 600;
+    font-size: 0.85rem;
+    animation: pulse-bg 2s ease-in-out infinite;
+}
+
+@keyframes pulse-bg {
+    0%, 100% { background: rgba(239, 68, 68, 0.25); }
+    50% { background: rgba(239, 68, 68, 0.15); }
+}
+
+.period-toggle {
+    display: flex;
+    gap: 4px;
+}
+
+.chart-toggle {
+    display: flex;
+    gap: 4px;
+}
+
+.btn-xs {
+    padding: 2px 10px;
+    font-size: 0.7rem;
+    border-radius: 4px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.btn-xs:hover, .btn-xs.active {
+    background: rgba(59, 130, 246, 0.15);
+    border-color: var(--blue);
+    color: #fff;
+}
+
+.charts-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.panel.half {
+    margin-bottom: 0;
+}
+
+.stat-value.warning { color: var(--orange); }
+
+.input-field {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    color: #fff;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 0.85rem;
+}
+
+.input-field:focus {
+    outline: none;
+    border-color: var(--blue);
+}
+
+@media (max-width: 768px) {
+    .charts-row {
+        grid-template-columns: 1fr;
+    }
+}

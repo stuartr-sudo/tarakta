@@ -364,6 +364,8 @@ class RefinerMonitorAgent:
                 json_schema=REFINER_RESPONSE_SCHEMA,
                 temperature=1.0,
                 timeout=self._timeout,
+                caller="agent2",
+                repo=getattr(self, "_repo", None),
             )
 
             latency_ms = (time.monotonic() - start) * 1000

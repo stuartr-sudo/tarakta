@@ -1,0 +1,414 @@
+{% extends "base.html" %}
+{% block title %}Tarakta - API Usage{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>OpenAI Usage</h1>
+        <span class="subtitle">API costs for this instance</span>
+    </div>
+    <div class="period-toggle">
+        <button class="btn btn-sm active" data-days="7">7d</button>
+        <button class="btn btn-sm" data-days="30">30d</button>
+        <button class="btn btn-sm" data-days="90">90d</button>
+    </div>
+</div>
+
+<!-- Stat Cards -->
+<div class="stats-grid" id="statCards">
+    <div class="stat-card">
+        <div class="stat-label">Month Spend</div>
+        <div class="stat-value" id="monthSpend">--</div>
+        <div class="stat-sub" id="monthPeriod"></div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Daily Average</div>
+        <div class="stat-value sm" id="dailyAvg">--</div>
+        <div class="stat-sub">per day</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Projected Month</div>
+        <div class="stat-value sm" id="projected">--</div>
+        <div class="stat-sub">at current rate</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Budget Remaining</div>
+        <div class="stat-value sm" id="budgetRemaining">--</div>
+        <div class="stat-sub" id="budgetSub">{{ 'of $%.2f' | format(usage_threshold | float) if usage_threshold else 'No limit set' }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Total Requests</div>
+        <div class="stat-value sm" id="totalRequests">--</div>
+        <div class="stat-sub">this month</div>
+    </div>
+</div>
+
+<!-- Spend Over Time Chart -->
+<div class="panel">
+    <div class="panel-header">
+        <h3>Spend Over Time</h3>
+        <div class="chart-toggle">
+            <button class="btn btn-xs active" id="toggleDaily">Daily</button>
+            <button class="btn btn-xs" id="toggleWeekly">Weekly</button>
+        </div>
+    </div>
+    <div class="chart-container" style="height:320px;">
+        <canvas id="spendChart"></canvas>
+    </div>
+</div>
+
+<!-- Per-Model & Per-Agent Charts (side by side) -->
+<div class="charts-row">
+    <div class="panel half">
+        <div class="panel-header"><h3>Cost by Model</h3></div>
+        <div class="chart-container" style="height:260px;">
+            <canvas id="modelChart"></canvas>
+        </div>
+    </div>
+    <div class="panel half">
+        <div class="panel-header"><h3>Cost by Agent</h3></div>
+        <div class="chart-container" style="height:260px;">
+            <canvas id="callerChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<!-- Token Volume Table -->
+<div class="panel">
+    <div class="panel-header"><h3>Token Volume by Agent</h3></div>
+    <table class="data-table" id="tokenTable">
+        <thead>
+            <tr>
+                <th>Agent</th>
+                <th>Requests</th>
+                <th>Input Tokens</th>
+                <th>Output Tokens</th>
+                <th>Total Tokens</th>
+                <th>Cost</th>
+            </tr>
+        </thead>
+        <tbody id="tokenTableBody">
+            <tr><td colspan="6" class="text-muted" style="text-align:center;">Loading...</td></tr>
+        </tbody>
+        <tfoot id="tokenTableFoot"></tfoot>
+    </table>
+</div>
+
+<!-- Alert Threshold Config (admin only) -->
+{% if role == 'admin' %}
+<div class="panel" style="max-width:480px;">
+    <div class="panel-header"><h3>Alert Threshold</h3></div>
+    <div style="display:flex;gap:8px;align-items:center;padding:12px 0;">
+        <span style="color:var(--text-secondary);">$</span>
+        <input type="number" id="thresholdInput" class="input-field" style="width:120px;"
+               value="{{ usage_threshold if usage_threshold else '' }}"
+               placeholder="e.g. 50" step="1" min="0">
+        <button class="btn btn-primary btn-sm" id="saveThreshold">Save</button>
+        <button class="btn btn-sm" id="clearThreshold">Clear</button>
+    </div>
+    <div class="stat-sub">Set monthly USD limit. Banner appears on all pages at 80%.</div>
+</div>
+{% endif %}
+
+<div id="emptyState" style="display:none;text-align:center;padding:60px 0;color:var(--text-muted);">
+    <h2>No usage data yet</h2>
+    <p>Usage will appear here once the bot makes its first OpenAI API call.</p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const CALLER_LABELS = {
+    agent1: 'Agent 1 (Analyst)',
+    agent2: 'Agent 2 (Refiner)',
+    agent3: 'Agent 3 (Position)',
+    lessons: 'Lesson Generator',
+    rag: 'RAG',
+    unknown: 'Unknown',
+};
+const COLORS = ['#3b82f6','#22c55e','#f59e0b','#ef4444','#a855f7','#06b6d4'];
+const THRESHOLD = {{ usage_threshold | default('null', true) }};
+let currentDays = 30;
+let rawSummary = [];
+let spendChart, modelChart, callerChart;
+
+function fmt$(v) { return '$' + v.toFixed(v < 1 ? 4 : 2); }
+function fmtK(v) { return v >= 1000000 ? (v/1000000).toFixed(1)+'M' : v >= 1000 ? (v/1000).toFixed(1)+'K' : v.toString(); }
+
+// ---- Fetch data ----
+async function loadAll() {
+    const [totals, summary, byModel, byCaller] = await Promise.all([
+        fetch(apiUrl('/api/usage/totals')).then(r => r.json()),
+        fetch(apiUrl('/api/usage/summary?days=' + currentDays)).then(r => r.json()),
+        fetch(apiUrl('/api/usage/by-model?days=' + currentDays)).then(r => r.json()),
+        fetch(apiUrl('/api/usage/by-caller?days=' + currentDays)).then(r => r.json()),
+    ]);
+
+    rawSummary = summary;
+    const empty = !summary.length && totals.month_requests === 0;
+    document.getElementById('emptyState').style.display = empty ? 'block' : 'none';
+
+    // Stat cards
+    const mc = totals.month_cost || 0;
+    document.getElementById('monthSpend').textContent = fmt$(mc);
+    document.getElementById('monthSpend').className = 'stat-value' + (THRESHOLD && mc > THRESHOLD ? ' negative' : (THRESHOLD && mc > THRESHOLD * 0.8 ? ' warning' : ''));
+    document.getElementById('monthPeriod').textContent = totals.period;
+    document.getElementById('dailyAvg').textContent = fmt$(totals.daily_avg || 0);
+    document.getElementById('projected').textContent = fmt$(totals.projected || 0);
+    document.getElementById('totalRequests').textContent = (totals.month_requests || 0).toLocaleString();
+
+    if (THRESHOLD) {
+        const remaining = Math.max(0, THRESHOLD - mc);
+        document.getElementById('budgetRemaining').textContent = fmt$(remaining);
+        document.getElementById('budgetRemaining').className = 'stat-value sm' + (remaining <= 0 ? ' negative' : '');
+    } else {
+        document.getElementById('budgetRemaining').textContent = '--';
+    }
+
+    renderSpendChart(summary, 'daily');
+    renderModelChart(byModel);
+    renderCallerChart(byCaller);
+    renderTokenTable(byCaller);
+}
+
+// ---- Spend Chart ----
+function aggregateWeekly(data) {
+    const weeks = {};
+    data.forEach(d => {
+        const dt = new Date(d.date);
+        const weekStart = new Date(dt);
+        weekStart.setDate(dt.getDate() - dt.getDay());
+        const key = weekStart.toISOString().slice(0,10);
+        if (!weeks[key]) weeks[key] = {date: key, cost_usd: 0, requests: 0};
+        weeks[key].cost_usd += d.cost_usd;
+        weeks[key].requests += d.requests;
+    });
+    return Object.values(weeks).sort((a,b) => a.date.localeCompare(b.date));
+}
+
+function renderSpendChart(data, mode) {
+    const ctx = document.getElementById('spendChart').getContext('2d');
+    if (spendChart) spendChart.destroy();
+
+    const display = mode === 'weekly' ? aggregateWeekly(data) : data;
+    const labels = display.map(d => d.date.slice(5)); // MM-DD
+    const costs = display.map(d => d.cost_usd);
+
+    // Cumulative line
+    let cum = 0;
+    const cumulative = costs.map(c => { cum += c; return cum; });
+
+    const datasets = [
+        {
+            label: 'Daily Cost',
+            data: costs,
+            backgroundColor: 'rgba(59,130,246,0.7)',
+            borderRadius: 3,
+            order: 2,
+            yAxisID: 'y',
+        },
+        {
+            label: 'Cumulative',
+            data: cumulative,
+            type: 'line',
+            borderColor: '#22c55e',
+            backgroundColor: 'transparent',
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.3,
+            order: 1,
+            yAxisID: 'y1',
+        },
+    ];
+
+    spendChart = new Chart(ctx, {
+        type: 'bar',
+        data: { labels, datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { intersect: false, mode: 'index' },
+            plugins: {
+                legend: { display: true, labels: { color: '#9ca3af', font: { size: 11 } } },
+                annotation: THRESHOLD ? {
+                    annotations: {
+                        threshold: {
+                            type: 'line', yMin: THRESHOLD, yMax: THRESHOLD,
+                            borderColor: '#ef4444', borderWidth: 2, borderDash: [6,3],
+                            label: { display: true, content: 'Limit $' + THRESHOLD, position: 'end', color: '#ef4444', font: { size: 10 } }
+                        }
+                    }
+                } : {},
+            },
+            scales: {
+                x: { grid: { color: '#2a2d35' }, ticks: { color: '#6b7280', font: { size: 10 } } },
+                y: { position: 'left', grid: { color: '#2a2d35' }, ticks: { color: '#6b7280', callback: v => '$' + v.toFixed(2) } },
+                y1: { position: 'right', grid: { drawOnChartArea: false }, ticks: { color: '#22c55e', callback: v => '$' + v.toFixed(2) } },
+            },
+        },
+    });
+}
+
+// ---- Model Chart (horizontal bar) ----
+function renderModelChart(data) {
+    const ctx = document.getElementById('modelChart').getContext('2d');
+    if (modelChart) modelChart.destroy();
+    if (!data.length) return;
+
+    modelChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: data.map(d => d.model),
+            datasets: [{
+                data: data.map(d => d.cost_usd),
+                backgroundColor: data.map((_, i) => COLORS[i % COLORS.length]),
+                borderRadius: 3,
+            }],
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: { callbacks: { label: ctx => fmt$(ctx.raw) } },
+            },
+            scales: {
+                x: { grid: { color: '#2a2d35' }, ticks: { color: '#6b7280', callback: v => '$' + v.toFixed(2) } },
+                y: { grid: { display: false }, ticks: { color: '#9ca3af', font: { size: 11 } } },
+            },
+        },
+    });
+}
+
+// ---- Caller Chart (doughnut) ----
+function renderCallerChart(data) {
+    const ctx = document.getElementById('callerChart').getContext('2d');
+    if (callerChart) callerChart.destroy();
+    if (!data.length) return;
+
+    const total = data.reduce((s, d) => s + d.cost_usd, 0);
+
+    callerChart = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+            labels: data.map(d => CALLER_LABELS[d.caller] || d.caller),
+            datasets: [{
+                data: data.map(d => d.cost_usd),
+                backgroundColor: data.map((_, i) => COLORS[i % COLORS.length]),
+                borderWidth: 0,
+            }],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            cutout: '60%',
+            plugins: {
+                legend: { position: 'bottom', labels: { color: '#9ca3af', font: { size: 11 }, padding: 12 } },
+                tooltip: { callbacks: { label: ctx => fmt$(ctx.raw) + ' (' + (ctx.raw / total * 100).toFixed(1) + '%)' } },
+            },
+        },
+        plugins: [{
+            id: 'centerText',
+            beforeDraw(chart) {
+                const { ctx: c, width, height } = chart;
+                c.save();
+                c.font = 'bold 18px -apple-system, system-ui, sans-serif';
+                c.fillStyle = '#fff';
+                c.textAlign = 'center';
+                c.textBaseline = 'middle';
+                c.fillText(fmt$(total), width / 2, height / 2 - 8);
+                c.font = '11px -apple-system, system-ui, sans-serif';
+                c.fillStyle = '#6b7280';
+                c.fillText('total', width / 2, height / 2 + 12);
+                c.restore();
+            }
+        }],
+    });
+}
+
+// ---- Token Table ----
+function renderTokenTable(data) {
+    const tbody = document.getElementById('tokenTableBody');
+    const tfoot = document.getElementById('tokenTableFoot');
+    if (!data.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-muted" style="text-align:center;">No data</td></tr>';
+        tfoot.innerHTML = '';
+        return;
+    }
+    let totals = { requests: 0, input: 0, output: 0, cost: 0 };
+    tbody.innerHTML = data.map(d => {
+        const total = d.input_tokens + d.output_tokens;
+        totals.requests += d.requests;
+        totals.input += d.input_tokens;
+        totals.output += d.output_tokens;
+        totals.cost += d.cost_usd;
+        return `<tr>
+            <td>${CALLER_LABELS[d.caller] || d.caller}</td>
+            <td>${d.requests.toLocaleString()}</td>
+            <td>${fmtK(d.input_tokens)}</td>
+            <td>${fmtK(d.output_tokens)}</td>
+            <td>${fmtK(total)}</td>
+            <td>${fmt$(d.cost_usd)}</td>
+        </tr>`;
+    }).join('');
+    tfoot.innerHTML = `<tr style="font-weight:600;border-top:2px solid var(--border);">
+        <td>Total</td>
+        <td>${totals.requests.toLocaleString()}</td>
+        <td>${fmtK(totals.input)}</td>
+        <td>${fmtK(totals.output)}</td>
+        <td>${fmtK(totals.input + totals.output)}</td>
+        <td>${fmt$(totals.cost)}</td>
+    </tr>`;
+}
+
+// ---- Period & View Toggles ----
+document.querySelectorAll('.period-toggle .btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.period-toggle .btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentDays = parseInt(btn.dataset.days);
+        loadAll();
+    });
+});
+
+document.getElementById('toggleDaily').addEventListener('click', () => {
+    document.getElementById('toggleDaily').classList.add('active');
+    document.getElementById('toggleWeekly').classList.remove('active');
+    renderSpendChart(rawSummary, 'daily');
+});
+document.getElementById('toggleWeekly').addEventListener('click', () => {
+    document.getElementById('toggleWeekly').classList.add('active');
+    document.getElementById('toggleDaily').classList.remove('active');
+    renderSpendChart(rawSummary, 'weekly');
+});
+
+// ---- Threshold Config ----
+{% if role == 'admin' %}
+document.getElementById('saveThreshold').addEventListener('click', async () => {
+    const val = document.getElementById('thresholdInput').value;
+    await fetch(apiUrl('/api/usage/threshold'), {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({threshold: val ? parseFloat(val) : null}),
+    });
+    location.reload();
+});
+document.getElementById('clearThreshold').addEventListener('click', async () => {
+    await fetch(apiUrl('/api/usage/threshold'), {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({threshold: null}),
+    });
+    location.reload();
+});
+{% endif %}
+
+// ---- Init ----
+loadAll();
+</script>
+{% endblock %}

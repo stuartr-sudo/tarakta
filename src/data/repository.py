@@ -881,3 +881,152 @@ class Repository:
             )
         except Exception as e:
             logger.error("candle_cache_upsert_failed", error=str(e), symbol=symbol)
+
+    # --- API Usage Tracking ---
+
+    async def log_api_usage(self, usage: dict[str, Any]) -> None:
+        """Insert a row into api_usage. Fire-and-forget, never raises."""
+        usage["instance_id"] = self.instance_id
+        try:
+            await asyncio.to_thread(
+                _exec, self.db.table("api_usage").insert(usage)
+            )
+        except Exception as e:
+            logger.debug("log_api_usage_failed", error=str(e))
+
+    async def get_usage_summary(self, days: int = 30) -> list[dict]:
+        """Daily aggregates: date, total_cost, request_count, input_tokens, output_tokens."""
+        since = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        from datetime import timedelta
+        since -= timedelta(days=days)
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("api_usage")
+                .select("created_at, cost_usd, input_tokens, output_tokens")
+                .eq("instance_id", self.instance_id)
+                .gte("created_at", since.isoformat())
+                .order("created_at"),
+            )
+            rows = result.data or []
+            # Aggregate by day client-side (Supabase doesn't do GROUP BY)
+            daily: dict[str, dict] = {}
+            for r in rows:
+                day = r["created_at"][:10]  # YYYY-MM-DD
+                if day not in daily:
+                    daily[day] = {"date": day, "cost_usd": 0, "requests": 0, "input_tokens": 0, "output_tokens": 0}
+                daily[day]["cost_usd"] += float(r.get("cost_usd", 0))
+                daily[day]["requests"] += 1
+                daily[day]["input_tokens"] += int(r.get("input_tokens", 0))
+                daily[day]["output_tokens"] += int(r.get("output_tokens", 0))
+            return sorted(daily.values(), key=lambda x: x["date"])
+        except Exception as e:
+            logger.warning("get_usage_summary_failed", error=str(e))
+            return []
+
+    async def get_usage_by_model(self, days: int = 30) -> list[dict]:
+        """Group by model: model, total_cost, total_requests."""
+        from datetime import timedelta
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("api_usage")
+                .select("model, cost_usd, input_tokens, output_tokens")
+                .eq("instance_id", self.instance_id)
+                .gte("created_at", since.isoformat()),
+            )
+            rows = result.data or []
+            models: dict[str, dict] = {}
+            for r in rows:
+                m = r["model"]
+                if m not in models:
+                    models[m] = {"model": m, "cost_usd": 0, "requests": 0, "input_tokens": 0, "output_tokens": 0}
+                models[m]["cost_usd"] += float(r.get("cost_usd", 0))
+                models[m]["requests"] += 1
+                models[m]["input_tokens"] += int(r.get("input_tokens", 0))
+                models[m]["output_tokens"] += int(r.get("output_tokens", 0))
+            return sorted(models.values(), key=lambda x: x["cost_usd"], reverse=True)
+        except Exception as e:
+            logger.warning("get_usage_by_model_failed", error=str(e))
+            return []
+
+    async def get_usage_by_caller(self, days: int = 30) -> list[dict]:
+        """Group by caller: caller, total_cost, total_requests, tokens."""
+        from datetime import timedelta
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("api_usage")
+                .select("caller, cost_usd, input_tokens, output_tokens")
+                .eq("instance_id", self.instance_id)
+                .gte("created_at", since.isoformat()),
+            )
+            rows = result.data or []
+            callers: dict[str, dict] = {}
+            for r in rows:
+                c = r["caller"]
+                if c not in callers:
+                    callers[c] = {"caller": c, "cost_usd": 0, "requests": 0, "input_tokens": 0, "output_tokens": 0}
+                callers[c]["cost_usd"] += float(r.get("cost_usd", 0))
+                callers[c]["requests"] += 1
+                callers[c]["input_tokens"] += int(r.get("input_tokens", 0))
+                callers[c]["output_tokens"] += int(r.get("output_tokens", 0))
+            return sorted(callers.values(), key=lambda x: x["cost_usd"], reverse=True)
+        except Exception as e:
+            logger.warning("get_usage_by_caller_failed", error=str(e))
+            return []
+
+    async def get_usage_totals(self, days: int = 30) -> dict:
+        """Current period totals for header stat cards."""
+        now = datetime.now(timezone.utc)
+        # Month start
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("api_usage")
+                .select("cost_usd, created_at")
+                .eq("instance_id", self.instance_id)
+                .gte("created_at", month_start.isoformat()),
+            )
+            rows = result.data or []
+            month_cost = sum(float(r.get("cost_usd", 0)) for r in rows)
+            month_requests = len(rows)
+
+            # Daily avg and projection
+            days_elapsed = max((now - month_start).days, 1)
+            import calendar
+            days_in_month = calendar.monthrange(now.year, now.month)[1]
+            daily_avg = month_cost / days_elapsed
+            projected = daily_avg * days_in_month
+
+            return {
+                "month_cost": round(month_cost, 4),
+                "month_requests": month_requests,
+                "daily_avg": round(daily_avg, 4),
+                "projected": round(projected, 2),
+                "period": now.strftime("%Y-%m"),
+            }
+        except Exception as e:
+            logger.warning("get_usage_totals_failed", error=str(e))
+            return {"month_cost": 0, "month_requests": 0, "daily_avg": 0, "projected": 0, "period": now.strftime("%Y-%m")}
+
+    async def get_month_usage_cost(self) -> float:
+        """Quick query: total cost this calendar month. Used for alert banner."""
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("api_usage")
+                .select("cost_usd")
+                .eq("instance_id", self.instance_id)
+                .gte("created_at", month_start.isoformat()),
+            )
+            return sum(float(r.get("cost_usd", 0)) for r in (result.data or []))
+        except Exception:
+            return 0.0

@@ -67,6 +67,7 @@ class TradingEngine:
         if config.openai_api_key:
             from src.strategy.position_agent import PositionManagerAgent
             self.position_agent = PositionManagerAgent(config)
+            self.position_agent._repo = repo  # usage tracking
 
         self.position_monitor = PositionMonitor(
             trailing_activation_rr=config.trailing_activation_rr,
@@ -129,6 +130,7 @@ class TradingEngine:
         self.refiner_agent: RefinerMonitorAgent | None = None
         if config.openai_api_key:
             self.refiner_agent = RefinerMonitorAgent(config)
+            self.refiner_agent._repo = repo  # usage tracking
             logger.info(
                 "refiner_agent_created",
                 model=config.refiner_agent_model,
@@ -188,6 +190,7 @@ class TradingEngine:
         self.agent_analyst: AgentEntryAnalyst | None = None
         if config.openai_api_key:
             self.agent_analyst = AgentEntryAnalyst(config)
+            self.agent_analyst._repo = repo  # usage tracking
             logger.info(
                 "agent_analyst_ready",
                 model=config.agent_model,

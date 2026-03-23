@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -51,8 +52,13 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
     def _instance_id_for_request(request: Request) -> str:
         return request.query_params.get("instance") or config.instance_id
 
+    # Cached usage alert state (refreshed every 5 minutes)
+    _usage_alert_cache: dict[str, Any] = {"data": None, "ts": 0}
+
     async def _base_context(request: Request) -> dict:
         """Common context for all authenticated pages (mode banner, nav)."""
+        import time as _time
+
         active_repo = _get_repo_for_request(request)
         active_instance = _instance_id_for_request(request)
         try:
@@ -72,6 +78,25 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         if config.instance_id not in instance_ids:
             all_instances.insert(0, {"instance_id": config.instance_id})
 
+        # Usage alert (cached 5 min)
+        usage_alert = None
+        overrides = (state.get("config_overrides") or {}) if state else {}
+        if isinstance(overrides, dict):
+            threshold = overrides.get("usage_alert_threshold_usd")
+            if threshold:
+                now = _time.time()
+                if now - _usage_alert_cache["ts"] > 300 or _usage_alert_cache["data"] is None:
+                    try:
+                        spend = await active_repo.get_month_usage_cost()
+                        alert_data = {"spend": spend, "threshold": float(threshold), "exceeded": spend > float(threshold)}
+                        _usage_alert_cache["data"] = alert_data
+                        _usage_alert_cache["ts"] = now
+                    except Exception:
+                        pass
+                cached = _usage_alert_cache.get("data")
+                if cached and cached["spend"] > cached["threshold"] * 0.8:
+                    usage_alert = cached
+
         return {
             "request": request,
             "state": state,
@@ -81,6 +106,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             "db_offline": state is None,
             "active_instance": active_instance,
             "all_instances": all_instances,
+            "usage_alert": usage_alert,
         }
 
     @router.get("/login", response_class=HTMLResponse)
@@ -204,6 +230,18 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx["initial_symbol"] = symbol
         ctx["tv_exchange_prefix"] = _TV_PREFIX_MAP.get(market, "BINANCE")
         return templates.TemplateResponse(request, "chart.html", context=ctx)
+
+    @router.get("/usage", response_class=HTMLResponse)
+    @login_required
+    async def usage_page(request: Request):
+        ctx = await _base_context(request)
+        # Load threshold from config_overrides
+        state = ctx.get("state") or {}
+        overrides = state.get("config_overrides") or {}
+        if not isinstance(overrides, dict):
+            overrides = {}
+        ctx["usage_threshold"] = overrides.get("usage_alert_threshold_usd")
+        return templates.TemplateResponse(request, "usage.html", context=ctx)
 
     @router.get("/settings", response_class=HTMLResponse)
     @login_required

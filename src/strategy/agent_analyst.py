@@ -387,6 +387,9 @@ class AgentEntryAnalyst:
                 json_schema=AGENT1_RESPONSE_SCHEMA,
                 temperature=1.0,
                 timeout=self._timeout,
+                caller="agent1",
+                repo=getattr(self, "_repo", None),
+                signal_id=signal.get("id") if isinstance(signal, dict) else None,
             )
 
             latency_ms = (time.monotonic() - start) * 1000

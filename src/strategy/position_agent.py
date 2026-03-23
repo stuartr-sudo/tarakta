@@ -245,6 +245,9 @@ class PositionManagerAgent:
                 json_schema=POSITION_RESPONSE_SCHEMA,
                 temperature=1.0,
                 timeout=self._timeout,
+                caller="agent3",
+                repo=getattr(self, "_repo", None),
+                trade_id=context.get("trade_id") if isinstance(context, dict) else None,
             )
 
             latency_ms = (time.time() - t0) * 1000

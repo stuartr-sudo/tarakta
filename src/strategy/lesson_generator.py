@@ -203,6 +203,8 @@ class TradeLessonGenerator:
                 json_schema=LESSON_RESPONSE_SCHEMA,
                 temperature=1.0,
                 timeout=self._timeout,
+                caller="lessons",
+                repo=self._repo,
             )
 
             latency_ms = (time.time() - t0) * 1000

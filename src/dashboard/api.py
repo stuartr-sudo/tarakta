@@ -1158,4 +1158,54 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             logger.error("advisor_endpoint_error", error=str(e))
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    # ---- Usage Tracking API ----
+
+    @router.get("/api/usage/totals")
+    @login_required
+    async def usage_totals(request: Request):
+        active_repo = _repo_for(request)
+        data = await active_repo.get_usage_totals()
+        return JSONResponse(data, headers={"Cache-Control": "private, max-age=300"})
+
+    @router.get("/api/usage/summary")
+    @login_required
+    async def usage_summary(request: Request):
+        active_repo = _repo_for(request)
+        days = int(request.query_params.get("days", 30))
+        data = await active_repo.get_usage_summary(days=days)
+        return JSONResponse(data, headers={"Cache-Control": "private, max-age=300"})
+
+    @router.get("/api/usage/by-model")
+    @login_required
+    async def usage_by_model(request: Request):
+        active_repo = _repo_for(request)
+        days = int(request.query_params.get("days", 30))
+        data = await active_repo.get_usage_by_model(days=days)
+        return JSONResponse(data, headers={"Cache-Control": "private, max-age=300"})
+
+    @router.get("/api/usage/by-caller")
+    @login_required
+    async def usage_by_caller(request: Request):
+        active_repo = _repo_for(request)
+        days = int(request.query_params.get("days", 30))
+        data = await active_repo.get_usage_by_caller(days=days)
+        return JSONResponse(data, headers={"Cache-Control": "private, max-age=300"})
+
+    @router.post("/api/usage/threshold")
+    @admin_required
+    async def set_usage_threshold(request: Request):
+        body = await request.json()
+        threshold = body.get("threshold")
+        state = await repo.get_engine_state() or {}
+        overrides = state.get("config_overrides") or {}
+        if not isinstance(overrides, dict):
+            overrides = {}
+        if threshold is None or threshold == "":
+            overrides.pop("usage_alert_threshold_usd", None)
+        else:
+            overrides["usage_alert_threshold_usd"] = float(threshold)
+        state["config_overrides"] = overrides
+        await repo.upsert_engine_state(state)
+        return JSONResponse({"ok": True, "threshold": threshold})
+
     return router

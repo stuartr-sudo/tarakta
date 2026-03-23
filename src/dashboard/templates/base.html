@@ -57,6 +57,7 @@
             <a href="/trades{{ _iq }}" class="{{ 'active' if current_page == '/trades' else '' }}">Trades</a>
             <a href="/signals{{ _iq }}" class="{{ 'active' if current_page == '/signals' else '' }}">Signals</a>
             <a href="/analytics{{ _iq }}" class="{{ 'active' if current_page == '/analytics' else '' }}">Analytics</a>
+            <a href="/usage{{ _iq }}" class="{{ 'active' if current_page == '/usage' else '' }}">Usage</a>
             <a href="/chart{{ _iq }}" class="{{ 'active' if current_page == '/chart' else '' }}">Chart</a>
             <a href="/settings{{ _iq }}" class="{{ 'active' if current_page == '/settings' else '' }}">Settings</a>
         </div>
@@ -76,6 +77,14 @@
     {% if db_offline %}
     <div style="background:#b91c1c;color:#fff;text-align:center;padding:8px;font-weight:600">
         Database unreachable &mdash; showing cached/empty data. Engines will auto-retry.
+    </div>
+    {% endif %}
+
+    {% if usage_alert is defined and usage_alert %}
+    <div class="alert-banner {{ 'alert-banner-red' if usage_alert.exceeded else 'alert-banner-amber' }}">
+        OpenAI spend {{ '$%.2f' | format(usage_alert.spend) }} of ${{ '%.2f' | format(usage_alert.threshold) }} limit
+        {% if usage_alert.exceeded %} &mdash; BUDGET EXCEEDED{% endif %}
+        <a href="/usage{{ _iq }}" style="color:inherit;margin-left:12px;text-decoration:underline;">View Usage</a>
     </div>
     {% endif %}
 
