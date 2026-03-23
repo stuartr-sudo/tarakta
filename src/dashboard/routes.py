@@ -85,7 +85,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
 
     @router.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request):
-        return templates.TemplateResponse("login.html", context={"request": request, "error": None})
+        return templates.TemplateResponse(request, "login.html", context={"request": request, "error": None})
 
     @router.post("/login")
     async def login_submit(
@@ -112,7 +112,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             return RedirectResponse(url="/", status_code=303)
 
         return templates.TemplateResponse(
-            "login.html", context={"request": request, "error": "Invalid credentials"}
+            request, "login.html", context={"request": request, "error": "Invalid credentials"}
         )
 
     @router.get("/logout")
@@ -151,7 +151,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx["main_margin_pct"] = main_settings.get("margin_pct", config.max_position_pct)
         ctx["main_leverage"] = main_settings.get("leverage", config.leverage)
 
-        return templates.TemplateResponse("dashboard.html", context=ctx)
+        return templates.TemplateResponse(request, "dashboard.html", context=ctx)
 
     @router.get("/trades", response_class=HTMLResponse)
     @login_required
@@ -169,7 +169,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             ctx["db_offline"] = True
         ctx["current_status"] = status
         ctx["current_page"] = page
-        return templates.TemplateResponse("trades.html", context=ctx)
+        return templates.TemplateResponse(request, "trades.html", context=ctx)
 
     @router.get("/signals", response_class=HTMLResponse)
     @login_required
@@ -183,13 +183,13 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             ctx["signals"] = []
             ctx["db_offline"] = True
         ctx["current_page"] = page
-        return templates.TemplateResponse("signals.html", context=ctx)
+        return templates.TemplateResponse(request, "signals.html", context=ctx)
 
     @router.get("/analytics", response_class=HTMLResponse)
     @login_required
     async def analytics_page(request: Request):
         ctx = await _base_context(request)
-        return templates.TemplateResponse("analytics.html", context=ctx)
+        return templates.TemplateResponse(request, "analytics.html", context=ctx)
 
     @router.get("/chart", response_class=HTMLResponse)
     @login_required
@@ -203,7 +203,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx["open_symbols"] = list(open_positions.keys())
         ctx["initial_symbol"] = symbol
         ctx["tv_exchange_prefix"] = _TV_PREFIX_MAP.get(market, "BINANCE")
-        return templates.TemplateResponse("chart.html", context=ctx)
+        return templates.TemplateResponse(request, "chart.html", context=ctx)
 
     @router.get("/settings", response_class=HTMLResponse)
     @login_required
@@ -233,7 +233,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         main_settings = overrides.get("main_bot_settings", {}) or {}
         ctx["main_leverage"] = main_settings.get("leverage", config.leverage)
         ctx["main_margin_pct"] = main_settings.get("margin_pct", config.max_position_pct)
-        return templates.TemplateResponse("settings.html", context=ctx)
+        return templates.TemplateResponse(request, "settings.html", context=ctx)
 
     @router.post("/settings/toggle-mode")
     @admin_required
