@@ -104,10 +104,10 @@ async def _simulate_signal(db, signal: dict) -> dict[str, Any] | None:
             db.table("candle_cache")
             .select("*")
             .eq("symbol", symbol)
-            .eq("timeframe", "1h")
+            .eq("timeframe", "5m")
             .gte("timestamp", signal_time)
             .order("timestamp", desc=False)
-            .limit(96),
+            .limit(288),  # 288 x 5m = 24h of data
         )
         rows = result.data or []
     except Exception as e:
