@@ -20,8 +20,8 @@ ruff format src/ tests/
 # Docker
 docker compose up --build
 
-# Deploy
-fly deploy --depot=false --remote-only
+# Deploy (expanded footprint bot)
+fly deploy --depot=false --remote-only --app tarakta-expanded
 ```
 
 ## Architecture
@@ -30,21 +30,25 @@ Automated crypto trading bot using Smart Money Concepts with three OpenAI-powere
 
 **Core loop** (`src/engine/core.py`, ~3500 lines): TradingEngine runs scan/trade/monitor cycles on a configurable interval. The scanner scores signals via confluence of SMC indicators, then agents decide whether to enter and how to manage positions.
 
-**Three-agent system:**
+**Three-agent system + lesson generator:**
 - **Agent 1** (`strategy/agent_analyst.py`): Analyzes signals with tool-use, produces reasoning + suggested SL/TP
 - **Agent 2** (`strategy/refiner_agent.py`): Makes entry decisions. Outputs ENTER only — never WAIT, ADJUST, or ABANDON
 - **Agent 3** (`strategy/position_agent.py`): Manages open positions. Can ONLY tighten SL and extend TP3 — never closes trades
+- **Lesson Generator** (`strategy/lesson_generator.py`): Post-trade analysis, generates reusable lessons stored in `trade_lessons` table
 
 **Key modules:**
 - `src/config.py` — Pydantic Settings, all config from env vars. Overrides can be stored in `engine_state.config_overrides` in DB
 - `src/strategy/scanner.py` + `confluence.py` — Market scanning and weighted signal scoring
 - `src/exchange/paper.py` — Paper trading wrapper around CCXT exchange client
-- `src/dashboard/` — FastAPI + Jinja2 web dashboard (port 8080, `/health` endpoint)
+- `src/dashboard/` — FastAPI + Jinja2 web dashboard (port 8080). Pages: `/` dashboard, `/trades`, `/signals`, `/analytics`, `/usage`, `/chart`, `/settings`. API routes under `/api/`. Health check at `/health`
 - `src/data/repository.py` — Supabase data access layer
 - `src/data/rag.py` — Hybrid RAG (dense + lexical + RRF) over trade history
 - `src/risk/` — Risk manager, circuit breaker, portfolio tracker
+- `src/execution/` — Order execution and position monitoring (`orders.py`, `monitor.py`)
 - `src/engine/entry_refiner.py` — Pullback entry refinement via watchlist
-- `src/advisor/` — Trade advisor using Claude Agent SDK (analyzes missed signals, simulates outcomes, recommends entry criteria changes). Dashboard endpoint: `POST /advisor/run`
+- `src/advisor/` — Trade advisor using Claude Agent SDK. Fetches missed signals (`missed_signals.py`), simulates outcomes (`outcome_simulator.py`), stores findings in `advisor_insights` table (`insights.py`), and injects learnings into Agent 1/2 context. Runs daily on reset or manually via dashboard button / `POST /advisor/run`. Runner: `runner.py`, MCP tools: `tools.py`
+
+**Usage tracking:** All `generate_json()` calls in `llm_client.py` log to `api_usage` table (fire-and-forget). Each caller passes `caller="agent1|agent2|agent3|lessons"` and optionally `repo`, `trade_id`, `signal_id`. Cost calculated via `MODEL_PRICING` dict. Dashboard at `/usage` shows spend charts, per-model/per-agent breakdowns, and configurable alert threshold (stored in `engine_state.config_overrides` as `usage_alert_threshold_usd`).
 
 ## Gotchas
 
@@ -66,4 +70,4 @@ Required (see `.env.example`):
 
 ## Database
 
-Supabase project **SWSP** (ref: `uounrdaescblpgwkgbdq`, region: ap-southeast-1). Migrations in `migrations/` numbered 001-012 (008 and 011 don't exist). Key tables: `trades`, `signals`, `engine_state`, `portfolio_snapshots`, `knowledge_sources`, `knowledge_chunks`, `candle_cache`.
+Supabase project **SWSP** (ref: `uounrdaescblpgwkgbdq`, region: ap-southeast-1). Migrations in `migrations/` numbered 001-014 (008 and 011 don't exist). Key tables: `trades`, `signals`, `engine_state`, `portfolio_snapshots`, `knowledge_sources`, `knowledge_chunks`, `candle_cache`, `advisor_insights`, `api_usage`.
