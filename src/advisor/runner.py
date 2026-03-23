@@ -207,12 +207,12 @@ async def run_advisor(
         f"```json\n{json.dumps(sim_summary, indent=2, default=str)}\n```"
     )
 
-    user_message = prompt or (
+    intro = prompt or (
         "Analyze these missed trading signals and simulation results. "
         "Identify patterns, calculate win rates, and provide recommendations "
-        "to make the bot less conservative on entry.\n\n"
-        + data_context
+        "to make the bot less conservative on entry."
     )
+    user_message = intro + "\n\n" + data_context
 
     # Step 4: Call Claude API directly
     async with httpx.AsyncClient(timeout=120) as client:
