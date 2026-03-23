@@ -1136,4 +1136,26 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             },
         }
 
+    # ── Trade Advisor (Claude Agent SDK) ────────────────────────────
+    @router.post("/advisor/run")
+    @login_required
+    async def run_trade_advisor(request: Request):
+        """Run the trade advisor agent to analyze missed signals."""
+        has_json = request.headers.get("content-type") == "application/json"
+        body = await request.json() if has_json else {}
+        prompt = body.get("prompt")
+
+        try:
+            from src.advisor.runner import run_advisor
+
+            result = await run_advisor(
+                db=repo.db,
+                instance_id=body.get("instance_id", "main"),
+                prompt=prompt,
+            )
+            return JSONResponse(result)
+        except Exception as e:
+            logger.error("advisor_endpoint_error", error=str(e))
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     return router
