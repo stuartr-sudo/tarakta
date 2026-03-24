@@ -648,6 +648,34 @@ class RefinerMonitorAgent:
             leverage_parts.append(f"Alignment bonus: {leverage_bonus} pts")
         leverage_section = " | ".join(leverage_parts) if leverage_parts else "Not available"
 
+        # ── Section 11b: Footprint / Order Flow ──
+        fp = ctx.get("footprint", {})
+        fp_parts = []
+        if fp:
+            fp_parts.append(f"Gate: {'PASSED' if fp.get('passed') else 'FAILED'}")
+            fp_parts.append(f"Confidence: {fp.get('confidence', 0):.1%}")
+            delta_pct = fp.get("delta_pct", 0)
+            if delta_pct > 0:
+                fp_parts.append(f"Delta: +{delta_pct:.2%} (buyer-dominated)")
+            elif delta_pct < 0:
+                fp_parts.append(f"Delta: {delta_pct:.2%} (seller-dominated)")
+            else:
+                fp_parts.append(f"Delta: {delta_pct:.2%}")
+            fp_parts.append(f"Absorption: {fp.get('absorption', 0):.3f}")
+            fp_parts.append(f"Cum. delta confirms: {fp.get('cum_delta', 0)}")
+            if fp.get("oi_change_pct"):
+                fp_parts.append(f"OI change: {fp['oi_change_pct']:+.2%}")
+            buy_v = fp.get("buy_volume", 0)
+            sell_v = fp.get("sell_volume", 0)
+            if buy_v or sell_v:
+                total_v = buy_v + sell_v
+                buy_pct = buy_v / total_v * 100 if total_v > 0 else 50
+                fp_parts.append(f"Buy/Sell: {buy_pct:.0f}%/{100 - buy_pct:.0f}%")
+            reasons = fp.get("reasons", [])
+            if reasons:
+                fp_parts.append(f"Signals: {'; '.join(reasons[:3])}")
+        footprint_section = " | ".join(fp_parts) if fp_parts else "Not available (footprint disabled or not applicable)"
+
         # ── Section 12: Order book ──
         ob_data = ctx.get("order_book", {})
         if ob_data.get("status") == "available":
@@ -813,6 +841,9 @@ class RefinerMonitorAgent:
 
 ### Leverage / Funding Profile
 {leverage_section}
+
+### Order Flow / Footprint (real-time trade tape analysis)
+{footprint_section}
 
 ### Symbol Trade History (previous entries on this token)
 {self._build_history_section(ctx)}

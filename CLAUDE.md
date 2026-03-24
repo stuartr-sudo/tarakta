@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Run
-python -m src.main
+python3 -m src.main
 
 # Tests
 pytest                          # all tests (asyncio_mode = "auto")
@@ -48,18 +48,28 @@ Automated crypto trading bot using Smart Money Concepts with three OpenAI-powere
 - `src/execution/` — Order execution and position monitoring (`orders.py`, `monitor.py`)
 - `src/engine/` — Core loop (`core.py`), consensus voting (`consensus.py`), scan scheduler (`scheduler.py`), engine state (`state.py`), pullback watchlist (`watchlist.py`, `entry_refiner.py`)
 - `src/strategy/` indicators — `fair_value_gaps.py`, `order_blocks.py`, `liquidity.py`, `sweep_detector.py`, `market_structure.py`, `footprint.py`, `sentiment.py`, `volume.py`, `sessions.py`, `weekly_cycle.py`, `pullback.py`
+
+**Data flow to agents:**
+- Scanner → `signal.agent_context` (OBs, FVGs, liquidity, market structure, volume, leverage) → Agent 1
+- `entry_refiner._build_agent_context()` assembles Agent 2's full context from signal.agent_context + live data (order book, footprint, candles)
+- Footprint analyzer runs live in entry_refiner before Agent 2, then again as a hard gate in core.py before execution
+- Advisor insights (daily) are injected into Agent 1 and Agent 2 prompts via `format_insights_for_agent()`
+- Trade lessons (per-trade) are injected into all agent prompts from `trade_lessons` table
 - `src/advisor/` — Trade advisor using Claude Agent SDK. Fetches missed signals (`missed_signals.py`), simulates outcomes (`outcome_simulator.py`), stores findings in `advisor_insights` table (`insights.py`), and injects learnings into Agent 1/2 context. Runs daily on reset or manually via dashboard button / `POST /advisor/run`. Runner: `runner.py`, MCP tools: `tools.py`
 
 **Usage tracking:** All `generate_json()` calls in `llm_client.py` log to `api_usage` table (fire-and-forget). Each caller passes `caller="agent1|agent2|agent3|lessons"` and optionally `repo`, `trade_id`, `signal_id`. Cost calculated via `MODEL_PRICING` dict. Dashboard at `/usage` shows spend charts, per-model/per-agent breakdowns, and configurable alert threshold (stored in `engine_state.config_overrides` as `usage_alert_threshold_usd`).
 
 ## Gotchas
 
+- **Agent context pipeline**: When adding new indicators/data, must wire through: (1) scanner's `_enrich_agent_context()` OR entry_refiner's `_build_agent_context()`, (2) the prompt template in the relevant agent file. Data in `signal_components` does NOT auto-propagate to agents.
+- **Footprint is ephemeral**: Order flow data (trade tape, live OI) is real-time only — cannot be retroactively fetched. To persist for analysis, must store on signal at scan time.
 - **DB model overrides**: After changing LLM model defaults in code, must clear `config_overrides` in `engine_state` table or stale model names persist
 - **Deploy flag**: Always `--depot=false --remote-only` for Fly.io (Depot builder times out)
 - **Branch policy**: Work on main branch for agent changes, not feature branches
 - **pandas-ta / smartmoneyconcepts**: Must install with `--no-deps` (Dockerfile handles this, don't add to regular pip install)
 - **Instance isolation**: `engine_state` is keyed by `instance_id` (not singleton) — multiple bot instances share one DB
 - **OOM risk**: Bot runs on Fly.io shared-cpu-1x with 2GB RAM. Memory-heavy operations (large candle fetches, multiple concurrent agent calls) can OOM — monitor via `fly logs -a tarakta`
+- **python3 only**: No bare `python` on macOS — always use `python3`
 
 ## Environment
 

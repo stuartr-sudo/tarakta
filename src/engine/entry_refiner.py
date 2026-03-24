@@ -106,6 +106,7 @@ class EntryRefiner:
         refiner_agent=None,
         market_filter=None,
         exchange=None,
+        footprint_analyzer=None,
     ) -> None:
         self.candles = candle_manager
         self.config = config
@@ -116,6 +117,7 @@ class EntryRefiner:
         self.refiner_agent = refiner_agent
         self.market_filter = market_filter
         self._exchange = exchange  # For order book data (Feature 2)
+        self.footprint_analyzer = footprint_analyzer  # Order flow confirmation
         self._last_agent_check: dict[str, float] = {}  # symbol → timestamp
         self._agent_check_interval = getattr(
             config, "refiner_agent_check_interval_minutes", 5.0
@@ -798,8 +800,41 @@ class EntryRefiner:
             except Exception as e:
                 logger.debug("order_book_fetch_error", symbol=entry.symbol, error=str(e))
 
+        # Fetch footprint (order flow) data for Agent 2 context
+        footprint_data = {}
+        signal = entry.signal
+        if (
+            self.footprint_analyzer
+            and signal.sweep_result
+            and not (self.config.footprint_longs_only and signal.direction == "bearish")
+        ):
+            try:
+                fp_result = await self.footprint_analyzer.analyze(
+                    exchange=self._exchange,
+                    symbol=signal.symbol,
+                    sweep_direction=getattr(signal.sweep_result, "sweep_type", "") or "",
+                    sweep_level=getattr(signal.sweep_result, "sweep_level", 0.0) or 0.0,
+                    current_price=float(candles_5m["close"].iloc[-1]),
+                    trade_limit=self.config.footprint_trade_limit,
+                    sweep_oi_usd=getattr(signal, "sweep_oi_usd", 0.0) or 0.0,
+                )
+                footprint_data = {
+                    "passed": fp_result.passed,
+                    "confidence": round(fp_result.confidence, 3),
+                    "delta_pct": round(fp_result.delta_pct, 4),
+                    "absorption": round(fp_result.absorption_score, 3),
+                    "cum_delta": fp_result.cumulative_delta_confirms,
+                    "oi_change_pct": round(fp_result.oi_change_pct, 3),
+                    "buy_volume": round(fp_result.buy_volume, 2),
+                    "sell_volume": round(fp_result.sell_volume, 2),
+                    "reasons": fp_result.reasons,
+                }
+            except Exception as e:
+                logger.debug("footprint_fetch_for_agent2_error", symbol=signal.symbol, error=str(e)[:80])
+
         context = self._build_agent_context(
             entry, candles_5m, zone_top, zone_bottom, direction, order_book_data,
+            footprint_data=footprint_data,
         )
 
         # Inject advisor insights into Agent 2 context
@@ -870,6 +905,7 @@ class EntryRefiner:
         zone_bottom: float,
         direction: str,
         order_book: dict | None = None,
+        footprint_data: dict | None = None,
     ) -> dict:
         """Build the context dict for Agent 2's prompt."""
         signal = entry.signal
@@ -1039,6 +1075,8 @@ class EntryRefiner:
             "agent1_tp": agent1_tp,
             "agent1_rr": agent1_rr,
             "order_book": order_book or {"status": "unavailable"},
+            # Footprint (order flow) data — delta, absorption, cumulative delta
+            "footprint": footprint_data or {},
             # PullbackPlan context — helps Agent 2 make time-aware decisions
             "pullback_plan": {
                 "zone_low": entry.pullback_plan.zone_low,

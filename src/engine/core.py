@@ -152,6 +152,7 @@ class TradingEngine:
                 refiner_agent=_initial_refiner_agent,
                 market_filter=self.market_filter,
                 exchange=exchange,
+                footprint_analyzer=self.footprint_analyzer,
             )
             if config.entry_refiner_enabled
             else None
