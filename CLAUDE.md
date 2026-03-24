@@ -20,15 +20,16 @@ ruff format src/ tests/
 # Docker
 docker compose up --build
 
-# Deploy (expanded footprint bot)
-fly deploy --depot=false --remote-only --app tarakta-expanded
+# Deploy
+fly deploy --depot=false --remote-only --app tarakta
+fly deploy --depot=false --remote-only --app tarakta-expanded  # expanded footprint variant
 ```
 
 ## Architecture
 
 Automated crypto trading bot using Smart Money Concepts with three OpenAI-powered LLM agents.
 
-**Core loop** (`src/engine/core.py`, ~3500 lines): TradingEngine runs scan/trade/monitor cycles on a configurable interval. The scanner scores signals via confluence of SMC indicators, then agents decide whether to enter and how to manage positions.
+**Core loop** (`src/engine/core.py`, ~4000 lines): TradingEngine runs scan/trade/monitor cycles on a configurable interval. The scanner scores signals via confluence of SMC indicators, then agents decide whether to enter and how to manage positions.
 
 **Three-agent system + lesson generator:**
 - **Agent 1** (`strategy/agent_analyst.py`): Analyzes signals with tool-use, produces reasoning + suggested SL/TP
@@ -45,7 +46,8 @@ Automated crypto trading bot using Smart Money Concepts with three OpenAI-powere
 - `src/data/rag.py` — Hybrid RAG (dense + lexical + RRF) over trade history
 - `src/risk/` — Risk manager, circuit breaker, portfolio tracker
 - `src/execution/` — Order execution and position monitoring (`orders.py`, `monitor.py`)
-- `src/engine/entry_refiner.py` — Pullback entry refinement via watchlist
+- `src/engine/` — Core loop (`core.py`), consensus voting (`consensus.py`), scan scheduler (`scheduler.py`), engine state (`state.py`), pullback watchlist (`watchlist.py`, `entry_refiner.py`)
+- `src/strategy/` indicators — `fair_value_gaps.py`, `order_blocks.py`, `liquidity.py`, `sweep_detector.py`, `market_structure.py`, `footprint.py`, `sentiment.py`, `volume.py`, `sessions.py`, `weekly_cycle.py`, `pullback.py`
 - `src/advisor/` — Trade advisor using Claude Agent SDK. Fetches missed signals (`missed_signals.py`), simulates outcomes (`outcome_simulator.py`), stores findings in `advisor_insights` table (`insights.py`), and injects learnings into Agent 1/2 context. Runs daily on reset or manually via dashboard button / `POST /advisor/run`. Runner: `runner.py`, MCP tools: `tools.py`
 
 **Usage tracking:** All `generate_json()` calls in `llm_client.py` log to `api_usage` table (fire-and-forget). Each caller passes `caller="agent1|agent2|agent3|lessons"` and optionally `repo`, `trade_id`, `signal_id`. Cost calculated via `MODEL_PRICING` dict. Dashboard at `/usage` shows spend charts, per-model/per-agent breakdowns, and configurable alert threshold (stored in `engine_state.config_overrides` as `usage_alert_threshold_usd`).
@@ -57,6 +59,7 @@ Automated crypto trading bot using Smart Money Concepts with three OpenAI-powere
 - **Branch policy**: Work on main branch for agent changes, not feature branches
 - **pandas-ta / smartmoneyconcepts**: Must install with `--no-deps` (Dockerfile handles this, don't add to regular pip install)
 - **Instance isolation**: `engine_state` is keyed by `instance_id` (not singleton) — multiple bot instances share one DB
+- **OOM risk**: Bot runs on Fly.io shared-cpu-1x with 2GB RAM. Memory-heavy operations (large candle fetches, multiple concurrent agent calls) can OOM — monitor via `fly logs -a tarakta`
 
 ## Environment
 
@@ -67,6 +70,10 @@ Required (see `.env.example`):
 - `TRADING_MODE` (paper|live)
 - `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD_HASH` / `SESSION_SECRET`
 - `ANTHROPIC_API_KEY` (trade advisor agent — optional, only needed for `/advisor/run`)
+
+## Deployment
+
+Fly.io app `tarakta` — region `ams` (Amsterdam), shared-cpu-1x, 2GB RAM. Config in `fly.toml`. Always deploy with `--depot=false --remote-only`.
 
 ## Database
 
