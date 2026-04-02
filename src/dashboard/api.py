@@ -560,8 +560,9 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         from src.config import Settings
         _cfg = Settings()
         try:
+            r = _repo_for(request)
             # Nuclear wipe — all tables
-            await repo.wipe_all_data()
+            await r.wipe_all_data()
 
             # Create fresh engine state
             state = {
@@ -577,7 +578,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 "last_scan_time": None,
                 "config_overrides": {},
             }
-            await repo.upsert_engine_state(state)
+            await r.upsert_engine_state(state)
 
             # Signal the engine to clear in-memory state
             if engine:
