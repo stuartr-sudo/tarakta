@@ -1,0 +1,628 @@
+{% extends "base.html" %}
+
+{% block title %}Training — Tarakta{% endblock %}
+
+{% block head %}
+<style>
+    .training-container {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 24px 16px;
+    }
+    .training-header {
+        margin-bottom: 32px;
+    }
+    .training-header h1 {
+        font-size: 1.8rem;
+        color: #e0e0e0;
+        margin: 0 0 8px 0;
+    }
+    .training-header p {
+        color: #888;
+        font-size: 0.95rem;
+        margin: 0;
+    }
+    .accordion-item {
+        background: #1a1a2e;
+        border: 1px solid #333;
+        border-radius: 8px;
+        margin-bottom: 12px;
+        overflow: hidden;
+    }
+    .accordion-header {
+        display: flex;
+        align-items: center;
+        padding: 16px 20px;
+        cursor: pointer;
+        user-select: none;
+        transition: background 0.2s;
+    }
+    .accordion-header:hover {
+        background: rgba(108, 99, 255, 0.08);
+    }
+    .accordion-number {
+        font-size: 0.8rem;
+        font-weight: 700;
+        color: #6C63FF;
+        margin-right: 14px;
+        font-family: monospace;
+        min-width: 24px;
+    }
+    .accordion-title {
+        flex: 1;
+        font-size: 1.05rem;
+        font-weight: 600;
+        color: #e0e0e0;
+    }
+    .accordion-chevron {
+        font-size: 0.75rem;
+        color: #888;
+        transition: transform 0.25s;
+        margin-left: 12px;
+    }
+    .accordion-item.open .accordion-chevron {
+        transform: rotate(90deg);
+    }
+    .accordion-body {
+        max-height: 0;
+        overflow: hidden;
+        transition: max-height 0.4s ease;
+    }
+    .accordion-item.open .accordion-body {
+        max-height: 3000px;
+    }
+    .accordion-content {
+        padding: 4px 20px 24px 20px;
+        color: #ccc;
+        font-size: 0.93rem;
+        line-height: 1.7;
+    }
+    .accordion-content h3 {
+        color: #e0e0e0;
+        font-size: 0.95rem;
+        font-weight: 600;
+        margin: 20px 0 8px 0;
+    }
+    .accordion-content h3:first-child {
+        margin-top: 8px;
+    }
+    .accordion-content p {
+        margin: 8px 0;
+    }
+    .accordion-content ul {
+        margin: 8px 0;
+        padding-left: 20px;
+    }
+    .accordion-content li {
+        margin-bottom: 6px;
+    }
+    .info-box {
+        background: rgba(108, 99, 255, 0.06);
+        border-left: 3px solid #6C63FF;
+        border-radius: 0 6px 6px 0;
+        padding: 12px 16px;
+        margin: 14px 0;
+        font-size: 0.9rem;
+        color: #d0d0e0;
+    }
+    .info-box strong {
+        color: #e0e0e0;
+    }
+    .pipeline-flow {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin: 12px 0;
+    }
+    .pipeline-step {
+        background: rgba(108, 99, 255, 0.12);
+        border: 1px solid rgba(108, 99, 255, 0.3);
+        border-radius: 6px;
+        padding: 6px 12px;
+        font-size: 0.85rem;
+        color: #c8c4ff;
+        white-space: nowrap;
+    }
+    .pipeline-arrow {
+        color: #555;
+        font-size: 0.8rem;
+    }
+    .glossary-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 8px;
+    }
+    .glossary-item {
+        display: flex;
+        gap: 8px;
+        padding: 8px 0;
+        border-bottom: 1px solid #2a2a3e;
+    }
+    .glossary-item:last-child {
+        border-bottom: none;
+    }
+    .glossary-term {
+        font-weight: 600;
+        color: #b8b4ff;
+        min-width: 200px;
+        flex-shrink: 0;
+    }
+    .glossary-def {
+        color: #bbb;
+    }
+    @media (max-width: 600px) {
+        .accordion-header { padding: 14px 14px; }
+        .accordion-content { padding: 4px 14px 20px 14px; }
+        .glossary-term { min-width: 140px; }
+        .pipeline-flow { flex-direction: column; align-items: flex-start; }
+        .pipeline-arrow { transform: rotate(90deg); }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="training-container">
+    <div class="training-header">
+        <h1>Training Guide</h1>
+        <p>Everything you need to understand how Tarakta works. Click any section to expand it.</p>
+    </div>
+
+    <!-- 01 -->
+    <div class="accordion-item" data-section="1">
+        <div class="accordion-header" onclick="toggleSection(this)">
+            <span class="accordion-number">01</span>
+            <span class="accordion-title">System Overview</span>
+            <span class="accordion-chevron">&#9654;</span>
+        </div>
+        <div class="accordion-body">
+            <div class="accordion-content">
+                <p>Tarakta is an automated cryptocurrency trading bot that combines Smart Money Concepts (institutional trading strategies) with AI-powered decision making.</p>
+
+                <div class="info-box">
+                    <strong>Core idea:</strong> The bot watches crypto markets around the clock, identifies trading opportunities that institutional traders would look for, then uses three AI agents to decide whether and when to trade.
+                </div>
+
+                <h3>The Pipeline</h3>
+                <div class="pipeline-flow">
+                    <span class="pipeline-step">Scanner checks markets</span>
+                    <span class="pipeline-arrow">&#8594;</span>
+                    <span class="pipeline-step">Agent 1 analyses signal</span>
+                    <span class="pipeline-arrow">&#8594;</span>
+                    <span class="pipeline-step">Agent 2 decides entry timing</span>
+                    <span class="pipeline-arrow">&#8594;</span>
+                    <span class="pipeline-step">Trade executes</span>
+                    <span class="pipeline-arrow">&#8594;</span>
+                    <span class="pipeline-step">Agent 3 manages position</span>
+                </div>
+
+                <p>The system runs 24/7 and scans markets on a regular timer (configurable from the Settings page).</p>
+
+                <h3>Paper Mode vs Live Mode</h3>
+                <ul>
+                    <li><strong>Paper mode (simulated):</strong> Uses real market data but no real money changes hands. Trades are tracked as if they were real, so you can evaluate performance without risk.</li>
+                    <li><strong>Live mode (real money):</strong> Real orders are placed on the exchange. Actual funds are at stake.</li>
+                </ul>
+                <p>The mode banner at the top of every page always tells you which mode is active.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 02 -->
+    <div class="accordion-item" data-section="2">
+        <div class="accordion-header" onclick="toggleSection(this)">
+            <span class="accordion-number">02</span>
+            <span class="accordion-title">The Three AI Agents</span>
+            <span class="accordion-chevron">&#9654;</span>
+        </div>
+        <div class="accordion-body">
+            <div class="accordion-content">
+                <p>Tarakta uses three specialised AI agents, each with a distinct role. Think of them as a team of analysts working together.</p>
+
+                <h3>Agent 1 — Signal Analyst</h3>
+                <div class="info-box">
+                    Answers the question: <strong>"Is this trade worth taking?"</strong>
+                </div>
+                <p>Agent 1 looks at sweep quality, market structure, and overall context. It returns one of three verdicts:</p>
+                <ul>
+                    <li><strong>SETUP_CONFIRMED:</strong> The signal looks good, proceed to entry timing.</li>
+                    <li><strong>WAIT_PULLBACK:</strong> The setup is valid but wait for a better entry price.</li>
+                    <li><strong>SKIP:</strong> Pass on this trade entirely.</li>
+                </ul>
+
+                <h3>Agent 2 — Entry Timer</h3>
+                <div class="info-box">
+                    Answers the question: <strong>"Is NOW the right time to enter?"</strong>
+                </div>
+                <p>Agent 2 monitors price action on 5-minute candles. It only ever returns <strong>ENTER</strong> with the exact entry price, stop loss, take profit levels, and position size. If conditions are not right, it simply does not respond.</p>
+
+                <h3>Agent 3 — Position Manager</h3>
+                <div class="info-box">
+                    Answers the question: <strong>"Should I adjust this open trade?"</strong>
+                </div>
+                <p>Agent 3 monitors open trades and can do exactly two things:</p>
+                <ul>
+                    <li><strong>Tighten the stop-loss:</strong> Move it closer to the current price to protect profits already gained.</li>
+                    <li><strong>Extend TP3:</strong> If momentum is strong, let the winning trade run further.</li>
+                </ul>
+                <p>Agent 3 cannot close trades — that is handled automatically by the exchange when price hits the stop-loss or take-profit levels.</p>
+
+                <h3>Model Selection</h3>
+                <p>Each agent uses an OpenAI GPT model. You can choose between faster, cheaper models (nano, mini) or smarter, more expensive ones (full GPT-5.3, GPT-5.4) from the Settings page. Each agent can also be individually enabled or disabled.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 03 -->
+    <div class="accordion-item" data-section="3">
+        <div class="accordion-header" onclick="toggleSection(this)">
+            <span class="accordion-number">03</span>
+            <span class="accordion-title">Signal Scanning &amp; Smart Money Concepts</span>
+            <span class="accordion-chevron">&#9654;</span>
+        </div>
+        <div class="accordion-body">
+            <div class="accordion-content">
+                <p>Scanning means checking all configured markets every few minutes for potential trade setups. The scanner looks for patterns that institutional ("smart money") traders typically create.</p>
+
+                <h3>Fair Value Gaps (FVGs)</h3>
+                <div class="info-box">
+                    When price moves so fast it leaves an "imbalance" — a gap in the price action. Price often returns to fill these gaps, making them predictable entry points.
+                </div>
+
+                <h3>Order Blocks (OBs)</h3>
+                <div class="info-box">
+                    Areas where large institutional traders previously bought or sold heavily. These zones act as strong support (price bounces up) or resistance (price bounces down).
+                </div>
+
+                <h3>Liquidity Sweeps</h3>
+                <div class="info-box">
+                    When price briefly spikes above or below a key level to trigger stop-losses, then reverses. This is how institutions collect liquidity before making a real move. A sweep often signals a genuine reversal is about to start.
+                </div>
+
+                <h3>Market Structure</h3>
+                <p>The pattern of price movement over time:</p>
+                <ul>
+                    <li><strong>Uptrend:</strong> A pattern of higher highs and higher lows.</li>
+                    <li><strong>Downtrend:</strong> A pattern of lower highs and lower lows.</li>
+                </ul>
+                <p>The bot trades in the direction of the current structure, not against it.</p>
+
+                <h3>Confluence Scoring</h3>
+                <div class="info-box">
+                    Each signal gets a score based on how many indicators agree. If an FVG, order block, and liquidity sweep all point the same direction, that is high confluence and a higher confidence trade. The minimum score needed to trade is configurable (Entry Threshold in Settings).
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 04 -->
+    <div class="accordion-item" data-section="4">
+        <div class="accordion-header" onclick="toggleSection(this)">
+            <span class="accordion-number">04</span>
+            <span class="accordion-title">Risk Management &amp; Safety</span>
+            <span class="accordion-chevron">&#9654;</span>
+        </div>
+        <div class="accordion-body">
+            <div class="accordion-content">
+                <p>Risk management is the most important part of any trading system. These controls exist to protect your capital even when individual trades go wrong.</p>
+
+                <h3>Max Risk Per Trade</h3>
+                <div class="info-box">
+                    Limits how much of your balance can be lost on any single trade. For example, if set to 2%, a $10,000 balance means no single trade can lose more than $200.
+                </div>
+
+                <h3>Circuit Breaker</h3>
+                <div class="info-box">
+                    <strong>Your emergency brake.</strong> Automatically stops ALL trading if total losses exceed a threshold (e.g., 15% of balance). This prevents catastrophic losses during unusual market conditions. Trading resumes only after a manual review.
+                </div>
+
+                <h3>Daily Drawdown Limit</h3>
+                <p>The maximum loss allowed in a single day before trading pauses automatically. If the bot loses too much in one day, it stops and waits until the next day.</p>
+
+                <h3>Max Concurrent Positions</h3>
+                <p>How many trades can be open at the same time. This prevents the bot from being overexposed to the market.</p>
+
+                <h3>Max Exposure</h3>
+                <p>The total portfolio exposure limit across all open positions combined.</p>
+
+                <h3>Cooldown</h3>
+                <p>After a string of losses, the bot waits a configurable amount of time before trading again. This prevents "tilt" — chasing losses with increasingly risky trades.</p>
+
+                <div class="info-box">
+                    All of these settings are configurable from the <strong>Settings</strong> page. It is strongly recommended not to change risk settings without understanding their impact.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 05 -->
+    <div class="accordion-item" data-section="5">
+        <div class="accordion-header" onclick="toggleSection(this)">
+            <span class="accordion-number">05</span>
+            <span class="accordion-title">Position Management &amp; Trade Lifecycle</span>
+            <span class="accordion-chevron">&#9654;</span>
+        </div>
+        <div class="accordion-body">
+            <div class="accordion-content">
+                <h3>Trade Flow</h3>
+                <div class="pipeline-flow">
+                    <span class="pipeline-step">Signal found</span>
+                    <span class="pipeline-arrow">&#8594;</span>
+                    <span class="pipeline-step">Agent 1 approves</span>
+                    <span class="pipeline-arrow">&#8594;</span>
+                    <span class="pipeline-step">Queued for Agent 2</span>
+                    <span class="pipeline-arrow">&#8594;</span>
+                    <span class="pipeline-step">Agent 2 says ENTER</span>
+                    <span class="pipeline-arrow">&#8594;</span>
+                    <span class="pipeline-step">Order placed</span>
+                </div>
+
+                <h3>Take-Profit Levels</h3>
+                <p>Each trade has three take-profit targets, which close portions of the position as price moves in your favour:</p>
+                <ul>
+                    <li><strong>TP1:</strong> Quick profit — closes a portion of the position early to lock in some gains.</li>
+                    <li><strong>TP2:</strong> Larger move — closes another portion at a higher profit target.</li>
+                    <li><strong>TP3:</strong> Full target — the remaining position closes here for maximum profit.</li>
+                </ul>
+
+                <h3>Stop-Loss (SL)</h3>
+                <div class="info-box">
+                    The price level where the trade closes at a loss to prevent further damage. Every trade has a stop-loss — this is non-negotiable. It is your maximum downside on that trade.
+                </div>
+
+                <h3>How Agent 3 Manages Trades</h3>
+                <p>While a trade is open, Agent 3 can:</p>
+                <ul>
+                    <li><strong>Tighten SL:</strong> If the trade is in profit, move the stop-loss closer to the entry price or into profit. This way, even if the trade reverses, you keep some of the gains.</li>
+                    <li><strong>Extend TP3:</strong> If momentum is strong, push the final target further to let the winner run.</li>
+                </ul>
+
+                <h3>How Trades Close</h3>
+                <ul>
+                    <li>Hits the stop-loss (loss)</li>
+                    <li>Hits all take-profit levels (full profit)</li>
+                    <li>Maximum hold time is exceeded (time-based exit)</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- 06 -->
+    <div class="accordion-item" data-section="6">
+        <div class="accordion-header" onclick="toggleSection(this)">
+            <span class="accordion-number">06</span>
+            <span class="accordion-title">Dashboard Guide</span>
+            <span class="accordion-chevron">&#9654;</span>
+        </div>
+        <div class="accordion-body">
+            <div class="accordion-content">
+                <p>The navigation bar at the top links to every section. Here is what each page shows:</p>
+
+                <h3>Dashboard (/)</h3>
+                <p>Live overview of the system: current balance, profit and loss, any open positions, and whether the engine is running.</p>
+
+                <h3>Trades (/trades)</h3>
+                <p>Complete history of every trade the bot has taken. Shows entry and exit prices, profit or loss, duration, and which agents were involved.</p>
+
+                <h3>Signals (/signals)</h3>
+                <p>Every signal the scanner detected, whether it was actually traded or not. Useful for reviewing what the bot saw versus what it acted on.</p>
+
+                <h3>Analytics (/analytics)</h3>
+                <p>Performance charts including win rate over time, cumulative profit and loss, and reward-to-risk distribution.</p>
+
+                <h3>Usage (/usage)</h3>
+                <p>API costs for running the AI agents. Track how much is being spent per agent, per day. Useful for cost management.</p>
+
+                <h3>Chart (/chart)</h3>
+                <p>TradingView chart for manual analysis of any trading pair. Good for visually verifying what the bot is seeing.</p>
+
+                <h3>Settings (/settings)</h3>
+                <p>Configure everything: leverage, risk parameters, agent models, trading mode, and more.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 07 -->
+    <div class="accordion-item" data-section="7">
+        <div class="accordion-header" onclick="toggleSection(this)">
+            <span class="accordion-number">07</span>
+            <span class="accordion-title">Paper vs Live Trading</span>
+            <span class="accordion-chevron">&#9654;</span>
+        </div>
+        <div class="accordion-body">
+            <div class="accordion-content">
+                <h3>Paper Trading</h3>
+                <div class="info-box">
+                    Uses real market data but all trades are simulated. No real money is at risk. Perfect for testing strategies, learning the system, and evaluating performance before committing real funds.
+                </div>
+
+                <h3>Live Trading</h3>
+                <div class="info-box">
+                    Real orders are placed on the exchange. Real money is used. Every profit is real, and every loss is real.
+                </div>
+
+                <h3>How to Switch</h3>
+                <p>Go to the Settings page and change the Trading Mode toggle. This is an admin-only action.</p>
+
+                <h3>Before Going Live</h3>
+                <p>A recommended checklist:</p>
+                <ul>
+                    <li>Look for consistent paper trading profits over at least several weeks.</li>
+                    <li>Understand every risk setting and what it controls.</li>
+                    <li>Start with small position sizes — you can always increase later.</li>
+                    <li>Monitor the dashboard daily, especially in the first week.</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- 08 -->
+    <div class="accordion-item" data-section="8">
+        <div class="accordion-header" onclick="toggleSection(this)">
+            <span class="accordion-number">08</span>
+            <span class="accordion-title">Settings &amp; Configuration</span>
+            <span class="accordion-chevron">&#9654;</span>
+        </div>
+        <div class="accordion-body">
+            <div class="accordion-content">
+                <p>All settings are on the Settings page and take effect immediately — no restart needed.</p>
+
+                <h3>Leverage</h3>
+                <div class="info-box">
+                    How much borrowing power you are using. For example, 10x means $100 of your balance controls $1,000 worth of a position. <strong>Higher leverage = more potential profit AND more potential loss.</strong>
+                </div>
+
+                <h3>Margin Per Trade</h3>
+                <p>What percentage of your balance to use per trade. A smaller margin means smaller positions and lower risk per trade.</p>
+
+                <h3>Entry Threshold</h3>
+                <p>The minimum confluence score a signal needs before it is considered for trading. A higher threshold means fewer trades but higher quality setups.</p>
+
+                <h3>Agent Models</h3>
+                <p>Choose the AI model each agent uses:</p>
+                <ul>
+                    <li><strong>Faster/cheaper models</strong> (nano, mini): Lower cost per decision, slightly less nuanced analysis.</li>
+                    <li><strong>Smarter/more expensive models</strong> (full GPT-5.3, GPT-5.4): Better analysis but higher API costs.</li>
+                </ul>
+
+                <h3>Agent Toggles</h3>
+                <p>You can enable or disable each agent individually. Disabling an agent means its step in the pipeline is skipped.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 09 -->
+    <div class="accordion-item" data-section="9">
+        <div class="accordion-header" onclick="toggleSection(this)">
+            <span class="accordion-number">09</span>
+            <span class="accordion-title">Understanding the Analytics</span>
+            <span class="accordion-chevron">&#9654;</span>
+        </div>
+        <div class="accordion-body">
+            <div class="accordion-content">
+                <h3>Key Metrics</h3>
+
+                <div class="info-box">
+                    <strong>Win Rate:</strong> Percentage of trades that were profitable. Above 50% is good, above 60% is excellent.
+                </div>
+
+                <div class="info-box">
+                    <strong>P&amp;L (Profit and Loss):</strong> Your net result in dollars. The cumulative P&amp;L chart shows the overall performance trend over time.
+                </div>
+
+                <div class="info-box">
+                    <strong>R:R Ratio (Reward-to-Risk):</strong> If you risk $10 and gain $30, that is 3:1 R:R. An average above 2:1 across all trades is the target.
+                </div>
+
+                <h3>Spotting Problems</h3>
+                <ul>
+                    <li>Declining win rate over time — the strategy may need adjustment.</li>
+                    <li>Large individual losses — risk settings may be too aggressive.</li>
+                    <li>Many consecutive losses — the market conditions may not suit the strategy.</li>
+                </ul>
+
+                <h3>What Success Looks Like</h3>
+                <ul>
+                    <li>A steady upward P&amp;L curve over weeks and months.</li>
+                    <li>Consistent R:R above 2:1 on average.</li>
+                    <li>Win rate holding above 50%.</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- 10 -->
+    <div class="accordion-item" data-section="10">
+        <div class="accordion-header" onclick="toggleSection(this)">
+            <span class="accordion-number">10</span>
+            <span class="accordion-title">Glossary &amp; Key Terms</span>
+            <span class="accordion-chevron">&#9654;</span>
+        </div>
+        <div class="accordion-body">
+            <div class="accordion-content">
+                <div class="glossary-grid">
+                    <div class="glossary-item">
+                        <span class="glossary-term">Circuit Breaker</span>
+                        <span class="glossary-def">An automatic safety switch that halts all trading when total losses exceed a set threshold. Prevents catastrophic drawdowns.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Confluence</span>
+                        <span class="glossary-def">When multiple technical indicators agree on the same trade direction. More confluence means higher confidence in the trade.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Drawdown</span>
+                        <span class="glossary-def">The decline from a peak balance to a trough. A 10% drawdown on a $10,000 account means the balance dropped to $9,000.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Entry Threshold</span>
+                        <span class="glossary-def">The minimum confluence score a signal must reach before it is considered for trading. Higher threshold = fewer, higher-quality trades.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Fair Value Gap (FVG)</span>
+                        <span class="glossary-def">A price imbalance created when price moves too fast, leaving a gap. Price tends to return to fill these gaps.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Leverage</span>
+                        <span class="glossary-def">Borrowing power that amplifies your position size. 10x leverage means $100 controls a $1,000 position. Amplifies both gains and losses equally.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Liquidity Sweep</span>
+                        <span class="glossary-def">When price briefly spikes past a key level to trigger stop-losses, then reverses. Often signals the start of a genuine price move.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Margin</span>
+                        <span class="glossary-def">The amount of your own capital used to open a leveraged position. Your actual money at risk in a trade.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Market Structure</span>
+                        <span class="glossary-def">The pattern of highs and lows that defines a trend. Higher highs/higher lows = uptrend. Lower highs/lower lows = downtrend.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Order Block</span>
+                        <span class="glossary-def">A price zone where institutional traders previously placed large orders. Acts as strong support or resistance.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Paper Trading</span>
+                        <span class="glossary-def">Simulated trading using real market data but no real money. Used for testing and evaluation.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">P&amp;L</span>
+                        <span class="glossary-def">Profit and Loss. The net financial result of trading activity, measured in dollars.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">R:R Ratio</span>
+                        <span class="glossary-def">Reward-to-Risk ratio. Compares potential profit to potential loss. A 3:1 R:R means you stand to gain 3x what you are risking.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">SL (Stop Loss)</span>
+                        <span class="glossary-def">A pre-set price level where a trade automatically closes to limit losses. Every trade must have one.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Smart Money Concepts (SMC)</span>
+                        <span class="glossary-def">A trading methodology based on how institutional traders (banks, hedge funds) operate. Focuses on order blocks, liquidity sweeps, and fair value gaps.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">TP (Take Profit)</span>
+                        <span class="glossary-def">A pre-set price level where a trade automatically closes to lock in profit. Tarakta uses three levels: TP1, TP2, and TP3.</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<script>
+function toggleSection(headerEl) {
+    var item = headerEl.parentElement;
+    var wasOpen = item.classList.contains('open');
+    var allItems = document.querySelectorAll('.accordion-item');
+    for (var i = 0; i < allItems.length; i++) {
+        allItems[i].classList.remove('open');
+    }
+    if (!wasOpen) {
+        item.classList.add('open');
+    }
+}
+</script>
+{% endblock %}

@@ -104,6 +104,46 @@
     </div>
 </div>
 
+<!-- API Keys -->
+{% if role == 'admin' %}
+<div class="panel" style="margin-bottom: 1.5rem;">
+    <div class="panel-header">
+        <h2>API Keys</h2>
+    </div>
+    <div class="panel-body">
+        <table class="config-table">
+            <tr>
+                <td style="width:140px;">OpenAI API Key</td>
+                <td>
+                    <div id="api-key-display" style="display:flex; align-items:center; gap:8px;">
+                        {% if api_key_set %}
+                        <span class="pulse-dot green"></span>
+                        <code style="color:var(--text-muted);">sk-...{{ api_key_hint }}</code>
+                        <span style="font-size:0.7rem; color:var(--text-muted);">({{ api_key_source }})</span>
+                        {% else %}
+                        <span class="pulse-dot" style="background:#ef4444;"></span>
+                        <span style="color:#ef4444;">Not configured</span>
+                        {% endif %}
+                        <button class="btn small" onclick="showApiKeyInput()" style="font-size:0.7rem; padding:2px 8px;">Update</button>
+                        {% if api_key_source == 'db' %}
+                        <button class="btn small" onclick="clearApiKey()" style="font-size:0.7rem; padding:2px 8px; background:var(--bg-card); border:1px solid var(--border);">Clear</button>
+                        {% endif %}
+                    </div>
+                    <div id="api-key-input" style="display:none; margin-top:8px;">
+                        <div style="display:flex; align-items:center; gap:8px;">
+                            <input type="password" id="api-key-field" placeholder="sk-..." style="font-size:0.8rem; padding:4px 8px; background:var(--bg-card); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; width:300px;">
+                            <button class="btn small primary" onclick="saveApiKey()" style="font-size:0.7rem; padding:2px 8px;">Save</button>
+                            <button class="btn small" onclick="hideApiKeyInput()" style="font-size:0.7rem; padding:2px 8px; background:var(--bg-card); border:1px solid var(--border);">Cancel</button>
+                        </div>
+                        <span id="api-key-status" style="font-size:0.7rem; margin-top:4px; display:inline-block;"></span>
+                    </div>
+                </td>
+            </tr>
+        </table>
+    </div>
+</div>
+{% endif %}
+
 <!-- AI Agents -->
 <div class="two-col">
     <!-- Agent 1: Strategic Analyst -->
@@ -517,6 +557,47 @@ const agent2Sel = document.getElementById('agent2-model-select');
 if (agent2Sel) agent2Sel.addEventListener('change', () => switchAgentModel('agent2', 'agent2-model-select'));
 const agent3Sel = document.getElementById('agent3-model-select');
 if (agent3Sel) agent3Sel.addEventListener('change', () => switchAgentModel('agent3', 'agent3-model-select'));
+
+// API key management
+function showApiKeyInput() {
+    document.getElementById('api-key-input').style.display = 'block';
+    document.getElementById('api-key-field').focus();
+}
+function hideApiKeyInput() {
+    document.getElementById('api-key-input').style.display = 'none';
+    document.getElementById('api-key-field').value = '';
+    document.getElementById('api-key-status').textContent = '';
+}
+async function saveApiKey() {
+    const field = document.getElementById('api-key-field');
+    const status = document.getElementById('api-key-status');
+    const key = field.value.trim();
+    if (!key) { status.textContent = 'Enter a key'; status.style.color = '#ef4444'; return; }
+    status.textContent = 'Saving...'; status.style.color = '#f59e0b';
+    try {
+        const resp = await fetch(apiUrl('/api/settings/api-key'), {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({key: key}),
+        });
+        const data = await resp.json();
+        if (data.error) {
+            status.textContent = data.error; status.style.color = '#ef4444';
+        } else {
+            status.textContent = 'Saved! Reloading...'; status.style.color = '#22c55e';
+            setTimeout(() => location.reload(), 1000);
+        }
+    } catch (e) {
+        status.textContent = 'Failed'; status.style.color = '#ef4444';
+    }
+}
+async function clearApiKey() {
+    if (!confirm('Clear DB key and revert to environment variable?')) return;
+    try {
+        await fetch(apiUrl('/api/settings/api-key'), {method: 'DELETE'});
+        location.reload();
+    } catch (e) { alert('Failed to clear key'); }
+}
 </script>
 {% endif %}
 {% endblock %}

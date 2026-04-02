@@ -11,6 +11,7 @@ python-multipart>=0.0.9
 supabase>=2.0.0
 pydantic-settings>=2.0.0
 bcrypt>=4.0.0
+cryptography>=42.0
 aiohttp>=3.9.0
 structlog>=24.0.0
 itsdangerous>=2.1.0
@@ -19,3 +20,6 @@ xgboost>=2.0.0
 scikit-learn>=1.4.0
 openai>=1.30.0
 yfinance>=0.2.36
+python-dotenv>=1.0.0
+# Trade advisor (local analysis tool, not part of runtime bot)
+claude-agent-sdk>=0.1.0

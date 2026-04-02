@@ -378,6 +378,17 @@ class TradingEngine:
                     else:
                         logger.warning("agent3_model_stale", saved=saved_model, using=self.config.position_agent_model)
 
+                # Load API key override from DB (encrypted)
+                api_keys = overrides.get("api_keys") or {}
+                if api_keys.get("openai"):
+                    try:
+                        from src.utils.crypto import decrypt_key
+                        decrypted = decrypt_key(api_keys["openai"])
+                        self.config.openai_api_key = decrypted
+                        logger.info("api_key_loaded_from_db", provider="openai", hint=api_keys.get("openai_hint", "?"))
+                    except Exception as e:
+                        logger.warning("api_key_decrypt_failed", error=str(e))
+
         self.portfolio = PortfolioTracker(
             initial_balance=self.state.current_balance,
             peak_balance=self.state.peak_balance,

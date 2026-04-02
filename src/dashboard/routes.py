@@ -271,7 +271,27 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         main_settings = overrides.get("main_bot_settings", {}) or {}
         ctx["main_leverage"] = main_settings.get("leverage", config.leverage)
         ctx["main_margin_pct"] = main_settings.get("margin_pct", config.max_position_pct)
+        # API key status
+        api_keys = overrides.get("api_keys") or {}
+        if api_keys.get("openai"):
+            ctx["api_key_set"] = True
+            ctx["api_key_hint"] = api_keys.get("openai_hint", "????")
+            ctx["api_key_source"] = "db"
+        elif config.openai_api_key:
+            ctx["api_key_set"] = True
+            ctx["api_key_hint"] = config.openai_api_key[-4:] if len(config.openai_api_key) >= 4 else "****"
+            ctx["api_key_source"] = "env"
+        else:
+            ctx["api_key_set"] = False
+            ctx["api_key_hint"] = ""
+            ctx["api_key_source"] = "none"
         return templates.TemplateResponse(request, "settings.html", context=ctx)
+
+    @router.get("/training", response_class=HTMLResponse)
+    @login_required
+    async def training_page(request: Request):
+        ctx = await _base_context(request)
+        return templates.TemplateResponse(request, "training.html", context=ctx)
 
     @router.post("/settings/toggle-mode")
     @admin_required

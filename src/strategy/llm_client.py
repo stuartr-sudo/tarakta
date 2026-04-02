@@ -33,6 +33,8 @@ def is_openai_model(model: str) -> bool:
 # Pricing per 1M tokens: (input, cached_input, output)
 # ---------------------------------------------------------------------------
 MODEL_PRICING: dict[str, tuple[float, float, float]] = {
+    "gpt-5.4": (2.50, 0.25, 15.00),
+    "gpt-5.3": (1.75, 0.175, 14.00),
     "gpt-5.4-mini": (0.75, 0.075, 4.50),
     "gpt-5-mini": (0.25, 0.025, 2.00),
     "gpt-5.4-nano": (0.20, 0.02, 1.25),
@@ -77,6 +79,11 @@ def _get_openai_client(api_key: str):
             timeout=180.0,  # 3-min hard cap — GPT-5 can be slow with thinking
         )
     return _openai_clients[api_key]
+
+
+def clear_client_cache():
+    """Clear cached OpenAI clients (e.g. after API key change)."""
+    _openai_clients.clear()
 
 
 # ---------------------------------------------------------------------------

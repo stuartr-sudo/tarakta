@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from src.dashboard.auth import admin_required, login_required
 from src.data.repository import Repository
+from src.utils.crypto import encrypt_key
 from src.exchange.models import OrderResult
 from src.exchange.protocol import get_symbol_category, CATEGORY_LABELS
 from src.utils.logging import get_logger
@@ -970,6 +971,113 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         except Exception as e:
             logger.error("agent_model_switch_failed", error=str(e))
             return {"error": str(e)}
+
+    # ── API Key Management ─────────────────────────────────────────────
+    @router.post("/settings/api-key")
+    @admin_required
+    async def set_api_key(request: Request):
+        """Update OpenAI API key at runtime. Encrypted and stored in DB."""
+        try:
+            body = await request.json()
+            key = body.get("key", "").strip()
+            if not key:
+                return JSONResponse({"error": "key is required"}, status_code=400)
+            if not key.startswith("sk-") or len(key) < 20:
+                return JSONResponse({"error": "Invalid API key format"}, status_code=400)
+
+            # Encrypt and store in config_overrides
+            encrypted = encrypt_key(key)
+            state = await repo.get_engine_state()
+            if not state:
+                return JSONResponse({"error": "Engine state not found"}, status_code=500)
+            overrides = state.get("config_overrides") or {}
+            if not isinstance(overrides, dict):
+                overrides = {}
+            api_keys = overrides.get("api_keys") or {}
+            api_keys["openai"] = encrypted
+            api_keys["openai_hint"] = key[-4:]
+            overrides["api_keys"] = api_keys
+            state["config_overrides"] = overrides
+            await repo.upsert_engine_state(state)
+
+            # Propagate to running engine
+            if engine:
+                engine.config.openai_api_key = key
+                if engine.agent_analyst:
+                    engine.agent_analyst._api_key = key
+                if engine.refiner_agent:
+                    engine.refiner_agent._api_key = key
+                if engine.position_agent:
+                    engine.position_agent._api_key = key
+                from src.strategy.llm_client import clear_client_cache
+                clear_client_cache()
+
+            logger.info("api_key_updated", provider="openai", hint=key[-4:])
+            return {"status": "ok", "hint": key[-4:]}
+        except Exception as e:
+            logger.error("api_key_update_failed", error=str(e))
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    @router.delete("/settings/api-key")
+    @admin_required
+    async def clear_api_key(request: Request):
+        """Clear DB API key override, revert to env var."""
+        try:
+            state = await repo.get_engine_state()
+            if state:
+                overrides = state.get("config_overrides") or {}
+                if isinstance(overrides, dict) and "api_keys" in overrides:
+                    del overrides["api_keys"]
+                    state["config_overrides"] = overrides
+                    await repo.upsert_engine_state(state)
+
+            # Revert to env var
+            if engine:
+                env_key = os.environ.get("OPENAI_API_KEY", "")
+                engine.config.openai_api_key = env_key
+                if engine.agent_analyst:
+                    engine.agent_analyst._api_key = env_key
+                if engine.refiner_agent:
+                    engine.refiner_agent._api_key = env_key
+                if engine.position_agent:
+                    engine.position_agent._api_key = env_key
+                from src.strategy.llm_client import clear_client_cache
+                clear_client_cache()
+
+            return {"status": "ok", "source": "env"}
+        except Exception as e:
+            logger.error("api_key_clear_failed", error=str(e))
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    @router.get("/settings/api-key-status")
+    @admin_required
+    async def api_key_status(request: Request):
+        """Return API key status without exposing the key."""
+        try:
+            state = await repo.get_engine_state()
+            overrides = (state.get("config_overrides") or {}) if state else {}
+            api_keys = overrides.get("api_keys") or {} if isinstance(overrides, dict) else {}
+
+            if api_keys.get("openai"):
+                return {
+                    "openai": {
+                        "set": True,
+                        "hint": api_keys.get("openai_hint", "????"),
+                        "source": "db",
+                    }
+                }
+            elif engine and engine.config.openai_api_key:
+                return {
+                    "openai": {
+                        "set": True,
+                        "hint": engine.config.openai_api_key[-4:] if len(engine.config.openai_api_key) >= 4 else "****",
+                        "source": "env",
+                    }
+                }
+            else:
+                return {"openai": {"set": False, "hint": "", "source": "none"}}
+        except Exception:
+            return {"openai": {"set": False, "hint": "", "source": "error"}}
 
     # ── Analytics ──────────────────────────────────────────────────────
     @router.get("/analytics/trades")
