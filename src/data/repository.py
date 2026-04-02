@@ -626,8 +626,34 @@ class Repository:
 
     async def wipe_all_data(self) -> None:
         """Nuclear reset — delete ALL data for THIS INSTANCE from every table."""
-        # Trades, signals, partial_exits for this instance
-        for table in ["signals", "trades"]:
+        # First, collect trade IDs so we can delete FK-dependent rows
+        trade_ids: list[str] = []
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("trades").select("id").eq("instance_id", self.instance_id),
+            )
+            trade_ids = [t["id"] for t in (result.data or [])]
+        except Exception:
+            pass
+
+        # Delete FK-dependent rows BEFORE trades
+        if trade_ids:
+            for dep_table in ["trade_lessons", "partial_exits"]:
+                try:
+                    await asyncio.to_thread(
+                        _exec,
+                        self.db.table(dep_table)
+                        .delete()
+                        .in_("trade_id", trade_ids)
+                        .gte("created_at", "1970-01-01"),
+                    )
+                    logger.info("wipe_table_ok", table=dep_table, instance_id=self.instance_id)
+                except Exception as e:
+                    logger.warning("wipe_table_failed", table=dep_table, error=str(e))
+
+        # Now safe to delete trades and signals
+        for table in ["trades", "signals"]:
             try:
                 await asyncio.to_thread(
                     _exec,
@@ -639,24 +665,6 @@ class Repository:
                 logger.info("wipe_table_ok", table=table, instance_id=self.instance_id)
             except Exception as e:
                 logger.warning("wipe_table_failed", table=table, error=str(e))
-
-        # Partial exits linked to this instance's trades
-        try:
-            open_result = await asyncio.to_thread(
-                _exec,
-                self.db.table("trades").select("id").eq("instance_id", self.instance_id),
-            )
-            trade_ids = [t["id"] for t in (open_result.data or [])]
-            if trade_ids:
-                await asyncio.to_thread(
-                    _exec,
-                    self.db.table("partial_exits")
-                    .delete()
-                    .in_("trade_id", trade_ids)
-                    .gte("created_at", "1970-01-01"),
-                )
-        except Exception:
-            pass
 
         # Engine state for this instance
         try:
