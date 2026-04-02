@@ -678,15 +678,24 @@ class AgentEntryAnalyst:
                 parts.append(f"NY Range: {sess.ny_low:.6g} – {sess.ny_high:.6g}")
             session_section = " | ".join(parts) if parts else ""
 
-        # Sweep details — directionally neutral
+        # Sweep details — include institutional implication so agent understands direction
         sweep_info = "None"
         if signal.sweep_result:
             sr = signal.sweep_result
             level_type = sr.sweep_type or "unknown"
             swept_side = "high" if "high" in level_type else "low" if "low" in level_type else "level"
+            # SMC semantics: sweeping highs grabs buy-side liquidity (bearish),
+            # sweeping lows grabs sell-side liquidity (bullish)
+            if "low" in level_type:
+                implication = "Sell-side liquidity grabbed below level → expect potential bullish reversal"
+            elif "high" in level_type:
+                implication = "Buy-side liquidity grabbed above level → expect potential bearish reversal"
+            else:
+                implication = "Liquidity sweep detected"
             sweep_info = (
                 f"Swept {swept_side} at {sr.sweep_level:.6g} "
-                f"(type: {level_type}, wick depth: {sr.sweep_depth:.4f})"
+                f"(type: {level_type}, wick depth: {sr.sweep_depth:.4f})\n"
+                f"  Implication: {implication}"
             )
             if hasattr(sr, 'target_level') and sr.target_level:
                 sweep_info += f"\n  Opposite-side target: {sr.target_level:.6g}"
