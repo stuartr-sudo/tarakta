@@ -267,10 +267,10 @@
                                 {{ t.direction | default('long') }}{% if (t.leverage | default(1) | int) > 1 %} {{ t.leverage }}x{% endif %}
                             </span>
                         </td>
-                        <td class="mono">${{ "%.4f" | format(t.entry_price | float) }}</td>
+                        <td class="mono">${{ "%.8f" | format(t.entry_price | float) }}</td>
                         <td class="mono pos-current-price">--</td>
                         <td class="mono pos-pnl">--</td>
-                        <td class="mono negative">${{ "%.4f" | format(t.stop_loss | float) }}</td>
+                        <td class="mono negative">${{ "%.8f" | format(t.stop_loss | float) }}</td>
                         <td class="mono">
                             {% if t.tp_tiers %}
                                 {% set tiers_done = t.current_tier | default(0) | int %}
@@ -279,7 +279,7 @@
                                     <div class="tp-tier-row {{ 'filled' if tier.filled else ('target' if tier.level == tiers_done + 1 else 'pending') }}">
                                         <span class="tp-tier-dot {{ 'filled' if tier.filled else ('target' if tier.level == tiers_done + 1 else '') }}"></span>
                                         <span class="tp-tier-name">TP{{ tier.level }}</span>
-                                        <span class="tp-tier-price">{% if tier.price %}${{ "%.4f" | format(tier.price | float) }}{% else %}Trail{% endif %}</span>
+                                        <span class="tp-tier-price">{% if tier.price %}${{ "%.8f" | format(tier.price | float) }}{% else %}Trail{% endif %}</span>
                                         <span class="tp-tier-pct">({{ (tier.pct * 100) | int }}%)</span>
                                         {% if tier.filled %}<span class="tp-tier-check">✓</span>{% endif %}
                                         {% if tier.filled and t.tier_pnl and tier.level|string in t.tier_pnl %}
@@ -292,7 +292,7 @@
                                     {% endfor %}
                                 </div>
                             {% else %}
-                                <span class="positive">{{ ("$%.4f" | format(t.take_profit | float)) if t.take_profit else '-' }}</span>
+                                <span class="positive">{{ ("$%.8f" | format(t.take_profit | float)) if t.take_profit else '-' }}</span>
                             {% endif %}
                         </td>
                         <td class="mono">
@@ -761,7 +761,7 @@ function renderPnlData(data) {
         const pnlCell = row.querySelector('.pos-pnl');
 
         if (pos.current_price !== null) {
-            priceCell.textContent = '$' + pos.current_price.toFixed(4);
+            priceCell.textContent = '$' + pos.current_price.toFixed(8);
             const pnlSign = pos.unrealized_pnl >= 0 ? '+' : '';
             pnlCell.textContent = pnlSign + '$' + pos.unrealized_pnl.toFixed(2) + ' (' + (pos.unrealized_pnl >= 0 ? '+' : '') + pos.unrealized_pct.toFixed(1) + '%)';
             pnlCell.className = 'mono pos-pnl ' + (pos.unrealized_pnl >= 0 ? 'positive' : 'negative');
