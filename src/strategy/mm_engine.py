@@ -1,0 +1,785 @@
+"""Standalone Market Makers Method trading engine.
+
+This engine runs completely independently from the existing SMC/footprint
+pipeline. It uses the 10 MM Method modules to make purely algorithmic
+trading decisions with ZERO LLM/agent calls.
+
+Architecture:
+  - Runs as a parallel async task alongside the existing TradingEngine
+  - Shares the exchange connection and database, but nothing else
+  - Has its own scan cycle, entry logic, position management, and exit rules
+  - All decisions are mechanical, based on the MM Method course rules
+
+Flow per scan cycle:
+  1. Session check — are we in a tradeable session?
+  2. Weekly cycle update — what phase are we in?
+  3. Per-pair analysis — formations, levels, EMA, confluence
+  4. Entry decisions — purely algorithmic (no LLM)
+  5. Position management — SL tightening, partial profits, exits
+
+The engine tags all its trades with strategy='mm_method' so they can be
+distinguished from SMC trades in the database and dashboard.
+"""
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from uuid import uuid4
+
+import pandas as pd
+from src.strategy.mm_board_meetings import BoardMeetingDetector
+from src.strategy.mm_confluence import MMConfluenceScorer, MMContext
+from src.strategy.mm_ema_framework import EMAFramework
+from src.strategy.mm_formations import FormationDetector
+from src.strategy.mm_levels import LevelTracker
+from src.strategy.mm_risk import MMRiskCalculator
+from src.strategy.mm_sessions import MMSessionAnalyzer
+from src.strategy.mm_targets import TargetAnalyzer
+from src.strategy.mm_weekly_cycle import WeeklyCycleTracker
+from src.strategy.mm_weekend_trap import WeekendTrapAnalyzer
+from src.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# Scan interval (minutes) — how often the MM engine runs
+DEFAULT_SCAN_INTERVAL = 5
+
+# Minimum confluence score (%) to consider an entry
+MIN_CONFLUENCE_PCT = 40.0
+
+# Minimum R:R ratio (to Level 1 target)
+MIN_RR = 3.0
+MIN_RR_AGGRESSIVE = 2.0
+
+# Minimum formation quality to act on
+MIN_FORMATION_QUALITY = 0.4
+
+# Maximum concurrent MM positions
+MAX_MM_POSITIONS = 3
+
+# Asia session range threshold — skip day if BTC range > 2%
+ASIA_RANGE_SKIP_PCT = 2.0
+
+# Position sizing: risk per trade as % of balance
+RISK_PER_TRADE_PCT = 1.0
+
+# Partial profit schedule (cumulative close %)
+PROFIT_SCHEDULE = {
+    1: 0.30,   # Close 30% at Level 1
+    2: 0.50,   # Close to 50% total at Level 2
+    3: 1.00,   # Close remaining at Level 3
+}
+
+# Strategy tag for database
+STRATEGY_TAG = "mm_method"
+
+
+# ---------------------------------------------------------------------------
+# Dataclasses
+# ---------------------------------------------------------------------------
+
+@dataclass
+class MMSignal:
+    """A potential MM Method trade signal."""
+    symbol: str = ""
+    direction: str = ""         # "long" or "short"
+    entry_price: float = 0.0
+    stop_loss: float = 0.0
+    target_l1: float = 0.0
+    target_l2: float = 0.0
+    target_l3: float = 0.0
+    risk_reward: float = 0.0
+
+    # MM analysis results
+    formation_type: str = ""     # "M" or "W"
+    formation_variant: str = ""
+    formation_quality: float = 0.0
+    cycle_phase: str = ""
+    current_level: int = 0
+    confluence_score: float = 0.0
+    confluence_grade: str = ""
+    session_name: str = ""
+    ema_alignment: str = ""
+    fmwb_direction: str = ""
+    weekend_bias: str = ""
+
+    # Metadata
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    reason: str = ""
+
+
+@dataclass
+class MMPosition:
+    """An open MM Method position with level tracking."""
+    trade_id: str = ""
+    symbol: str = ""
+    direction: str = ""         # "long" or "short"
+    entry_price: float = 0.0
+    quantity: float = 0.0
+    stop_loss: float = 0.0
+    current_level: int = 0      # Track which level we're at
+    last_level_checked: int = 0
+    partial_closed_pct: float = 0.0  # How much has been closed (0-1)
+    entry_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    cost_usd: float = 0.0
+    margin_used: float = 0.0
+
+    # Targets
+    target_l1: float = 0.0
+    target_l2: float = 0.0
+    target_l3: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# MM Engine
+# ---------------------------------------------------------------------------
+
+class MMEngine:
+    """Standalone algorithmic MM Method trading engine.
+
+    Runs independently from the existing TradingEngine. Makes all decisions
+    mechanically based on the MM Method rules — no LLM calls.
+    """
+
+    def __init__(
+        self,
+        exchange,
+        repo,
+        candle_manager,
+        config=None,
+        scan_interval_minutes: float = DEFAULT_SCAN_INTERVAL,
+    ):
+        self.exchange = exchange
+        self.repo = repo
+        self.candle_manager = candle_manager
+        self.config = config
+        self.scan_interval = scan_interval_minutes * 60  # Convert to seconds
+
+        # MM Method modules
+        self.session_analyzer = MMSessionAnalyzer()
+        self.ema_framework = EMAFramework()
+        self.formation_detector = FormationDetector(session_analyzer=self.session_analyzer)
+        self.level_tracker = LevelTracker(ema_framework=self.ema_framework)
+        self.weekly_cycle_tracker = WeeklyCycleTracker()
+        self.confluence_scorer = MMConfluenceScorer(min_rr=MIN_RR, min_score=MIN_CONFLUENCE_PCT)
+        self.weekend_trap_analyzer = WeekendTrapAnalyzer()
+        self.board_meeting_detector = BoardMeetingDetector()
+        self.target_analyzer = TargetAnalyzer()
+        self.risk_calculator = MMRiskCalculator(risk_per_trade=RISK_PER_TRADE_PCT / 100)
+
+        # State
+        self.positions: dict[str, MMPosition] = {}
+        self.cycle_count = 0
+        self._running = True
+
+        logger.info("mm_engine_initialized", scan_interval=scan_interval_minutes)
+
+    async def run(self) -> None:
+        """Main loop — runs scan/trade/manage cycles."""
+        logger.info("mm_engine_started")
+
+        while self._running:
+            try:
+                await self._cycle()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("mm_engine_cycle_error", error=str(e), exc_info=True)
+
+            await asyncio.sleep(self.scan_interval)
+
+        logger.info("mm_engine_stopped")
+
+    async def shutdown(self) -> None:
+        """Graceful shutdown."""
+        self._running = False
+
+    async def _cycle(self) -> None:
+        """One complete scan/trade/manage cycle."""
+        self.cycle_count += 1
+        now = datetime.now(timezone.utc)
+
+        # 1. Session check
+        session = self.session_analyzer.get_current_session()
+        if session.is_weekend:
+            if self.cycle_count % 12 == 0:  # Log every hour
+                logger.debug("mm_engine_weekend_skip")
+            return
+
+        if session.session_name == "dead_zone":
+            if self.cycle_count % 12 == 0:
+                logger.debug("mm_engine_dead_zone_skip")
+            return
+
+        logger.info(
+            "mm_engine_cycle",
+            cycle=self.cycle_count,
+            session=session.session_name,
+            is_gap=session.is_gap,
+            positions=len(self.positions),
+        )
+
+        # 2. Get tradeable pairs
+        try:
+            pairs = await self._get_pairs()
+        except Exception as e:
+            logger.warning("mm_engine_pairs_error", error=str(e))
+            return
+
+        # 3. Scan each pair
+        signals: list[MMSignal] = []
+        for pair in pairs:
+            try:
+                signal = await self._analyze_pair(pair, session, now)
+                if signal:
+                    signals.append(signal)
+            except Exception as e:
+                logger.debug("mm_analyze_pair_error", symbol=pair, error=str(e))
+
+        # 4. Rank signals and enter best ones
+        if signals:
+            signals.sort(key=lambda s: s.confluence_score, reverse=True)
+            await self._process_entries(signals)
+
+        # 5. Manage existing positions
+        for symbol in list(self.positions.keys()):
+            try:
+                await self._manage_position(symbol)
+            except Exception as e:
+                logger.warning("mm_manage_error", symbol=symbol, error=str(e))
+
+    async def _get_pairs(self) -> list[str]:
+        """Get the list of pairs to scan."""
+        pairs = await self.exchange.get_tradeable_pairs(
+            quote_currencies=["USDT"],
+            min_volume_usd=getattr(self.config, "min_volume_usd", 5_000_000),
+        )
+        # Filter out pairs we already have positions in
+        return [p for p in pairs if p not in self.positions]
+
+    async def _analyze_pair(
+        self,
+        symbol: str,
+        session,
+        now: datetime,
+    ) -> MMSignal | None:
+        """Run the full MM Method analysis on a single pair.
+
+        Returns an MMSignal if entry conditions are met, None otherwise.
+        """
+        # Fetch candles (1H primary, 4H for EMA trend)
+        try:
+            candles_1h = await self.candle_manager.get_candles(symbol, "1h", limit=500)
+            candles_4h = await self.candle_manager.get_candles(symbol, "4h", limit=250)
+        except Exception:
+            return None
+
+        if candles_1h is None or candles_1h.empty or len(candles_1h) < 50:
+            return None
+
+        current_price = float(candles_1h.iloc[-1]["close"])
+
+        # --- Run all MM modules ---
+
+        # EMA Framework (4H for macro trend)
+        ema_state = None
+        ema_values = {}
+        if candles_4h is not None and not candles_4h.empty and len(candles_4h) > 200:
+            ema_state = self.ema_framework.calculate(candles_4h)
+            _trend_state = self.ema_framework.get_trend_state(candles_4h)  # noqa: F841 — kept for future use
+            ema_values = ema_state.values
+            ema_break = self.ema_framework.detect_ema_break(candles_4h, ema_period=50)
+        else:
+            ema_break = None
+
+        # Formation detection (1H)
+        formations = self.formation_detector.detect(candles_1h)
+
+        if not formations:
+            return None  # No formation = no entry
+
+        best_formation = formations[0]
+
+        if best_formation.quality_score < MIN_FORMATION_QUALITY:
+            return None
+
+        # Level tracking (1H)
+        direction = best_formation.direction or "bullish"
+        level_analysis = self.level_tracker.analyze(candles_1h, direction=direction)
+
+        # Don't enter if Level 3+ already reached (expect reversal)
+        if level_analysis.current_level >= 3:
+            return None
+
+        # Weekly cycle
+        cycle_state = self.weekly_cycle_tracker.update(candles_1h, now)
+
+        # Don't enter during FMWB (it's the false move)
+        if cycle_state.phase == "FMWB":
+            return None
+
+        # Don't enter during Friday trap phase
+        if cycle_state.phase == "FRIDAY_TRAP":
+            return None
+
+        # Weekend trap analysis
+        weekend = self.weekend_trap_analyzer.analyze(candles_1h, now)
+
+        # Target identification
+        target_analysis = self.target_analyzer.analyze(
+            ohlc=candles_1h,
+            direction=direction,
+            entry_price=current_price,
+            stop_loss=current_price * (0.99 if direction == "bullish" else 1.01),
+            current_level=level_analysis.current_level,
+            ema_values=ema_values,
+            how=cycle_state.how if cycle_state.how > 0 else None,
+            low=cycle_state.low if cycle_state.low < float("inf") else None,
+        )
+
+        # Calculate entry, SL, and targets
+        entry_price = current_price
+
+        # Stop loss placement per MM rules
+        if best_formation.type.upper() == "W":
+            # W = bullish: SL below the formation's low
+            sl_price = min(
+                float(candles_1h.iloc[-20:]["low"].min()),
+                entry_price * 0.985,  # Max 1.5% SL
+            )
+            trade_direction = "long"
+        else:
+            # M = bearish: SL above the formation's high
+            sl_price = max(
+                float(candles_1h.iloc[-20:]["high"].max()),
+                entry_price * 1.015,  # Max 1.5% SL
+            )
+            trade_direction = "short"
+
+        # Targets from target analyzer
+        t_l1 = target_analysis.primary_l1.price if target_analysis.primary_l1 else None
+        t_l2 = target_analysis.primary_l2.price if target_analysis.primary_l2 else None
+        t_l3 = target_analysis.primary_l3.price if target_analysis.primary_l3 else None
+
+        # Fallback targets based on EMA values if target analyzer didn't find anything
+        if not t_l1:
+            ema_50 = ema_values.get(50)
+            if ema_50 and self._is_valid_target(ema_50, trade_direction, entry_price):
+                t_l1 = ema_50
+            else:
+                # Can't determine target → skip
+                return None
+
+        # R:R check (to Level 1 only — per course rules, beyond is bonus)
+        risk = abs(entry_price - sl_price)
+        reward = abs(t_l1 - entry_price)
+        if risk <= 0:
+            return None
+        rr = reward / risk
+
+        if rr < MIN_RR_AGGRESSIVE:
+            return None
+
+        # Confluence scoring
+        at_how = abs(current_price - cycle_state.how) / current_price < 0.005 if cycle_state.how > 0 else False
+        at_low = abs(current_price - cycle_state.low) / current_price < 0.005 if cycle_state.low < float("inf") else False
+
+        mm_ctx = MMContext(
+            formation={
+                "type": best_formation.type,
+                "variant": best_formation.variant,
+                "quality": best_formation.quality_score,
+                "at_key_level": best_formation.at_key_level,
+                "session": session.session_name,
+            },
+            ema_state={
+                "alignment": ema_state.alignment if ema_state else "mixed",
+                "broke_50": ema_break.broke_ema if ema_break else False,
+                "volume_confirmed": ema_break.volume_confirmed if ema_break else False,
+            } if ema_state else None,
+            level_state={
+                "current_level": level_analysis.current_level,
+                "svc_detected": level_analysis.svc.detected if level_analysis.svc else False,
+                "volume_degrading": level_analysis.volume_degrading,
+            },
+            cycle_state={
+                "phase": cycle_state.phase,
+                "direction": cycle_state.direction,
+            },
+            entry_price=entry_price,
+            stop_loss=sl_price,
+            target_price=t_l1,
+            at_session_changeover=session.is_gap,
+            at_how_low=at_how or at_low,
+            has_unrecovered_vector=len(target_analysis.unrecovered_vectors) > 0,
+        )
+
+        confluence_result = self.confluence_scorer.score(mm_ctx)
+
+        # Check confluence meets minimum
+        if confluence_result.score_pct < MIN_CONFLUENCE_PCT:
+            return None
+
+        # Check retest conditions (need >= 2)
+        if confluence_result.retest_conditions_met < 2:
+            return None
+
+        # Build signal
+        signal = MMSignal(
+            symbol=symbol,
+            direction=trade_direction,
+            entry_price=entry_price,
+            stop_loss=sl_price,
+            target_l1=t_l1 or 0,
+            target_l2=t_l2 or 0,
+            target_l3=t_l3 or 0,
+            risk_reward=round(rr, 2),
+            formation_type=best_formation.type,
+            formation_variant=best_formation.variant,
+            formation_quality=round(best_formation.quality_score, 3),
+            cycle_phase=cycle_state.phase,
+            current_level=level_analysis.current_level,
+            confluence_score=round(confluence_result.total_score, 1),
+            confluence_grade=confluence_result.grade,
+            session_name=session.session_name,
+            ema_alignment=ema_state.alignment if ema_state else "mixed",
+            fmwb_direction=weekend.fmwb.direction if weekend.fmwb.detected else "",
+            weekend_bias=weekend.bias,
+            reason=f"{best_formation.type} formation ({best_formation.variant}) "
+                   f"grade={confluence_result.grade} R:R={rr:.1f} "
+                   f"phase={cycle_state.phase}",
+        )
+
+        logger.info(
+            "mm_signal_generated",
+            symbol=symbol,
+            direction=trade_direction,
+            formation=best_formation.type,
+            grade=confluence_result.grade,
+            rr=round(rr, 2),
+            confluence=round(confluence_result.score_pct, 1),
+        )
+
+        return signal
+
+    async def _process_entries(self, signals: list[MMSignal]) -> None:
+        """Process entry signals — execute the best ones."""
+        open_count = len(self.positions)
+
+        for signal in signals:
+            if open_count >= MAX_MM_POSITIONS:
+                break
+
+            if signal.symbol in self.positions:
+                continue
+
+            try:
+                await self._enter_trade(signal)
+                open_count += 1
+            except Exception as e:
+                logger.warning("mm_entry_failed", symbol=signal.symbol, error=str(e))
+
+    async def _enter_trade(self, signal: MMSignal) -> None:
+        """Execute an MM Method trade entry."""
+        # Get balance for position sizing
+        balance = await self.exchange.get_balance()
+        account_balance = balance.get("USDT", 0)
+
+        if account_balance <= 0:
+            return
+
+        # Calculate position size (1% risk)
+        pos_result = self.risk_calculator.calculate_position_size(
+            account_balance_usd=account_balance,
+            entry_price=signal.entry_price,
+            stop_loss_price=signal.stop_loss,
+        )
+
+        if not pos_result.is_viable or pos_result.position_size_usd < 10:
+            logger.debug("mm_position_too_small", symbol=signal.symbol, size=pos_result.position_size_usd)
+            return
+
+        # Calculate quantity
+        quantity = pos_result.position_size_usd / signal.entry_price
+
+        # Place order
+        side = "buy" if signal.direction == "long" else "sell"
+        try:
+            result = await self.exchange.place_market_order(
+                symbol=signal.symbol,
+                side=side,
+                quantity=quantity,
+            )
+        except Exception as e:
+            logger.warning("mm_order_failed", symbol=signal.symbol, error=str(e))
+            return
+
+        if not result or result.status != "closed":
+            return
+
+        trade_id = f"mm-{uuid4().hex[:8]}"
+        fill_price = result.avg_price or signal.entry_price
+
+        # Create MM position
+        position = MMPosition(
+            trade_id=trade_id,
+            symbol=signal.symbol,
+            direction=signal.direction,
+            entry_price=fill_price,
+            quantity=result.filled_quantity,
+            stop_loss=signal.stop_loss,
+            current_level=0,
+            cost_usd=result.filled_quantity * fill_price,
+            margin_used=pos_result.position_size_usd / pos_result.recommended_leverage,
+            target_l1=signal.target_l1,
+            target_l2=signal.target_l2,
+            target_l3=signal.target_l3,
+        )
+
+        self.positions[signal.symbol] = position
+
+        # Log to database
+        try:
+            await self.repo.insert_trade({
+                "trade_id": trade_id,
+                "symbol": signal.symbol,
+                "direction": signal.direction,
+                "entry_price": fill_price,
+                "quantity": result.filled_quantity,
+                "stop_loss": signal.stop_loss,
+                "take_profit": signal.target_l1,
+                "cost_usd": position.cost_usd,
+                "strategy": STRATEGY_TAG,
+                "entry_reason": signal.reason,
+                "confluence_score": signal.confluence_score,
+                "mm_formation": signal.formation_type,
+                "mm_cycle_phase": signal.cycle_phase,
+                "mm_confluence_grade": signal.confluence_grade,
+                "status": "open",
+            })
+        except Exception as e:
+            logger.debug("mm_trade_db_insert_failed", error=str(e))
+
+        logger.info(
+            "mm_trade_entered",
+            trade_id=trade_id,
+            symbol=signal.symbol,
+            direction=signal.direction,
+            entry=fill_price,
+            sl=signal.stop_loss,
+            tp1=signal.target_l1,
+            rr=signal.risk_reward,
+            grade=signal.confluence_grade,
+            formation=signal.formation_type,
+            cost=round(position.cost_usd, 2),
+        )
+
+    async def _manage_position(self, symbol: str) -> None:
+        """Manage an existing MM position — SL, partials, exits."""
+        pos = self.positions.get(symbol)
+        if not pos:
+            return
+
+        # Get current price
+        try:
+            ticker = await self.exchange.fetch_ticker(symbol)
+            current_price = float(ticker["last"])
+        except Exception:
+            return
+
+        # Check stop loss hit
+        if self._is_stopped_out(pos, current_price):
+            await self._close_position(pos, current_price, "stop_loss")
+            return
+
+        # Fetch fresh candles for level analysis
+        try:
+            candles_1h = await self.candle_manager.get_candles(symbol, "1h", limit=100)
+        except Exception:
+            return
+
+        if candles_1h is None or candles_1h.empty:
+            return
+
+        # Update level count
+        direction = "bullish" if pos.direction == "long" else "bearish"
+        level_analysis = self.level_tracker.analyze(candles_1h, direction=direction)
+        new_level = level_analysis.current_level
+
+        # Level progression — take partials and tighten SL
+        if new_level > pos.current_level:
+            logger.info(
+                "mm_level_advanced",
+                symbol=symbol,
+                old_level=pos.current_level,
+                new_level=new_level,
+            )
+
+            # Take partial profit
+            await self._take_partial(pos, new_level, current_price)
+
+            # Tighten SL per MM rules
+            self._tighten_sl(pos, new_level, candles_1h)
+
+            pos.current_level = new_level
+
+        # Check for Stopping Volume Candle at Level 3
+        if new_level >= 3 and level_analysis.svc and level_analysis.svc.detected:
+            logger.info("mm_svc_detected", symbol=symbol, level=new_level)
+            # Close remaining position
+            if pos.partial_closed_pct < 1.0:
+                await self._close_position(pos, current_price, "svc_level_3")
+                return
+
+        # Check Friday UK session exit
+        session = self.session_analyzer.get_current_session()
+        if session.session_name == "uk" and session.day_of_week == 4:  # Friday
+            if new_level >= 2:
+                logger.info("mm_friday_uk_exit", symbol=symbol)
+                await self._close_position(pos, current_price, "friday_uk_exit")
+                return
+
+        # Volume degradation at Level 3 = exit
+        if new_level >= 3 and level_analysis.volume_degrading:
+            logger.info("mm_volume_degradation_exit", symbol=symbol)
+            await self._close_position(pos, current_price, "volume_degradation")
+            return
+
+    def _is_stopped_out(self, pos: MMPosition, current_price: float) -> bool:
+        """Check if position has hit its stop loss."""
+        if pos.direction == "long":
+            return current_price <= pos.stop_loss
+        else:
+            return current_price >= pos.stop_loss
+
+    def _tighten_sl(self, pos: MMPosition, new_level: int, candles_1h: pd.DataFrame) -> None:
+        """Tighten stop loss per MM Method level rules.
+
+        Rules from the course:
+        - Level 1 complete: SL stays at entry (do NOT move to breakeven yet)
+        - Level 2 starts: NOW move SL to breakeven (entry price)
+        - Level 2 running: SL under 50 EMA
+        - Level 3: SL trails under recent structure
+        """
+        if new_level <= 1:
+            # Don't tighten yet — course says wait for Level 2
+            return
+
+        if new_level == 2:
+            # Move to breakeven
+            if pos.direction == "long" and pos.stop_loss < pos.entry_price:
+                pos.stop_loss = pos.entry_price
+                logger.info("mm_sl_breakeven", symbol=pos.symbol, sl=pos.stop_loss)
+            elif pos.direction == "short" and pos.stop_loss > pos.entry_price:
+                pos.stop_loss = pos.entry_price
+                logger.info("mm_sl_breakeven", symbol=pos.symbol, sl=pos.stop_loss)
+
+        elif new_level >= 3:
+            # Tighten under/above recent structure (last 10 candles)
+            recent = candles_1h.tail(10)
+            if pos.direction == "long":
+                new_sl = float(recent["low"].min()) * 0.998  # Small buffer
+                if new_sl > pos.stop_loss:
+                    pos.stop_loss = new_sl
+                    logger.info("mm_sl_tightened", symbol=pos.symbol, sl=new_sl, level=new_level)
+            else:
+                new_sl = float(recent["high"].max()) * 1.002
+                if new_sl < pos.stop_loss:
+                    pos.stop_loss = new_sl
+                    logger.info("mm_sl_tightened", symbol=pos.symbol, sl=new_sl, level=new_level)
+
+    async def _take_partial(self, pos: MMPosition, level: int, current_price: float) -> None:
+        """Take partial profit at level completion."""
+        target_close_pct = PROFIT_SCHEDULE.get(level, 0)
+        if target_close_pct <= pos.partial_closed_pct:
+            return  # Already closed enough
+
+        close_pct = target_close_pct - pos.partial_closed_pct
+        close_qty = pos.quantity * close_pct
+
+        if close_qty <= 0:
+            return
+
+        side = "sell" if pos.direction == "long" else "buy"
+        try:
+            result = await self.exchange.place_market_order(
+                symbol=pos.symbol,
+                side=side,
+                quantity=close_qty,
+            )
+            if result and result.status == "closed":
+                pos.partial_closed_pct = target_close_pct
+                pos.quantity -= close_qty
+                logger.info(
+                    "mm_partial_profit",
+                    symbol=pos.symbol,
+                    level=level,
+                    closed_pct=round(target_close_pct * 100),
+                    qty=round(close_qty, 6),
+                    price=current_price,
+                )
+        except Exception as e:
+            logger.warning("mm_partial_failed", symbol=pos.symbol, error=str(e))
+
+    async def _close_position(self, pos: MMPosition, price: float, reason: str) -> None:
+        """Fully close an MM position."""
+        if pos.quantity <= 0:
+            self.positions.pop(pos.symbol, None)
+            return
+
+        side = "sell" if pos.direction == "long" else "buy"
+        try:
+            await self.exchange.place_market_order(
+                symbol=pos.symbol,
+                side=side,
+                quantity=pos.quantity,
+            )
+        except Exception as e:
+            logger.warning("mm_close_failed", symbol=pos.symbol, error=str(e))
+            return
+
+        # Calculate PnL
+        if pos.direction == "long":
+            pnl = (price - pos.entry_price) * pos.quantity
+        else:
+            pnl = (pos.entry_price - price) * pos.quantity
+
+        # Update database
+        try:
+            await self.repo.update_trade(pos.trade_id, {
+                "status": "closed",
+                "exit_price": price,
+                "exit_reason": reason,
+                "pnl_usd": round(pnl, 4),
+                "exit_time": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as e:
+            logger.debug("mm_trade_db_update_failed", error=str(e))
+
+        logger.info(
+            "mm_trade_closed",
+            trade_id=pos.trade_id,
+            symbol=pos.symbol,
+            direction=pos.direction,
+            entry=pos.entry_price,
+            exit=price,
+            pnl=round(pnl, 4),
+            reason=reason,
+            level=pos.current_level,
+        )
+
+        self.positions.pop(pos.symbol, None)
+
+    @staticmethod
+    def _is_valid_target(price: float, direction: str, entry: float) -> bool:
+        """Check if a target price is in the right direction."""
+        if direction == "long":
+            return price > entry
+        else:
+            return price < entry

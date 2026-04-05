@@ -129,12 +129,36 @@ async def main() -> None:
     dashboard_thread.start()
     logger.info("dashboard_started", port=port)
 
+    # --- MM Method Engine (standalone, parallel, no LLM) ---
+    mm_engine = None
+    if config.mm_method_enabled:
+        from src.strategy.mm_engine import MMEngine
+
+        # Reuse the primary market's exchange + candle_manager
+        first_market = list(engines.keys())[0]
+        first_engine = engines[first_market]
+        mm_exchange = first_engine.exchange
+        mm_candle_mgr = first_engine.candle_manager if hasattr(first_engine, "candle_manager") else CandleManager(
+            exchange=live_exchanges[0], repo=repo,
+        )
+
+        mm_engine = MMEngine(
+            exchange=mm_exchange,
+            repo=repo,
+            candle_manager=mm_candle_mgr,
+            config=config,
+            scan_interval_minutes=config.mm_scan_interval_minutes,
+        )
+        logger.info("mm_engine_created", scan_interval=config.mm_scan_interval_minutes)
+
     # Graceful shutdown
     loop = asyncio.get_event_loop()
 
     async def shutdown_all():
         for engine in engines.values():
             await engine.shutdown()
+        if mm_engine:
+            await mm_engine.shutdown()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown_all()))
@@ -160,8 +184,34 @@ async def main() -> None:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
 
+    async def run_mm_engine():
+        """Run the MM Method engine with restart-on-crash."""
+        backoff = 30
+        max_backoff = 600
+        while True:
+            try:
+                await mm_engine.run()
+                break
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.critical("mm_engine_fatal", error=str(e), exc_info=True)
+                try:
+                    await repo.log_error("mm_engine", "critical", str(e))
+                except Exception:
+                    pass
+                logger.info("mm_engine_restart_backoff", seconds=backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+
+    # Gather all tasks: SMC engines + optional MM engine
+    tasks = [run_engine(name, eng) for name, eng in engines.items()]
+    if mm_engine:
+        tasks.append(run_mm_engine())
+        logger.info("mm_engine_added_to_tasks", total_tasks=len(tasks))
+
     try:
-        await asyncio.gather(*[run_engine(name, eng) for name, eng in engines.items()])
+        await asyncio.gather(*tasks)
     finally:
         for live_ex in live_exchanges:
             try:

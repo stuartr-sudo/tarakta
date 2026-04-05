@@ -96,12 +96,6 @@ class Settings(BaseSettings):
     max_hold_hours: float = 0.0  # 0 = disabled — no time-based auto-close
     stale_close_below_rr: float = 0.0  # Only auto-close if trade is in the red (negative PnL)
 
-    # MM Method — Market Makers Method analysis (sessions, EMA framework, formations, levels, weekly cycle)
-    mm_method_enabled: bool = True  # Master toggle for MM Method analysis modules
-    mm_method_weight: float = 15.0  # Max bonus points from MM confluence in PostSweepEngine
-    mm_min_confluence_score: float = 40.0  # Minimum MM confluence score (%) to contribute to signal
-    mm_min_rr: float = 3.0  # Minimum R:R ratio for MM confluence scoring
-
     # Weekly cycle — Fake Move Monday & Mid-Week Reversal (ICT concepts)
     weekly_cycle_enabled: bool = True  # Master toggle for weekly cycle features
     monday_manipulation_penalty: float = 15.0  # Score penalty during Monday manipulation window
@@ -227,6 +221,12 @@ class Settings(BaseSettings):
     market_commodities_connector: str = ""
     market_commodities_symbol_universe: str = ""  # Comma-separated: "GC=F,SI=F,CL=F"
     market_commodities_initial_balance: float = 10000.0
+
+    # MM Method — standalone algorithmic engine (runs parallel, no LLM calls)
+    mm_method_enabled: bool = False          # Set MM_METHOD_ENABLED=true to activate
+    mm_scan_interval_minutes: float = 5.0    # How often the MM engine scans
+    mm_max_positions: int = 3                # Max concurrent MM positions
+    mm_risk_per_trade_pct: float = 1.0       # Risk % per MM trade
 
     # One-time force reset — set FORCE_RESET=true to wipe all data on next startup
     force_reset: bool = False
