@@ -302,6 +302,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             mm_trades.sort(key=lambda t: t.get("created_at", ""), reverse=True)
 
             closed = [t for t in mm_trades if t.get("status") == "closed"]
+            open_mm = [t for t in mm_trades if t.get("status") == "open"]
             if closed:
                 wins = sum(1 for t in closed if (t.get("pnl_usd") or 0) > 0)
                 losses = len(closed) - wins
@@ -315,10 +316,21 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
                     "avg_pnl": round(sum(pnls) / len(closed), 2),
                 }
         except Exception:
+            open_mm = []
             ctx["db_offline"] = True
 
-        ctx["mm_trades"] = mm_trades[:50]  # Last 50
+        # Build snapshot-like data for MM dashboard
+        mm_initial = getattr(config, "mm_initial_balance", 10000.0)
+        mm_balance = mm_initial + mm_stats["total_pnl"]
+        mm_drawdown = max(0, (mm_initial - mm_balance) / mm_initial) if mm_initial > 0 else 0
+        ctx["mm_trades"] = mm_trades[:50]
+        ctx["mm_open_trades"] = open_mm
         ctx["mm_stats"] = mm_stats
+        ctx["mm_snapshot"] = {
+            "balance_usd": mm_balance,
+            "total_pnl_usd": mm_stats["total_pnl"],
+            "drawdown_pct": mm_drawdown,
+        }
         return templates.TemplateResponse(request, "mm.html", context=ctx)
 
     @router.get("/training", response_class=HTMLResponse)

@@ -25,6 +25,11 @@
     .grid-stack-item-content > .stat-card { box-sizing: border-box; }
     /* Remove old layout grids — gridstack handles positioning */
     .dash-stats, .dash-mid, .dash-bottom { display: contents; }
+    /* Bot toggle */
+    .bot-toggle { display: flex; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+    .bot-toggle a { padding: 7px 18px; font-size: 12px; font-weight: 600; text-decoration: none; color: var(--text-muted); transition: all 0.15s; white-space: nowrap; }
+    .bot-toggle a:hover { color: var(--text-primary); }
+    .bot-toggle a.active { background: var(--teal-dim); color: var(--teal); }
 
     /* Mobile: disable GridStack absolute positioning, stack items naturally */
     @media (max-width: 768px) {
@@ -60,10 +65,16 @@
 {% endfor %}{% endif %}
 {% set allocated = ns.allocated %}
 
-<!-- Grid layout toolbar -->
-<div class="gs-toolbar">
-    <button class="gs-reset-btn" onclick="resetGridLayout()" title="Reset to default layout">Reset Layout</button>
-    <button class="gs-lock-btn" id="gs-lock-btn" onclick="toggleGridLock()" title="Toggle drag &amp; resize">Unlock Layout</button>
+<!-- Bot selector + Grid toolbar -->
+<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;">
+    <div class="bot-toggle">
+        <a href="/" class="active">Footprint Bot</a>
+        <a href="/mm">MM Bot</a>
+    </div>
+    <div class="gs-toolbar" style="margin-bottom: 0;">
+        <button class="gs-reset-btn" onclick="resetGridLayout()" title="Reset to default layout">Reset Layout</button>
+        <button class="gs-lock-btn" id="gs-lock-btn" onclick="toggleGridLock()" title="Toggle drag &amp; resize">Unlock Layout</button>
+    </div>
 </div>
 
 <!-- Hidden elements for JS compatibility -->

@@ -1,76 +1,118 @@
 {% extends "base.html" %}
 {% block title %}Tarakta - MM Engine{% endblock %}
-{% block topbar_title %}MM Engine{% endblock %}
+{% block topbar_title %}Dashboard{% endblock %}
+
+{% block head %}
+<style>
+    .bot-toggle { display: flex; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+    .bot-toggle a { padding: 7px 18px; font-size: 12px; font-weight: 600; text-decoration: none; color: var(--text-muted); transition: all 0.15s; white-space: nowrap; }
+    .bot-toggle a:hover { color: var(--text-primary); }
+    .bot-toggle a.active { background: var(--teal-dim); color: var(--teal); }
+    .mm-stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 16px; }
+    @media (max-width: 768px) {
+        .mm-stat-grid { grid-template-columns: 1fr 1fr; }
+        .bot-toggle a { padding: 6px 12px; font-size: 11px; }
+    }
+</style>
+{% endblock %}
 
 {% block content %}
-<!-- Page Header -->
-<div class="page-header">
-    <div>
-        <h1>MM Engine
-            <span class="account-badge" style="background:rgba(0,229,212,0.12); color:#00e5d4;">Algorithmic</span>
-            <span id="mm-status-badge" class="status-badge closed-loss">LOADING</span>
-        </h1>
-        <span class="subtitle">Market Makers Method — zero LLM, purely mechanical</span>
+{% set mm_initial = (config.mm_initial_balance | default(10000) | float) %}
+{% set mm_balance = mm_snapshot.balance_usd | default(mm_initial) | float %}
+{% set mm_total_pnl = mm_snapshot.total_pnl_usd | default(0) | float %}
+{% set mm_drawdown = mm_snapshot.drawdown_pct | default(0) | float %}
+
+<!-- Bot Selector -->
+<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+    <div class="bot-toggle">
+        <a href="/">Footprint Bot</a>
+        <a href="/mm" class="active">MM Bot</a>
     </div>
-    {% if role == 'admin' %}
-    <div style="display:flex; align-items:center; gap:8px;">
-        <button id="mm-start-btn" class="btn primary" onclick="toggleMMEngine()" disabled>▶ Start</button>
+    <div style="display: flex; align-items: center; gap: 8px;">
+        <span class="account-badge" style="background:rgba(0,229,212,0.12); color:#00e5d4;">Algorithmic</span>
+        <span id="mm-status-badge" class="status-badge closed-loss">LOADING</span>
+        {% if role == 'admin' %}
+        <button id="mm-start-btn" class="btn primary" onclick="toggleMMEngine()" disabled style="font-size:11px; padding:5px 14px;">&#9654; Start</button>
+        {% endif %}
     </div>
-    {% endif %}
 </div>
 
-<!-- Stat Cards -->
-<div class="stats-grid">
+<!-- Stat Cards Row 1: Core metrics -->
+<div class="mm-stat-grid">
     <div class="stat-card">
-        <div class="stat-label">Balance</div>
-        <div class="stat-value" id="mm-balance">${{ "%.0f" | format(config.mm_initial_balance | default(10000) | float) }}</div>
-        <div class="stat-sub">of ${{ "%.0f" | format(config.mm_initial_balance | default(10000) | float) }} initial</div>
+        <div class="stat-label">MM Balance</div>
+        <div class="stat-value" id="mm-balance">${{ "%.2f" | format(mm_balance) }}</div>
+        <div class="stat-sub">{% set mm_pct = ((mm_balance - mm_initial) / mm_initial * 100) if mm_initial > 0 else 0 %}<span class="{{ 'positive' if mm_pct >= 0 else 'negative' }}" style="font-size:10px;">{{ "%.1f"|format(mm_pct) }}%</span> since open</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Total P&L</div>
+        <div class="stat-value {{ 'positive' if mm_total_pnl >= 0 else 'negative' }}">{{ "+" if mm_total_pnl >= 0 else "" }}${{ "%.2f" | format(mm_total_pnl) }}</div>
+        <div class="stat-sub">all-time realized</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Win Rate</div>
+        <div class="stat-value">{% if mm_stats and mm_stats.total > 0 %}{{ "%.1f"|format(mm_stats.win_rate * 100) }}%{% else %}--{% endif %}</div>
+        <div class="stat-sub">{% if mm_stats and mm_stats.total > 0 %}{{ mm_stats.wins }}W / {{ mm_stats.losses }}L ({{ mm_stats.total }}){% else %}no trades yet{% endif %}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Open Positions</div>
+        <div class="stat-value" id="mm-positions">{{ mm_open_trades|length if mm_open_trades else 0 }}</div>
+        <div class="stat-sub">max {{ config.mm_max_positions | default(3) }}</div>
+    </div>
+</div>
+
+<!-- Stat Cards Row 2: Secondary metrics -->
+<div class="mm-stat-grid">
+    <div class="stat-card">
+        <div class="stat-label">Avg P&L / Trade</div>
+        <div class="stat-value {{ 'positive' if (mm_stats.avg_pnl|default(0)) >= 0 else 'negative' }}">{% if mm_stats and mm_stats.total > 0 %}{{ "+" if mm_stats.avg_pnl >= 0 else "" }}${{ "%.2f"|format(mm_stats.avg_pnl) }}{% else %}--{% endif %}</div>
+        <div class="stat-sub">per closed trade</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Drawdown</div>
+        <div class="stat-value {{ 'negative' if mm_drawdown > 0.05 else '' }}">{{ "%.1f"|format(mm_drawdown * 100) }}%</div>
+        <div class="stat-sub">from peak</div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Cycle</div>
-        <div class="stat-value sm" id="mm-cycle">0</div>
+        <div class="stat-value" id="mm-cycle">0</div>
         <div class="stat-sub">scan every {{ config.mm_scan_interval_minutes | default(5) }} min</div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Session</div>
-        <div class="stat-value sm" id="mm-session">—</div>
+        <div class="stat-value" id="mm-session">&mdash;</div>
         <div class="stat-sub" id="mm-session-sub">loading...</div>
     </div>
-    <div class="stat-card">
-        <div class="stat-label">Open Positions</div>
-        <div class="stat-value sm" id="mm-positions">0</div>
-        <div class="stat-sub">max {{ config.mm_max_positions | default(3) }}</div>
-    </div>
+</div>
+
+<!-- Stat Cards Row 3: Risk & Unrealized -->
+<div class="mm-stat-grid">
     <div class="stat-card">
         <div class="stat-label">Risk / Trade</div>
-        <div class="stat-value sm">{{ config.mm_risk_per_trade_pct | default(1.0) }}%</div>
+        <div class="stat-value">{{ config.mm_risk_per_trade_pct | default(1.0) }}%</div>
         <div class="stat-sub">of MM balance</div>
     </div>
-    {% if mm_stats and mm_stats.total > 0 %}
     <div class="stat-card">
-        <div class="stat-label">Win Rate</div>
-        <div class="stat-value sm">{{ "%.0f" | format(mm_stats.win_rate * 100) }}%</div>
-        <div class="stat-sub">{{ mm_stats.wins }}W / {{ mm_stats.losses }}L ({{ mm_stats.total }})</div>
+        <div class="stat-label">Unrealized P&L</div>
+        <div class="stat-value" id="mm-unrealized">--</div>
+        <div class="stat-sub" id="mm-unrealized-sub">from open positions</div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">Total P&L</div>
-        <div class="stat-value sm {{ 'positive' if mm_stats.total_pnl >= 0 else 'negative' }}">
-            {{ "+" if mm_stats.total_pnl >= 0 else "" }}${{ "%.2f" | format(mm_stats.total_pnl) }}
-        </div>
+        <div class="stat-label">Net P&L</div>
+        <div class="stat-value" id="mm-net-pnl">--</div>
+        <div class="stat-sub">realized + unrealized</div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">Avg P&L</div>
-        <div class="stat-value sm {{ 'positive' if mm_stats.avg_pnl >= 0 else 'negative' }}">
-            {{ "+" if mm_stats.avg_pnl >= 0 else "" }}${{ "%.2f" | format(mm_stats.avg_pnl) }}
-        </div>
+        <div class="stat-label">Initial Balance</div>
+        <div class="stat-value">${{ "%.0f" | format(mm_initial) }}</div>
+        <div class="stat-sub">starting capital</div>
     </div>
-    {% endif %}
 </div>
 
 <!-- Open MM Positions -->
 <div class="panel" id="mm-positions-panel">
     <div class="panel-header">
-        <h2>Open Positions <span id="mm-pos-badge" class="badge" style="background:var(--teal-dim);color:var(--teal);">0</span></h2>
+        <h2>Open Positions <span id="mm-pos-badge" class="badge" style="background:var(--teal-dim);color:var(--teal);">{{ mm_open_trades|length if mm_open_trades else 0 }}</span></h2>
     </div>
     <div id="mm-positions-body" class="panel-body no-pad" style="display:none;">
         <div class="overflow-x">
@@ -123,16 +165,16 @@
                     <tr>
                         <td><strong>{{ t.symbol | replace(':USDT','') | replace('/USDT','') }}</strong></td>
                         <td><span class="dir-badge {{ 'long' if t.direction == 'long' else 'short' }}">{{ t.direction | upper }}</span></td>
-                        <td class="mono">${{ "%.6f" | format(t.entry_price | default(0) | float) }}</td>
-                        <td class="mono">{% if t.exit_price %}${{ "%.6f" | format(t.exit_price | float) }}{% else %}—{% endif %}</td>
+                        <td class="mono">${{ "%.4f" | format(t.entry_price | default(0) | float) }}</td>
+                        <td class="mono">{% if t.exit_price %}${{ "%.4f" | format(t.exit_price | float) }}{% else %}&mdash;{% endif %}</td>
                         <td class="mono {{ 'positive' if (t.pnl_usd or 0) | float >= 0 else 'negative' }}">
-                            {% if t.pnl_usd is not none %}{{ "+" if t.pnl_usd | float >= 0 else "" }}${{ "%.2f" | format(t.pnl_usd | float) }}{% else %}—{% endif %}
+                            {% if t.pnl_usd is not none %}{{ "+" if t.pnl_usd | float >= 0 else "" }}${{ "%.2f" | format(t.pnl_usd | float) }}{% else %}&mdash;{% endif %}
                         </td>
-                        <td>{{ t.mm_confluence_grade | default('—') }}</td>
-                        <td>{{ t.mm_formation | default('—') }}</td>
-                        <td>{{ t.mm_cycle_phase | default('—') }}</td>
-                        <td style="font-size:0.7rem; max-width:200px; overflow:hidden; text-overflow:ellipsis;">{{ t.exit_reason | default(t.entry_reason | default('—')) }}</td>
-                        <td style="font-size:0.7rem;">{{ t.created_at[:16] if t.created_at else '—' }}</td>
+                        <td>{{ t.mm_confluence_grade | default('&mdash;') }}</td>
+                        <td>{{ t.mm_formation | default('&mdash;') }}</td>
+                        <td>{{ t.mm_cycle_phase | default('&mdash;') }}</td>
+                        <td style="font-size:0.7rem; max-width:200px; overflow:hidden; text-overflow:ellipsis;">{{ t.exit_reason | default(t.entry_reason | default('&mdash;')) }}</td>
+                        <td style="font-size:0.7rem;">{{ t.created_at[:16] if t.created_at else '&mdash;' }}</td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -151,6 +193,7 @@
 <script>
 let _mmScanning = false;
 let _mmAvailable = false;
+const _mmTotalPnl = {{ mm_total_pnl }};
 
 async function loadMMStatus() {
     try {
@@ -178,14 +221,14 @@ function updateMMPage(data) {
 
     if (data.is_weekend) {
         if (badge) { badge.textContent = 'WEEKEND'; badge.style.background = 'rgba(255,170,0,0.12)'; badge.style.color = '#ffaa00'; }
-        if (btn) { btn.textContent = _mmScanning ? '⏹ Stop' : '▶ Start'; btn.style.background = '#e040fb'; }
+        if (btn) { btn.innerHTML = _mmScanning ? '&#9632; Stop' : '&#9654; Start'; btn.style.background = '#e040fb'; }
         document.getElementById('mm-session-sub').textContent = 'Weekend — no trading';
     } else if (_mmScanning) {
-        if (btn) { btn.textContent = '⏹ Stop'; btn.style.background = '#e040fb'; }
+        if (btn) { btn.innerHTML = '&#9632; Stop'; btn.style.background = '#e040fb'; }
         if (badge) { badge.textContent = 'SCANNING'; badge.style.background = '#00e5d4'; badge.style.color = '#040812'; }
         document.getElementById('mm-session-sub').textContent = 'actively scanning';
     } else {
-        if (btn) { btn.textContent = '▶ Start'; btn.style.background = '#e040fb'; }
+        if (btn) { btn.innerHTML = '&#9654; Start'; btn.style.background = '#e040fb'; }
         if (badge) { badge.textContent = 'PAUSED'; badge.style.background = 'rgba(224,64,251,0.12)'; badge.style.color = '#e040fb'; }
         document.getElementById('mm-session-sub').textContent = 'paused — managing positions only';
     }
@@ -213,17 +256,58 @@ function updateMMPage(data) {
                 `<tr>
                     <td><strong>${p.symbol.replace(':USDT','').replace('/USDT','')}</strong></td>
                     <td><span class="dir-badge ${p.direction === 'long' ? 'long' : 'short'}">${p.direction.toUpperCase()}</span></td>
-                    <td class="mono">$${p.entry_price.toFixed(6)}</td>
-                    <td class="mono">$${p.stop_loss.toFixed(6)}</td>
+                    <td class="mono">$${p.entry_price.toFixed(4)}</td>
+                    <td class="mono">$${p.stop_loss.toFixed(4)}</td>
                     <td>Level ${p.current_level}</td>
                     <td>${p.partial_closed_pct}%</td>
                     <td class="mono" style="font-size:0.7rem;">${p.trade_id}</td>
                 </tr>`
             ).join('');
         }
+
+        // Calculate unrealized P&L from positions (if current_price available)
+        let totalUnrealized = 0;
+        let hasPrices = false;
+        data.positions.forEach(p => {
+            if (p.unrealized_pnl !== undefined) {
+                totalUnrealized += p.unrealized_pnl;
+                hasPrices = true;
+            }
+        });
+        const unrEl = document.getElementById('mm-unrealized');
+        const unrSub = document.getElementById('mm-unrealized-sub');
+        const netEl = document.getElementById('mm-net-pnl');
+        if (hasPrices) {
+            if (unrEl) {
+                unrEl.textContent = (totalUnrealized >= 0 ? '+' : '') + '$' + totalUnrealized.toFixed(2);
+                unrEl.className = 'stat-value ' + (totalUnrealized >= 0 ? 'positive' : 'negative');
+            }
+            if (unrSub) unrSub.textContent = data.positions.length + ' open position' + (data.positions.length !== 1 ? 's' : '');
+            const netPnl = _mmTotalPnl + totalUnrealized;
+            if (netEl) {
+                netEl.textContent = (netPnl >= 0 ? '+' : '') + '$' + netPnl.toFixed(2);
+                netEl.className = 'stat-value ' + (netPnl >= 0 ? 'positive' : 'negative');
+            }
+        } else {
+            if (unrEl) unrEl.textContent = '--';
+            const netPnl = _mmTotalPnl;
+            if (netEl) {
+                netEl.textContent = (netPnl >= 0 ? '+' : '') + '$' + netPnl.toFixed(2);
+                netEl.className = 'stat-value ' + (netPnl >= 0 ? 'positive' : 'negative');
+            }
+        }
     } else {
         if (posBody) posBody.style.display = 'none';
         if (posEmpty) posEmpty.style.display = 'block';
+        // No open positions
+        const unrEl = document.getElementById('mm-unrealized');
+        const netEl = document.getElementById('mm-net-pnl');
+        if (unrEl) { unrEl.textContent = '$0.00'; unrEl.className = 'stat-value'; }
+        const netPnl = _mmTotalPnl;
+        if (netEl) {
+            netEl.textContent = (netPnl >= 0 ? '+' : '') + '$' + netPnl.toFixed(2);
+            netEl.className = 'stat-value ' + (netPnl >= 0 ? 'positive' : 'negative');
+        }
     }
 }
 
