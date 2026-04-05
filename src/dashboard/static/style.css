@@ -52,10 +52,10 @@
     --border-accent: rgba(0,229,212,0.1);
 
     /* Text */
-    --text-primary:   #c8daea;
-    --text-secondary: #4d6a87;
-    --text-muted:     #2e4158;
-    --text-dim:       #1e2e42;
+    --text-primary:   #ffffff;
+    --text-secondary: #8ba3bd;
+    --text-muted:     #4d6a87;
+    --text-dim:       #2e4158;
 
     /* Radii */
     --radius-sm: 5px;
@@ -254,6 +254,27 @@ body::after {
 }
 .instance-pnl { font-family: var(--font-mono); font-size: 10px; }
 .instance-pnl.positive { color: var(--teal); }
+
+/* Instance switcher dropdown */
+.instance-switcher { display: flex; align-items: center; }
+.instance-dropdown {
+    appearance: none;
+    -webkit-appearance: none;
+    padding: 5px 28px 5px 12px;
+    border-radius: 7px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: var(--font-body);
+    color: var(--teal);
+    background: var(--teal-dim) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2300e5d4'/%3E%3C/svg%3E") no-repeat right 10px center;
+    border: 1px solid rgba(0,229,212,0.25);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    letter-spacing: 0.03em;
+}
+.instance-dropdown:hover { border-color: var(--teal); background-color: var(--teal-faint); }
+.instance-dropdown:focus { outline: none; border-color: var(--teal); box-shadow: 0 0 0 2px var(--teal-glow); }
+.instance-dropdown option { background: var(--bg-card); color: var(--text-primary); font-weight: 500; }
 .instance-pnl.negative { color: var(--magenta); }
 
 /* Scan timer */

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Tarakta{% endblock %}</title>
-    <link rel="stylesheet" href="/static/style.css?v=7">
+    <link rel="stylesheet" href="/static/style.css?v=8">
     {% block head %}{% endblock %}
 </head>
 <body>
@@ -144,18 +144,15 @@
                 <div class="topbar-title">{% block topbar_title %}{% endblock %}</div>
 
                 {% if filtered | length > 1 %}
-                <div class="instance-tabs">
-                    {% for inst in filtered %}
-                    {% set iid = inst.instance_id if inst.instance_id is defined else inst %}
-                    <a href="?instance={{ iid }}" class="instance-tab {{ 'active' if iid == active_instance else '' }}">
-                        {{ iid }}
-                        {% if inst.total_pnl_usd is defined and inst.total_pnl_usd is not none %}
-                        <span class="instance-pnl {{ 'positive' if inst.total_pnl_usd >= 0 else 'negative' }}">
-                            ${{ '%.2f' | format(inst.total_pnl_usd) }}
-                        </span>
-                        {% endif %}
-                    </a>
-                    {% endfor %}
+                <div class="instance-switcher">
+                    <select class="instance-dropdown" onchange="if(this.value) window.location.search='instance='+this.value">
+                        {% for inst in filtered %}
+                        {% set iid = inst.instance_id if inst.instance_id is defined else inst %}
+                        <option value="{{ iid }}" {{ 'selected' if iid == active_instance else '' }}>
+                            {{ iid | upper }}{% if inst.total_pnl_usd is defined and inst.total_pnl_usd is not none %} &mdash; ${{ '%.2f' | format(inst.total_pnl_usd) }}{% endif %}
+                        </option>
+                        {% endfor %}
+                    </select>
                 </div>
                 {% endif %}
 

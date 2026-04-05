@@ -4,6 +4,27 @@
 
 {% block head %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/gridstack@10/dist/gridstack.min.css">
+<script src="https://cdn.jsdelivr.net/npm/gridstack@10/dist/gridstack-all.js"></script>
+<style>
+    .grid-stack { min-height: 100px; }
+    .grid-stack-item-content { overflow: auto; }
+    .grid-stack-item-content > .panel,
+    .grid-stack-item-content > .stat-card { height: 100%; display: flex; flex-direction: column; }
+    .grid-stack-item-content > .panel > .panel-body { flex: 1; min-height: 0; overflow: auto; }
+    .grid-stack-item-content > .panel > .chart-container,
+    .grid-stack-item-content > .panel .chart-container { flex: 1; min-height: 0; }
+    .grid-stack > .grid-stack-item > .grid-stack-item-content { inset: 4px; border-radius: var(--radius-lg); }
+    .gs-lock-btn { position: absolute; top: 8px; right: 8px; z-index: 10; background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text-muted); border-radius: 6px; padding: 4px 10px; font-size: 11px; cursor: pointer; font-family: var(--font-body); }
+    .gs-lock-btn:hover { color: var(--teal); border-color: var(--teal); }
+    .gs-lock-btn.locked { color: var(--text-dim); }
+    /* Override gridstack defaults for our dark theme */
+    .grid-stack-placeholder > .placeholder-content { border: 1px dashed var(--teal) !important; background: var(--teal-faint) !important; border-radius: var(--radius-lg); }
+    /* Stat cards inside gridstack */
+    .grid-stack-item-content > .stat-card { box-sizing: border-box; }
+    /* Remove old layout grids — gridstack handles positioning */
+    .dash-stats, .dash-mid, .dash-bottom { display: contents; }
+</style>
 {% endblock %}
 
 {% block content %}
@@ -19,82 +40,8 @@
 {% endfor %}{% endif %}
 {% set allocated = ns.allocated %}
 
-<!-- ── Row 1: 4 stat cards ──────────────────────────────── -->
-<div class="dash-stats">
-    <div class="stat-card">
-        <div class="stat-label">Portfolio Value</div>
-        <div class="stat-value" id="equity-value">${{ "%.2f" | format(balance) }}</div>
-        <div class="stat-sub">{% set pct = ((balance - (config.initial_balance|default(100.0)|float)) / (config.initial_balance|default(100.0)|float) * 100) if (config.initial_balance|default(100.0)|float) > 0 else 0 %}<span class="{{ 'positive' if pct >= 0 else 'negative' }}" style="font-size:10px;">{{ "%.1f"|format(pct) }}%</span> since open</div>
-    </div>
-    <div class="stat-card">
-        <div class="stat-label">Today's P&L</div>
-        <div class="stat-value {{ 'positive' if (snapshot.daily_pnl_usd|default(0)|float) >= 0 else 'negative' }}" id="daily-pnl-value">{{ "+" if (snapshot.daily_pnl_usd|default(0)|float) >= 0 else "" }}${{ "%.2f"|format(snapshot.daily_pnl_usd|default(0)|float) }}</div>
-        <div class="stat-sub">{% if stats and stats.total > 0 %}{{ stats.wins }}W &middot; {{ stats.losses }}L{% else %}--{% endif %}</div>
-    </div>
-    <div class="stat-card">
-        <div class="stat-label">Win Rate &middot; 7D</div>
-        <div class="stat-value">{% if stats and stats.total > 0 %}{{ "%.1f"|format(stats.win_rate * 100) }}%{% else %}--{% endif %}</div>
-        <div class="stat-sub">{% if stats and stats.total > 0 %}{{ stats.wins }} of {{ stats.total }} trades{% else %}no trades yet{% endif %}</div>
-    </div>
-    <div class="stat-card">
-        <div class="stat-label">Active Signals</div>
-        <div class="stat-value">{{ signals|length if signals else 0 }}</div>
-        <div class="stat-sub">{{ trades|length }} open &middot; <span id="refiner-count-mini">0</span> queued</div>
-    </div>
-</div>
-
-<!-- ── Row 2: Chart + Open Positions ────────────────────── -->
-<div class="dash-mid">
-    <div class="panel dash-chart-panel">
-        <div class="panel-header">
-            <h2>Portfolio Performance</h2>
-            <div style="display:flex; align-items:center; gap:6px;">
-                {% if role == 'admin' %}
-                <span id="main-status-badge" class="status-badge closed-loss" style="font-size:9px;">STOPPED</span>
-                <button id="main-start-btn" class="btn primary" onclick="toggleMainBot()" style="font-size:11px; padding:4px 12px;">▶ Start</button>
-                {% endif %}
-            </div>
-        </div>
-        <div class="chart-container" style="border:none; padding:12px 14px;">
-            <canvas id="balanceChart"></canvas>
-        </div>
-    </div>
-
-    <div class="panel dash-positions-panel">
-        <div class="panel-header">
-            <h2>Open Positions</h2>
-            <span class="badge" style="background:var(--teal-dim);color:var(--teal);">{{ trades|length }} active</span>
-        </div>
-        <div class="panel-body" style="padding:10px 14px;">
-            {% if trades %}
-            <div id="positions-cards">
-                {% for t in trades %}
-                <div class="pos-card-item" data-symbol="{{ t.symbol }}">
-                    <div class="pos-card-row1">
-                        <div><strong>{{ t.symbol|replace(':USDT', '') }}</strong>
-                            <span class="dir-badge {{ t.direction|default('long') }}" style="font-size:8px; padding:1px 5px; margin-left:5px;">{{ (t.direction|default('long'))|upper }}</span>
-                        </div>
-                        <span class="mono pos-card-pnl" data-trade-id="{{ t.id }}" style="font-size:13px; font-weight:500;">--</span>
-                    </div>
-                    <div class="pos-card-row2">
-                        <div class="pos-card-detail"><span class="pos-card-dlbl">Entry</span><span class="pos-card-dval mono">${{ "%.2f"|format(t.entry_price|float) }}</span></div>
-                        <div class="pos-card-detail"><span class="pos-card-dlbl">Mark</span><span class="pos-card-dval mono pos-card-mark" data-trade-id="{{ t.id }}">--</span></div>
-                        <div class="pos-card-detail"><span class="pos-card-dlbl">Size</span><span class="pos-card-dval mono">{{ "%.3f"|format((t.remaining_quantity or t.entry_quantity or 0)|float) }}</span></div>
-                    </div>
-                    <div class="tp-bar"><div class="tp-fill" style="width:0%"></div></div>
-                </div>
-                {% endfor %}
-            </div>
-            {% else %}
-            <div class="empty-state" style="padding:20px 12px;"><p>No open positions</p></div>
-            {% endif %}
-            <div class="pos-card-footer">
-                <div><div class="pos-card-dlbl">Unrealised</div><div class="pos-card-dval mono positive" id="unrealized-profit-value" style="font-size:14px;">--</div></div>
-                <div><div class="pos-card-dlbl">Exposure</div><div class="pos-card-dval mono" id="allocated-value" style="font-size:14px;">${{ "%.2f"|format(allocated) }}</div></div>
-            </div>
-        </div>
-    </div>
-</div>
+<!-- Lock/unlock toggle -->
+<button class="gs-lock-btn" id="gs-lock-btn" onclick="toggleGridLock()" title="Toggle drag &amp; resize">Unlock Layout</button>
 
 <!-- Hidden elements for JS compatibility -->
 <div style="display:none;">
@@ -110,114 +57,321 @@
         {% for t in trades %}
         <tr data-symbol="{{ t.symbol }}" data-trade-id="{{ t.id }}">
             <td></td><td></td><td></td><td class="mono pos-current-price">--</td><td class="mono pos-pnl">--</td><td></td>
-            <td>{% if t.tp_tiers %}<div class="tp-tiers-detail">{% set tiers_done = t.current_tier|default(0)|int %}{% for tier in t.tp_tiers %}<div class="tp-tier-row {{ 'filled' if tier.filled else ('target' if tier.level == tiers_done + 1 else 'pending') }}"><span class="tp-tier-dot {{ 'filled' if tier.filled else ('target' if tier.level == tiers_done + 1 else '') }}"></span><span class="tp-tier-name">TP{{ tier.level }}</span><span class="tp-tier-price">{% if tier.price %}${{ "%.8f"|format(tier.price|float) }}{% else %}Trail{% endif %}</span><span class="tp-tier-pct">({{ (tier.pct * 100)|int }}%)</span>{% if tier.filled %}<span class="tp-tier-check">✓</span>{% endif %}</div>{% endfor %}</div>{% endif %}</td>
+            <td>{% if t.tp_tiers %}<div class="tp-tiers-detail">{% set tiers_done = t.current_tier|default(0)|int %}{% for tier in t.tp_tiers %}<div class="tp-tier-row {{ 'filled' if tier.filled else ('target' if tier.level == tiers_done + 1 else 'pending') }}"><span class="tp-tier-dot {{ 'filled' if tier.filled else ('target' if tier.level == tiers_done + 1 else '') }}"></span><span class="tp-tier-name">TP{{ tier.level }}</span><span class="tp-tier-price">{% if tier.price %}${{ "%.8f"|format(tier.price|float) }}{% else %}Trail{% endif %}</span><span class="tp-tier-pct">({{ (tier.pct * 100)|int }}%)</span>{% if tier.filled %}<span class="tp-tier-check">&#10003;</span>{% endif %}</div>{% endfor %}</div>{% endif %}</td>
             <td></td><td></td><td></td>
         </tr>
         {% endfor %}
     </tbody></table>
 </div>
 
-<!-- ── Row 3: Signals + Agent Activity ─────────────────── -->
-<div class="dash-bottom">
-    <div class="panel">
-        <div class="panel-header">
-            <h2>Recent Signals</h2>
-            <a href="/signals" class="btn" style="font-size:11px; padding:3px 10px;">View All</a>
+<div class="grid-stack" id="dashboard-grid">
+    <!-- Stat card: Portfolio Value -->
+    <div class="grid-stack-item" gs-id="stat-portfolio" gs-x="0" gs-y="0" gs-w="3" gs-h="2" gs-min-w="2" gs-min-h="2">
+        <div class="grid-stack-item-content">
+            <div class="stat-card">
+                <div class="stat-label">Portfolio Value</div>
+                <div class="stat-value" id="equity-value">${{ "%.2f" | format(balance) }}</div>
+                <div class="stat-sub">{% set pct = ((balance - (config.initial_balance|default(100.0)|float)) / (config.initial_balance|default(100.0)|float) * 100) if (config.initial_balance|default(100.0)|float) > 0 else 0 %}<span class="{{ 'positive' if pct >= 0 else 'negative' }}" style="font-size:10px;">{{ "%.1f"|format(pct) }}%</span> since open</div>
+            </div>
         </div>
-        {% if signals %}
-        <div class="panel-body no-pad">
-            <div class="overflow-x">
-                <table class="data-table">
-                    <thead><tr><th>Pair</th><th>Setup</th><th>Score</th><th>Time</th><th>Status</th></tr></thead>
-                    <tbody>
-                        {% for s in signals[:8] %}
-                        <tr>
-                            <td><strong>{{ s.symbol|replace(':USDT', '') }}</strong></td>
-                            <td style="font-size:11px;">{% if s.reasons %}{{ s.reasons[0] }}{% else %}--{% endif %}</td>
-                            <td><div class="score-bar"><span class="score-num {{ 'positive' if (s.score|int) >= 65 else 'negative' }}">{{ s.score }}</span><div class="bar-track"><div class="bar-fill {{ 'high' if (s.score|int) >= 65 else ('medium' if (s.score|int) >= 50 else 'low') }}" style="width:{{ s.score|int }}%"></div></div></div></td>
-                            <td class="text-muted" style="font-size:11px;">{{ s.created_at[11:16] }}</td>
-                            <td>{% if s.acted_on %}<span class="status-badge open" style="font-size:9px;">Entered</span>{% else %}<span style="font-size:11px; color:var(--text-muted);">Skipped</span>{% endif %}</td>
-                        </tr>
+    </div>
+    <!-- Stat card: Today's P&L -->
+    <div class="grid-stack-item" gs-id="stat-pnl" gs-x="3" gs-y="0" gs-w="3" gs-h="2" gs-min-w="2" gs-min-h="2">
+        <div class="grid-stack-item-content">
+            <div class="stat-card">
+                <div class="stat-label">Today's P&L</div>
+                <div class="stat-value {{ 'positive' if (snapshot.daily_pnl_usd|default(0)|float) >= 0 else 'negative' }}" id="daily-pnl-value">{{ "+" if (snapshot.daily_pnl_usd|default(0)|float) >= 0 else "" }}${{ "%.2f"|format(snapshot.daily_pnl_usd|default(0)|float) }}</div>
+                <div class="stat-sub">{% if stats and stats.total > 0 %}{{ stats.wins }}W &middot; {{ stats.losses }}L{% else %}--{% endif %}</div>
+            </div>
+        </div>
+    </div>
+    <!-- Stat card: Win Rate -->
+    <div class="grid-stack-item" gs-id="stat-winrate" gs-x="6" gs-y="0" gs-w="3" gs-h="2" gs-min-w="2" gs-min-h="2">
+        <div class="grid-stack-item-content">
+            <div class="stat-card">
+                <div class="stat-label">Win Rate &middot; 7D</div>
+                <div class="stat-value">{% if stats and stats.total > 0 %}{{ "%.1f"|format(stats.win_rate * 100) }}%{% else %}--{% endif %}</div>
+                <div class="stat-sub">{% if stats and stats.total > 0 %}{{ stats.wins }} of {{ stats.total }} trades{% else %}no trades yet{% endif %}</div>
+            </div>
+        </div>
+    </div>
+    <!-- Stat card: Active Signals -->
+    <div class="grid-stack-item" gs-id="stat-signals" gs-x="9" gs-y="0" gs-w="3" gs-h="2" gs-min-w="2" gs-min-h="2">
+        <div class="grid-stack-item-content">
+            <div class="stat-card">
+                <div class="stat-label">Active Signals</div>
+                <div class="stat-value">{{ signals|length if signals else 0 }}</div>
+                <div class="stat-sub">{{ trades|length }} open &middot; <span id="refiner-count-mini">0</span> queued</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Chart panel -->
+    <div class="grid-stack-item" gs-id="chart" gs-x="0" gs-y="2" gs-w="8" gs-h="5" gs-min-w="4" gs-min-h="3">
+        <div class="grid-stack-item-content">
+            <div class="panel dash-chart-panel" style="height:100%; display:flex; flex-direction:column;">
+                <div class="panel-header">
+                    <h2>Portfolio Performance</h2>
+                    <div style="display:flex; align-items:center; gap:6px;">
+                        {% if role == 'admin' %}
+                        <span id="main-status-badge" class="status-badge closed-loss" style="font-size:9px;">STOPPED</span>
+                        <button id="main-start-btn" class="btn primary" onclick="toggleMainBot()" style="font-size:11px; padding:4px 12px;">&#9654; Start</button>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="chart-container" style="flex:1; min-height:0; border:none; padding:12px 14px;">
+                    <canvas id="balanceChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Open Positions panel -->
+    <div class="grid-stack-item" gs-id="positions" gs-x="8" gs-y="2" gs-w="4" gs-h="5" gs-min-w="3" gs-min-h="3">
+        <div class="grid-stack-item-content">
+            <div class="panel dash-positions-panel" style="height:100%; display:flex; flex-direction:column;">
+                <div class="panel-header">
+                    <h2>Open Positions</h2>
+                    <span class="badge" style="background:var(--teal-dim);color:var(--teal);">{{ trades|length }} active</span>
+                </div>
+                <div class="panel-body" style="padding:10px 14px; flex:1; min-height:0; overflow-y:auto;">
+                    {% if trades %}
+                    <div id="positions-cards">
+                        {% for t in trades %}
+                        <div class="pos-card-item" data-symbol="{{ t.symbol }}">
+                            <div class="pos-card-row1">
+                                <div><strong>{{ t.symbol|replace(':USDT', '') }}</strong>
+                                    <span class="dir-badge {{ t.direction|default('long') }}" style="font-size:8px; padding:1px 5px; margin-left:5px;">{{ (t.direction|default('long'))|upper }}</span>
+                                </div>
+                                <span class="mono pos-card-pnl" data-trade-id="{{ t.id }}" style="font-size:13px; font-weight:500;">--</span>
+                            </div>
+                            <div class="pos-card-row2">
+                                <div class="pos-card-detail"><span class="pos-card-dlbl">Entry</span><span class="pos-card-dval mono">${{ "%.2f"|format(t.entry_price|float) }}</span></div>
+                                <div class="pos-card-detail"><span class="pos-card-dlbl">Mark</span><span class="pos-card-dval mono pos-card-mark" data-trade-id="{{ t.id }}">--</span></div>
+                                <div class="pos-card-detail"><span class="pos-card-dlbl">Size</span><span class="pos-card-dval mono">{{ "%.3f"|format((t.remaining_quantity or t.entry_quantity or 0)|float) }}</span></div>
+                            </div>
+                            <div class="tp-bar"><div class="tp-fill" style="width:0%"></div></div>
+                        </div>
                         {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-        {% else %}
-        <div class="empty-state"><p>Waiting for first scan.</p></div>
-        {% endif %}
-    </div>
-    <div class="panel">
-        <div class="panel-header">
-            <h2>Agent Activity</h2>
-            <span class="badge" style="background:var(--teal-dim);color:var(--teal);">Live</span>
-        </div>
-        <div class="panel-body" style="padding:6px 14px;">
-            <div class="agent-log" id="agent-log-container">
-                <div class="empty-state" style="padding:20px 12px;"><p>Agent activity will appear here.</p></div>
+                    </div>
+                    {% else %}
+                    <div class="empty-state" style="padding:20px 12px;"><p>No open positions</p></div>
+                    {% endif %}
+                    <div class="pos-card-footer">
+                        <div><div class="pos-card-dlbl">Unrealised</div><div class="pos-card-dval mono positive" id="unrealized-profit-value" style="font-size:14px;">--</div></div>
+                        <div><div class="pos-card-dlbl">Exposure</div><div class="pos-card-dval mono" id="allocated-value" style="font-size:14px;">${{ "%.2f"|format(allocated) }}</div></div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
-</div>
 
-<!-- ── Admin panels (refiner, agent stats, advisor) ──────── -->
-{% if role == 'admin' %}
-<div class="panel" id="refiner-panel" style="display:none; margin-top:14px;">
-    <div class="panel-header">
-        <h2>Entry Refiner Queue <span id="refiner-badge" class="badge" style="background:var(--teal-dim);color:var(--teal);">0</span>
-            <span id="refiner-heartbeat" style="font-size:0.65rem; margin-left:8px; color:var(--text-muted);"></span></h2>
-        <div style="font-size:0.7rem; color:var(--text-muted);"><span id="refiner-stats" style="font-size:0.65rem;"></span></div>
-    </div>
-    <div id="refiner-body" class="panel-body no-pad">
-        <div class="overflow-x">
-            <table class="data-table" id="refiner-table">
-                <thead><tr><th>Symbol</th><th>Dir</th><th>Score</th><th>Entry Level</th><th>1H Price</th><th>Checks</th><th>Expires</th></tr></thead>
-                <tbody id="refiner-tbody"></tbody>
-            </table>
+    <!-- MM Engine Controls -->
+    {% if role == 'admin' %}
+    <div class="grid-stack-item" gs-id="mm-engine" gs-x="0" gs-y="7" gs-w="12" gs-h="3" gs-min-w="4" gs-min-h="2">
+        <div class="grid-stack-item-content">
+            <div class="panel" id="mm-engine-panel" style="height:100%; display:flex; flex-direction:column;">
+                <div class="panel-header">
+                    <h2>MM Engine
+                        <span class="account-badge" style="background:rgba(0,229,212,0.12); color:#00e5d4;">Algorithmic</span>
+                        <span id="mm-status-badge" class="status-badge closed-loss">LOADING</span>
+                    </h2>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <button id="mm-start-btn" class="btn primary" onclick="toggleMMEngine()" disabled>&#9654; Start</button>
+                    </div>
+                </div>
+                <div class="panel-body" style="padding:12px 16px; flex:1;">
+                    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(100px, 1fr)); gap:12px; font-size:0.8rem;">
+                        <div><div style="color:var(--text-muted); font-size:0.7rem;">Cycle</div><div id="mm-cycle" class="mono" style="font-size:1rem; font-weight:600;">0</div></div>
+                        <div><div style="color:var(--text-muted); font-size:0.7rem;">Session</div><div id="mm-session" class="mono" style="font-size:0.9rem;">&mdash;</div></div>
+                        <div><div style="color:var(--text-muted); font-size:0.7rem;">Positions</div><div id="mm-positions" class="mono" style="font-size:1rem; font-weight:600;">0</div></div>
+                        <div><div style="color:var(--text-muted); font-size:0.7rem;">Balance</div><div id="mm-balance" class="mono" style="font-size:0.9rem; color:var(--teal);">${{ "%.0f" | format(config.mm_initial_balance | default(10000) | float) }}</div></div>
+                    </div>
+                    <div id="mm-positions-list" style="margin-top:10px; display:none;">
+                        <div style="color:var(--text-muted); font-size:0.7rem; margin-bottom:4px;">Open MM Positions</div>
+                        <div id="mm-positions-body" style="font-size:0.75rem;"></div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
-    <div id="refiner-empty" class="empty-state" style="display:none;"><p>No signals queued.</p></div>
-</div>
+    {% endif %}
 
-<div class="panel" id="agent-panel" style="display:none; margin-top:14px;">
-    <div class="panel-header"><h2>AI Entry Agent <span id="agent-model-badge" class="badge" style="background:var(--teal-dim);color:var(--teal);">--</span></h2></div>
-    <div class="panel-body" style="padding:12px 16px;">
-        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); gap:12px; font-size:0.8rem;">
-            <div><div style="color:var(--text-muted); font-size:0.7rem;">Requests</div><div id="agent-requests" class="mono" style="font-size:1rem; font-weight:600;">0</div></div>
-            <div><div style="color:var(--text-muted); font-size:0.7rem;">ENTER / WAIT / SKIP</div><div id="agent-actions" class="mono" style="font-size:0.9rem;">0 / 0 / 0</div></div>
-            <div><div style="color:var(--text-muted); font-size:0.7rem;">Total Cost</div><div id="agent-cost" class="mono" style="font-size:1rem; font-weight:600; color:var(--teal);">$0.00</div></div>
-            <div><div style="color:var(--text-muted); font-size:0.7rem;">Avg / Call</div><div id="agent-avg-cost" class="mono" style="font-size:0.9rem;">$0.00</div></div>
-            <div><div style="color:var(--text-muted); font-size:0.7rem;">Tokens (In / Out)</div><div id="agent-tokens" class="mono" style="font-size:0.9rem;">0 / 0</div></div>
-            <div><div style="color:var(--text-muted); font-size:0.7rem;">Errors</div><div id="agent-errors" class="mono" style="font-size:0.9rem;">0</div></div>
+    <!-- Recent Signals -->
+    <div class="grid-stack-item" gs-id="signals" gs-x="0" gs-y="10" gs-w="6" gs-h="5" gs-min-w="4" gs-min-h="3">
+        <div class="grid-stack-item-content">
+            <div class="panel" style="height:100%; display:flex; flex-direction:column;">
+                <div class="panel-header">
+                    <h2>Recent Signals</h2>
+                    <a href="/signals" class="btn" style="font-size:11px; padding:3px 10px;">View All</a>
+                </div>
+                {% if signals %}
+                <div class="panel-body no-pad" style="flex:1; min-height:0; overflow:auto;">
+                    <div class="overflow-x">
+                        <table class="data-table">
+                            <thead><tr><th>Pair</th><th>Setup</th><th>Score</th><th>Time</th><th>Status</th></tr></thead>
+                            <tbody>
+                                {% for s in signals[:8] %}
+                                <tr>
+                                    <td><strong>{{ s.symbol|replace(':USDT', '') }}</strong></td>
+                                    <td style="font-size:11px;">{% if s.reasons %}{{ s.reasons[0] }}{% else %}--{% endif %}</td>
+                                    <td><div class="score-bar"><span class="score-num {{ 'positive' if (s.score|int) >= 65 else 'negative' }}">{{ s.score }}</span><div class="bar-track"><div class="bar-fill {{ 'high' if (s.score|int) >= 65 else ('medium' if (s.score|int) >= 50 else 'low') }}" style="width:{{ s.score|int }}%"></div></div></div></td>
+                                    <td class="text-muted" style="font-size:11px;">{{ s.created_at[11:16] }}</td>
+                                    <td>{% if s.acted_on %}<span class="status-badge open" style="font-size:9px;">Entered</span>{% else %}<span style="font-size:11px; color:var(--text-muted);">Skipped</span>{% endif %}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                {% else %}
+                <div class="empty-state" style="flex:1;"><p>Waiting for first scan.</p></div>
+                {% endif %}
+            </div>
         </div>
     </div>
-</div>
 
-<div class="panel" id="advisor-panel" style="margin-top:14px;">
-    <div class="panel-header">
-        <h2>Trade Advisor <span class="badge" style="background:var(--teal-dim);color:var(--teal);">Claude</span></h2>
-        <div style="display:flex; align-items:center; gap:8px;">
-            <select id="advisor-days" style="padding:4px 8px; border-radius:4px; background:var(--bg-card); color:var(--text-primary); border:1px solid var(--border); font-size:0.8rem;">
-                <option value="3">Last 3 days</option><option value="7" selected>Last 7 days</option><option value="14">Last 14 days</option>
-            </select>
-            <button id="advisor-run-btn" class="btn active" onclick="runAdvisor()" style="font-size:0.8rem; padding:4px 12px;">Analyze</button>
+    <!-- Agent Activity -->
+    <div class="grid-stack-item" gs-id="agent-activity" gs-x="6" gs-y="10" gs-w="6" gs-h="5" gs-min-w="3" gs-min-h="3">
+        <div class="grid-stack-item-content">
+            <div class="panel" style="height:100%; display:flex; flex-direction:column;">
+                <div class="panel-header">
+                    <h2>Agent Activity</h2>
+                    <span class="badge" style="background:var(--teal-dim);color:var(--teal);">Live</span>
+                </div>
+                <div class="panel-body" style="padding:6px 14px; flex:1; min-height:0; overflow:auto;">
+                    <div class="agent-log" id="agent-log-container">
+                        <div class="empty-state" style="padding:20px 12px;"><p>Agent activity will appear here.</p></div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
-    <div class="panel-body" style="padding:12px 16px;">
-        <div id="advisor-status" style="font-size:0.8rem; color:var(--text-muted);">Click "Analyze" to review missed signals.</div>
-        <div id="advisor-result" style="display:none; margin-top:12px;">
-            <div id="advisor-cost" style="font-size:0.7rem; color:var(--text-muted); margin-bottom:8px;"></div>
-            <div id="advisor-analysis" style="font-size:0.85rem; line-height:1.6; white-space:pre-wrap; max-height:500px; overflow-y:auto; padding:12px; background:var(--bg-deep); border-radius:6px; border:1px solid var(--border);"></div>
+
+    <!-- Admin panels -->
+    {% if role == 'admin' %}
+    <div class="grid-stack-item" gs-id="refiner" gs-x="0" gs-y="15" gs-w="12" gs-h="4" gs-min-w="6" gs-min-h="3">
+        <div class="grid-stack-item-content">
+            <div class="panel" id="refiner-panel" style="height:100%; display:flex; flex-direction:column;">
+                <div class="panel-header">
+                    <h2>Entry Refiner Queue <span id="refiner-badge" class="badge" style="background:var(--teal-dim);color:var(--teal);">0</span>
+                        <span id="refiner-heartbeat" style="font-size:0.65rem; margin-left:8px; color:var(--text-muted);"></span></h2>
+                    <div style="font-size:0.7rem; color:var(--text-muted);"><span id="refiner-stats" style="font-size:0.65rem;"></span></div>
+                </div>
+                <div id="refiner-body" class="panel-body no-pad" style="flex:1; min-height:0; overflow:auto;">
+                    <div class="overflow-x">
+                        <table class="data-table" id="refiner-table">
+                            <thead><tr><th>Symbol</th><th>Dir</th><th>Score</th><th>Entry Level</th><th>1H Price</th><th>Checks</th><th>Expires</th></tr></thead>
+                            <tbody id="refiner-tbody"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div id="refiner-empty" class="empty-state" style="display:none;"><p>No signals queued.</p></div>
+            </div>
         </div>
     </div>
-</div>
-{% endif %}
 
-<!-- old layout removed -->
+    <div class="grid-stack-item" gs-id="agent-stats" gs-x="0" gs-y="19" gs-w="6" gs-h="3" gs-min-w="4" gs-min-h="2">
+        <div class="grid-stack-item-content">
+            <div class="panel" id="agent-panel" style="height:100%; display:flex; flex-direction:column;">
+                <div class="panel-header"><h2>AI Entry Agent <span id="agent-model-badge" class="badge" style="background:var(--teal-dim);color:var(--teal);">--</span></h2></div>
+                <div class="panel-body" style="padding:12px 16px; flex:1;">
+                    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); gap:12px; font-size:0.8rem;">
+                        <div><div style="color:var(--text-muted); font-size:0.7rem;">Requests</div><div id="agent-requests" class="mono" style="font-size:1rem; font-weight:600;">0</div></div>
+                        <div><div style="color:var(--text-muted); font-size:0.7rem;">ENTER / WAIT / SKIP</div><div id="agent-actions" class="mono" style="font-size:0.9rem;">0 / 0 / 0</div></div>
+                        <div><div style="color:var(--text-muted); font-size:0.7rem;">Total Cost</div><div id="agent-cost" class="mono" style="font-size:1rem; font-weight:600; color:var(--teal);">$0.00</div></div>
+                        <div><div style="color:var(--text-muted); font-size:0.7rem;">Avg / Call</div><div id="agent-avg-cost" class="mono" style="font-size:0.9rem;">$0.00</div></div>
+                        <div><div style="color:var(--text-muted); font-size:0.7rem;">Tokens (In / Out)</div><div id="agent-tokens" class="mono" style="font-size:0.9rem;">0 / 0</div></div>
+                        <div><div style="color:var(--text-muted); font-size:0.7rem;">Errors</div><div id="agent-errors" class="mono" style="font-size:0.9rem;">0</div></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="grid-stack-item" gs-id="advisor" gs-x="6" gs-y="19" gs-w="6" gs-h="3" gs-min-w="4" gs-min-h="2">
+        <div class="grid-stack-item-content">
+            <div class="panel" id="advisor-panel" style="height:100%; display:flex; flex-direction:column;">
+                <div class="panel-header">
+                    <h2>Trade Advisor <span class="badge" style="background:var(--teal-dim);color:var(--teal);">Claude</span></h2>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <select id="advisor-days" style="padding:4px 8px; border-radius:4px; background:var(--bg-card); color:var(--text-primary); border:1px solid var(--border); font-size:0.8rem;">
+                            <option value="3">Last 3 days</option><option value="7" selected>Last 7 days</option><option value="14">Last 14 days</option>
+                        </select>
+                        <button id="advisor-run-btn" class="btn active" onclick="runAdvisor()" style="font-size:0.8rem; padding:4px 12px;">Analyze</button>
+                    </div>
+                </div>
+                <div class="panel-body" style="padding:12px 16px; flex:1; overflow:auto;">
+                    <div id="advisor-status" style="font-size:0.8rem; color:var(--text-muted);">Click "Analyze" to review missed signals.</div>
+                    <div id="advisor-result" style="display:none; margin-top:12px;">
+                        <div id="advisor-cost" style="font-size:0.7rem; color:var(--text-muted); margin-bottom:8px;"></div>
+                        <div id="advisor-analysis" style="font-size:0.85rem; line-height:1.6; white-space:pre-wrap; max-height:400px; overflow-y:auto; padding:12px; background:var(--bg-deep); border-radius:6px; border:1px solid var(--border);"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+// ── GridStack dashboard layout ──────────────────────────────
+const GS_STORAGE_KEY = 'tarakta_grid_layout';
+let _grid = null;
+let _gridLocked = true;
+
+function initGrid() {
+    _grid = GridStack.init({
+        column: 12,
+        cellHeight: 60,
+        margin: 4,
+        float: false,
+        disableDrag: true,
+        disableResize: true,
+        animate: true
+    }, '#dashboard-grid');
+
+    // Load saved layout
+    const saved = localStorage.getItem(GS_STORAGE_KEY);
+    if (saved) {
+        try {
+            const layout = JSON.parse(saved);
+            _grid.load(layout, true);
+        } catch (e) { console.warn('Failed to load grid layout:', e); }
+    }
+
+    // Save on change
+    _grid.on('change', function() {
+        const items = _grid.save(false);
+        localStorage.setItem(GS_STORAGE_KEY, JSON.stringify(items));
+    });
+}
+
+function toggleGridLock() {
+    _gridLocked = !_gridLocked;
+    const btn = document.getElementById('gs-lock-btn');
+    if (_gridLocked) {
+        _grid.enableMove(false);
+        _grid.enableResize(false);
+        btn.textContent = 'Unlock Layout';
+        btn.classList.add('locked');
+    } else {
+        _grid.enableMove(true);
+        _grid.enableResize(true);
+        btn.textContent = 'Lock Layout';
+        btn.classList.remove('locked');
+    }
+}
+
+function resetGridLayout() {
+    localStorage.removeItem(GS_STORAGE_KEY);
+    location.reload();
+}
+
+document.addEventListener('DOMContentLoaded', initGrid);
+
 // ── Expandable trade detail rows ──────────────────────────
 const _detailCache = {};
 
