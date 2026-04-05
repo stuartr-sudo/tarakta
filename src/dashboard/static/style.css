@@ -984,7 +984,9 @@ select:focus {
 }
 .dash-mid {
     display: grid;
-    grid-template-columns: 1fr 320px;
+    grid-template-columns: 1fr 340px;
+    grid-template-rows: auto;
+    align-items: start;
     gap: 14px;
     margin-bottom: 18px;
 }
@@ -998,13 +1000,22 @@ select:focus {
 .dash-chart-panel .chart-container {
     border: none;
     padding: 12px 14px;
+    height: 280px;
 }
 
 /* Position cards panel */
+.dash-positions-panel {
+    max-height: 480px;
+    display: flex;
+    flex-direction: column;
+}
 .dash-positions-panel .panel-body {
     display: flex;
     flex-direction: column;
     gap: 0;
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
 }
 
 .pos-card-item {
