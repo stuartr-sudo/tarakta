@@ -69,7 +69,7 @@
         transition: max-height 0.4s ease;
     }
     .accordion-item.open .accordion-body {
-        max-height: 3000px;
+        max-height: 8000px;
     }
     .accordion-content {
         padding: 4px 20px 24px 20px;
@@ -108,6 +108,18 @@
     .info-box strong {
         color: #e0e0e0;
     }
+    .warn-box {
+        background: rgba(255, 170, 50, 0.06);
+        border-left: 3px solid #ffaa32;
+        border-radius: 0 6px 6px 0;
+        padding: 12px 16px;
+        margin: 14px 0;
+        font-size: 0.9rem;
+        color: #e0d0b0;
+    }
+    .warn-box strong {
+        color: #ffcc66;
+    }
     .pipeline-flow {
         display: flex;
         align-items: center;
@@ -127,6 +139,34 @@
     .pipeline-arrow {
         color: #555;
         font-size: 0.8rem;
+    }
+    .score-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 12px 0;
+        font-size: 0.88rem;
+    }
+    .score-table th {
+        text-align: left;
+        padding: 8px 10px;
+        background: rgba(108, 99, 255, 0.1);
+        color: #c8c4ff;
+        border-bottom: 1px solid #333;
+        font-weight: 600;
+    }
+    .score-table td {
+        padding: 7px 10px;
+        border-bottom: 1px solid #2a2a3e;
+        color: #ccc;
+    }
+    .score-table tr:last-child td {
+        border-bottom: none;
+    }
+    .score-table .pts {
+        color: #6C63FF;
+        font-weight: 600;
+        font-family: monospace;
+        white-space: nowrap;
     }
     .glossary-grid {
         display: grid;
@@ -151,12 +191,33 @@
     .glossary-def {
         color: #bbb;
     }
+    .context-list {
+        columns: 2;
+        column-gap: 24px;
+        list-style: none;
+        padding: 0;
+        margin: 10px 0;
+    }
+    .context-list li {
+        break-inside: avoid;
+        padding: 3px 0 3px 16px;
+        position: relative;
+        font-size: 0.88rem;
+    }
+    .context-list li::before {
+        content: "\2713";
+        position: absolute;
+        left: 0;
+        color: #6C63FF;
+        font-weight: 700;
+    }
     @media (max-width: 600px) {
         .accordion-header { padding: 14px 14px; }
         .accordion-content { padding: 4px 14px 20px 14px; }
         .glossary-term { min-width: 140px; }
         .pipeline-flow { flex-direction: column; align-items: flex-start; }
         .pipeline-arrow { transform: rotate(90deg); }
+        .context-list { columns: 1; }
     }
 </style>
 {% endblock %}
@@ -177,33 +238,63 @@
         </div>
         <div class="accordion-body">
             <div class="accordion-content">
-                <p>Tarakta is an automated cryptocurrency trading bot that combines Smart Money Concepts (institutional trading strategies) with AI-powered decision making.</p>
+                <p>Tarakta is an automated cryptocurrency futures trading bot that combines Smart Money Concepts (institutional trading strategies) with AI-powered decision making. It trades perpetual futures on Binance using leverage.</p>
 
                 <div class="info-box">
-                    <strong>Core idea:</strong> The bot watches crypto markets around the clock, identifies trading opportunities that institutional traders would look for, then uses three AI agents to decide whether and when to trade.
+                    <strong>Core idea:</strong> The bot watches crypto markets around the clock, identifies trading opportunities that institutional traders would look for, then uses three AI agents to decide whether and when to trade. It can go both long (profit when price rises) and short (profit when price falls).
                 </div>
 
-                <h3>The Pipeline</h3>
+                <h3>The Full Pipeline</h3>
                 <div class="pipeline-flow">
-                    <span class="pipeline-step">Scanner checks markets</span>
+                    <span class="pipeline-step">Scanner (every N min)</span>
                     <span class="pipeline-arrow">&#8594;</span>
-                    <span class="pipeline-step">Agent 1 analyses signal</span>
+                    <span class="pipeline-step">Confluence scoring</span>
                     <span class="pipeline-arrow">&#8594;</span>
-                    <span class="pipeline-step">Agent 2 decides entry timing</span>
+                    <span class="pipeline-step">Consensus check</span>
                     <span class="pipeline-arrow">&#8594;</span>
-                    <span class="pipeline-step">Trade executes</span>
+                    <span class="pipeline-step">Agent 1 analyses</span>
                     <span class="pipeline-arrow">&#8594;</span>
-                    <span class="pipeline-step">Agent 3 manages position</span>
+                    <span class="pipeline-step">Entry Refiner queues</span>
+                    <span class="pipeline-arrow">&#8594;</span>
+                    <span class="pipeline-step">Footprint gate</span>
+                    <span class="pipeline-arrow">&#8594;</span>
+                    <span class="pipeline-step">Agent 2 times entry</span>
+                    <span class="pipeline-arrow">&#8594;</span>
+                    <span class="pipeline-step">Order executes</span>
+                    <span class="pipeline-arrow">&#8594;</span>
+                    <span class="pipeline-step">Agent 3 manages</span>
+                    <span class="pipeline-arrow">&#8594;</span>
+                    <span class="pipeline-step">Lesson generated</span>
                 </div>
 
-                <p>The system runs 24/7 and scans markets on a regular timer (configurable from the Settings page).</p>
-
-                <h3>Paper Mode vs Live Mode</h3>
+                <h3>How a Scan Cycle Works</h3>
+                <p>Every scan interval (configurable, typically every few minutes), the engine:</p>
                 <ul>
-                    <li><strong>Paper mode (simulated):</strong> Uses real market data but no real money changes hands. Trades are tracked as if they were real, so you can evaluate performance without risk.</li>
-                    <li><strong>Live mode (real money):</strong> Real orders are placed on the exchange. Actual funds are at stake.</li>
+                    <li>Fetches 1H, 4H, and 1D candle data for all configured trading pairs</li>
+                    <li>Runs market structure analysis across all timeframes to determine trend direction</li>
+                    <li>Checks session timing (Asian, London, New York kill zones)</li>
+                    <li>Runs sweep detection on the 1H timeframe &mdash; a completed liquidity sweep is the primary entry trigger</li>
+                    <li>Confirms displacement (strong volume move away from the sweep level)</li>
+                    <li>Scores the signal using the PostSweepEngine confluence formula</li>
+                    <li>If score passes the entry threshold, enriches the signal with structural data (order blocks, FVGs, liquidity levels) and sends it to Agent 1</li>
                 </ul>
-                <p>The mode banner at the top of every page always tells you which mode is active.</p>
+
+                <h3>Scanner Mode: Expanded-Footprint</h3>
+                <div class="info-box">
+                    The active scanner mode strips out retail-level indicators (standalone OBs, FVGs, premium/discount zones) and focuses purely on <strong>sweep-first</strong> setups. A completed liquidity sweep on the 1H timeframe is the only entry trigger. OBs, FVGs, and liquidity levels are still computed but used only as context for the AI agents, not for scoring.
+                </div>
+
+                <h3>Instance Isolation</h3>
+                <p>Multiple bot instances can run simultaneously against the same exchange and database. Each instance has a unique INSTANCE_ID that keeps its engine state, open positions, and configuration overrides separate. This allows A/B testing of different strategies or settings.</p>
+
+                <h3>Infrastructure</h3>
+                <ul>
+                    <li><strong>Hosting:</strong> Fly.io, Amsterdam region (shared-cpu-1x, 2GB RAM)</li>
+                    <li><strong>Exchange:</strong> Binance Futures (perpetual contracts)</li>
+                    <li><strong>Database:</strong> Supabase (PostgreSQL with pgvector extension)</li>
+                    <li><strong>AI:</strong> OpenAI GPT models for agents, OpenAI embeddings for RAG</li>
+                    <li><strong>Dashboard:</strong> FastAPI + Jinja2 web interface on port 8080</li>
+                </ul>
             </div>
         </div>
     </div>
@@ -212,43 +303,111 @@
     <div class="accordion-item" data-section="2">
         <div class="accordion-header" onclick="toggleSection(this)">
             <span class="accordion-number">02</span>
-            <span class="accordion-title">The Three AI Agents</span>
+            <span class="accordion-title">The Three AI Agents (Deep Dive)</span>
             <span class="accordion-chevron">&#9654;</span>
         </div>
         <div class="accordion-body">
             <div class="accordion-content">
-                <p>Tarakta uses three specialised AI agents, each with a distinct role. Think of them as a team of analysts working together.</p>
+                <p>Each agent is an OpenAI GPT model call with a detailed system prompt, structured JSON output, and rich context injected into the user prompt. They operate as a sequential chain &mdash; each agent's output feeds the next.</p>
 
-                <h3>Agent 1 — Signal Analyst</h3>
+                <h3>Agent 1 &mdash; Strategic Entry Analyst</h3>
                 <div class="info-box">
-                    Answers the question: <strong>"Is this trade worth taking?"</strong>
+                    Answers: <strong>"Is this trade worth taking, and in which direction?"</strong>
                 </div>
-                <p>Agent 1 looks at sweep quality, market structure, and overall context. It returns one of three verdicts:</p>
+                <p>Agent 1 is the direction authority. It independently decides whether to go LONG or SHORT regardless of the scanner's initial suggestion. It returns one of three verdicts:</p>
                 <ul>
-                    <li><strong>SETUP_CONFIRMED:</strong> The signal looks good, proceed to entry timing.</li>
-                    <li><strong>WAIT_PULLBACK:</strong> The setup is valid but wait for a better entry price.</li>
-                    <li><strong>SKIP:</strong> Pass on this trade entirely.</li>
+                    <li><strong>SETUP_CONFIRMED:</strong> Enter now &mdash; the signal is strong enough for immediate action. Agent 2 gets called on the very next tick.</li>
+                    <li><strong>WAIT_PULLBACK:</strong> The thesis is valid but the price is not yet at an optimal entry. The signal is queued in the Entry Refiner, and Agent 2 checks every 5 minutes for a pullback into the entry zone.</li>
+                    <li><strong>SKIP:</strong> Reject this signal entirely.</li>
                 </ul>
 
-                <h3>Agent 2 — Entry Timer</h3>
-                <div class="info-box">
-                    Answers the question: <strong>"Is NOW the right time to enter?"</strong>
-                </div>
-                <p>Agent 2 monitors price action on 5-minute candles. It only ever returns <strong>ENTER</strong> with the exact entry price, stop loss, take profit levels, and position size. If conditions are not right, it simply does not respond.</p>
-
-                <h3>Agent 3 — Position Manager</h3>
-                <div class="info-box">
-                    Answers the question: <strong>"Should I adjust this open trade?"</strong>
-                </div>
-                <p>Agent 3 monitors open trades and can do exactly two things:</p>
-                <ul>
-                    <li><strong>Tighten the stop-loss:</strong> Move it closer to the current price to protect profits already gained.</li>
-                    <li><strong>Extend TP3:</strong> If momentum is strong, let the winning trade run further.</li>
+                <h3>What Agent 1 Actually Sees</h3>
+                <p>Agent 1 receives an extensive context package including:</p>
+                <ul class="context-list">
+                    <li>Sweep details (level, depth, type)</li>
+                    <li>HTF market structure (1H/4H/1D trends)</li>
+                    <li>5 nearest order blocks with distance %</li>
+                    <li>5 nearest fair value gaps with midpoints</li>
+                    <li>Liquidity pools (buy &amp; sell side)</li>
+                    <li>Relative volume (RVOL multiplier)</li>
+                    <li>Displacement detection &amp; strength</li>
+                    <li>Pullback status &amp; retracement %</li>
+                    <li>Session timing (kill zone status)</li>
+                    <li>Fibonacci retracement levels (OTE zone)</li>
+                    <li>Leverage profile (funding, OI, L/S ratio)</li>
+                    <li>Judas swing probability</li>
+                    <li>Liquidation distances (long &amp; short)</li>
+                    <li>BTC trend &amp; 24h change</li>
+                    <li>Sentiment score (-10 to +10)</li>
+                    <li>Recent news headlines</li>
+                    <li>Last 5 trades on this symbol (outcome, PnL)</li>
+                    <li>RAG knowledge (similar past trades)</li>
+                    <li>Learned lessons from post-mortems</li>
+                    <li>Advisor insights (missed opportunities)</li>
+                    <li>Bot performance metrics (win rate, streaks)</li>
+                    <li>Algorithmic SL/TP reference levels</li>
                 </ul>
-                <p>Agent 3 cannot close trades — that is handled automatically by the exchange when price hits the stop-loss or take-profit levels.</p>
+                <p>Agent 1 outputs: action, direction (LONG/SHORT), confidence score, detailed reasoning, suggested entry zone, SL, TP, invalidation level, must-reach price, and market regime classification.</p>
 
-                <h3>Model Selection</h3>
-                <p>Each agent uses an OpenAI GPT model. You can choose between faster, cheaper models (nano, mini) or smarter, more expensive ones (full GPT-5.3, GPT-5.4) from the Settings page. Each agent can also be individually enabled or disabled.</p>
+                <h3>Agent 2 &mdash; Tactical Entry Timer</h3>
+                <div class="info-box">
+                    Answers: <strong>"Is NOW the right moment to enter?"</strong>
+                </div>
+                <p>Agent 2 is called every 5 minutes while a signal is queued. It receives Agent 1's locked direction and thesis (cannot change it) plus fresh real-time data. It performs a mandatory 4-step analysis:</p>
+                <ul>
+                    <li><strong>Step 0 &mdash; Must-reach-price gate:</strong> Has the institutional displacement move occurred? If not, WAIT.</li>
+                    <li><strong>Step 1 &mdash; Rejection check:</strong> Has price tested the entry zone and shown a rejection candle (wick ratio, engulfing pattern, volume spike)?</li>
+                    <li><strong>Step 2 &mdash; Live vs continuation:</strong> Is this a live rejection or stale data?</li>
+                    <li><strong>Step 3 &mdash; Structural confirmation:</strong> Do order blocks, FVGs, and market structure support entry here?</li>
+                </ul>
+
+                <h3>What Agent 2 Sees (beyond Agent 1's context)</h3>
+                <ul class="context-list">
+                    <li>Last 50 five-minute candles (OHLCV table)</li>
+                    <li>Order book (top 10 bid/ask, walls, imbalance)</li>
+                    <li>Footprint / order flow (delta %, absorption)</li>
+                    <li>Cumulative delta confirmation</li>
+                    <li>OI change percentage</li>
+                    <li>Buy/sell volume split</li>
+                    <li>Previous Agent 2 analysis (reasoning continuity)</li>
+                    <li>Check count (how many times evaluated)</li>
+                    <li>Price change since queued</li>
+                    <li>Sentiment score &amp; headlines</li>
+                    <li>Advisor insights</li>
+                </ul>
+                <p>Agent 2 outputs: ENTER (with exact entry price, SL, TP, position size modifier 0.25&ndash;1.5x, confidence, urgency) or WAIT.</p>
+
+                <h3>Agent 3 &mdash; Position Manager</h3>
+                <div class="info-box">
+                    Answers: <strong>"Should I adjust this open trade?"</strong>
+                </div>
+                <p>Agent 3 monitors every open position and can do exactly two things:</p>
+                <ul>
+                    <li><strong>TIGHTEN_SL:</strong> Move stop-loss closer to current price (never wider). Requires confidence &ge; 50.</li>
+                    <li><strong>EXTEND_TP3:</strong> Push the final take-profit target further. Requires confidence &ge; 60 and evidence of strong momentum (BOS, displacement, no resistance ahead).</li>
+                </ul>
+                <p>Agent 3 defaults to HOLD in 80%+ of cases. It cannot close trades, widen stops, or override the exchange's hard SL/TP levels.</p>
+
+                <h3>What Agent 3 Sees</h3>
+                <ul class="context-list">
+                    <li>Position details (entry, SL, TP, direction)</li>
+                    <li>Current PnL ($ and %)</li>
+                    <li>Unrealized R ratio</li>
+                    <li>TP tier progress (X/3 filled)</li>
+                    <li>Time held</li>
+                    <li>Remaining position quantity</li>
+                    <li>1H ATR (volatility baseline)</li>
+                    <li>Agent 1's original thesis</li>
+                    <li>BTC trend + funding rate</li>
+                    <li>HTF market structure per timeframe</li>
+                    <li>Last 15-20 candles (5m + 1h)</li>
+                    <li>Position management lessons</li>
+                </ul>
+
+                <h3>Temperature Settings</h3>
+                <div class="info-box">
+                    <strong>Temperature</strong> controls how random or deterministic the AI's output is. Lower = more consistent decisions. Agent 1: 0.4 (strategic but stable), Agent 2: 0.5 (some flexibility for timing), Agent 3: 0.3 (very deterministic, safety-critical).
+                </div>
             </div>
         </div>
     </div>
@@ -257,39 +416,61 @@
     <div class="accordion-item" data-section="3">
         <div class="accordion-header" onclick="toggleSection(this)">
             <span class="accordion-number">03</span>
-            <span class="accordion-title">Signal Scanning &amp; Smart Money Concepts</span>
+            <span class="accordion-title">Signal Scanning &amp; Confluence Scoring</span>
             <span class="accordion-chevron">&#9654;</span>
         </div>
         <div class="accordion-body">
             <div class="accordion-content">
-                <p>Scanning means checking all configured markets every few minutes for potential trade setups. The scanner looks for patterns that institutional ("smart money") traders typically create.</p>
+                <p>The scanner checks all configured markets on a timer. In expanded-footprint mode, the only entry trigger is a completed <strong>liquidity sweep</strong> on the 1H timeframe, confirmed by displacement volume.</p>
 
-                <h3>Fair Value Gaps (FVGs)</h3>
+                <h3>Confluence Score Formula</h3>
+                <p>Each signal is scored out of 100 base points (plus up to 10 bonus points for leverage alignment). The score components are:</p>
+                <table class="score-table">
+                    <tr><th>Component</th><th>Points</th><th>What It Checks</th></tr>
+                    <tr><td>Sweep Detected</td><td class="pts">35 pts</td><td>A completed liquidity sweep on 1H &mdash; price spiked past a key level, triggered stops, and reversed. This is the primary signal.</td></tr>
+                    <tr><td>Displacement Confirmed</td><td class="pts">25 pts</td><td>Strong volume move away from the sweep level. Proves institutional commitment behind the reversal.</td></tr>
+                    <tr><td>HTF Direction Aligned</td><td class="pts">15 pts</td><td>The 4H and/or 1D market structure trend agrees with the trade direction.</td></tr>
+                    <tr><td>Post-Kill-Zone Timing</td><td class="pts">15 pts</td><td>The signal occurs shortly after an active session kill zone (London or New York open), when institutional activity is highest.</td></tr>
+                    <tr><td>Pullback Confirmed</td><td class="pts">10 pts</td><td>Price has pulled back into the optimal trade entry (OTE) zone &mdash; the 61.8%&ndash;78.6% Fibonacci retracement of the displacement move.</td></tr>
+                    <tr><td>Leverage Aligned (bonus)</td><td class="pts">0&ndash;10 pts</td><td>Funding rate, open interest, and long/short ratio all support the direction. Only on futures.</td></tr>
+                </table>
                 <div class="info-box">
-                    When price moves so fast it leaves an "imbalance" — a gap in the price action. Price often returns to fill these gaps, making them predictable entry points.
+                    <strong>Entry Threshold:</strong> Signals must reach the configured minimum score (set in Settings) to be passed to Agent 1. A typical threshold is 60&ndash;70. A score of 100 means every base component aligned perfectly.
                 </div>
 
-                <h3>Order Blocks (OBs)</h3>
-                <div class="info-box">
-                    Areas where large institutional traders previously bought or sold heavily. These zones act as strong support (price bounces up) or resistance (price bounces down).
-                </div>
-
-                <h3>Liquidity Sweeps</h3>
-                <div class="info-box">
-                    When price briefly spikes above or below a key level to trigger stop-losses, then reverses. This is how institutions collect liquidity before making a real move. A sweep often signals a genuine reversal is about to start.
-                </div>
-
-                <h3>Market Structure</h3>
-                <p>The pattern of price movement over time:</p>
+                <h3>Weekly Cycle Adjustments</h3>
+                <p>The scanner applies timing adjustments based on the day of the week:</p>
                 <ul>
-                    <li><strong>Uptrend:</strong> A pattern of higher highs and higher lows.</li>
-                    <li><strong>Downtrend:</strong> A pattern of lower highs and lower lows.</li>
+                    <li><strong>Monday manipulation window:</strong> Score penalty during early Monday hours when institutions often create fake moves to trap retail traders.</li>
+                    <li><strong>Mid-week reversal bonus:</strong> Small score boost during Tuesday&ndash;Thursday when genuine trend moves are more likely.</li>
                 </ul>
-                <p>The bot trades in the direction of the current structure, not against it.</p>
 
-                <h3>Confluence Scoring</h3>
-                <div class="info-box">
-                    Each signal gets a score based on how many indicators agree. If an FVG, order block, and liquidity sweep all point the same direction, that is high confluence and a higher confidence trade. The minimum score needed to trade is configurable (Entry Threshold in Settings).
+                <h3>Consensus Check</h3>
+                <p>Before reaching Agent 1, signals pass through a consensus mechanism that checks directional alignment:</p>
+                <ul>
+                    <li><strong>Portfolio bias:</strong> If most open profitable positions are in the opposite direction, a penalty of &minus;10 points is applied.</li>
+                    <li><strong>BTC trend disagreement:</strong> If BTC's 4H/1D structure contradicts the signal direction, an additional &minus;5 points is applied.</li>
+                </ul>
+                <p>If a signal's score drops below the threshold after penalties, it is queued in the Consensus Monitor and re-evaluated every 60 seconds for up to 30 minutes. If alignment improves, the signal graduates (possibly with a direction flip).</p>
+
+                <h3>Session Timing &amp; Kill Zones</h3>
+                <p>Crypto markets run 24/7, but institutional activity follows three major trading sessions:</p>
+                <ul>
+                    <li><strong>Asian session (00:00&ndash;08:00 UTC):</strong> Typically lower volume. Price often establishes a range.</li>
+                    <li><strong>London session (07:00&ndash;16:00 UTC):</strong> High volume. Institutions often sweep Asian session highs/lows.</li>
+                    <li><strong>New York session (12:00&ndash;21:00 UTC):</strong> Highest volume. The most significant moves typically occur here.</li>
+                </ul>
+                <p>The "kill zone" is the first 1&ndash;2 hours of each session when manipulation is most likely. The scanner gives a 15-point bonus for signals detected in the post-kill-zone period, when genuine reversals tend to follow the initial sweep.</p>
+
+                <h3>Footprint Gate (Order Flow Confirmation)</h3>
+                <p>After Agent 2 says ENTER, there is one final gate: the Footprint Analyzer examines real-time order flow data (trade tape, open interest changes) to confirm that actual buyer/seller pressure supports the direction.</p>
+                <ul>
+                    <li><strong>Delta %:</strong> The ratio of aggressive buys to sells. For a long trade, delta should be positive.</li>
+                    <li><strong>Absorption:</strong> Large buy orders sitting at a level and absorbing sell pressure (for longs). Indicates institutional support.</li>
+                    <li><strong>Cumulative delta:</strong> The running total of buy minus sell volume confirming directional commitment.</li>
+                </ul>
+                <div class="warn-box">
+                    <strong>Note:</strong> Footprint data is ephemeral &mdash; it comes from the real-time trade tape and cannot be fetched historically. If the footprint gate fails, the trade is rejected even if Agent 2 said ENTER.
                 </div>
             </div>
         </div>
@@ -299,38 +480,51 @@
     <div class="accordion-item" data-section="4">
         <div class="accordion-header" onclick="toggleSection(this)">
             <span class="accordion-number">04</span>
-            <span class="accordion-title">Risk Management &amp; Safety</span>
+            <span class="accordion-title">Risk Management &amp; Safety Systems</span>
             <span class="accordion-chevron">&#9654;</span>
         </div>
         <div class="accordion-body">
             <div class="accordion-content">
-                <p>Risk management is the most important part of any trading system. These controls exist to protect your capital even when individual trades go wrong.</p>
+                <p>Risk management is the most important part of the system. These controls exist to protect capital even when individual trades go wrong or market conditions become extreme.</p>
 
-                <h3>Max Risk Per Trade</h3>
-                <div class="info-box">
-                    Limits how much of your balance can be lost on any single trade. For example, if set to 2%, a $10,000 balance means no single trade can lose more than $200.
-                </div>
+                <h3>Per-Trade Risk Controls</h3>
+                <table class="score-table">
+                    <tr><th>Control</th><th>What It Does</th></tr>
+                    <tr><td>Max Risk %</td><td>Limits the maximum loss on any single trade as a percentage of balance. If set to 2% on a $10,000 balance, no trade can lose more than $200.</td></tr>
+                    <tr><td>Max SL %</td><td>Caps how far the stop-loss can be from the entry price. Prevents the agents from setting overly wide stops that expose too much capital.</td></tr>
+                    <tr><td>Min R:R Ratio</td><td>Minimum reward-to-risk ratio required. If set to 2.0, the potential profit must be at least 2x the potential loss before a trade is placed.</td></tr>
+                    <tr><td>Max Position %</td><td>Maximum percentage of balance used as margin for a single position.</td></tr>
+                    <tr><td>Max Position Volume %</td><td>Caps position size relative to the symbol's 24h trading volume, preventing market impact on low-liquidity pairs.</td></tr>
+                </table>
+
+                <h3>Portfolio-Level Controls</h3>
+                <table class="score-table">
+                    <tr><th>Control</th><th>What It Does</th></tr>
+                    <tr><td>Max Concurrent Positions</td><td>Limits how many trades can be open simultaneously. Prevents overexposure.</td></tr>
+                    <tr><td>Max Exposure %</td><td>Total portfolio exposure limit across all open positions combined.</td></tr>
+                    <tr><td>Max Per Correlation Cluster</td><td>Limits how many correlated positions can be open (e.g., only N altcoin longs at once).</td></tr>
+                    <tr><td>Max Daily Trades</td><td>Hard cap on trades per day, preventing overtrading.</td></tr>
+                </table>
 
                 <h3>Circuit Breaker</h3>
-                <div class="info-box">
-                    <strong>Your emergency brake.</strong> Automatically stops ALL trading if total losses exceed a threshold (e.g., 15% of balance). This prevents catastrophic losses during unusual market conditions. Trading resumes only after a manual review.
+                <div class="warn-box">
+                    <strong>Emergency brake.</strong> Automatically halts ALL trading if total losses exceed a threshold (e.g., 15% of balance). When triggered, no new trades are placed until the engine is manually reset. This prevents catastrophic losses during black swan events or strategy failure.
                 </div>
 
                 <h3>Daily Drawdown Limit</h3>
-                <p>The maximum loss allowed in a single day before trading pauses automatically. If the bot loses too much in one day, it stops and waits until the next day.</p>
+                <p>If the bot loses more than the configured daily limit, it pauses trading until the next calendar day. This prevents compounding losses during bad market conditions.</p>
 
-                <h3>Max Concurrent Positions</h3>
-                <p>How many trades can be open at the same time. This prevents the bot from being overexposed to the market.</p>
+                <h3>Cooldown Period</h3>
+                <p>After consecutive losses, the bot enters a configurable cooldown where no new trades are placed. This prevents emotional "tilt" trading &mdash; chasing losses with increasingly desperate entries.</p>
 
-                <h3>Max Exposure</h3>
-                <p>The total portfolio exposure limit across all open positions combined.</p>
+                <h3>BTC Macro Gate</h3>
+                <p>When enabled, the bot checks Bitcoin's trend before entering altcoin trades. If BTC is crashing (e.g., down &gt;2% in an hour), altcoin longs are blocked because altcoins tend to follow BTC downward regardless of their individual setups.</p>
 
-                <h3>Cooldown</h3>
-                <p>After a string of losses, the bot waits a configurable amount of time before trading again. This prevents "tilt" — chasing losses with increasingly risky trades.</p>
+                <h3>Sentiment Gate</h3>
+                <p>Extreme negative sentiment (measured on a -10 to +10 scale from news and social data) can block trades. If sentiment is strongly bearish and the signal is long, the trade may be rejected or its score reduced.</p>
 
-                <div class="info-box">
-                    All of these settings are configurable from the <strong>Settings</strong> page. It is strongly recommended not to change risk settings without understanding their impact.
-                </div>
+                <h3>Funding Rate Gate</h3>
+                <p>On futures, the funding rate indicates market positioning. Extremely positive funding means the market is crowded long (risky for longs), and vice versa. When enabled, this gate blocks trades that go against heavily funded positions.</p>
             </div>
         </div>
     </div>
@@ -344,45 +538,62 @@
         </div>
         <div class="accordion-body">
             <div class="accordion-content">
-                <h3>Trade Flow</h3>
+                <h3>Full Trade Lifecycle</h3>
                 <div class="pipeline-flow">
-                    <span class="pipeline-step">Signal found</span>
+                    <span class="pipeline-step">Signal scored</span>
                     <span class="pipeline-arrow">&#8594;</span>
                     <span class="pipeline-step">Agent 1 approves</span>
                     <span class="pipeline-arrow">&#8594;</span>
-                    <span class="pipeline-step">Queued for Agent 2</span>
+                    <span class="pipeline-step">Queued in Entry Refiner</span>
                     <span class="pipeline-arrow">&#8594;</span>
                     <span class="pipeline-step">Agent 2 says ENTER</span>
                     <span class="pipeline-arrow">&#8594;</span>
-                    <span class="pipeline-step">Order placed</span>
+                    <span class="pipeline-step">Footprint gate passes</span>
+                    <span class="pipeline-arrow">&#8594;</span>
+                    <span class="pipeline-step">Order placed on exchange</span>
+                    <span class="pipeline-arrow">&#8594;</span>
+                    <span class="pipeline-step">Agent 3 monitors</span>
+                    <span class="pipeline-arrow">&#8594;</span>
+                    <span class="pipeline-step">Trade closes (SL/TP/time)</span>
+                    <span class="pipeline-arrow">&#8594;</span>
+                    <span class="pipeline-step">Lesson generated</span>
                 </div>
 
-                <h3>Take-Profit Levels</h3>
-                <p>Each trade has three take-profit targets, which close portions of the position as price moves in your favour:</p>
+                <h3>Entry Refiner &amp; Pullback Queue</h3>
+                <p>When Agent 1 says WAIT_PULLBACK, the signal enters the Entry Refiner. This is a queue that holds signals and waits for price to pull back into the optimal entry zone:</p>
                 <ul>
-                    <li><strong>TP1:</strong> Quick profit — closes a portion of the position early to lock in some gains.</li>
-                    <li><strong>TP2:</strong> Larger move — closes another portion at a higher profit target.</li>
-                    <li><strong>TP3:</strong> Full target — the remaining position closes here for maximum profit.</li>
+                    <li><strong>Entry zone:</strong> Defined by Agent 1 (zone_high to zone_low), typically based on a structural level like an order block, FVG, or Fibonacci retracement zone.</li>
+                    <li><strong>OTE zone:</strong> The Optimal Trade Entry zone is the 61.8%&ndash;78.6% Fibonacci retracement of the displacement move. This is where institutional buyers/sellers are most likely to re-enter.</li>
+                    <li><strong>Must-reach price:</strong> A price level that must be hit before pullback entry is valid. Ensures the displacement move has actually occurred.</li>
+                    <li><strong>Agent 2 checks:</strong> Every 5 minutes, the entry refiner fetches fresh 5m candles, order book data, and footprint data, then asks Agent 2 whether conditions are right to enter.</li>
+                    <li><strong>Expiry:</strong> Signals expire after a configurable period if Agent 2 never says ENTER. The entry zone can be updated up to a few times if price action warrants it.</li>
                 </ul>
 
-                <h3>Stop-Loss (SL)</h3>
-                <div class="info-box">
-                    The price level where the trade closes at a loss to prevent further damage. Every trade has a stop-loss — this is non-negotiable. It is your maximum downside on that trade.
-                </div>
+                <h3>Take-Profit Tiers</h3>
+                <p>Each trade has three take-profit targets, which close portions of the position progressively:</p>
+                <table class="score-table">
+                    <tr><th>Tier</th><th>Purpose</th><th>Behaviour</th></tr>
+                    <tr><td>TP1</td><td>Quick lock-in</td><td>Closes a portion of the position early. Reduces risk by banking some profit immediately.</td></tr>
+                    <tr><td>TP2</td><td>Medium target</td><td>Closes another portion at a higher profit target. By now, the stop-loss is typically moved to breakeven or into profit.</td></tr>
+                    <tr><td>TP3</td><td>Full target / runner</td><td>The remaining position. Can be extended by Agent 3 if momentum is strong. This is where the biggest profits come from.</td></tr>
+                </table>
 
-                <h3>How Agent 3 Manages Trades</h3>
-                <p>While a trade is open, Agent 3 can:</p>
+                <h3>Trailing Stop &amp; Breakeven</h3>
                 <ul>
-                    <li><strong>Tighten SL:</strong> If the trade is in profit, move the stop-loss closer to the entry price or into profit. This way, even if the trade reverses, you keep some of the gains.</li>
-                    <li><strong>Extend TP3:</strong> If momentum is strong, push the final target further to let the winner run.</li>
+                    <li><strong>Breakeven activation:</strong> After a trade reaches a configurable R:R ratio (e.g., 1.5R), the stop-loss is automatically moved to breakeven (entry price). From this point, the trade cannot lose money.</li>
+                    <li><strong>Trailing activation:</strong> After reaching a higher R:R threshold, a trailing stop activates that follows price, locking in progressively more profit.</li>
                 </ul>
 
                 <h3>How Trades Close</h3>
                 <ul>
-                    <li>Hits the stop-loss (loss)</li>
-                    <li>Hits all take-profit levels (full profit)</li>
-                    <li>Maximum hold time is exceeded (time-based exit)</li>
+                    <li><strong>Stop-loss hit:</strong> Trade closes at a loss (or breakeven/profit if SL was tightened).</li>
+                    <li><strong>All TP tiers filled:</strong> Full profit captured across all three levels.</li>
+                    <li><strong>Max hold time exceeded:</strong> Configurable time limit. Prevents capital from being tied up in stale trades.</li>
+                    <li><strong>Stale close below R:R:</strong> If a trade is held for too long with low R:R, it can be closed as a "stale" position.</li>
                 </ul>
+
+                <h3>Post-Trade: Lesson Generation</h3>
+                <p>After every trade closes, the Lesson Generator analyses the outcome. It sees all three agents' reasoning, the signal components, and the trade result. It produces structured lessons tagged with severity (low/medium/high/critical), lesson type (entry/timing/exit/position_management/risk), and which agents should learn from it. These lessons are stored in the database and injected into future agent prompts.</p>
             </div>
         </div>
     </div>
@@ -391,33 +602,53 @@
     <div class="accordion-item" data-section="6">
         <div class="accordion-header" onclick="toggleSection(this)">
             <span class="accordion-number">06</span>
-            <span class="accordion-title">Dashboard Guide</span>
+            <span class="accordion-title">AI Learning &amp; Knowledge Systems</span>
             <span class="accordion-chevron">&#9654;</span>
         </div>
         <div class="accordion-body">
             <div class="accordion-content">
-                <p>The navigation bar at the top links to every section. Here is what each page shows:</p>
+                <p>Tarakta has three systems that make agents smarter over time: the RAG knowledge base, the lesson generator, and the trade advisor.</p>
 
-                <h3>Dashboard (/)</h3>
-                <p>Live overview of the system: current balance, profit and loss, any open positions, and whether the engine is running.</p>
+                <h3>RAG (Retrieval-Augmented Generation)</h3>
+                <div class="info-box">
+                    <strong>Purpose:</strong> Before making a decision, agents can search past trade history for similar setups and see how those trades turned out.
+                </div>
+                <p>How it works:</p>
+                <ul>
+                    <li><strong>Ingestion:</strong> Every closed trade is converted into a text summary (symbol, direction, outcome, PnL, confluence score, signal reasons, agent reasoning) and embedded as a 1536-dimensional vector using OpenAI's text-embedding-3-small model.</li>
+                    <li><strong>Storage:</strong> Embeddings are stored in Supabase using the pgvector extension alongside the text content in the knowledge_chunks table.</li>
+                    <li><strong>Retrieval:</strong> When a new signal arrives, a query is built from the symbol, direction, sweep type, market regime, and displacement status. This query is embedded and compared against all stored trades using hybrid search.</li>
+                    <li><strong>Hybrid search:</strong> Combines dense search (cosine similarity between vectors) with lexical search (PostgreSQL full-text search) using Reciprocal Rank Fusion (RRF) to rank results.</li>
+                    <li><strong>Injection:</strong> The top 5 most relevant past trades are formatted and injected into Agent 1 and Agent 2's context as "Similar Past Trades" with relevance scores.</li>
+                </ul>
+                <p>Example: If the bot is evaluating a LONG setup on ETH after a sweep of a Fibonacci level, the RAG system might surface past ETH LONG trades with similar sweep types and show their outcomes, helping the agent avoid repeated mistakes.</p>
 
-                <h3>Trades (/trades)</h3>
-                <p>Complete history of every trade the bot has taken. Shows entry and exit prices, profit or loss, duration, and which agents were involved.</p>
+                <h3>Lesson Generator</h3>
+                <div class="info-box">
+                    <strong>Purpose:</strong> Extract actionable rules from every closed trade so agents learn from mistakes and successes.
+                </div>
+                <p>After each trade closes, the lesson generator:</p>
+                <ul>
+                    <li>Reviews all three agents' reasoning, the trade outcome, and the signal quality</li>
+                    <li>Generates structured lessons in "IF [condition], THEN [action]" format</li>
+                    <li>Tags each lesson with: severity (low/medium/high/critical), type (entry/timing/exit/position_management/risk), and applies_to (agent1/agent2/agent3)</li>
+                    <li>Avoids duplicating lessons already generated (checks last 5 existing lessons)</li>
+                </ul>
+                <p>Lessons are stored in the trade_lessons table and injected into the relevant agent's prompt with priority ordering: symbol-specific agent lessons first, then high-severity general lessons, then medium severity.</p>
 
-                <h3>Signals (/signals)</h3>
-                <p>Every signal the scanner detected, whether it was actually traded or not. Useful for reviewing what the bot saw versus what it acted on.</p>
-
-                <h3>Analytics (/analytics)</h3>
-                <p>Performance charts including win rate over time, cumulative profit and loss, and reward-to-risk distribution.</p>
-
-                <h3>Usage (/usage)</h3>
-                <p>API costs for running the AI agents. Track how much is being spent per agent, per day. Useful for cost management.</p>
-
-                <h3>Chart (/chart)</h3>
-                <p>TradingView chart for manual analysis of any trading pair. Good for visually verifying what the bot is seeing.</p>
-
-                <h3>Settings (/settings)</h3>
-                <p>Configure everything: leverage, risk parameters, agent models, trading mode, and more.</p>
+                <h3>Trade Advisor</h3>
+                <div class="info-box">
+                    <strong>Purpose:</strong> Identify missed opportunities and patterns the bot is consistently missing.
+                </div>
+                <p>The advisor runs periodically (daily on reset or manually via the dashboard) and:</p>
+                <ul>
+                    <li>Fetches high-scoring signals that were never traded (acted_on = false)</li>
+                    <li>Simulates what would have happened if the trade had been taken (2% SL, 4% TP, max 4h hold)</li>
+                    <li>Uses Claude (Anthropic's AI) to analyse patterns across the missed signals</li>
+                    <li>Produces recommendations (e.g., "lower entry threshold for BTC sweeps" or "the bot is too conservative during NY session")</li>
+                    <li>Stores insights in the advisor_insights table</li>
+                </ul>
+                <p>These insights are formatted and injected into Agent 1 and Agent 2's context so they can factor in the advisor's recommendations.</p>
             </div>
         </div>
     </div>
@@ -426,32 +657,41 @@
     <div class="accordion-item" data-section="7">
         <div class="accordion-header" onclick="toggleSection(this)">
             <span class="accordion-number">07</span>
-            <span class="accordion-title">Paper vs Live Trading</span>
+            <span class="accordion-title">Smart Money Concepts Explained</span>
             <span class="accordion-chevron">&#9654;</span>
         </div>
         <div class="accordion-body">
             <div class="accordion-content">
-                <h3>Paper Trading</h3>
+                <p>Smart Money Concepts (SMC) is a trading methodology based on understanding how large institutional traders (banks, hedge funds, market makers) operate. These institutions control the majority of market volume and their activity creates predictable patterns.</p>
+
+                <h3>Liquidity Sweeps (Primary Signal)</h3>
                 <div class="info-box">
-                    Uses real market data but all trades are simulated. No real money is at risk. Perfect for testing strategies, learning the system, and evaluating performance before committing real funds.
+                    <strong>The core thesis:</strong> Institutional traders need liquidity (orders to trade against) to fill their large positions. They deliberately push price to levels where retail traders have placed stop-losses, trigger those stops (creating liquidity), then reverse the market in their intended direction.
                 </div>
+                <p>A liquidity sweep occurs when price briefly spikes above resistance or below support, triggers stop-losses, then reverses. In Tarakta's expanded-footprint mode, a confirmed sweep on the 1H timeframe is the ONLY trigger for a new signal. The bot looks for sweeps of various levels including swing highs/lows, Fibonacci levels, and equal highs/lows.</p>
 
-                <h3>Live Trading</h3>
-                <div class="info-box">
-                    Real orders are placed on the exchange. Real money is used. Every profit is real, and every loss is real.
-                </div>
+                <h3>Displacement</h3>
+                <p>After a sweep, institutions make a strong move in their intended direction. This "displacement" is characterised by large-body candles with high volume and minimal wicks. The scanner awards 25 points for confirmed displacement because it proves institutional commitment &mdash; the sweep was not random.</p>
 
-                <h3>How to Switch</h3>
-                <p>Go to the Settings page and change the Trading Mode toggle. This is an admin-only action.</p>
+                <h3>Fair Value Gaps (FVGs)</h3>
+                <p>When price moves so fast that candle bodies don't overlap (candle 1's close and candle 3's open leave a gap with candle 2), it creates an imbalance zone. Price tends to return to fill these gaps before continuing. FVGs are used as potential entry zones &mdash; if the displacement creates an FVG, the pullback entry often targets the gap's midpoint.</p>
 
-                <h3>Before Going Live</h3>
-                <p>A recommended checklist:</p>
+                <h3>Order Blocks (OBs)</h3>
+                <p>An order block is the last candle before a strong institutional move. It represents the zone where institutions placed their orders. When price returns to an OB, it often finds support (bullish OB) or resistance (bearish OB). Agents use OBs to validate entry zones and set stop-losses.</p>
+
+                <h3>Market Structure</h3>
+                <p>Market structure describes the trend through swing highs and swing lows:</p>
                 <ul>
-                    <li>Look for consistent paper trading profits over at least several weeks.</li>
-                    <li>Understand every risk setting and what it controls.</li>
-                    <li>Start with small position sizes — you can always increase later.</li>
-                    <li>Monitor the dashboard daily, especially in the first week.</li>
+                    <li><strong>Break of Structure (BOS):</strong> Price breaks a recent swing high (bullish) or swing low (bearish), confirming trend continuation.</li>
+                    <li><strong>Change of Character (CHoCH):</strong> Price breaks structure in the opposite direction, signalling a potential trend reversal.</li>
                 </ul>
+                <p>The bot analyses structure on three timeframes (1H, 4H, 1D) with strength percentages. Higher-timeframe alignment (HTF) adds 15 points to the confluence score.</p>
+
+                <h3>Optimal Trade Entry (OTE)</h3>
+                <p>The OTE zone is the 61.8%&ndash;78.6% Fibonacci retracement of a displacement move. This is the statistically optimal area where price tends to pull back before continuing. When Agent 1 says WAIT_PULLBACK, it typically defines the entry zone around the OTE.</p>
+
+                <h3>Judas Swing</h3>
+                <p>A fake move at the open of a trading session designed to trap traders on the wrong side before the real move. The bot calculates the probability of a Judas swing based on funding rates, open interest, and the crowded side of the market.</p>
             </div>
         </div>
     </div>
@@ -460,33 +700,55 @@
     <div class="accordion-item" data-section="8">
         <div class="accordion-header" onclick="toggleSection(this)">
             <span class="accordion-number">08</span>
-            <span class="accordion-title">Settings &amp; Configuration</span>
+            <span class="accordion-title">Leverage, Futures &amp; Margin</span>
             <span class="accordion-chevron">&#9654;</span>
         </div>
         <div class="accordion-body">
             <div class="accordion-content">
-                <p>All settings are on the Settings page and take effect immediately — no restart needed.</p>
+                <p>Tarakta trades perpetual futures contracts on Binance. Understanding leverage and margin is critical.</p>
 
-                <h3>Leverage</h3>
-                <div class="info-box">
-                    How much borrowing power you are using. For example, 10x means $100 of your balance controls $1,000 worth of a position. <strong>Higher leverage = more potential profit AND more potential loss.</strong>
-                </div>
-
-                <h3>Margin Per Trade</h3>
-                <p>What percentage of your balance to use per trade. A smaller margin means smaller positions and lower risk per trade.</p>
-
-                <h3>Entry Threshold</h3>
-                <p>The minimum confluence score a signal needs before it is considered for trading. A higher threshold means fewer trades but higher quality setups.</p>
-
-                <h3>Agent Models</h3>
-                <p>Choose the AI model each agent uses:</p>
+                <h3>What Are Perpetual Futures?</h3>
+                <p>Unlike spot trading (buying and holding crypto), futures contracts let you profit from both rising and falling prices:</p>
                 <ul>
-                    <li><strong>Faster/cheaper models</strong> (nano, mini): Lower cost per decision, slightly less nuanced analysis.</li>
-                    <li><strong>Smarter/more expensive models</strong> (full GPT-5.3, GPT-5.4): Better analysis but higher API costs.</li>
+                    <li><strong>Long:</strong> You profit when price goes up. You lose when price goes down.</li>
+                    <li><strong>Short:</strong> You profit when price goes down. You lose when price goes up.</li>
+                </ul>
+                <p>"Perpetual" means the contract never expires. You can hold the position as long as you maintain margin.</p>
+
+                <h3>Leverage Explained</h3>
+                <div class="info-box">
+                    Leverage amplifies your position size. At <strong>10x leverage</strong>, $100 of margin controls $1,000 worth of a position. If price moves 1% in your favour, you make 10% on your margin. If it moves 1% against you, you lose 10%.
+                </div>
+                <p>Higher leverage means:</p>
+                <ul>
+                    <li>Larger potential profits per trade</li>
+                    <li>Larger potential losses per trade</li>
+                    <li>Liquidation happens at a closer price level</li>
+                    <li>Less margin tied up per position (more capital available for other trades)</li>
                 </ul>
 
-                <h3>Agent Toggles</h3>
-                <p>You can enable or disable each agent individually. Disabling an agent means its step in the pipeline is skipped.</p>
+                <h3>Margin &amp; Liquidation</h3>
+                <p><strong>Margin</strong> is the capital you put up to open a leveraged position. If the trade moves against you enough to exhaust your margin, the exchange "liquidates" the position &mdash; forcibly closes it, and you lose the margin.</p>
+                <div class="warn-box">
+                    <strong>The stop-loss prevents liquidation.</strong> Every trade has a stop-loss set well before the liquidation price. The bot's risk management ensures the SL triggers long before liquidation would occur.
+                </div>
+
+                <h3>Funding Rate</h3>
+                <p>Perpetual futures use a "funding rate" mechanism. Every 8 hours, one side pays the other:</p>
+                <ul>
+                    <li><strong>Positive funding:</strong> Longs pay shorts. Indicates the market is crowded long.</li>
+                    <li><strong>Negative funding:</strong> Shorts pay longs. Indicates the market is crowded short.</li>
+                </ul>
+                <p>The bot monitors funding rates as part of its leverage analysis. Extreme funding suggests crowded positioning and increases the probability of a Judas swing (fake move to liquidate the crowded side).</p>
+
+                <h3>What the Bot Monitors</h3>
+                <p>The leverage analysis module tracks:</p>
+                <ul>
+                    <li><strong>Open Interest (OI):</strong> Total value of outstanding futures contracts. Rising OI with price = real conviction. Rising OI against price = potential squeeze.</li>
+                    <li><strong>Long/Short Ratio:</strong> The balance between long and short positions. Extreme ratios indicate crowded trades.</li>
+                    <li><strong>Crowding Intensity:</strong> How extreme the positioning imbalance is (percentage).</li>
+                    <li><strong>Liquidation Levels:</strong> Estimated price levels where large clusters of long or short positions would be liquidated, creating liquidity for sweeps.</li>
+                </ul>
             </div>
         </div>
     </div>
@@ -495,38 +757,36 @@
     <div class="accordion-item" data-section="9">
         <div class="accordion-header" onclick="toggleSection(this)">
             <span class="accordion-number">09</span>
-            <span class="accordion-title">Understanding the Analytics</span>
+            <span class="accordion-title">Dashboard &amp; Pages</span>
             <span class="accordion-chevron">&#9654;</span>
         </div>
         <div class="accordion-body">
             <div class="accordion-content">
-                <h3>Key Metrics</h3>
+                <p>The navigation bar at the top links to every section. Here is what each page shows and how to use it:</p>
 
-                <div class="info-box">
-                    <strong>Win Rate:</strong> Percentage of trades that were profitable. Above 50% is good, above 60% is excellent.
-                </div>
+                <h3>Dashboard (/)</h3>
+                <p>Live overview of the system. Shows current balance, total PnL, open positions with real-time unrealised profit/loss, engine status, and active signals being monitored. The mode banner (Paper/Live) appears at the top of every page.</p>
 
-                <div class="info-box">
-                    <strong>P&amp;L (Profit and Loss):</strong> Your net result in dollars. The cumulative P&amp;L chart shows the overall performance trend over time.
-                </div>
+                <h3>Trades (/trades)</h3>
+                <p>Complete history of every trade. Each row shows: symbol, direction, entry/exit prices, PnL in dollars and percentage, R:R achieved, confluence score, exit reason (SL/TP1/TP2/TP3/stale/time), hold duration, and TP tier progress. Click any trade to see agent reasoning.</p>
 
-                <div class="info-box">
-                    <strong>R:R Ratio (Reward-to-Risk):</strong> If you risk $10 and gain $30, that is 3:1 R:R. An average above 2:1 across all trades is the target.
-                </div>
+                <h3>Signals (/signals)</h3>
+                <p>Every signal the scanner detected, whether it was actually traded or not. Shows confluence score, components that triggered, agent decisions, and outcome. Useful for reviewing "what the bot saw vs what it acted on" and identifying good signals that were wrongly skipped.</p>
 
-                <h3>Spotting Problems</h3>
-                <ul>
-                    <li>Declining win rate over time — the strategy may need adjustment.</li>
-                    <li>Large individual losses — risk settings may be too aggressive.</li>
-                    <li>Many consecutive losses — the market conditions may not suit the strategy.</li>
-                </ul>
+                <h3>Analytics (/analytics)</h3>
+                <p>Performance charts including: cumulative PnL curve, win rate over time (rolling window), R:R distribution histogram, trade duration distribution, performance by symbol, performance by direction (long vs short), and performance by time of day.</p>
 
-                <h3>What Success Looks Like</h3>
-                <ul>
-                    <li>A steady upward P&amp;L curve over weeks and months.</li>
-                    <li>Consistent R:R above 2:1 on average.</li>
-                    <li>Win rate holding above 50%.</li>
-                </ul>
+                <h3>Usage (/usage)</h3>
+                <p>API cost tracking dashboard. Shows spend by model, by agent (Agent 1/2/3/lessons), daily and cumulative cost charts. Configurable alert threshold warns when spend exceeds a set amount. Every LLM call logs tokens and cost to the api_usage table.</p>
+
+                <h3>Chart (/chart)</h3>
+                <p>Embedded TradingView chart for manual analysis of any trading pair. Useful for visually verifying what the bot is seeing &mdash; checking sweep levels, market structure, and entry zones against the actual chart.</p>
+
+                <h3>Settings (/settings)</h3>
+                <p>All configurable parameters. Changes take effect immediately &mdash; no restart needed. Settings are stored as config_overrides in the engine_state database table, keyed by instance ID.</p>
+
+                <h3>Training (/training)</h3>
+                <p>This page. A comprehensive guide to how Tarakta works.</p>
             </div>
         </div>
     </div>
@@ -535,6 +795,201 @@
     <div class="accordion-item" data-section="10">
         <div class="accordion-header" onclick="toggleSection(this)">
             <span class="accordion-number">10</span>
+            <span class="accordion-title">Settings &amp; Configuration Reference</span>
+            <span class="accordion-chevron">&#9654;</span>
+        </div>
+        <div class="accordion-body">
+            <div class="accordion-content">
+                <p>All settings take effect immediately. They are stored in the database as config overrides, so they persist across deploys and restarts.</p>
+
+                <h3>Trading Parameters</h3>
+                <table class="score-table">
+                    <tr><th>Setting</th><th>What It Controls</th></tr>
+                    <tr><td>Trading Mode</td><td>Paper (simulated) or Live (real money). Admin-only.</td></tr>
+                    <tr><td>Leverage</td><td>Position leverage multiplier (e.g., 10x). Higher = more amplified gains and losses.</td></tr>
+                    <tr><td>Margin Mode</td><td>Cross (shared margin) or Isolated (per-position margin).</td></tr>
+                    <tr><td>Entry Threshold</td><td>Minimum confluence score to consider a signal. Higher = fewer but better trades.</td></tr>
+                    <tr><td>Scan Interval</td><td>How often (in minutes) the scanner checks all markets.</td></tr>
+                    <tr><td>Quote Currencies</td><td>Which quote currencies to trade (e.g., USDT).</td></tr>
+                </table>
+
+                <h3>Risk Parameters</h3>
+                <table class="score-table">
+                    <tr><th>Setting</th><th>What It Controls</th></tr>
+                    <tr><td>Max Risk %</td><td>Maximum loss per trade as % of balance.</td></tr>
+                    <tr><td>Max SL %</td><td>Maximum stop-loss distance from entry price.</td></tr>
+                    <tr><td>Max Position %</td><td>Maximum margin per position as % of balance.</td></tr>
+                    <tr><td>Max Exposure %</td><td>Total portfolio exposure limit across all positions.</td></tr>
+                    <tr><td>Max Concurrent</td><td>Maximum open positions at once.</td></tr>
+                    <tr><td>Max Daily Trades</td><td>Hard cap on trades per day.</td></tr>
+                    <tr><td>Max Daily Drawdown</td><td>Maximum daily loss before trading pauses.</td></tr>
+                    <tr><td>Circuit Breaker %</td><td>Total loss threshold that halts all trading.</td></tr>
+                    <tr><td>Min R:R Ratio</td><td>Minimum reward-to-risk ratio for trade acceptance.</td></tr>
+                    <tr><td>Max Hold Hours</td><td>Maximum time a position can stay open.</td></tr>
+                    <tr><td>Cooldown Hours</td><td>Wait time after consecutive losses.</td></tr>
+                </table>
+
+                <h3>Agent Configuration</h3>
+                <table class="score-table">
+                    <tr><th>Setting</th><th>What It Controls</th></tr>
+                    <tr><td>Agent 1 Enabled</td><td>Toggle Agent 1 (strategic analysis). If off, signals go directly to scoring.</td></tr>
+                    <tr><td>Agent 2 / Entry Refiner</td><td>Toggle Agent 2 (entry timing). If off, trades enter at scanner price.</td></tr>
+                    <tr><td>Agent 3 / Position Agent</td><td>Toggle Agent 3 (position management). If off, trades only exit via hard SL/TP.</td></tr>
+                    <tr><td>Agent Model</td><td>Which OpenAI model each agent uses. Faster/cheaper (nano, mini) or smarter (full GPT).</td></tr>
+                </table>
+
+                <h3>Feature Toggles</h3>
+                <table class="score-table">
+                    <tr><th>Setting</th><th>What It Controls</th></tr>
+                    <tr><td>RAG Enabled</td><td>Toggle the knowledge retrieval system (learning from past trades).</td></tr>
+                    <tr><td>Footprint Enabled</td><td>Toggle the order flow confirmation gate.</td></tr>
+                    <tr><td>Weekly Cycle Enabled</td><td>Toggle Monday penalty / mid-week bonus scoring adjustments.</td></tr>
+                    <tr><td>TP Tiers Enabled</td><td>Toggle three-tier take-profit system vs single TP.</td></tr>
+                    <tr><td>BTC Macro Gate</td><td>Toggle blocking altcoin trades when BTC is crashing.</td></tr>
+                    <tr><td>Funding Gate</td><td>Toggle blocking trades against extreme funding rates.</td></tr>
+                </table>
+
+                <div class="warn-box">
+                    <strong>Important:</strong> After changing agent model defaults, stale model names may persist in the database's config_overrides. If agents seem to be using old models, clear the overrides from the Settings page or database.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 11 -->
+    <div class="accordion-item" data-section="11">
+        <div class="accordion-header" onclick="toggleSection(this)">
+            <span class="accordion-number">11</span>
+            <span class="accordion-title">Bot Instances</span>
+            <span class="accordion-chevron">&#9654;</span>
+        </div>
+        <div class="accordion-body">
+            <div class="accordion-content">
+                <p>Tarakta can run multiple independent bot instances from the same codebase, each with its own identity, trade history, and configuration. This lets you test improvements without disrupting a running bot.</p>
+
+                <h3>Active Instances</h3>
+                <div class="glossary-grid">
+                    <div class="glossary-item">
+                        <span class="glossary-term">tarakta-expanded</span>
+                        <span class="glossary-def">The original production bot. Uses the expanded-footprint scanner mode. Dashboard: <a href="https://tarakta-expanded.fly.dev" target="_blank" style="color: #6C63FF;">tarakta-expanded.fly.dev</a></span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">tarakta-stream</span>
+                        <span class="glossary-def">Enhanced version with improved AI decision quality. Includes fixed RAG embeddings, lower agent temperatures for consistency, stricter entry gates, and sentiment-aware entry timing. Dashboard: <a href="https://tarakta-stream.fly.dev" target="_blank" style="color: #6C63FF;">tarakta-stream.fly.dev</a></span>
+                    </div>
+                </div>
+
+                <h3>How Isolation Works</h3>
+                <div class="info-box">
+                    Each instance has a unique <strong>INSTANCE_ID</strong> that keys its engine state, open positions, and configuration overrides in the shared database. Two bots can run the same code against the same exchange without interfering with each other. They share the same knowledge base (RAG) and trade lessons, so learnings from one bot benefit the other.
+                </div>
+
+                <h3>What Changed in tarakta-stream</h3>
+                <ul>
+                    <li><strong>RAG fix (critical):</strong> Embeddings were stored as JSON strings instead of pgvector arrays, completely breaking the dense search component of hybrid retrieval. Agents were seeing "No similar past trades found" on every signal. Now fixed &mdash; agents can actually learn from past trade outcomes.</li>
+                    <li><strong>Lower temperatures:</strong> Agent 1 (0.4), Agent 2 (0.5), Agent 3 (0.3) &mdash; down from 1.0. At temperature 1.0, the same signal could produce opposite decisions. Lower temperatures make decisions consistent and repeatable.</li>
+                    <li><strong>Must-reach-price gate enforced:</strong> Agent 2 now MUST wait for the institutional displacement move to occur before entering. Previously the gate was advisory ("note it but proceed"), allowing premature entries before the thesis was confirmed.</li>
+                    <li><strong>Sentiment passed to Agent 2:</strong> Agent 2 now sees the sentiment score (-10 to +10) and recent news headlines. Previously it was blind to news events that occurred between Agent 1's analysis and Agent 2's entry decision.</li>
+                    <li><strong>Lesson framing:</strong> Agents 2 and 3 now receive explicit "IMPORTANT: apply these lessons" instructions. Previously, lessons were appended as raw text at the end of the prompt with no emphasis &mdash; agents often ignored them.</li>
+                    <li><strong>Smarter lesson priority:</strong> Symbol-specific lessons matching the agent are shown first, then high-severity general lessons, then medium. Previously, generic high-severity lessons could fill all slots and crowd out relevant symbol-specific ones.</li>
+                    <li><strong>Richer RAG queries:</strong> Trade history retrieval now includes market regime (trending/ranging) and displacement context, not just the symbol and sweep type. Produces more relevant historical matches.</li>
+                    <li><strong>Better error logging:</strong> Advisor insight failures and RAG retrieval failures are now logged instead of silently swallowed, making it possible to diagnose issues.</li>
+                </ul>
+
+                <h3>Comparing Performance</h3>
+                <p>Both bots share the same Supabase database but use separate instance IDs. You can compare their results by viewing each dashboard separately. The goal is to validate that tarakta-stream makes better decisions (higher win rate, better R:R, fewer premature entries) before promoting its changes.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 12 -->
+    <div class="accordion-item" data-section="12">
+        <div class="accordion-header" onclick="toggleSection(this)">
+            <span class="accordion-number">12</span>
+            <span class="accordion-title">Paper vs Live Trading</span>
+            <span class="accordion-chevron">&#9654;</span>
+        </div>
+        <div class="accordion-body">
+            <div class="accordion-content">
+                <h3>Paper Trading</h3>
+                <div class="info-box">
+                    Uses real market data but all trades are simulated. No real money is at risk. The paper trading wrapper tracks positions, SL/TP levels, and PnL as if trades were real. Perfect for testing strategies, validating changes, and evaluating performance.
+                </div>
+
+                <h3>Live Trading</h3>
+                <div class="info-box">
+                    Real orders are placed on Binance Futures. Real money is used. Every profit and every loss is real. Slippage, fees, and funding payments apply.
+                </div>
+
+                <h3>Differences Between Paper and Live</h3>
+                <ul>
+                    <li><strong>Slippage:</strong> Paper trades execute at exact prices. Live trades may get slightly worse fills, especially on volatile pairs or large positions.</li>
+                    <li><strong>Fees:</strong> Paper mode may not perfectly model exchange fees. Live mode incurs maker/taker fees on every trade.</li>
+                    <li><strong>Funding:</strong> Live positions pay/receive funding every 8 hours. Paper mode simulates this.</li>
+                    <li><strong>Liquidity:</strong> Paper mode assumes infinite liquidity. Live mode may face partial fills on low-volume pairs.</li>
+                </ul>
+
+                <h3>How to Switch</h3>
+                <p>Go to the Settings page and change the Trading Mode. This is an admin-only action.</p>
+
+                <h3>Before Going Live</h3>
+                <ul>
+                    <li>Run paper trading for at least 2&ndash;4 weeks with consistent profitability.</li>
+                    <li>Understand every risk setting and what happens when it triggers.</li>
+                    <li>Start with minimal leverage and small position sizes &mdash; you can always increase later.</li>
+                    <li>Monitor the dashboard daily, especially in the first week. Check the Analytics page for trends.</li>
+                    <li>Ensure the circuit breaker is set at a level you are comfortable with as a maximum loss.</li>
+                    <li>Keep API key permissions minimal &mdash; the bot needs futures trading permission but not withdrawal permission.</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- 13 -->
+    <div class="accordion-item" data-section="13">
+        <div class="accordion-header" onclick="toggleSection(this)">
+            <span class="accordion-number">13</span>
+            <span class="accordion-title">Understanding the Analytics</span>
+            <span class="accordion-chevron">&#9654;</span>
+        </div>
+        <div class="accordion-body">
+            <div class="accordion-content">
+                <h3>Key Metrics</h3>
+                <table class="score-table">
+                    <tr><th>Metric</th><th>What It Means</th><th>Target</th></tr>
+                    <tr><td>Win Rate</td><td>Percentage of trades that were profitable.</td><td>Above 50% is good, above 60% is excellent.</td></tr>
+                    <tr><td>P&amp;L</td><td>Net profit/loss in dollars. The cumulative chart shows the overall trajectory.</td><td>Steady upward curve over weeks.</td></tr>
+                    <tr><td>Average R:R</td><td>Average reward-to-risk ratio across all trades. A 3:1 R:R means average profit was 3x the average loss.</td><td>Above 2:1 across all trades.</td></tr>
+                    <tr><td>Max Drawdown</td><td>The largest peak-to-trough decline in balance. Measures worst-case scenario experienced.</td><td>Below 15% of peak balance.</td></tr>
+                    <tr><td>Profit Factor</td><td>Total gross profit divided by total gross loss. Above 1.0 = profitable overall.</td><td>Above 1.5 is solid, above 2.0 is excellent.</td></tr>
+                    <tr><td>Average Hold Time</td><td>How long trades are open on average. Shorter = faster turnover of capital.</td><td>Depends on strategy, typically 1&ndash;8 hours.</td></tr>
+                </table>
+
+                <h3>Spotting Problems</h3>
+                <ul>
+                    <li><strong>Declining win rate over time:</strong> The market regime may have changed (trending to ranging) or the strategy needs recalibration.</li>
+                    <li><strong>Large individual losses:</strong> Check if SL settings are too wide or if the agents are placing stops poorly.</li>
+                    <li><strong>Many consecutive losses:</strong> Could indicate wrong market conditions for the strategy. The cooldown should kick in, but consider pausing manually.</li>
+                    <li><strong>High win rate but flat/negative PnL:</strong> Winners are too small relative to losers. The R:R ratio needs improvement &mdash; either tighter stops or wider take-profits.</li>
+                    <li><strong>API costs increasing without more trades:</strong> Agents may be retrying failed calls or the model is too expensive for the trade frequency.</li>
+                </ul>
+
+                <h3>What Success Looks Like</h3>
+                <ul>
+                    <li>A steady upward P&amp;L curve over weeks and months (not just a few good days).</li>
+                    <li>Consistent R:R above 2:1 on average &mdash; winners significantly larger than losers.</li>
+                    <li>Win rate holding above 50%, ideally 55&ndash;65%.</li>
+                    <li>Drawdowns recovering relatively quickly (weeks, not months).</li>
+                    <li>Lessons being generated and applied &mdash; the bot gets measurably smarter over time.</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- 14 -->
+    <div class="accordion-item" data-section="14">
+        <div class="accordion-header" onclick="toggleSection(this)">
+            <span class="accordion-number">14</span>
             <span class="accordion-title">Glossary &amp; Key Terms</span>
             <span class="accordion-chevron">&#9654;</span>
         </div>
@@ -542,68 +997,128 @@
             <div class="accordion-content">
                 <div class="glossary-grid">
                     <div class="glossary-item">
+                        <span class="glossary-term">Absorption</span>
+                        <span class="glossary-def">Large limit orders sitting at a price level, absorbing aggressive orders from the opposite side. Indicates institutional defence of a level.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">BOS (Break of Structure)</span>
+                        <span class="glossary-def">When price breaks a recent swing high (bullish BOS) or swing low (bearish BOS), confirming trend continuation.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">CHoCH (Change of Character)</span>
+                        <span class="glossary-def">When price breaks structure in the opposite direction of the trend, signalling a potential reversal.</span>
+                    </div>
+                    <div class="glossary-item">
                         <span class="glossary-term">Circuit Breaker</span>
-                        <span class="glossary-def">An automatic safety switch that halts all trading when total losses exceed a set threshold. Prevents catastrophic drawdowns.</span>
+                        <span class="glossary-def">Automatic safety switch that halts all trading when total losses exceed a set threshold. Prevents catastrophic drawdowns.</span>
                     </div>
                     <div class="glossary-item">
                         <span class="glossary-term">Confluence</span>
-                        <span class="glossary-def">When multiple technical indicators agree on the same trade direction. More confluence means higher confidence in the trade.</span>
+                        <span class="glossary-def">When multiple technical indicators agree on the same trade direction. Measured as a score out of 100. More confluence = higher confidence.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Cumulative Delta</span>
+                        <span class="glossary-def">Running total of aggressive buy volume minus aggressive sell volume. Positive delta = net buying pressure. Negative = net selling.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Displacement</span>
+                        <span class="glossary-def">A strong, high-volume price move away from a sweep level. Proves institutional commitment behind the reversal.</span>
                     </div>
                     <div class="glossary-item">
                         <span class="glossary-term">Drawdown</span>
-                        <span class="glossary-def">The decline from a peak balance to a trough. A 10% drawdown on a $10,000 account means the balance dropped to $9,000.</span>
+                        <span class="glossary-def">The decline from a peak balance to a trough. A 10% drawdown on $10,000 means balance dropped to $9,000.</span>
                     </div>
                     <div class="glossary-item">
                         <span class="glossary-term">Entry Threshold</span>
-                        <span class="glossary-def">The minimum confluence score a signal must reach before it is considered for trading. Higher threshold = fewer, higher-quality trades.</span>
+                        <span class="glossary-def">Minimum confluence score a signal must reach to be considered. Higher threshold = fewer, higher-quality trades.</span>
                     </div>
                     <div class="glossary-item">
                         <span class="glossary-term">Fair Value Gap (FVG)</span>
-                        <span class="glossary-def">A price imbalance created when price moves too fast, leaving a gap. Price tends to return to fill these gaps.</span>
+                        <span class="glossary-def">A price imbalance where candle bodies don't overlap, leaving a gap. Price tends to return to fill these gaps.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Footprint</span>
+                        <span class="glossary-def">Real-time order flow analysis. Examines the trade tape to see buyer/seller pressure, delta, absorption, and OI changes.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Funding Rate</span>
+                        <span class="glossary-def">Periodic payment between long and short futures holders. Positive funding = longs pay shorts (market crowded long).</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">HTF (Higher Timeframe)</span>
+                        <span class="glossary-def">Longer-period charts (4H, 1D) used to determine the larger trend. HTF alignment means the trade direction matches the bigger picture.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Judas Swing</span>
+                        <span class="glossary-def">A fake move at the open of a session designed to trap traders before the real move. Probability is calculated from funding and OI data.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Kill Zone</span>
+                        <span class="glossary-def">The first 1-2 hours of a major session (London/NY) when institutional manipulation (sweeps) is most likely.</span>
                     </div>
                     <div class="glossary-item">
                         <span class="glossary-term">Leverage</span>
-                        <span class="glossary-def">Borrowing power that amplifies your position size. 10x leverage means $100 controls a $1,000 position. Amplifies both gains and losses equally.</span>
+                        <span class="glossary-def">Borrowing power that amplifies position size. 10x means $100 controls $1,000. Amplifies both gains and losses.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Liquidation</span>
+                        <span class="glossary-def">Forced closure of a position when losses exhaust the margin. The bot's SL triggers well before this level.</span>
                     </div>
                     <div class="glossary-item">
                         <span class="glossary-term">Liquidity Sweep</span>
-                        <span class="glossary-def">When price briefly spikes past a key level to trigger stop-losses, then reverses. Often signals the start of a genuine price move.</span>
+                        <span class="glossary-def">Price spikes past a key level to trigger stop-losses, then reverses. The primary signal in expanded-footprint mode.</span>
                     </div>
                     <div class="glossary-item">
                         <span class="glossary-term">Margin</span>
-                        <span class="glossary-def">The amount of your own capital used to open a leveraged position. Your actual money at risk in a trade.</span>
+                        <span class="glossary-def">Your capital used to open a leveraged position. Your actual money at risk in a trade.</span>
                     </div>
                     <div class="glossary-item">
                         <span class="glossary-term">Market Structure</span>
-                        <span class="glossary-def">The pattern of highs and lows that defines a trend. Higher highs/higher lows = uptrend. Lower highs/lower lows = downtrend.</span>
+                        <span class="glossary-def">The pattern of swing highs/lows defining a trend. Analysed on 1H, 4H, and 1D with strength percentages.</span>
                     </div>
                     <div class="glossary-item">
-                        <span class="glossary-term">Order Block</span>
-                        <span class="glossary-def">A price zone where institutional traders previously placed large orders. Acts as strong support or resistance.</span>
+                        <span class="glossary-term">Open Interest (OI)</span>
+                        <span class="glossary-def">Total value of outstanding futures contracts. Rising OI = new money entering. Falling OI = positions closing.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">Order Block (OB)</span>
+                        <span class="glossary-def">The last candle before a strong institutional move. Marks the zone where institutions placed orders. Acts as support/resistance.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">OTE (Optimal Trade Entry)</span>
+                        <span class="glossary-def">The 61.8%-78.6% Fibonacci retracement zone of a displacement move. The ideal pullback entry area.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">P&amp;L</span>
+                        <span class="glossary-def">Profit and Loss. Net financial result of trading, measured in dollars.</span>
                     </div>
                     <div class="glossary-item">
                         <span class="glossary-term">Paper Trading</span>
                         <span class="glossary-def">Simulated trading using real market data but no real money. Used for testing and evaluation.</span>
                     </div>
                     <div class="glossary-item">
-                        <span class="glossary-term">P&amp;L</span>
-                        <span class="glossary-def">Profit and Loss. The net financial result of trading activity, measured in dollars.</span>
+                        <span class="glossary-term">RAG</span>
+                        <span class="glossary-def">Retrieval-Augmented Generation. The bot's knowledge system that retrieves similar past trades to inform current decisions.</span>
                     </div>
                     <div class="glossary-item">
                         <span class="glossary-term">R:R Ratio</span>
-                        <span class="glossary-def">Reward-to-Risk ratio. Compares potential profit to potential loss. A 3:1 R:R means you stand to gain 3x what you are risking.</span>
+                        <span class="glossary-def">Reward-to-Risk ratio. A 3:1 R:R means potential profit is 3x the potential loss.</span>
+                    </div>
+                    <div class="glossary-item">
+                        <span class="glossary-term">RVOL (Relative Volume)</span>
+                        <span class="glossary-def">Current volume compared to the average for that time period. RVOL of 2.0 means volume is 2x normal.</span>
                     </div>
                     <div class="glossary-item">
                         <span class="glossary-term">SL (Stop Loss)</span>
-                        <span class="glossary-def">A pre-set price level where a trade automatically closes to limit losses. Every trade must have one.</span>
+                        <span class="glossary-def">Pre-set price where a trade closes to limit losses. Every trade must have one. Non-negotiable.</span>
                     </div>
                     <div class="glossary-item">
                         <span class="glossary-term">Smart Money Concepts (SMC)</span>
-                        <span class="glossary-def">A trading methodology based on how institutional traders (banks, hedge funds) operate. Focuses on order blocks, liquidity sweeps, and fair value gaps.</span>
+                        <span class="glossary-def">Trading methodology based on how banks and hedge funds operate. Focuses on sweeps, order blocks, FVGs, and displacement.</span>
                     </div>
                     <div class="glossary-item">
                         <span class="glossary-term">TP (Take Profit)</span>
-                        <span class="glossary-def">A pre-set price level where a trade automatically closes to lock in profit. Tarakta uses three levels: TP1, TP2, and TP3.</span>
+                        <span class="glossary-def">Pre-set price where a trade closes to lock in profit. Tarakta uses three tiers: TP1 (quick lock-in), TP2 (medium), TP3 (runner).</span>
                     </div>
                 </div>
             </div>
