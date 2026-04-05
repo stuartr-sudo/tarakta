@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Tarakta - Settings{% endblock %}
+{% block topbar_title %}Settings{% endblock %}
 
 {% block content %}
 <div class="page-header">
@@ -121,8 +122,8 @@
                         <code style="color:var(--text-muted);">sk-...{{ api_key_hint }}</code>
                         <span style="font-size:0.7rem; color:var(--text-muted);">({{ api_key_source }})</span>
                         {% else %}
-                        <span class="pulse-dot" style="background:#ef4444;"></span>
-                        <span style="color:#ef4444;">Not configured</span>
+                        <span class="pulse-dot" style="background:#e040fb;"></span>
+                        <span style="color:#e040fb;">Not configured</span>
                         {% endif %}
                         <button class="btn small" onclick="showApiKeyInput()" style="font-size:0.7rem; padding:2px 8px;">Update</button>
                         {% if api_key_source == 'db' %}
@@ -193,7 +194,7 @@
     </div>
 
     <!-- Agent 2: Refiner Monitor -->
-    <div class="panel" style="border-left: 3px solid {{ '#22c55e' if refiner_agent_enabled else '#64748b' }};">
+    <div class="panel" style="border-left: 3px solid {{ '#00e5d4' if refiner_agent_enabled else '#64748b' }};">
         <div class="panel-header">
             <h2>Agent 2 — Entry Timer</h2>
             <span class="status-badge {{ 'open' if refiner_agent_enabled else 'paper' }}">
@@ -249,7 +250,7 @@
 </div>
 
 <!-- Agent 3: Position Manager -->
-<div class="panel" style="border-left: 3px solid {{ '#22c55e' if position_agent_enabled else '#64748b' }};">
+<div class="panel" style="border-left: 3px solid {{ '#00e5d4' if position_agent_enabled else '#64748b' }};">
     <div class="panel-header">
         <h2>Agent 3 — Position Manager</h2>
         <span class="status-badge {{ 'open' if position_agent_enabled else 'paper' }}">
@@ -378,10 +379,10 @@
 </div>
 
 <!-- Weekly Cycle Settings -->
-<div class="panel" style="border-left: 3px solid #f59e0b;">
+<div class="panel" style="border-left: 3px solid #00e5d4;">
     <div class="panel-header">
         <h2>Weekly Cycle
-            <span id="weekly-toggle-badge" class="badge" style="font-size:0.7rem; background:{{ '#22c55e' if config.weekly_cycle_enabled else '#ef4444' }}; color:#fff;">
+            <span id="weekly-toggle-badge" class="badge" style="font-size:0.7rem; background:{{ '#00e5d4' if config.weekly_cycle_enabled else 'rgba(224,64,251,0.12)' }}; color:{{ '#040812' if config.weekly_cycle_enabled else '#e040fb' }};">
                 {{ 'ON' if config.weekly_cycle_enabled else 'OFF' }}
             </span>
         </h2>
@@ -488,7 +489,7 @@ Object.entries(SETTINGS).forEach(([key, s]) => {
 async function saveSetting(payload) {
     const st = document.getElementById('settings-save-status');
     st.textContent = 'Saving...';
-    st.style.color = '#f59e0b';
+    st.style.color = '#00e5d4';
     try {
         const resp = await fetch(apiUrl('/api/main/settings'), {
             method: 'POST',
@@ -498,14 +499,14 @@ async function saveSetting(payload) {
         const data = await resp.json();
         if (data.success) {
             st.textContent = 'Saved';
-            st.style.color = '#22c55e';
+            st.style.color = '#00e5d4';
         } else {
             st.textContent = data.error || 'Error';
-            st.style.color = '#ef4444';
+            st.style.color = '#e040fb';
         }
     } catch (e) {
         st.textContent = 'Failed';
-        st.style.color = '#ef4444';
+        st.style.color = '#e040fb';
     }
     setTimeout(() => { st.textContent = 'Live'; st.style.color = 'var(--text-muted)'; }, 3000);
 }
@@ -517,7 +518,8 @@ async function toggleWeeklyCycle() {
     const newVal = !isOn;
     await saveSetting({weekly_cycle_enabled: newVal});
     badge.textContent = newVal ? 'ON' : 'OFF';
-    badge.style.background = newVal ? '#22c55e' : '#ef4444';
+    badge.style.background = newVal ? '#00e5d4' : 'rgba(224,64,251,0.12)';
+    badge.style.color = newVal ? '#040812' : '#e040fb';
     btn.textContent = newVal ? 'Disable' : 'Enable';
 }
 
@@ -528,7 +530,7 @@ async function switchAgentModel(agentKey, selectId) {
     if (!sel) return;
     const model = sel.value;
     status.textContent = 'Saving...';
-    status.style.color = '#f59e0b';
+    status.style.color = '#00e5d4';
     try {
         const resp = await fetch(apiUrl('/api/agent-model'), {
             method: 'POST',
@@ -538,14 +540,14 @@ async function switchAgentModel(agentKey, selectId) {
         const data = await resp.json();
         if (data.error) {
             status.textContent = data.error;
-            status.style.color = '#ef4444';
+            status.style.color = '#e040fb';
         } else {
             status.textContent = 'Saved';
-            status.style.color = '#22c55e';
+            status.style.color = '#00e5d4';
         }
     } catch (e) {
         status.textContent = 'Failed';
-        status.style.color = '#ef4444';
+        status.style.color = '#e040fb';
     }
     setTimeout(() => { status.textContent = ''; }, 3000);
 }
@@ -572,8 +574,8 @@ async function saveApiKey() {
     const field = document.getElementById('api-key-field');
     const status = document.getElementById('api-key-status');
     const key = field.value.trim();
-    if (!key) { status.textContent = 'Enter a key'; status.style.color = '#ef4444'; return; }
-    status.textContent = 'Saving...'; status.style.color = '#f59e0b';
+    if (!key) { status.textContent = 'Enter a key'; status.style.color = '#e040fb'; return; }
+    status.textContent = 'Saving...'; status.style.color = '#00e5d4';
     try {
         const resp = await fetch(apiUrl('/api/settings/api-key'), {
             method: 'POST',
@@ -582,13 +584,13 @@ async function saveApiKey() {
         });
         const data = await resp.json();
         if (data.error) {
-            status.textContent = data.error; status.style.color = '#ef4444';
+            status.textContent = data.error; status.style.color = '#e040fb';
         } else {
-            status.textContent = 'Saved! Reloading...'; status.style.color = '#22c55e';
+            status.textContent = 'Saved! Reloading...'; status.style.color = '#00e5d4';
             setTimeout(() => location.reload(), 1000);
         }
     } catch (e) {
-        status.textContent = 'Failed'; status.style.color = '#ef4444';
+        status.textContent = 'Failed'; status.style.color = '#e040fb';
     }
 }
 async function clearApiKey() {

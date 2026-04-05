@@ -1,0 +1,254 @@
+{% extends "base.html" %}
+{% block title %}Tarakta - MM Engine{% endblock %}
+{% block topbar_title %}MM Engine{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="page-header">
+    <div>
+        <h1>MM Engine
+            <span class="account-badge" style="background:rgba(0,229,212,0.12); color:#00e5d4;">Algorithmic</span>
+            <span id="mm-status-badge" class="status-badge closed-loss">LOADING</span>
+        </h1>
+        <span class="subtitle">Market Makers Method — zero LLM, purely mechanical</span>
+    </div>
+    {% if role == 'admin' %}
+    <div style="display:flex; align-items:center; gap:8px;">
+        <button id="mm-start-btn" class="btn primary" onclick="toggleMMEngine()" disabled>▶ Start</button>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Stat Cards -->
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-label">Balance</div>
+        <div class="stat-value" id="mm-balance">${{ "%.0f" | format(config.mm_initial_balance | default(10000) | float) }}</div>
+        <div class="stat-sub">of ${{ "%.0f" | format(config.mm_initial_balance | default(10000) | float) }} initial</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Cycle</div>
+        <div class="stat-value sm" id="mm-cycle">0</div>
+        <div class="stat-sub">scan every {{ config.mm_scan_interval_minutes | default(5) }} min</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Session</div>
+        <div class="stat-value sm" id="mm-session">—</div>
+        <div class="stat-sub" id="mm-session-sub">loading...</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Open Positions</div>
+        <div class="stat-value sm" id="mm-positions">0</div>
+        <div class="stat-sub">max {{ config.mm_max_positions | default(3) }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Risk / Trade</div>
+        <div class="stat-value sm">{{ config.mm_risk_per_trade_pct | default(1.0) }}%</div>
+        <div class="stat-sub">of MM balance</div>
+    </div>
+    {% if mm_stats and mm_stats.total > 0 %}
+    <div class="stat-card">
+        <div class="stat-label">Win Rate</div>
+        <div class="stat-value sm">{{ "%.0f" | format(mm_stats.win_rate * 100) }}%</div>
+        <div class="stat-sub">{{ mm_stats.wins }}W / {{ mm_stats.losses }}L ({{ mm_stats.total }})</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Total P&L</div>
+        <div class="stat-value sm {{ 'positive' if mm_stats.total_pnl >= 0 else 'negative' }}">
+            {{ "+" if mm_stats.total_pnl >= 0 else "" }}${{ "%.2f" | format(mm_stats.total_pnl) }}
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Avg P&L</div>
+        <div class="stat-value sm {{ 'positive' if mm_stats.avg_pnl >= 0 else 'negative' }}">
+            {{ "+" if mm_stats.avg_pnl >= 0 else "" }}${{ "%.2f" | format(mm_stats.avg_pnl) }}
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Open MM Positions -->
+<div class="panel" id="mm-positions-panel">
+    <div class="panel-header">
+        <h2>Open Positions <span id="mm-pos-badge" class="badge" style="background:var(--teal-dim);color:var(--teal);">0</span></h2>
+    </div>
+    <div id="mm-positions-body" class="panel-body no-pad" style="display:none;">
+        <div class="overflow-x">
+            <table class="data-table" id="mm-positions-table">
+                <thead>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Direction</th>
+                        <th>Entry</th>
+                        <th>Stop Loss</th>
+                        <th>Level</th>
+                        <th>Closed %</th>
+                        <th>Trade ID</th>
+                    </tr>
+                </thead>
+                <tbody id="mm-positions-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+    <div id="mm-positions-empty" class="empty-state">
+        <p>No open MM positions. The engine will enter trades when confluence conditions are met.</p>
+    </div>
+</div>
+
+<!-- Closed MM Trades -->
+<div class="panel">
+    <div class="panel-header">
+        <h2>Recent MM Trades</h2>
+    </div>
+    {% if mm_trades %}
+    <div class="panel-body no-pad">
+        <div class="overflow-x">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Dir</th>
+                        <th>Entry</th>
+                        <th>Exit</th>
+                        <th>P&L</th>
+                        <th>Grade</th>
+                        <th>Formation</th>
+                        <th>Phase</th>
+                        <th>Reason</th>
+                        <th>Time</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for t in mm_trades %}
+                    <tr>
+                        <td><strong>{{ t.symbol | replace(':USDT','') | replace('/USDT','') }}</strong></td>
+                        <td><span class="dir-badge {{ 'long' if t.direction == 'long' else 'short' }}">{{ t.direction | upper }}</span></td>
+                        <td class="mono">${{ "%.6f" | format(t.entry_price | default(0) | float) }}</td>
+                        <td class="mono">{% if t.exit_price %}${{ "%.6f" | format(t.exit_price | float) }}{% else %}—{% endif %}</td>
+                        <td class="mono {{ 'positive' if (t.pnl_usd or 0) | float >= 0 else 'negative' }}">
+                            {% if t.pnl_usd is not none %}{{ "+" if t.pnl_usd | float >= 0 else "" }}${{ "%.2f" | format(t.pnl_usd | float) }}{% else %}—{% endif %}
+                        </td>
+                        <td>{{ t.mm_confluence_grade | default('—') }}</td>
+                        <td>{{ t.mm_formation | default('—') }}</td>
+                        <td>{{ t.mm_cycle_phase | default('—') }}</td>
+                        <td style="font-size:0.7rem; max-width:200px; overflow:hidden; text-overflow:ellipsis;">{{ t.exit_reason | default(t.entry_reason | default('—')) }}</td>
+                        <td style="font-size:0.7rem;">{{ t.created_at[:16] if t.created_at else '—' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <p>No MM Method trades yet. Trades will appear here once the engine enters positions.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let _mmScanning = false;
+let _mmAvailable = false;
+
+async function loadMMStatus() {
+    try {
+        const resp = await fetch(apiUrl('/api/mm/status'));
+        const data = await resp.json();
+        _mmAvailable = data.available;
+        _mmScanning = data.scanning_active;
+        updateMMPage(data);
+    } catch (e) {
+        console.error('MM status fetch failed:', e);
+    }
+}
+
+function updateMMPage(data) {
+    const btn = document.getElementById('mm-start-btn');
+    const badge = document.getElementById('mm-status-badge');
+
+    if (!data.available) {
+        if (badge) { badge.textContent = 'DISABLED'; badge.style.background = 'rgba(255,255,255,0.06)'; badge.style.color = 'var(--text-muted)'; }
+        if (btn) { btn.disabled = true; btn.textContent = 'N/A'; }
+        return;
+    }
+
+    if (btn) btn.disabled = false;
+
+    if (data.is_weekend) {
+        if (badge) { badge.textContent = 'WEEKEND'; badge.style.background = 'rgba(255,170,0,0.12)'; badge.style.color = '#ffaa00'; }
+        if (btn) { btn.textContent = _mmScanning ? '⏹ Stop' : '▶ Start'; btn.style.background = '#e040fb'; }
+        document.getElementById('mm-session-sub').textContent = 'Weekend — no trading';
+    } else if (_mmScanning) {
+        if (btn) { btn.textContent = '⏹ Stop'; btn.style.background = '#e040fb'; }
+        if (badge) { badge.textContent = 'SCANNING'; badge.style.background = '#00e5d4'; badge.style.color = '#040812'; }
+        document.getElementById('mm-session-sub').textContent = 'actively scanning';
+    } else {
+        if (btn) { btn.textContent = '▶ Start'; btn.style.background = '#e040fb'; }
+        if (badge) { badge.textContent = 'PAUSED'; badge.style.background = 'rgba(224,64,251,0.12)'; badge.style.color = '#e040fb'; }
+        document.getElementById('mm-session-sub').textContent = 'paused — managing positions only';
+    }
+
+    // Update stat cards
+    const cycleEl = document.getElementById('mm-cycle');
+    const sessionEl = document.getElementById('mm-session');
+    const posEl = document.getElementById('mm-positions');
+    if (cycleEl) cycleEl.textContent = data.cycle_count || 0;
+    if (sessionEl) sessionEl.textContent = data.session || '—';
+    if (posEl) posEl.textContent = data.open_positions || 0;
+
+    // Update positions table
+    const posBadge = document.getElementById('mm-pos-badge');
+    const posBody = document.getElementById('mm-positions-body');
+    const posEmpty = document.getElementById('mm-positions-empty');
+    const posTbody = document.getElementById('mm-positions-tbody');
+    if (posBadge) posBadge.textContent = (data.positions || []).length;
+
+    if (data.positions && data.positions.length > 0) {
+        if (posBody) posBody.style.display = 'block';
+        if (posEmpty) posEmpty.style.display = 'none';
+        if (posTbody) {
+            posTbody.innerHTML = data.positions.map(p =>
+                `<tr>
+                    <td><strong>${p.symbol.replace(':USDT','').replace('/USDT','')}</strong></td>
+                    <td><span class="dir-badge ${p.direction === 'long' ? 'long' : 'short'}">${p.direction.toUpperCase()}</span></td>
+                    <td class="mono">$${p.entry_price.toFixed(6)}</td>
+                    <td class="mono">$${p.stop_loss.toFixed(6)}</td>
+                    <td>Level ${p.current_level}</td>
+                    <td>${p.partial_closed_pct}%</td>
+                    <td class="mono" style="font-size:0.7rem;">${p.trade_id}</td>
+                </tr>`
+            ).join('');
+        }
+    } else {
+        if (posBody) posBody.style.display = 'none';
+        if (posEmpty) posEmpty.style.display = 'block';
+    }
+}
+
+async function toggleMMEngine() {
+    const btn = document.getElementById('mm-start-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '...'; }
+    const wantStart = !_mmScanning;
+    try {
+        const url = wantStart ? '/api/mm/begin' : '/api/mm/stop';
+        const resp = await fetch(apiUrl(url), { method: 'POST' });
+        const data = await resp.json();
+        if (data.success) {
+            _mmScanning = wantStart;
+        } else {
+            alert('Failed: ' + (data.error || 'Unknown'));
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    } finally {
+        if (btn) btn.disabled = false;
+        setTimeout(loadMMStatus, 1000);
+    }
+}
+
+loadMMStatus();
+setInterval(loadMMStatus, 15000);
+</script>
+{% endblock %}

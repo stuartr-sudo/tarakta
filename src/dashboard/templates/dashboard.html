@@ -1,427 +1,219 @@
 {% extends "base.html" %}
 {% block title %}Tarakta - Dashboard{% endblock %}
+{% block topbar_title %}Dashboard{% endblock %}
 
 {% block head %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 {% endblock %}
 
 {% block content %}
-<!-- Page Header -->
-<div class="page-header">
-    <div>
-        <h1>Dashboard</h1>
-        {% if state %}
-        <span class="subtitle">
-            <span class="pulse-dot {{ 'green animate' if state.status == 'running' else 'orange' }}"></span>
-            Cycle #{{ state.cycle_count | default(0) }}
-            {% if state.last_scan_time %}
-             &middot; Last scan {{ state.last_scan_time[:16] }}
-            {% endif %}
-        </span>
-        {% endif %}
-    </div>
-</div>
-
-<!-- Stat Cards -->
 {% set balance = snapshot.balance_usd | default(0) | float %}
 {% set ns = namespace(allocated=0.0) %}
-{% if trades %}
-{% for t in trades %}
+{% if trades %}{% for t in trades %}
     {% set lev = t.leverage | default(1) | int %}
     {% set qty = (t.remaining_quantity or t.entry_quantity or 0) | float %}
     {% set ep = (t.entry_price or 0) | float %}
     {% set current_notional = qty * ep %}
-    {% if lev > 1 %}
-        {% set ns.allocated = ns.allocated + current_notional / lev %}
-    {% else %}
-        {% set ns.allocated = ns.allocated + current_notional %}
-    {% endif %}
-{% endfor %}
-{% endif %}
+    {% if lev > 1 %}{% set ns.allocated = ns.allocated + current_notional / lev %}
+    {% else %}{% set ns.allocated = ns.allocated + current_notional %}{% endif %}
+{% endfor %}{% endif %}
 {% set allocated = ns.allocated %}
-<div class="stats-grid">
+
+<!-- ── Row 1: 4 stat cards ──────────────────────────────── -->
+<div class="dash-stats">
     <div class="stat-card">
-        <div class="stat-label">Equity</div>
+        <div class="stat-label">Portfolio Value</div>
         <div class="stat-value" id="equity-value">${{ "%.2f" | format(balance) }}</div>
-        <div class="stat-sub">of ${{ "%.2f" | format(config.initial_balance | default(100.0) | float) }} initial</div>
-    </div>
-    <div class="stat-card" style="border-left: 3px solid #22c55e;">
-        <div class="stat-label">Available Cash</div>
-        <div class="stat-value sm" id="available-value">${{ "%.2f" | format(balance - allocated) }}</div>
-        <div class="stat-sub">free to trade</div>
-    </div>
-    <div class="stat-card" style="border-left: 3px solid #f59e0b;">
-        <div class="stat-label">Allocated</div>
-        <div class="stat-value sm" id="allocated-value">${{ "%.2f" | format(allocated) }}</div>
-        <div class="stat-sub">across {{ trades | length }} position{{ 's' if (trades | length) != 1 else '' }}</div>
+        <div class="stat-sub">{% set pct = ((balance - (config.initial_balance|default(100.0)|float)) / (config.initial_balance|default(100.0)|float) * 100) if (config.initial_balance|default(100.0)|float) > 0 else 0 %}<span class="{{ 'positive' if pct >= 0 else 'negative' }}" style="font-size:10px;">{{ "%.1f"|format(pct) }}%</span> since open</div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">Daily P&L</div>
-        <div class="stat-value {{ 'positive' if (snapshot.daily_pnl_usd | default(0) | float) >= 0 else 'negative' }}" id="daily-pnl-value">
-            {{ "+" if (snapshot.daily_pnl_usd | default(0) | float) >= 0 else "" }}${{ "%.2f" | format(snapshot.daily_pnl_usd | default(0) | float) }}
-        </div>
+        <div class="stat-label">Today's P&L</div>
+        <div class="stat-value {{ 'positive' if (snapshot.daily_pnl_usd|default(0)|float) >= 0 else 'negative' }}" id="daily-pnl-value">{{ "+" if (snapshot.daily_pnl_usd|default(0)|float) >= 0 else "" }}${{ "%.2f"|format(snapshot.daily_pnl_usd|default(0)|float) }}</div>
+        <div class="stat-sub">{% if stats and stats.total > 0 %}{{ stats.wins }}W &middot; {{ stats.losses }}L{% else %}--{% endif %}</div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">Total P&L</div>
-        <div class="stat-value {{ 'positive' if (snapshot.total_pnl_usd | default(0) | float) >= 0 else 'negative' }}" id="total-pnl-value">
-            {{ "+" if (snapshot.total_pnl_usd | default(0) | float) >= 0 else "" }}${{ "%.2f" | format(snapshot.total_pnl_usd | default(0) | float) }}
-        </div>
+        <div class="stat-label">Win Rate &middot; 7D</div>
+        <div class="stat-value">{% if stats and stats.total > 0 %}{{ "%.1f"|format(stats.win_rate * 100) }}%{% else %}--{% endif %}</div>
+        <div class="stat-sub">{% if stats and stats.total > 0 %}{{ stats.wins }} of {{ stats.total }} trades{% else %}no trades yet{% endif %}</div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">Drawdown</div>
-        <div class="stat-value sm {{ 'negative' if (snapshot.drawdown_pct | default(0) | float) > 0.05 else '' }}" id="drawdown-value">
-            {{ "%.1f" | format((snapshot.drawdown_pct | default(0) | float) * 100) }}%
-        </div>
-        <div class="stat-sub">circuit break {{ "%.0f" | format(config.circuit_breaker_pct * 100) if config else 15 }}%</div>
+        <div class="stat-label">Active Signals</div>
+        <div class="stat-value">{{ signals|length if signals else 0 }}</div>
+        <div class="stat-sub">{{ trades|length }} open &middot; <span id="refiner-count-mini">0</span> queued</div>
     </div>
-    <div class="stat-card" id="unrealized-card" style="border-left: 3px solid #22c55e;">
-        <div class="stat-label">Unrealized Profit</div>
-        <div class="stat-value sm positive" id="unrealized-profit-value">--</div>
-        <div class="stat-sub" id="unrealized-profit-sub">Loading...</div>
-    </div>
-    <div class="stat-card" id="unrealized-loss-card" style="border-left: 3px solid #ef4444;">
-        <div class="stat-label">Unrealized Loss</div>
-        <div class="stat-value sm negative" id="unrealized-loss-value">--</div>
-        <div class="stat-sub" id="unrealized-loss-sub">Loading...</div>
-    </div>
-    <div class="stat-card" id="net-pnl-card" style="border-left: 3px solid #8b5cf6;">
-        <div class="stat-label">Net P&L</div>
-        <div class="stat-value sm" id="net-pnl-value">--</div>
-        <div class="stat-sub" id="net-pnl-sub">realized + unrealized</div>
-    </div>
-    {% if stats and stats.total > 0 %}
-    <div class="stat-card">
-        <div class="stat-label">Win Rate</div>
-        <div class="stat-value sm">{{ "%.0f" | format(stats.win_rate * 100) }}%</div>
-        <div class="stat-sub">{{ stats.wins }}W / {{ stats.losses }}L ({{ stats.total }} trades)</div>
-    </div>
-    <div class="stat-card">
-        <div class="stat-label">Avg P&L</div>
-        <div class="stat-value sm {{ 'positive' if stats.avg_pnl >= 0 else 'negative' }}">
-            {{ "+" if stats.avg_pnl >= 0 else "" }}${{ "%.2f" | format(stats.avg_pnl) }}
-        </div>
-    </div>
-    {% endif %}
 </div>
 
-<!-- Main Bot Controls -->
+<!-- ── Row 2: Chart + Open Positions ────────────────────── -->
+<div class="dash-mid">
+    <div class="panel dash-chart-panel">
+        <div class="panel-header">
+            <h2>Portfolio Performance</h2>
+            <div style="display:flex; align-items:center; gap:6px;">
+                {% if role == 'admin' %}
+                <span id="main-status-badge" class="status-badge closed-loss" style="font-size:9px;">STOPPED</span>
+                <button id="main-start-btn" class="btn primary" onclick="toggleMainBot()" style="font-size:11px; padding:4px 12px;">▶ Start</button>
+                {% endif %}
+            </div>
+        </div>
+        <div class="chart-container" style="border:none; padding:12px 14px;">
+            <canvas id="balanceChart"></canvas>
+        </div>
+    </div>
+
+    <div class="panel dash-positions-panel">
+        <div class="panel-header">
+            <h2>Open Positions</h2>
+            <span class="badge" style="background:var(--teal-dim);color:var(--teal);">{{ trades|length }} active</span>
+        </div>
+        <div class="panel-body" style="padding:10px 14px;">
+            {% if trades %}
+            <div id="positions-cards">
+                {% for t in trades %}
+                <div class="pos-card-item" data-symbol="{{ t.symbol }}">
+                    <div class="pos-card-row1">
+                        <div><strong>{{ t.symbol|replace(':USDT', '') }}</strong>
+                            <span class="dir-badge {{ t.direction|default('long') }}" style="font-size:8px; padding:1px 5px; margin-left:5px;">{{ (t.direction|default('long'))|upper }}</span>
+                        </div>
+                        <span class="mono pos-card-pnl" data-trade-id="{{ t.id }}" style="font-size:13px; font-weight:500;">--</span>
+                    </div>
+                    <div class="pos-card-row2">
+                        <div class="pos-card-detail"><span class="pos-card-dlbl">Entry</span><span class="pos-card-dval mono">${{ "%.2f"|format(t.entry_price|float) }}</span></div>
+                        <div class="pos-card-detail"><span class="pos-card-dlbl">Mark</span><span class="pos-card-dval mono pos-card-mark" data-trade-id="{{ t.id }}">--</span></div>
+                        <div class="pos-card-detail"><span class="pos-card-dlbl">Size</span><span class="pos-card-dval mono">{{ "%.3f"|format((t.remaining_quantity or t.entry_quantity or 0)|float) }}</span></div>
+                    </div>
+                    <div class="tp-bar"><div class="tp-fill" style="width:0%"></div></div>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty-state" style="padding:20px 12px;"><p>No open positions</p></div>
+            {% endif %}
+            <div class="pos-card-footer">
+                <div><div class="pos-card-dlbl">Unrealised</div><div class="pos-card-dval mono positive" id="unrealized-profit-value" style="font-size:14px;">--</div></div>
+                <div><div class="pos-card-dlbl">Exposure</div><div class="pos-card-dval mono" id="allocated-value" style="font-size:14px;">${{ "%.2f"|format(allocated) }}</div></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Hidden elements for JS compatibility -->
+<div style="display:none;">
+    <span id="unrealized-profit-sub"></span><span id="unrealized-loss-value"></span><span id="unrealized-loss-sub"></span>
+    <span id="net-pnl-value"></span><span id="net-pnl-sub"></span>
+    <span id="available-value">${{ "%.2f"|format(balance - allocated) }}</span>
+    <span id="total-pnl-value">{{ "+" if (snapshot.total_pnl_usd|default(0)|float) >= 0 else "" }}${{ "%.2f"|format(snapshot.total_pnl_usd|default(0)|float) }}</span>
+    <span id="drawdown-value">{{ "%.1f"|format((snapshot.drawdown_pct|default(0)|float) * 100) }}%</span>
+    <span id="unrealized-card"></span><span id="unrealized-loss-card"></span><span id="net-pnl-card"></span>
+    <span id="last-updated"></span><span id="main-config-badge"></span>
+    <button id="refresh-btn" onclick="manualRefresh()"></button>
+    <table><tbody id="positions-tbody">
+        {% for t in trades %}
+        <tr data-symbol="{{ t.symbol }}" data-trade-id="{{ t.id }}">
+            <td></td><td></td><td></td><td class="mono pos-current-price">--</td><td class="mono pos-pnl">--</td><td></td>
+            <td>{% if t.tp_tiers %}<div class="tp-tiers-detail">{% set tiers_done = t.current_tier|default(0)|int %}{% for tier in t.tp_tiers %}<div class="tp-tier-row {{ 'filled' if tier.filled else ('target' if tier.level == tiers_done + 1 else 'pending') }}"><span class="tp-tier-dot {{ 'filled' if tier.filled else ('target' if tier.level == tiers_done + 1 else '') }}"></span><span class="tp-tier-name">TP{{ tier.level }}</span><span class="tp-tier-price">{% if tier.price %}${{ "%.8f"|format(tier.price|float) }}{% else %}Trail{% endif %}</span><span class="tp-tier-pct">({{ (tier.pct * 100)|int }}%)</span>{% if tier.filled %}<span class="tp-tier-check">✓</span>{% endif %}</div>{% endfor %}</div>{% endif %}</td>
+            <td></td><td></td><td></td>
+        </tr>
+        {% endfor %}
+    </tbody></table>
+</div>
+
+<!-- ── Row 3: Signals + Agent Activity ─────────────────── -->
+<div class="dash-bottom">
+    <div class="panel">
+        <div class="panel-header">
+            <h2>Recent Signals</h2>
+            <a href="/signals" class="btn" style="font-size:11px; padding:3px 10px;">View All</a>
+        </div>
+        {% if signals %}
+        <div class="panel-body no-pad">
+            <div class="overflow-x">
+                <table class="data-table">
+                    <thead><tr><th>Pair</th><th>Setup</th><th>Score</th><th>Time</th><th>Status</th></tr></thead>
+                    <tbody>
+                        {% for s in signals[:8] %}
+                        <tr>
+                            <td><strong>{{ s.symbol|replace(':USDT', '') }}</strong></td>
+                            <td style="font-size:11px;">{% if s.reasons %}{{ s.reasons[0] }}{% else %}--{% endif %}</td>
+                            <td><div class="score-bar"><span class="score-num {{ 'positive' if (s.score|int) >= 65 else 'negative' }}">{{ s.score }}</span><div class="bar-track"><div class="bar-fill {{ 'high' if (s.score|int) >= 65 else ('medium' if (s.score|int) >= 50 else 'low') }}" style="width:{{ s.score|int }}%"></div></div></div></td>
+                            <td class="text-muted" style="font-size:11px;">{{ s.created_at[11:16] }}</td>
+                            <td>{% if s.acted_on %}<span class="status-badge open" style="font-size:9px;">Entered</span>{% else %}<span style="font-size:11px; color:var(--text-muted);">Skipped</span>{% endif %}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% else %}
+        <div class="empty-state"><p>Waiting for first scan.</p></div>
+        {% endif %}
+    </div>
+    <div class="panel">
+        <div class="panel-header">
+            <h2>Agent Activity</h2>
+            <span class="badge" style="background:var(--teal-dim);color:var(--teal);">Live</span>
+        </div>
+        <div class="panel-body" style="padding:6px 14px;">
+            <div class="agent-log" id="agent-log-container">
+                <div class="empty-state" style="padding:20px 12px;"><p>Agent activity will appear here.</p></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ── Admin panels (refiner, agent stats, advisor) ──────── -->
 {% if role == 'admin' %}
-<div class="panel" style="border-left: 3px solid #8b5cf6;">
-    <div class="panel-header" style="padding-bottom:0.75rem;">
-        <h2>Main Bot
-            <span id="main-config-badge" class="account-badge" style="background:#8b5cf6;">{{ main_leverage }}x &bull; {{ (main_margin_pct * 100)|round(0)|int }}%</span>
-            <span id="main-status-badge" class="account-badge" style="background:#ef4444;">STOPPED</span>
-        </h2>
-        <div style="display:flex; align-items:center; gap:8px;">
-            <button id="main-start-btn" class="btn" style="background:#22c55e; color:#fff; border:none; padding:6px 16px; border-radius:4px; font-weight:600;" onclick="toggleMainBot()">▶ Start</button>
-        </div>
-    </div>
-</div>
-{% endif %}
-
-<!-- Entry Refiner Queue -->
-<div class="panel" id="refiner-panel" style="border-left: 3px solid #f59e0b; display:none;">
+<div class="panel" id="refiner-panel" style="display:none; margin-top:14px;">
     <div class="panel-header">
-        <h2>Entry Refiner Queue
-            <span id="refiner-badge" class="badge" style="background:#f59e0b; color:#000; font-size:0.75rem;">0</span>
-            <span id="refiner-heartbeat" style="font-size:0.65rem; margin-left:8px; color:var(--text-muted);"></span>
-        </h2>
-        <div style="font-size:0.7rem; color:var(--text-muted); display:flex; justify-content:space-between; align-items:center;">
-            <span>Signals waiting for 5m pullback confirmation</span>
-            <span id="refiner-stats" style="font-size:0.65rem;"></span>
-        </div>
+        <h2>Entry Refiner Queue <span id="refiner-badge" class="badge" style="background:var(--teal-dim);color:var(--teal);">0</span>
+            <span id="refiner-heartbeat" style="font-size:0.65rem; margin-left:8px; color:var(--text-muted);"></span></h2>
+        <div style="font-size:0.7rem; color:var(--text-muted);"><span id="refiner-stats" style="font-size:0.65rem;"></span></div>
     </div>
     <div id="refiner-body" class="panel-body no-pad">
         <div class="overflow-x">
             <table class="data-table" id="refiner-table">
-                <thead>
-                    <tr>
-                        <th>Symbol</th>
-                        <th>Dir</th>
-                        <th>Score</th>
-                        <th>Entry Level</th>
-                        <th>1H Price</th>
-                        <th>Checks</th>
-                        <th>Expires</th>
-                    </tr>
-                </thead>
+                <thead><tr><th>Symbol</th><th>Dir</th><th>Score</th><th>Entry Level</th><th>1H Price</th><th>Checks</th><th>Expires</th></tr></thead>
                 <tbody id="refiner-tbody"></tbody>
             </table>
         </div>
     </div>
-    <div id="refiner-empty" class="empty-state" style="display:none;">
-        <p>No signals queued for refinement. Sweep signals will appear here when detected.</p>
-    </div>
+    <div id="refiner-empty" class="empty-state" style="display:none;"><p>No signals queued.</p></div>
 </div>
 
-<!-- AI Agent Stats -->
-{% if role == 'admin' %}
-<div class="panel" id="agent-panel" style="border-left: 3px solid #8b5cf6; display:none;">
-    <div class="panel-header">
-        <h2>AI Entry Agent
-            <span id="agent-model-badge" class="badge" style="background:#8b5cf6; color:#fff; font-size:0.75rem;">--</span>
-        </h2>
-        <div style="font-size:0.7rem; color:var(--text-muted);">Model selection on Settings page</div>
-    </div>
+<div class="panel" id="agent-panel" style="display:none; margin-top:14px;">
+    <div class="panel-header"><h2>AI Entry Agent <span id="agent-model-badge" class="badge" style="background:var(--teal-dim);color:var(--teal);">--</span></h2></div>
     <div class="panel-body" style="padding:12px 16px;">
         <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); gap:12px; font-size:0.8rem;">
-            <div>
-                <div style="color:var(--text-muted); font-size:0.7rem;">Requests</div>
-                <div id="agent-requests" class="mono" style="font-size:1rem; font-weight:600;">0</div>
-            </div>
-            <div>
-                <div style="color:var(--text-muted); font-size:0.7rem;">ENTER / WAIT / SKIP</div>
-                <div id="agent-actions" class="mono" style="font-size:0.9rem;">0 / 0 / 0</div>
-            </div>
-            <div>
-                <div style="color:var(--text-muted); font-size:0.7rem;">Total Cost</div>
-                <div id="agent-cost" class="mono" style="font-size:1rem; font-weight:600; color:#f59e0b;">$0.00</div>
-            </div>
-            <div>
-                <div style="color:var(--text-muted); font-size:0.7rem;">Avg / Call</div>
-                <div id="agent-avg-cost" class="mono" style="font-size:0.9rem;">$0.00</div>
-            </div>
-            <div>
-                <div style="color:var(--text-muted); font-size:0.7rem;">Tokens (In / Out)</div>
-                <div id="agent-tokens" class="mono" style="font-size:0.9rem;">0 / 0</div>
-            </div>
-            <div>
-                <div style="color:var(--text-muted); font-size:0.7rem;">Errors</div>
-                <div id="agent-errors" class="mono" style="font-size:0.9rem;">0</div>
-            </div>
+            <div><div style="color:var(--text-muted); font-size:0.7rem;">Requests</div><div id="agent-requests" class="mono" style="font-size:1rem; font-weight:600;">0</div></div>
+            <div><div style="color:var(--text-muted); font-size:0.7rem;">ENTER / WAIT / SKIP</div><div id="agent-actions" class="mono" style="font-size:0.9rem;">0 / 0 / 0</div></div>
+            <div><div style="color:var(--text-muted); font-size:0.7rem;">Total Cost</div><div id="agent-cost" class="mono" style="font-size:1rem; font-weight:600; color:var(--teal);">$0.00</div></div>
+            <div><div style="color:var(--text-muted); font-size:0.7rem;">Avg / Call</div><div id="agent-avg-cost" class="mono" style="font-size:0.9rem;">$0.00</div></div>
+            <div><div style="color:var(--text-muted); font-size:0.7rem;">Tokens (In / Out)</div><div id="agent-tokens" class="mono" style="font-size:0.9rem;">0 / 0</div></div>
+            <div><div style="color:var(--text-muted); font-size:0.7rem;">Errors</div><div id="agent-errors" class="mono" style="font-size:0.9rem;">0</div></div>
         </div>
     </div>
 </div>
-{% endif %}
 
-<!-- Trade Advisor (Claude) -->
-{% if role == 'admin' %}
-<div class="panel" id="advisor-panel" style="border-left: 3px solid #06b6d4;">
+<div class="panel" id="advisor-panel" style="margin-top:14px;">
     <div class="panel-header">
-        <h2>Trade Advisor
-            <span class="badge" style="background:#06b6d4; color:#fff; font-size:0.75rem;">Claude</span>
-        </h2>
+        <h2>Trade Advisor <span class="badge" style="background:var(--teal-dim);color:var(--teal);">Claude</span></h2>
         <div style="display:flex; align-items:center; gap:8px;">
             <select id="advisor-days" style="padding:4px 8px; border-radius:4px; background:var(--bg-card); color:var(--text-primary); border:1px solid var(--border); font-size:0.8rem;">
-                <option value="3">Last 3 days</option>
-                <option value="7" selected>Last 7 days</option>
-                <option value="14">Last 14 days</option>
+                <option value="3">Last 3 days</option><option value="7" selected>Last 7 days</option><option value="14">Last 14 days</option>
             </select>
-            <button id="advisor-run-btn" class="btn" onclick="runAdvisor()" style="font-size:0.8rem; padding:4px 12px; background:#06b6d4; color:#fff; border:none; cursor:pointer;">
-                Analyze Missed Signals
-            </button>
+            <button id="advisor-run-btn" class="btn active" onclick="runAdvisor()" style="font-size:0.8rem; padding:4px 12px;">Analyze</button>
         </div>
     </div>
     <div class="panel-body" style="padding:12px 16px;">
-        <div id="advisor-status" style="font-size:0.8rem; color:var(--text-muted);">
-            Click "Analyze Missed Signals" to run the advisor. It will review signals the bot detected but didn't trade, simulate their outcomes, and recommend entry criteria changes.
-        </div>
+        <div id="advisor-status" style="font-size:0.8rem; color:var(--text-muted);">Click "Analyze" to review missed signals.</div>
         <div id="advisor-result" style="display:none; margin-top:12px;">
             <div id="advisor-cost" style="font-size:0.7rem; color:var(--text-muted); margin-bottom:8px;"></div>
-            <div id="advisor-analysis" style="font-size:0.85rem; line-height:1.6; white-space:pre-wrap; max-height:500px; overflow-y:auto; padding:12px; background:var(--bg-body); border-radius:6px; border:1px solid var(--border);"></div>
+            <div id="advisor-analysis" style="font-size:0.85rem; line-height:1.6; white-space:pre-wrap; max-height:500px; overflow-y:auto; padding:12px; background:var(--bg-deep); border-radius:6px; border:1px solid var(--border);"></div>
         </div>
     </div>
 </div>
 {% endif %}
 
-<!-- Open Positions (full width) -->
-<div class="panel">
-    <div class="panel-header">
-        <h2>Open Positions</h2>
-        <div style="display:flex; align-items:center; gap:8px;">
-            <span class="badge text-blue">{{ trades | length }}</span>
-            <button id="refresh-btn" class="btn" onclick="manualRefresh()" style="font-size:0.8rem; padding:4px 10px;">Refresh Prices</button>
-            <span id="last-updated" class="text-muted" style="font-size:0.7rem;"></span>
-            {% if trades and role == 'admin' %}
-            <button id="nuke-btn" class="btn btn-nuke" onclick="confirmNuke()">NUKE ALL</button>
-            {% endif %}
-            {% if role == 'admin' %}
-            <button class="btn" style="font-size:0.75rem; padding:4px 8px; background:#ef4444; color:#fff; border:none; border-radius:4px;" onclick="confirmResetMain()">Reset Main</button>
-            {% endif %}
-        </div>
-    </div>
-    {% if trades %}
-    <div class="panel-body no-pad">
-        <div class="overflow-x">
-            <table class="data-table">
-                <thead>
-                    <tr>
-                        <th>Symbol</th>
-                        <th>Dir</th>
-                        <th>Entry</th>
-                        <th>Current</th>
-                        <th>P&L</th>
-                        <th>SL</th>
-                        <th>TP</th>
-                        <th>Qty</th>
-                        <th>Size</th>
-                        <th>Score</th>
-                    </tr>
-                </thead>
-                <tbody id="positions-tbody">
-                    {% for t in trades %}
-                    <tr data-symbol="{{ t.symbol }}" data-trade-id="{{ t.id }}" class="clickable-row" onclick="toggleDetail(this)">
-                        <td><strong>{{ t.symbol|replace(':USDT', '') }}</strong>{% if t.test_group == 'agent' %} <span class="llm-bolt" title="AI Agent trade">&#9889;</span>{% endif %}</td>
-                        <td>
-                            <span class="dir-badge {{ t.direction | default('long') }}">
-                                {{ t.direction | default('long') }}{% if (t.leverage | default(1) | int) > 1 %} {{ t.leverage }}x{% endif %}
-                            </span>
-                        </td>
-                        <td class="mono">${{ "%.8f" | format(t.entry_price | float) }}</td>
-                        <td class="mono pos-current-price">--</td>
-                        <td class="mono pos-pnl">--</td>
-                        <td class="mono negative">${{ "%.8f" | format(t.stop_loss | float) }}</td>
-                        <td class="mono">
-                            {% if t.tp_tiers %}
-                                {% set tiers_done = t.current_tier | default(0) | int %}
-                                <div class="tp-tiers-detail">
-                                    {% for tier in t.tp_tiers %}
-                                    <div class="tp-tier-row {{ 'filled' if tier.filled else ('target' if tier.level == tiers_done + 1 else 'pending') }}">
-                                        <span class="tp-tier-dot {{ 'filled' if tier.filled else ('target' if tier.level == tiers_done + 1 else '') }}"></span>
-                                        <span class="tp-tier-name">TP{{ tier.level }}</span>
-                                        <span class="tp-tier-price">{% if tier.price %}${{ "%.8f" | format(tier.price | float) }}{% else %}Trail{% endif %}</span>
-                                        <span class="tp-tier-pct">({{ (tier.pct * 100) | int }}%)</span>
-                                        {% if tier.filled %}<span class="tp-tier-check">✓</span>{% endif %}
-                                        {% if tier.filled and t.tier_pnl and tier.level|string in t.tier_pnl %}
-                                            {% set tp_pnl = t.tier_pnl[tier.level|string] | float %}
-                                            <span class="tp-tier-pnl {{ 'positive' if tp_pnl >= 0 else 'negative' }}" style="font-size:0.65rem; margin-left:4px;">
-                                                {{ '+' if tp_pnl >= 0 else '' }}${{ "%.2f" | format(tp_pnl) }}
-                                            </span>
-                                        {% endif %}
-                                    </div>
-                                    {% endfor %}
-                                </div>
-                            {% else %}
-                                <span class="positive">{{ ("$%.8f" | format(t.take_profit | float)) if t.take_profit else '-' }}</span>
-                            {% endif %}
-                        </td>
-                        <td class="mono">
-                            {% set rem_qty = (t.remaining_quantity or t.entry_quantity or 0) | float %}
-                            {% set full_qty = (t.entry_quantity or 0) | float %}
-                            <div style="font-weight:600;">{{ "%.6g" | format(rem_qty) }}</div>
-                            {% if rem_qty != full_qty and full_qty > 0 %}
-                            <div style="font-size:0.65rem; color:var(--text-muted);">of {{ "%.6g" | format(full_qty) }}</div>
-                            {% endif %}
-                        </td>
-                        <td class="mono">
-                            {% set lev = t.leverage | default(1) | int %}
-                            {% set cost = t.entry_cost_usd | default(0) | float %}
-                            {% if lev > 1 %}
-                                <div style="font-weight:600;">${{ "%.2f" | format(cost) }}</div>
-                                <div style="font-size:0.7rem; color:var(--text-muted);">${{ "%.2f" | format(cost / lev) }} margin</div>
-                            {% else %}
-                                ${{ "%.2f" | format(cost) }}
-                            {% endif %}
-                        </td>
-                        <td>
-                            <div class="score-bar">
-                                <span class="score-num {{ 'positive' if (t.confluence_score | int) >= 65 else ('text-orange' if (t.confluence_score | int) >= 50 else 'negative') }}">{{ t.confluence_score }}</span>
-                                <div class="bar-track">
-                                    <div class="bar-fill {{ 'high' if (t.confluence_score | int) >= 65 else ('medium' if (t.confluence_score | int) >= 50 else 'low') }}"
-                                         style="width: {{ t.confluence_score | int }}%"></div>
-                                </div>
-                            </div>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-    {% else %}
-    <div class="empty-state">
-        <div class="empty-icon">---</div>
-        <p>No open positions. Waiting for signals above threshold.</p>
-    </div>
-    {% endif %}
-</div>
-
-<!-- Balance Chart (full width, below positions) -->
-<div class="panel">
-    <div class="panel-header">
-        <h2>Equity History</h2>
-        <span class="badge text-muted">7 days</span>
-    </div>
-    <div class="chart-container">
-        <canvas id="balanceChart"></canvas>
-    </div>
-</div>
-
-<!-- Recent Signals -->
-<div class="panel">
-    <div class="panel-header">
-        <h2>Recent Signals</h2>
-        <a href="/signals" class="btn">View All</a>
-    </div>
-    {% if signals %}
-    <div class="panel-body no-pad">
-        <div class="overflow-x">
-            <table class="data-table">
-                <thead>
-                    <tr>
-                        <th>Symbol</th>
-                        <th>Direction</th>
-                        <th>Score</th>
-                        <th>Acted</th>
-                        <th>Reasons</th>
-                        <th>Time</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for s in signals %}
-                    <tr>
-                        <td>
-                            <strong>{{ s.symbol|replace(':USDT', '') }}</strong>
-                            {% if s.components and s.components.signal_type == 'breakout' %}
-                            <span class="reason-pill" style="font-size:0.6rem; margin-left:4px; background:var(--accent-blue, #3b82f6); color:#fff;">BRK</span>
-                            {% endif %}
-                        </td>
-                        <td>
-                            <span class="dir-badge {{ s.direction }}">{{ s.direction }}</span>
-                        </td>
-                        <td>
-                            <div class="score-bar">
-                                <span class="score-num {{ 'positive' if (s.score | int) >= 65 else ('text-orange' if (s.score | int) >= 50 else 'negative') }}">{{ s.score }}</span>
-                                <div class="bar-track">
-                                    <div class="bar-fill {{ 'high' if (s.score | int) >= 65 else ('medium' if (s.score | int) >= 50 else 'low') }}"
-                                         style="width: {{ s.score | int }}%"></div>
-                                </div>
-                            </div>
-                        </td>
-                        <td>
-                            {% if s.acted_on %}
-                            <span class="positive">Yes</span>
-                            {% else %}
-                            <span class="text-muted">No</span>
-                            {% endif %}
-                        </td>
-                        <td>
-                            {% if s.reasons %}
-                            <div class="reason-pills">
-                                {% for r in s.reasons[:4] %}
-                                <span class="reason-pill">{{ r }}</span>
-                                {% endfor %}
-                                {% if s.reasons | length > 4 %}
-                                <span class="reason-pill">+{{ s.reasons | length - 4 }}</span>
-                                {% endif %}
-                            </div>
-                            {% else %}
-                            <span class="text-muted">-</span>
-                            {% endif %}
-                        </td>
-                        <td class="text-muted">{{ s.created_at[:16] }}</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-    {% else %}
-    <div class="empty-state">
-        <p>No signals yet. Waiting for first scan cycle to complete.</p>
-    </div>
-    {% endif %}
-</div>
+<!-- old layout removed -->
 {% endblock %}
 
 {% block scripts %}
@@ -651,8 +443,8 @@ async function loadChart() {
         const values = data.history.map(s => parseFloat(s.balance_usd));
         const initial = {{ config.initial_balance | default(100.0) }};
         const current = values[values.length - 1] || initial;
-        const lineColor = current >= initial ? '#22c55e' : '#ef4444';
-        const fillColor = current >= initial ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)';
+        const lineColor = current >= initial ? '#00e5d4' : '#e040fb';
+        const fillColor = current >= initial ? 'rgba(0,229,212,0.08)' : 'rgba(224,64,251,0.08)';
 
         new Chart(document.getElementById('balanceChart'), {
             type: 'line',
@@ -880,6 +672,49 @@ function renderPnlData(data) {
             ts.className = 'text-muted text-warn';
         }
     }
+
+    // 7. Sync visible position cards from same data
+    syncPositionCards(data);
+}
+
+function syncPositionCards(data) {
+    if (!data || !data.positions) return;
+    const posById = {};
+    data.positions.forEach(p => { posById[p.trade_id] = p; });
+
+    document.querySelectorAll('.pos-card-pnl[data-trade-id]').forEach(el => {
+        const pos = posById[el.dataset.tradeId];
+        if (!pos || pos.current_price === null) return;
+        const sign = pos.unrealized_pnl >= 0 ? '+' : '';
+        el.textContent = sign + '$' + pos.unrealized_pnl.toFixed(2);
+        el.className = 'mono pos-card-pnl ' + (pos.unrealized_pnl >= 0 ? 'positive' : 'negative');
+    });
+
+    document.querySelectorAll('.pos-card-mark[data-trade-id]').forEach(el => {
+        const pos = posById[el.dataset.tradeId];
+        if (!pos || pos.current_price === null) return;
+        el.textContent = '$' + pos.current_price.toFixed(pos.current_price < 1 ? 6 : 2);
+    });
+
+    // Update TP progress bars on cards
+    document.querySelectorAll('.pos-card-item[data-symbol]').forEach(card => {
+        const sym = card.dataset.symbol;
+        const pos = data.positions.find(p => p.symbol === sym);
+        if (!pos || !pos.tp_tiers) return;
+        const filled = pos.tp_tiers.filter(t => t.filled).length;
+        const total = pos.tp_tiers.length;
+        const pct = total > 0 ? (filled / total * 100) : 0;
+        const fill = card.querySelector('.tp-fill');
+        if (fill) fill.style.width = pct + '%';
+    });
+
+    // Update unrealised total in card footer
+    const netPnl = data.positions.reduce((s, p) => s + (p.current_price !== null ? p.unrealized_pnl : 0), 0);
+    const unrEl = document.getElementById('unrealized-profit-value');
+    if (unrEl) {
+        unrEl.textContent = (netPnl >= 0 ? '+' : '') + '$' + netPnl.toFixed(2);
+        unrEl.className = 'stat-value sm ' + (netPnl >= 0 ? 'positive' : 'negative');
+    }
 }
 
 async function loadUnrealizedPnl() {
@@ -1015,12 +850,12 @@ function updateMainButton() {
     if (!btn) return;
     if (_mainScanning) {
         btn.textContent = '⏹ Stop';
-        btn.style.background = '#ef4444';
-        if (badge) { badge.textContent = 'SCANNING'; badge.style.background = '#22c55e'; }
+        btn.style.background = '#e040fb';
+        if (badge) { badge.textContent = 'SCANNING'; badge.style.background = '#00e5d4'; badge.style.color = '#040812'; }
     } else {
         btn.textContent = '▶ Start';
-        btn.style.background = '#22c55e';
-        if (badge) { badge.textContent = 'STOPPED'; badge.style.background = '#ef4444'; }
+        btn.style.background = '#e040fb';
+        if (badge) { badge.textContent = 'STOPPED'; badge.style.background = 'rgba(224,64,251,0.12)'; badge.style.color = '#e040fb'; }
     }
 }
 
@@ -1145,6 +980,8 @@ async function loadRefinerQueue() {
         if (!data.enabled) { panel.style.display = 'none'; return; }
         panel.style.display = 'block';
         badge.textContent = data.total_queued;
+        const miniCount = document.getElementById('refiner-count-mini');
+        if (miniCount) miniCount.textContent = data.total_queued;
 
         // Heartbeat indicator — shows the refiner loop is alive
         const hb = document.getElementById('refiner-heartbeat');
@@ -1153,7 +990,7 @@ async function loadRefinerQueue() {
             const ago = Math.round((Date.now() - new Date(data.last_check_at).getTime()) / 1000);
             const alive = ago < 120;
             hb.innerHTML = (alive ? '&#9679;' : '&#9675;') + ' ' + (ago < 60 ? ago + 's ago' : Math.floor(ago/60) + 'm ago');
-            hb.style.color = alive ? '#22c55e' : '#ef4444';
+            hb.style.color = alive ? '#00e5d4' : '#e040fb';
         }
         if (stats) {
             stats.textContent = (data.total_confirmed || 0) + ' confirmed / ' + (data.total_expired || 0) + ' expired / ' + (data.total_checks || 0) + ' cycles';

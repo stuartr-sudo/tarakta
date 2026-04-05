@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Tarakta - Analytics{% endblock %}
+{% block topbar_title %}Analytics{% endblock %}
 
 {% block head %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -245,15 +246,15 @@
 <script>
 (function() {
     const CHART_COLORS = {
-        green: 'rgba(34, 197, 94, 0.8)',
-        red: 'rgba(239, 68, 68, 0.8)',
-        blue: 'rgba(59, 130, 246, 0.8)',
-        orange: 'rgba(245, 158, 11, 0.8)',
-        purple: 'rgba(168, 85, 247, 0.8)',
-        teal: 'rgba(20, 184, 166, 0.8)',
-        pink: 'rgba(236, 72, 153, 0.8)',
+        teal: 'rgba(0, 229, 212, 0.8)',
+        magenta: 'rgba(224, 64, 251, 0.8)',
+        tealMid: 'rgba(0, 229, 212, 0.5)',
+        magentaMid: 'rgba(224, 64, 251, 0.5)',
+        tealDim: 'rgba(0, 229, 212, 0.3)',
+        magentaDim: 'rgba(224, 64, 251, 0.3)',
+        tealFaint: 'rgba(0, 229, 212, 0.15)',
     };
-    const BAR_COLORS = [CHART_COLORS.blue, CHART_COLORS.green, CHART_COLORS.orange, CHART_COLORS.purple, CHART_COLORS.teal, CHART_COLORS.pink, CHART_COLORS.red];
+    const BAR_COLORS = [CHART_COLORS.teal, CHART_COLORS.magenta, CHART_COLORS.tealMid, CHART_COLORS.magentaMid, CHART_COLORS.tealDim, CHART_COLORS.magentaDim, CHART_COLORS.tealFaint];
 
     let currentPage = 1;
 

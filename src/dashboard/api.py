@@ -772,6 +772,74 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             return {"scanning_active": False, "available": False}
         return {"scanning_active": engine._scanning_active, "available": True}
 
+    # ── MM Engine Start/Stop/Status ──────────────────────────────────
+    def _get_mm_engine(request: Request):
+        """Get the MM Engine from app state (set in main.py after creation)."""
+        return getattr(request.app.state, "mm_engine", None)
+
+    @router.get("/mm/status")
+    @login_required
+    async def get_mm_status(request: Request):
+        """Get MM Engine running status and details."""
+        mm = _get_mm_engine(request)
+        if not mm:
+            return {"available": False, "scanning_active": False}
+        status = mm.get_status()
+        status["available"] = True
+        return status
+
+    @router.post("/mm/begin")
+    @admin_required
+    async def begin_mm_scanning(request: Request):
+        """Start the MM Engine's scan loop."""
+        mm = _get_mm_engine(request)
+        if not mm:
+            return JSONResponse({"success": False, "error": "MM Engine not available"}, status_code=503)
+        mm.begin_scanning()
+        # Persist to DB
+        try:
+            state = await repo.get_engine_state()
+            if state:
+                overrides = state.get("config_overrides", {}) or {}
+                if not isinstance(overrides, dict):
+                    overrides = {}
+                mm_settings = overrides.get("mm_engine_settings", {})
+                if not isinstance(mm_settings, dict):
+                    mm_settings = {}
+                mm_settings["scanning_active"] = True
+                overrides["mm_engine_settings"] = mm_settings
+                state["config_overrides"] = overrides
+                await repo.upsert_engine_state(state)
+        except Exception as e:
+            logger.warning("begin_mm_persist_failed", error=str(e))
+        return {"success": True, "message": "MM Engine scanning started"}
+
+    @router.post("/mm/stop")
+    @admin_required
+    async def stop_mm_scanning(request: Request):
+        """Pause the MM Engine's scan loop (keeps managing open positions)."""
+        mm = _get_mm_engine(request)
+        if not mm:
+            return JSONResponse({"success": False, "error": "MM Engine not available"}, status_code=503)
+        mm.stop_scanning()
+        # Persist to DB
+        try:
+            state = await repo.get_engine_state()
+            if state:
+                overrides = state.get("config_overrides", {}) or {}
+                if not isinstance(overrides, dict):
+                    overrides = {}
+                mm_settings = overrides.get("mm_engine_settings", {})
+                if not isinstance(mm_settings, dict):
+                    mm_settings = {}
+                mm_settings["scanning_active"] = False
+                overrides["mm_engine_settings"] = mm_settings
+                state["config_overrides"] = overrides
+                await repo.upsert_engine_state(state)
+        except Exception as e:
+            logger.warning("stop_mm_persist_failed", error=str(e))
+        return {"success": True, "message": "MM Engine scanning paused (still managing positions)"}
+
     # ── Entry Refiner Queue ───────────────────────────────────────────
     @router.get("/refiner/main")
     @login_required

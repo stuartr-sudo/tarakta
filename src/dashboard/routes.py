@@ -287,6 +287,40 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             ctx["api_key_source"] = "none"
         return templates.TemplateResponse(request, "settings.html", context=ctx)
 
+    @router.get("/mm", response_class=HTMLResponse)
+    @login_required
+    async def mm_engine_page(request: Request):
+        ctx = await _base_context(request)
+        active_repo = _get_repo_for_request(request)
+
+        # Fetch MM Method trades (strategy='mm_method')
+        mm_trades = []
+        mm_stats = {"total": 0, "wins": 0, "losses": 0, "win_rate": 0, "total_pnl": 0, "avg_pnl": 0}
+        try:
+            all_trades = await active_repo.get_trades(per_page=200)
+            mm_trades = [t for t in all_trades if t.get("strategy") == "mm_method"]
+            mm_trades.sort(key=lambda t: t.get("created_at", ""), reverse=True)
+
+            closed = [t for t in mm_trades if t.get("status") == "closed"]
+            if closed:
+                wins = sum(1 for t in closed if (t.get("pnl_usd") or 0) > 0)
+                losses = len(closed) - wins
+                pnls = [float(t.get("pnl_usd") or 0) for t in closed]
+                mm_stats = {
+                    "total": len(closed),
+                    "wins": wins,
+                    "losses": losses,
+                    "win_rate": wins / len(closed) if closed else 0,
+                    "total_pnl": round(sum(pnls), 2),
+                    "avg_pnl": round(sum(pnls) / len(closed), 2),
+                }
+        except Exception:
+            ctx["db_offline"] = True
+
+        ctx["mm_trades"] = mm_trades[:50]  # Last 50
+        ctx["mm_stats"] = mm_stats
+        return templates.TemplateResponse(request, "mm.html", context=ctx)
+
     @router.get("/training", response_class=HTMLResponse)
     @login_required
     async def training_page(request: Request):

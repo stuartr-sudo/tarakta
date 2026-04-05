@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Tarakta - Signals{% endblock %}
+{% block topbar_title %}Signals{% endblock %}
 
 {% block content %}
 <div class="page-header">
@@ -30,7 +31,7 @@
                         <td>
                             <strong>{{ s.symbol|replace(':USDT', '') }}</strong>
                             {% if s.components and s.components.signal_type == 'breakout' %}
-                            <span class="reason-pill" style="font-size:0.6rem; margin-left:4px; background:var(--accent-blue, #3b82f6); color:#fff;">BRK</span>
+                            <span class="reason-pill" style="font-size:0.6rem; margin-left:4px; background:var(--teal-dim); color:var(--teal);">BRK</span>
                             {% endif %}
                         </td>
                         <td>

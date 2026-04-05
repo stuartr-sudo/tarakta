@@ -177,12 +177,35 @@ class MMEngine:
         self.positions: dict[str, MMPosition] = {}
         self.cycle_count = 0
         self._running = True
+        self._scanning_active = True  # MM Engine starts active (unlike main bot)
 
         logger.info("mm_engine_initialized", scan_interval=scan_interval_minutes)
 
+    def begin_scanning(self) -> None:
+        """Resume the MM engine's scan loop (called from dashboard)."""
+        self._scanning_active = True
+        logger.info("mm_engine_scanning_started")
+
+    def stop_scanning(self) -> None:
+        """Pause the MM engine's scan loop (keeps managing open positions)."""
+        self._scanning_active = False
+        logger.info("mm_engine_scanning_stopped")
+
     async def run(self) -> None:
         """Main loop — runs scan/trade/manage cycles."""
-        logger.info("mm_engine_started")
+        # Restore scanning state from DB if persisted
+        try:
+            state = await self.repo.get_engine_state()
+            if state:
+                overrides = state.get("config_overrides", {}) or {}
+                mm_settings = overrides.get("mm_engine_settings", {})
+                if isinstance(mm_settings, dict) and "scanning_active" in mm_settings:
+                    self._scanning_active = bool(mm_settings["scanning_active"])
+                    logger.info("mm_engine_restored_state", scanning_active=self._scanning_active)
+        except Exception as e:
+            logger.debug("mm_engine_state_restore_failed", error=str(e))
+
+        logger.info("mm_engine_started", scanning_active=self._scanning_active)
 
         while self._running:
             try:
@@ -199,6 +222,30 @@ class MMEngine:
     async def shutdown(self) -> None:
         """Graceful shutdown."""
         self._running = False
+
+    def get_status(self) -> dict:
+        """Return a status snapshot for the dashboard API."""
+        session = self.session_analyzer.get_current_session()
+        return {
+            "scanning_active": self._scanning_active,
+            "running": self._running,
+            "cycle_count": self.cycle_count,
+            "open_positions": len(self.positions),
+            "session": session.session_name if session else "unknown",
+            "is_weekend": session.is_weekend if session else False,
+            "positions": [
+                {
+                    "symbol": pos.symbol,
+                    "direction": pos.direction,
+                    "entry_price": pos.entry_price,
+                    "stop_loss": pos.stop_loss,
+                    "current_level": pos.current_level,
+                    "partial_closed_pct": round(pos.partial_closed_pct * 100),
+                    "trade_id": pos.trade_id,
+                }
+                for pos in self.positions.values()
+            ],
+        }
 
     async def _cycle(self) -> None:
         """One complete scan/trade/manage cycle."""
@@ -225,29 +272,31 @@ class MMEngine:
             positions=len(self.positions),
         )
 
-        # 2. Get tradeable pairs
-        try:
-            pairs = await self._get_pairs()
-        except Exception as e:
-            logger.warning("mm_engine_pairs_error", error=str(e))
-            return
-
-        # 3. Scan each pair
-        signals: list[MMSignal] = []
-        for pair in pairs:
+        # 2. Only scan for new entries if scanning is active
+        if self._scanning_active:
+            # Get tradeable pairs
             try:
-                signal = await self._analyze_pair(pair, session, now)
-                if signal:
-                    signals.append(signal)
+                pairs = await self._get_pairs()
             except Exception as e:
-                logger.debug("mm_analyze_pair_error", symbol=pair, error=str(e))
+                logger.warning("mm_engine_pairs_error", error=str(e))
+                pairs = []
 
-        # 4. Rank signals and enter best ones
-        if signals:
-            signals.sort(key=lambda s: s.confluence_score, reverse=True)
-            await self._process_entries(signals)
+            # 3. Scan each pair
+            signals: list[MMSignal] = []
+            for pair in pairs:
+                try:
+                    signal = await self._analyze_pair(pair, session, now)
+                    if signal:
+                        signals.append(signal)
+                except Exception as e:
+                    logger.debug("mm_analyze_pair_error", symbol=pair, error=str(e))
 
-        # 5. Manage existing positions
+            # 4. Rank signals and enter best ones
+            if signals:
+                signals.sort(key=lambda s: s.confluence_score, reverse=True)
+                await self._process_entries(signals)
+
+        # 5. Manage existing positions (always, even when paused)
         for symbol in list(self.positions.keys()):
             try:
                 await self._manage_position(symbol)

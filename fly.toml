@@ -1,5 +1,5 @@
 app = "tarakta"
-primary_region = "ams"
+primary_region = "sin"
 
 [build]
   dockerfile = "Dockerfile"

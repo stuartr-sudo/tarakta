@@ -1,18 +1,19 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Tarakta{% endblock %}</title>
-    <link rel="stylesheet" href="/static/style.css?v=5">
+    <link rel="stylesheet" href="/static/style.css?v=6">
     {% block head %}{% endblock %}
 </head>
 <body>
     {% set current_page = request.url.path %}
     {% set mode = (state.mode | default('paper')) if state else 'paper' %}
+    {% set _iq = '?instance=' ~ active_instance if active_instance is defined and active_instance != config.instance_id else '' %}
 
-    <!-- Instance Tabs (only show active bots) -->
-    {% set active_ids = ['tarakta-stream', 'footprint'] %}
+    <!-- Active instance list (sidebar + topbar) -->
+    {% set active_ids = ['tarakta-expanded', 'footprint'] %}
     {% set filtered = [] %}
     {% if all_instances is defined %}
         {% for inst in all_instances %}
@@ -22,130 +23,212 @@
             {% endif %}
         {% endfor %}
     {% endif %}
-    {% if filtered | length > 1 %}
-    <div class="instance-tabs">
-        {% for inst in filtered %}
-        {% set iid = inst.instance_id if inst.instance_id is defined else inst %}
-        <a href="?instance={{ iid }}"
-           class="instance-tab {{ 'active' if iid == active_instance else '' }}">
-            {{ iid | upper }}
-            {% if inst.total_pnl_usd is defined and inst.total_pnl_usd is not none %}
-            <span class="instance-pnl {{ 'positive' if inst.total_pnl_usd >= 0 else 'negative' }}">
-                ${{ '%.2f' | format(inst.total_pnl_usd) }}
-            </span>
-            {% endif %}
-        </a>
-        {% endfor %}
-    </div>
-    {% endif %}
 
-    <!-- Mode Banner -->
-    <div class="mode-banner {{ mode }}">
-        {% if mode == 'paper' %}
-            Paper Trading — All trades are simulated
-        {% else %}
-            Live Trading — Real orders active
-        {% endif %}
-        {% if enabled_markets and enabled_markets | length > 1 %}
-        <span class="market-badges">
-            {% for m in enabled_markets %}
-            <span class="market-badge">{{ m | upper }}</span>
-            {% endfor %}
-        </span>
-        {% endif %}
-        {% if active_instance is defined and active_instance != config.instance_id %}
-        <span style="margin-left:12px;font-weight:700;">Viewing: {{ active_instance | upper }}</span>
-        {% endif %}
-    </div>
+    <div class="app-shell">
 
-    <!-- Navigation -->
-    {% set _iq = '?instance=' ~ active_instance if active_instance is defined and active_instance != config.instance_id else '' %}
-    <nav class="top-nav">
-        <a href="/" class="brand">tarakta</a>
-        <div class="nav-links">
-            <a href="/{{ _iq }}" class="{{ 'active' if current_page == '/' else '' }}">Dashboard</a>
-            <a href="/trades{{ _iq }}" class="{{ 'active' if current_page == '/trades' else '' }}">Trades</a>
-            <a href="/signals{{ _iq }}" class="{{ 'active' if current_page == '/signals' else '' }}">Signals</a>
-            <a href="/analytics{{ _iq }}" class="{{ 'active' if current_page == '/analytics' else '' }}">Analytics</a>
-            <a href="/usage{{ _iq }}" class="{{ 'active' if current_page == '/usage' else '' }}">Usage</a>
-            <a href="/chart{{ _iq }}" class="{{ 'active' if current_page == '/chart' else '' }}">Chart</a>
-            <a href="/settings{{ _iq }}" class="{{ 'active' if current_page == '/settings' else '' }}">Settings</a>
-            <a href="/training{{ _iq }}" class="{{ 'active' if current_page == '/training' else '' }}">Training</a>
-        </div>
-        <div class="nav-right">
-            <div class="scan-timer" id="scanTimer">
-                <div class="timer-label">Next Scan</div>
-                <div class="timer-countdown" id="timerCountdown">--:--</div>
-                <div class="timer-bar">
-                    <div class="timer-bar-fill" id="timerBarFill"></div>
-                </div>
+        <!-- ── Sidebar ──────────────────────────────────── -->
+        <aside class="sidebar">
+            <div class="sidebar-logo">
+                <div class="brand-name">Tarakta</div>
+                <div class="brand-sub">Smart Money Bot</div>
             </div>
-            {% if role == 'viewer' %}<span class="badge text-muted" style="font-size:0.65rem;">view-only</span>{% endif %}
-            <a href="/logout" class="btn nav-logout">Logout</a>
-        </div>
-    </nav>
 
-    {% if db_offline %}
-    <div style="background:rgba(248,113,113,0.15);color:var(--red);text-align:center;padding:8px;font-weight:600;font-size:0.78rem;font-family:var(--font-mono);">
-        Database unreachable &mdash; showing cached/empty data
-    </div>
-    {% endif %}
+            <nav class="sidebar-nav">
+                <div class="sidebar-section">Monitor</div>
 
-    {% if usage_alert is defined and usage_alert %}
-    <div class="alert-banner {{ 'alert-banner-red' if usage_alert.exceeded else 'alert-banner-amber' }}">
-        OpenAI spend {{ '$%.2f' | format(usage_alert.spend) }} of ${{ '%.2f' | format(usage_alert.threshold) }} limit
-        {% if usage_alert.exceeded %} &mdash; BUDGET EXCEEDED{% endif %}
-        <a href="/usage{{ _iq }}" style="color:inherit;margin-left:12px;text-decoration:underline;">View Usage</a>
-    </div>
-    {% endif %}
+                <a href="/{{ _iq }}" class="sidebar-link {{ 'active' if current_page == '/' else '' }}">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                        <rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1.2"/>
+                        <rect x="9" y="1.5" width="5.5" height="5.5" rx="1.2"/>
+                        <rect x="1.5" y="9" width="5.5" height="5.5" rx="1.2"/>
+                        <rect x="9" y="9" width="5.5" height="5.5" rx="1.2"/>
+                    </svg>
+                    Dashboard
+                </a>
 
-    <main class="content">
-        {% block content %}{% endblock %}
-    </main>
+                <a href="/trades{{ _iq }}" class="sidebar-link {{ 'active' if current_page == '/trades' else '' }}">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                        <path d="M2 11.5 5.5 8l3 1.5 3-5.5 2.5 2.5"/>
+                        <path d="M2 14.5h12"/>
+                    </svg>
+                    Trades
+                </a>
 
-    <footer class="site-footer">
-        Tarakta Trading System
-    </footer>
+                <a href="/signals{{ _iq }}" class="sidebar-link {{ 'active' if current_page == '/signals' else '' }}">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                        <circle cx="8" cy="8" r="5.5"/>
+                        <path d="M8 5.5V8l1.5 1.5"/>
+                    </svg>
+                    Signals
+                </a>
+
+                <a href="/analytics{{ _iq }}" class="sidebar-link {{ 'active' if current_page == '/analytics' else '' }}">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                        <rect x="2" y="10" width="3" height="4.5" rx="0.5"/>
+                        <rect x="6.5" y="6.5" width="3" height="8" rx="0.5"/>
+                        <rect x="11" y="3.5" width="3" height="11" rx="0.5"/>
+                    </svg>
+                    Analytics
+                </a>
+
+                <a href="/chart{{ _iq }}" class="sidebar-link {{ 'active' if current_page == '/chart' else '' }}">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                        <path d="M2 12.5 5 8.5l3 2 3-6.5 3 3"/>
+                        <line x1="2" y1="14.5" x2="14" y2="14.5"/>
+                    </svg>
+                    Chart
+                </a>
+
+                <a href="/mm{{ _iq }}" class="sidebar-link {{ 'active' if current_page == '/mm' else '' }}">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                        <path d="M2 12 4.5 5 6.5 9 8 3 9.5 9 11.5 5 14 12"/>
+                        <line x1="2" y1="14" x2="14" y2="14"/>
+                    </svg>
+                    MM Engine
+                </a>
+
+                <div class="sidebar-section">Manage</div>
+
+                <a href="/usage{{ _iq }}" class="sidebar-link {{ 'active' if current_page == '/usage' else '' }}">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                        <circle cx="8" cy="8" r="2.2"/>
+                        <path d="M8 1.5v1.3M8 13.2v1.3M1.5 8h1.3M13.2 8h1.3M3.4 3.4l.9.9M11.7 11.7l.9.9M12.6 3.4l-.9.9M4.3 11.7l-.9.9"/>
+                    </svg>
+                    Usage
+                </a>
+
+                <a href="/settings{{ _iq }}" class="sidebar-link {{ 'active' if current_page == '/settings' else '' }}">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                        <path d="M6.5 2H9.5l.5 1.5 1.3-.5 1.5 2.6-1 1.1.1 1.3-1 1.1-1.5-1-1.3.5H6.5l-.5-1.5-1.3.5L3.2 7l1-1.1-.1-1.3 1-1.1 1.5 1 1.3-.5z"/>
+                        <circle cx="8" cy="8" r="1.8"/>
+                    </svg>
+                    Settings
+                </a>
+
+                <a href="/training{{ _iq }}" class="sidebar-link {{ 'active' if current_page == '/training' else '' }}">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                        <path d="M3 4.5l5-3 5 3v7l-5 3-5-3z"/>
+                        <path d="M8 1.5v14M3 4.5l5 3 5-3"/>
+                    </svg>
+                    Training
+                </a>
+            </nav>
+
+            <!-- Instance switcher -->
+            {% if filtered | length > 0 %}
+            <div class="sidebar-instances">
+                <div class="inst-label">Instances</div>
+                {% for inst in filtered %}
+                {% set iid = inst.instance_id if inst.instance_id is defined else inst %}
+                <a href="?instance={{ iid }}" class="inst-row {{ 'active-inst' if iid == active_instance else '' }}">
+                    <div class="pulse-dot {{ 'animate' if inst.status == 'running' else 'orange' if inst.status == 'stopped' else '' }}"></div>
+                    <div class="inst-name">{{ iid }}</div>
+                    {% if inst.total_pnl_usd is defined and inst.total_pnl_usd is not none %}
+                    <div class="inst-pnl {{ 'positive' if inst.total_pnl_usd >= 0 else 'negative' }}">
+                        ${{ '%.2f' | format(inst.total_pnl_usd) }}
+                    </div>
+                    {% else %}
+                    <div class="inst-tag">{{ mode }}</div>
+                    {% endif %}
+                </a>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </aside>
+
+        <!-- ── App main ──────────────────────────────────── -->
+        <div class="app-main">
+
+            <!-- Topbar -->
+            <header class="topbar">
+                <div class="topbar-title">{% block topbar_title %}{% endblock %}</div>
+
+                {% if filtered | length > 1 %}
+                <div class="instance-tabs">
+                    {% for inst in filtered %}
+                    {% set iid = inst.instance_id if inst.instance_id is defined else inst %}
+                    <a href="?instance={{ iid }}" class="instance-tab {{ 'active' if iid == active_instance else '' }}">
+                        {{ iid }}
+                        {% if inst.total_pnl_usd is defined and inst.total_pnl_usd is not none %}
+                        <span class="instance-pnl {{ 'positive' if inst.total_pnl_usd >= 0 else 'negative' }}">
+                            ${{ '%.2f' | format(inst.total_pnl_usd) }}
+                        </span>
+                        {% endif %}
+                    </a>
+                    {% endfor %}
+                </div>
+                {% endif %}
+
+                <div class="topbar-right">
+                    <div class="scan-timer" id="scanTimer">
+                        <div class="timer-label">Next Scan</div>
+                        <div class="timer-countdown" id="timerCountdown">--:--</div>
+                        <div class="timer-bar"><div class="timer-bar-fill" id="timerBarFill"></div></div>
+                    </div>
+                    {% if role == 'viewer' %}<span class="badge text-muted">view-only</span>{% endif %}
+                    <a href="/logout" class="nav-logout">Logout</a>
+                </div>
+            </header>
+
+            <!-- Banners -->
+            {% if mode == 'paper' or mode == 'live' %}
+            <div class="mode-banner {{ mode }}">
+                {% if mode == 'paper' %}Paper Trading — All trades are simulated
+                {% else %}Live Trading — Real orders active{% endif %}
+                {% if enabled_markets and enabled_markets | length > 1 %}
+                <span class="market-badges">
+                    {% for m in enabled_markets %}<span class="market-badge">{{ m | upper }}</span>{% endfor %}
+                </span>
+                {% endif %}
+                {% if active_instance is defined and active_instance != config.instance_id %}
+                <span style="margin-left:12px;font-weight:700">Viewing: {{ active_instance | upper }}</span>
+                {% endif %}
+            </div>
+            {% endif %}
+
+            {% if db_offline %}
+            <div class="db-offline-banner">Database unreachable &mdash; showing cached/empty data</div>
+            {% endif %}
+
+            {% if usage_alert is defined and usage_alert %}
+            <div class="alert-banner {{ 'alert-banner-red' if usage_alert.exceeded else 'alert-banner-amber' }}">
+                OpenAI spend ${{ '%.2f' | format(usage_alert.spend) }} of ${{ '%.2f' | format(usage_alert.threshold) }} limit
+                {% if usage_alert.exceeded %} &mdash; BUDGET EXCEEDED{% endif %}
+                <a href="/usage{{ _iq }}" style="color:inherit;margin-left:12px;text-decoration:underline">View Usage</a>
+            </div>
+            {% endif %}
+
+            <!-- Page content -->
+            <main class="content">
+                {% block content %}{% endblock %}
+            </main>
+
+        </div><!-- /app-main -->
+    </div><!-- /app-shell -->
+
     <script>
     (function() {
         const INTERVAL = {{ config.scan_interval_minutes if config else 15 }};
         const timerEl = document.getElementById('timerCountdown');
-        const barEl = document.getElementById('timerBarFill');
+        const barEl   = document.getElementById('timerBarFill');
         if (!timerEl) return;
-
         function update() {
-            const now = new Date();
-            const utcMs = now.getTime();
-            const intervalMs = INTERVAL * 60 * 1000;
-            const nextTick = Math.ceil(utcMs / intervalMs) * intervalMs;
-            const remainMs = nextTick - utcMs;
-            const remainSec = Math.max(0, Math.floor(remainMs / 1000));
-
-            const mins = Math.floor(remainSec / 60);
-            const secs = remainSec % 60;
-            timerEl.textContent = String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
-
-            const elapsed = intervalMs - remainMs;
-            const pct = Math.min(100, (elapsed / intervalMs) * 100);
-            barEl.style.width = pct + '%';
-
-            if (remainSec <= 30) {
-                timerEl.classList.add('imminent');
-            } else {
-                timerEl.classList.remove('imminent');
-            }
+            const now = Date.now();
+            const ms  = INTERVAL * 60 * 1000;
+            const rem = Math.ceil(now / ms) * ms - now;
+            const s   = Math.max(0, Math.floor(rem / 1000));
+            timerEl.textContent = String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
+            barEl.style.width = Math.min(100, ((ms-rem)/ms)*100) + '%';
+            timerEl.classList.toggle('imminent', s <= 30);
         }
-
-        update();
-        setInterval(update, 1000);
+        update(); setInterval(update, 1000);
     })();
     </script>
     <script>
     const _ACTIVE_INSTANCE = '{{ active_instance | default("") }}';
     function apiUrl(path) {
         if (!_ACTIVE_INSTANCE) return path;
-        const sep = path.includes('?') ? '&' : '?';
-        return path + sep + 'instance=' + encodeURIComponent(_ACTIVE_INSTANCE);
+        return path + (path.includes('?') ? '&' : '?') + 'instance=' + encodeURIComponent(_ACTIVE_INSTANCE);
     }
     </script>
     {% block scripts %}{% endblock %}

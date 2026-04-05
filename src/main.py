@@ -168,6 +168,12 @@ async def main() -> None:
             balance=config.mm_initial_balance,
         )
 
+    # Wire mm_engine into dashboard so API can access it
+    if mm_engine:
+        dashboard_app.state.mm_engine = mm_engine
+    else:
+        dashboard_app.state.mm_engine = None
+
     # Graceful shutdown
     loop = asyncio.get_event_loop()
 
