@@ -30,6 +30,16 @@ from src.strategy.leverage import LeverageAnalyzer
 from src.strategy.liquidity import LiquidityAnalyzer
 from src.strategy.order_blocks import OrderBlockAnalyzer
 from src.strategy.market_structure import MarketStructureAnalyzer
+from src.strategy.mm_board_meetings import BoardMeetingDetector
+from src.strategy.mm_confluence import MMConfluenceScorer, MMContext
+from src.strategy.mm_ema_framework import EMAFramework
+from src.strategy.mm_formations import FormationDetector
+from src.strategy.mm_levels import LevelTracker
+from src.strategy.mm_risk import MMRiskCalculator
+from src.strategy.mm_sessions import MMSessionAnalyzer
+from src.strategy.mm_targets import TargetAnalyzer
+from src.strategy.mm_weekly_cycle import WeeklyCycleTracker
+from src.strategy.mm_weekend_trap import WeekendTrapAnalyzer
 from src.strategy.pullback import PullbackAnalyzer
 from src.strategy.sessions import SessionAnalyzer
 from src.strategy.sweep_detector import SweepDetector
@@ -71,6 +81,25 @@ class AltcoinScanner:
             monday_manipulation_hours=getattr(config, "monday_manipulation_hours", 8.0),
             midweek_reversal_bonus_pts=getattr(config, "midweek_reversal_bonus", 10.0),
         )
+        # MM Method modules — Market Makers Method analysis pipeline
+        self.mm_method_enabled = getattr(config, "mm_method_enabled", True)
+        if self.mm_method_enabled:
+            self.mm_session_analyzer = MMSessionAnalyzer()
+            self.mm_ema_framework = EMAFramework()
+            self.mm_formation_detector = FormationDetector(
+                session_analyzer=self.mm_session_analyzer,
+            )
+            self.mm_level_tracker = LevelTracker(ema_framework=self.mm_ema_framework)
+            self.mm_weekly_cycle_tracker = WeeklyCycleTracker()
+            self.mm_confluence_scorer = MMConfluenceScorer(
+                min_rr=getattr(config, "mm_min_rr", 3.0),
+                min_score=getattr(config, "mm_min_confluence_score", 40.0),
+            )
+            self.mm_weekend_trap_analyzer = WeekendTrapAnalyzer()
+            self.mm_board_meeting_detector = BoardMeetingDetector()
+            self.mm_target_analyzer = TargetAnalyzer()
+            self.mm_risk_calculator = MMRiskCalculator()
+            self.mm_method_weight = getattr(config, "mm_method_weight", 15.0)
         # Near-misses for hyper-watchlist promotion (populated each scan cycle)
         self.last_near_misses: list[SignalCandidate] = []
 
@@ -296,6 +325,35 @@ class AltcoinScanner:
                     midweek_reversal=weekly_result.signal_aligns_with_reversal,
                 )
 
+        # ── MM Method: sessions, EMA, formations, levels, weekly cycle ──
+        if self.mm_method_enabled and signal.score > 0:
+            try:
+                mm_data = self._run_mm_analysis(symbol, candles, signal.direction)
+                signal._scan_mm_data = mm_data  # Stashed for agent context enrichment
+
+                # Apply MM bonus scoring
+                mm_bonus = self._score_mm_method(mm_data)
+                if mm_bonus > 0:
+                    signal.score += mm_bonus
+                    signal.components["mm_method"] = mm_bonus
+                    signal.reasons.append(
+                        f"MM Method confluence: grade {mm_data.get('confluence_grade', '?')} "
+                        f"({mm_data.get('confluence_score_pct', 0):.0f}%) +{mm_bonus:.0f}pts"
+                    )
+                    logger.info(
+                        "mm_method_applied",
+                        symbol=symbol,
+                        mm_phase=mm_data.get("cycle_phase"),
+                        mm_grade=mm_data.get("confluence_grade"),
+                        mm_score_pct=mm_data.get("confluence_score_pct"),
+                        mm_level=mm_data.get("current_level"),
+                        mm_formation=mm_data.get("formation_type"),
+                        bonus=mm_bonus,
+                        new_score=signal.score,
+                    )
+            except Exception as e:
+                logger.warning("mm_method_failed", symbol=symbol, error=str(e))
+
         # Attach sweep data and ATR for order execution
         signal.sweep_result = sweep_result
         signal.atr_1h = atr_1h
@@ -405,6 +463,235 @@ class AltcoinScanner:
             bonus += 2.0
 
         return min(bonus, 10.0)
+
+    def _run_mm_analysis(
+        self, symbol: str, candles: dict[str, pd.DataFrame], signal_direction: str | None,
+    ) -> dict:
+        """Run all MM Method modules and return a consolidated results dict.
+
+        Called per-pair during _analyze_pair when mm_method_enabled is True.
+        Uses 1H candles for formation/level detection and 4H for EMA trend.
+
+        Args:
+            symbol: Trading pair symbol.
+            candles: Dict of timeframe -> DataFrame (must include "1h").
+            signal_direction: Signal direction from sweep scoring ("bullish"/"bearish").
+
+        Returns:
+            Dict with all MM results keyed for agent context and scoring.
+        """
+        from datetime import datetime, timezone
+
+        df_1h = candles.get("1h")
+        df_4h = candles.get("4h")
+        mm: dict = {}
+
+        # 1. Session timing
+        session_info = self.mm_session_analyzer.get_current_session()
+        mm["session_name"] = session_info.session_name
+        mm["session_is_gap"] = session_info.is_gap
+        mm["session_minutes_remaining"] = session_info.minutes_remaining
+        mm["is_weekend"] = session_info.is_weekend
+
+        # 2. EMA framework (use 4H for macro trend, 1H for entry timing)
+        if df_4h is not None and not df_4h.empty:
+            ema_state_4h = self.mm_ema_framework.calculate(df_4h)
+            trend_state_4h = self.mm_ema_framework.get_trend_state(df_4h)
+            ema_break_50 = self.mm_ema_framework.detect_ema_break(df_4h, ema_period=50)
+            mm["ema_alignment_4h"] = ema_state_4h.alignment
+            mm["ema_fan_out_4h"] = round(ema_state_4h.fan_out_score, 3)
+            mm["ema_price_dist_50"] = round(ema_state_4h.price_distance_from_50, 2)
+            mm["ema_price_dist_200"] = round(ema_state_4h.price_distance_from_200, 2)
+            mm["trend_direction_4h"] = trend_state_4h.direction
+            mm["trend_strength_4h"] = round(trend_state_4h.strength, 3)
+            mm["trend_is_accelerating"] = trend_state_4h.is_accelerating
+            mm["trend_is_flattening"] = trend_state_4h.is_flattening
+            mm["ema50_broke"] = ema_break_50.broke_ema
+            mm["ema50_break_volume_confirmed"] = ema_break_50.volume_confirmed
+            mm["ema50_break_direction"] = ema_break_50.direction
+        else:
+            mm["ema_alignment_4h"] = "mixed"
+            mm["trend_direction_4h"] = "sideways"
+            mm["trend_strength_4h"] = 0.0
+
+        # 3. Formation detection (1H)
+        if df_1h is not None and not df_1h.empty:
+            formations = self.mm_formation_detector.detect(
+                df_1h, direction_bias=signal_direction,
+            )
+            if formations:
+                best = formations[0]  # Already sorted by quality score
+                mm["formation_type"] = best.type
+                mm["formation_variant"] = best.variant
+                mm["formation_quality"] = round(best.quality_score, 3)
+                mm["formation_direction"] = best.direction
+                mm["formation_at_key_level"] = best.at_key_level
+                mm["formation_confirmed"] = best.confirmed
+                mm["formation_session_peak1"] = best.session_peak1
+                mm["formation_session_peak2"] = best.session_peak2
+            else:
+                mm["formation_type"] = None
+
+        # 4. Level tracking (1H)
+        if df_1h is not None and not df_1h.empty:
+            level_analysis = self.mm_level_tracker.analyze(
+                df_1h, direction=signal_direction,
+            )
+            mm["current_level"] = level_analysis.current_level
+            mm["level_direction"] = level_analysis.direction
+            mm["is_extended"] = level_analysis.is_extended
+            mm["volume_degrading"] = level_analysis.volume_degrading
+            mm["num_board_meetings"] = len(level_analysis.board_meetings)
+            if level_analysis.svc and level_analysis.svc.detected:
+                mm["svc_detected"] = True
+                mm["svc_confirmed"] = not level_analysis.svc.price_returned_to_wick
+                mm["svc_volume_ratio"] = round(level_analysis.svc.volume_ratio, 2)
+            else:
+                mm["svc_detected"] = False
+                mm["svc_confirmed"] = False
+        else:
+            mm["current_level"] = 0
+
+        # 5. Weekly cycle state (1H)
+        if df_1h is not None and not df_1h.empty:
+            now_utc = datetime.now(timezone.utc)
+            cycle_state = self.mm_weekly_cycle_tracker.update(df_1h, now_utc)
+            mm["cycle_phase"] = cycle_state.phase
+            mm["cycle_direction"] = cycle_state.direction
+            mm["cycle_how"] = cycle_state.how
+            mm["cycle_low"] = cycle_state.low
+            mm["cycle_hod"] = cycle_state.hod
+            mm["cycle_lod"] = cycle_state.lod
+            mm["cycle_fmwb_detected"] = cycle_state.fmwb_detected
+            mm["cycle_fmwb_direction"] = cycle_state.fmwb_direction
+            mm["cycle_midweek_reversal_expected"] = cycle_state.midweek_reversal_expected
+            mm["cycle_take_profit_signal"] = cycle_state.take_profit_signal
+            mm["cycle_confidence"] = round(cycle_state.confidence, 3)
+        else:
+            mm["cycle_phase"] = "unknown"
+
+        # 6. Weekend Trap Box + FMWB detection (1H)
+        if df_1h is not None and not df_1h.empty:
+            now_utc = datetime.now(timezone.utc)
+            weekend_analysis = self.mm_weekend_trap_analyzer.analyze(df_1h, now_utc)
+            mm["weekend_trap_detected"] = weekend_analysis.trap_box.detected
+            mm["weekend_box_high"] = weekend_analysis.trap_box.box_high
+            mm["weekend_box_low"] = weekend_analysis.trap_box.box_low
+            mm["weekend_box_range_pct"] = weekend_analysis.trap_box.box_range_pct
+            mm["weekend_trap_direction"] = weekend_analysis.trap_box.primary_trap_direction
+            mm["fmwb_detected"] = weekend_analysis.fmwb.detected
+            mm["fmwb_direction"] = weekend_analysis.fmwb.direction
+            mm["fmwb_real_direction"] = weekend_analysis.fmwb.real_direction
+            mm["fmwb_magnitude_pct"] = weekend_analysis.fmwb.magnitude_pct
+            mm["weekend_bias"] = weekend_analysis.bias
+            mm["weekend_confidence"] = weekend_analysis.confidence
+
+        # 7. Target identification (1H)
+        current_price = float(df_1h.iloc[-1]["close"]) if df_1h is not None and not df_1h.empty else 0.0
+        if df_1h is not None and not df_1h.empty and current_price > 0:
+            # Get EMA values for target calc
+            ema_vals = {}
+            if df_4h is not None and not df_4h.empty:
+                ema_state = self.mm_ema_framework.calculate(df_4h)
+                ema_vals = ema_state.values
+            target_analysis = self.mm_target_analyzer.analyze(
+                ohlc=df_1h,
+                direction=signal_direction or "bullish",
+                entry_price=current_price,
+                stop_loss=current_price * 0.99,  # Placeholder SL for vector scanning
+                current_level=mm.get("current_level", 1),
+                ema_values=ema_vals,
+                how=mm.get("cycle_how"),
+                low=mm.get("cycle_low"),
+            )
+            mm["unrecovered_vectors"] = len(target_analysis.unrecovered_vectors)
+            if target_analysis.primary_l1:
+                mm["target_l1_price"] = target_analysis.primary_l1.price
+                mm["target_l1_source"] = target_analysis.primary_l1.source
+            if target_analysis.primary_l2:
+                mm["target_l2_price"] = target_analysis.primary_l2.price
+                mm["target_l2_source"] = target_analysis.primary_l2.source
+            if target_analysis.primary_l3:
+                mm["target_l3_price"] = target_analysis.primary_l3.price
+                mm["target_l3_source"] = target_analysis.primary_l3.source
+            mm["rr_to_l1"] = target_analysis.risk_reward_l1
+            has_unrecovered = len(target_analysis.unrecovered_vectors) > 0
+        else:
+            has_unrecovered = False
+
+        # 8. MM Confluence scoring (assembles MMContext from all the above)
+        # Check HOW/LOW proximity for confluence
+        at_how_low = False
+        at_hod_lod = False
+        if current_price > 0:
+            cycle_how = mm.get("cycle_how", 0)
+            cycle_low = mm.get("cycle_low", float("inf"))
+            if cycle_how and abs(current_price - cycle_how) / current_price < 0.005:
+                at_how_low = True
+            if cycle_low and cycle_low < float("inf") and abs(current_price - cycle_low) / current_price < 0.005:
+                at_how_low = True
+            cycle_hod = mm.get("cycle_hod", 0)
+            cycle_lod = mm.get("cycle_lod", float("inf"))
+            if cycle_hod and abs(current_price - cycle_hod) / current_price < 0.003:
+                at_hod_lod = True
+            if cycle_lod and cycle_lod < float("inf") and abs(current_price - cycle_lod) / current_price < 0.003:
+                at_hod_lod = True
+
+        mm_ctx = MMContext(
+            formation=mm if mm.get("formation_type") else None,
+            ema_state={
+                "alignment": mm.get("ema_alignment_4h", "mixed"),
+                "broke_50": mm.get("ema50_broke", False),
+                "volume_confirmed": mm.get("ema50_break_volume_confirmed", False),
+                "at_50_ema": abs(mm.get("ema_price_dist_50", 999)) < 0.5,
+            } if mm.get("ema_alignment_4h") else None,
+            level_state={
+                "current_level": mm.get("current_level", 0),
+                "svc_detected": mm.get("svc_detected", False),
+                "volume_degrading": mm.get("volume_degrading", False),
+            },
+            cycle_state={
+                "phase": mm.get("cycle_phase", "unknown"),
+                "direction": mm.get("cycle_direction"),
+            },
+            at_session_changeover=mm.get("session_is_gap", False),
+            at_how_low=at_how_low,
+            at_hod_lod=at_hod_lod,
+            has_unrecovered_vector=has_unrecovered,
+            has_liquidation_cluster=False,  # Requires Hyblock API integration (Phase 3c)
+        )
+        confluence_result = self.mm_confluence_scorer.score(mm_ctx)
+        mm["confluence_score"] = round(confluence_result.total_score, 2)
+        mm["confluence_score_pct"] = round(confluence_result.score_pct, 2)
+        mm["confluence_grade"] = confluence_result.grade
+        mm["confluence_rr"] = round(confluence_result.risk_reward, 2)
+        mm["confluence_factors"] = confluence_result.factors
+
+        return mm
+
+    def _score_mm_method(self, mm_data: dict) -> float:
+        """Convert MM Method analysis into bonus points for the signal score.
+
+        Scales the MM confluence score percentage into 0-mm_method_weight bonus.
+        Only contributes if the MM confluence meets the minimum threshold.
+
+        Args:
+            mm_data: Dict from _run_mm_analysis.
+
+        Returns:
+            Bonus points (0 to mm_method_weight).
+        """
+        score_pct = mm_data.get("confluence_score_pct", 0.0)
+        min_pct = self.config.mm_min_confluence_score if hasattr(self.config, "mm_min_confluence_score") else 40.0
+        max_bonus = self.mm_method_weight
+
+        if score_pct < min_pct:
+            return 0.0
+
+        # Scale linearly: min_pct -> 0 bonus, 100% -> full bonus
+        scale = (score_pct - min_pct) / (100.0 - min_pct) if min_pct < 100 else 0.0
+        bonus = round(scale * max_bonus, 1)
+        return min(bonus, max_bonus)
 
     def _enrich_agent_context(self, signals: list[SignalCandidate]) -> None:
         """Attach ICT/SMC context data to signals for the AI agent prompt.
@@ -536,6 +823,82 @@ class AltcoinScanner:
                         "judas_swing_probability": round(lp.judas_swing_probability, 2),
                     }
 
+                # ── MM Method (stashed from _analyze_pair) ──
+                mm_data = getattr(signal, "_scan_mm_data", None)
+                if mm_data:
+                    ctx["mm_method"] = {
+                        "session": {
+                            "name": mm_data.get("session_name"),
+                            "is_gap": mm_data.get("session_is_gap"),
+                            "minutes_remaining": mm_data.get("session_minutes_remaining"),
+                        },
+                        "ema": {
+                            "alignment_4h": mm_data.get("ema_alignment_4h"),
+                            "fan_out_4h": mm_data.get("ema_fan_out_4h"),
+                            "price_dist_50": mm_data.get("ema_price_dist_50"),
+                            "price_dist_200": mm_data.get("ema_price_dist_200"),
+                            "broke_50": mm_data.get("ema50_broke"),
+                            "break_volume_confirmed": mm_data.get("ema50_break_volume_confirmed"),
+                        },
+                        "trend": {
+                            "direction_4h": mm_data.get("trend_direction_4h"),
+                            "strength_4h": mm_data.get("trend_strength_4h"),
+                            "is_accelerating": mm_data.get("trend_is_accelerating"),
+                            "is_flattening": mm_data.get("trend_is_flattening"),
+                        },
+                        "formation": {
+                            "type": mm_data.get("formation_type"),
+                            "variant": mm_data.get("formation_variant"),
+                            "quality": mm_data.get("formation_quality"),
+                            "direction": mm_data.get("formation_direction"),
+                            "at_key_level": mm_data.get("formation_at_key_level"),
+                            "confirmed": mm_data.get("formation_confirmed"),
+                        } if mm_data.get("formation_type") else None,
+                        "levels": {
+                            "current": mm_data.get("current_level"),
+                            "direction": mm_data.get("level_direction"),
+                            "is_extended": mm_data.get("is_extended"),
+                            "volume_degrading": mm_data.get("volume_degrading"),
+                            "svc_detected": mm_data.get("svc_detected"),
+                            "svc_confirmed": mm_data.get("svc_confirmed"),
+                        },
+                        "weekly_cycle": {
+                            "phase": mm_data.get("cycle_phase"),
+                            "direction": mm_data.get("cycle_direction"),
+                            "how": mm_data.get("cycle_how"),
+                            "low": mm_data.get("cycle_low"),
+                            "fmwb_detected": mm_data.get("cycle_fmwb_detected"),
+                            "midweek_reversal_expected": mm_data.get("cycle_midweek_reversal_expected"),
+                            "take_profit_signal": mm_data.get("cycle_take_profit_signal"),
+                        },
+                        "weekend_trap": {
+                            "detected": mm_data.get("weekend_trap_detected"),
+                            "box_high": mm_data.get("weekend_box_high"),
+                            "box_low": mm_data.get("weekend_box_low"),
+                            "box_range_pct": mm_data.get("weekend_box_range_pct"),
+                            "trap_direction": mm_data.get("weekend_trap_direction"),
+                            "fmwb_detected": mm_data.get("fmwb_detected"),
+                            "fmwb_direction": mm_data.get("fmwb_direction"),
+                            "fmwb_real_direction": mm_data.get("fmwb_real_direction"),
+                            "bias": mm_data.get("weekend_bias"),
+                        } if mm_data.get("weekend_trap_detected") else None,
+                        "targets": {
+                            "l1_price": mm_data.get("target_l1_price"),
+                            "l1_source": mm_data.get("target_l1_source"),
+                            "l2_price": mm_data.get("target_l2_price"),
+                            "l2_source": mm_data.get("target_l2_source"),
+                            "l3_price": mm_data.get("target_l3_price"),
+                            "l3_source": mm_data.get("target_l3_source"),
+                            "unrecovered_vectors": mm_data.get("unrecovered_vectors", 0),
+                            "rr_to_l1": mm_data.get("rr_to_l1"),
+                        },
+                        "confluence": {
+                            "score": mm_data.get("confluence_score"),
+                            "score_pct": mm_data.get("confluence_score_pct"),
+                            "grade": mm_data.get("confluence_grade"),
+                        },
+                    }
+
                 signal.agent_context = ctx
 
                 logger.info(
@@ -544,6 +907,7 @@ class AltcoinScanner:
                     obs=len(ctx.get("order_blocks", [])),
                     fvgs=len(ctx.get("fair_value_gaps", [])),
                     liq_pools=ctx.get("liquidity", {}).get("active_pool_count", 0),
+                    mm_method="yes" if ctx.get("mm_method") else "no",
                 )
 
             except Exception as e:
@@ -557,7 +921,10 @@ class AltcoinScanner:
                     signal.displacement_open_1h = _pb.displacement_open
 
                 # Clean up stashed data to free memory
-                for attr in ("_scan_candles_1h", "_scan_ms_results", "_scan_vol_profile", "_scan_pullback_result"):
+                for attr in (
+                    "_scan_candles_1h", "_scan_ms_results", "_scan_vol_profile",
+                    "_scan_pullback_result", "_scan_mm_data",
+                ):
                     if hasattr(signal, attr):
                         delattr(signal, attr)
 

@@ -204,7 +204,40 @@ For each candle in the table, extract:
 - **Displacement** — Large-bodied candle with above-average volume
 - **Liquidity Sweep** — Price wicked through a key level to trigger stops, then reversed
 - **Wick Ratio** — Rejection wick / body size (>1.0 = rejection, >2.0 = strong)
-- **Engulfing** — Candle body fully encompasses prior candle's body"""
+- **Engulfing** — Candle body fully encompasses prior candle's body
+
+## MM Method Entry Rules (if MM context is provided)
+
+When MM Method data is available, apply these rules as additional confirmation for your ENTER/WAIT decision.
+
+### Entry Types
+- **Aggressive Entry** (on 2nd peak of M/W): Enter when candle CLOSES as hammer/engulfing on 2nd peak. \
+  SL above 1st peak wick (M) or below 1st peak wick (W). Typical R:R: 4:1 to 7.8:1
+- **Conservative Entry** (after Level 1): Wait for 50 EMA break with volume, enter on retest. \
+  SL above 2nd peak of M/W. Typical R:R: 2.7:1 to 9.8:1
+
+### Four Retest Conditions (need >=2 for conservative entry)
+After Level 1, price must retrace to at least 2 of:
+1. The 50 EMA
+2. The vector candle that created the Level 1 move
+3. A higher low (after W) or lower high (after M)
+4. A liquidation level cluster
+
+### Minimum R:R
+- R:R must be calculated to Level 1 target only — beyond Level 1 is bonus
+- R:R below 1.4:1 = do NOT enter ("don't get out of bed")
+- At 4:1 R:R, only need 3 wins out of 10 to be profitable
+
+### When NOT to Enter (MM rules)
+- Friday after 5pm NY market close
+- Asia range >2% for BTC = skip the day (session shift likely)
+- After only Level 1 drop — do NOT counter-trend trade from 200 EMA back
+- If level count is 3+ in current direction — reversal imminent, do NOT enter with trend
+- If cycle phase is FMWB — current move is FALSE, do not enter with it
+
+### The Refund Zone (aggressive entries only)
+- If price CLOSES below the wick of the 2nd peak W (or above for M): formation invalidated
+- This should be an immediate cut — tiny loss, wait for real M/W"""
 
 
 REFINER_JSON_FORMAT = """
@@ -874,6 +907,8 @@ class RefinerMonitorAgent:
 
 {ctx.get("advisor_insights", "")}
 
+{self._format_mm_method_context(ctx)}
+
 **IMPORTANT: If lessons or advisor insights are shown above, actively apply them to your ENTER/WAIT decision. These are real mistakes the bot made before — do not repeat them.**
 
 Run through the 3-step analysis: (1) price vs zone, (2) latest candle rejection signals, \
@@ -882,6 +917,109 @@ If previous trades on this symbol show repeated losses, demand stronger 5m confi
 Use similar past trade outcomes from the knowledge base to inform your confidence level. \
 If advisor insights suggest the bot has been too conservative, factor that into your ENTER vs WAIT decision. \
 Reference specific numbers from the data in your reasoning."""
+
+    @staticmethod
+    def _format_mm_method_context(ctx: dict) -> str:
+        """Format MM Method context for Agent 2's tactical entry evaluation.
+
+        The mm_method dict comes from signal.agent_context and is passed through
+        to Agent 2's context. Nested keys match scanner output:
+          session, ema, trend, formation, levels, weekly_cycle, confluence
+        """
+        mm = ctx.get("mm_method")
+        if not mm:
+            return ""
+
+        lines = ["### MM Method Entry Context"]
+
+        # Weekly cycle phase
+        wc = mm.get("weekly_cycle", {})
+        phase = wc.get("phase") if wc else None
+        if phase:
+            lines.append(f"- **Cycle Phase:** {phase}")
+            phase_lower = phase.lower()
+            if "fmwb" in phase_lower or "false move" in phase_lower or wc.get("fmwb_detected"):
+                lines.append("  CAUTION: FMWB phase — this move may be a trap. Demand strongest confirmation before ENTER.")
+        elif wc and wc.get("fmwb_detected"):
+            lines.append("- **FMWB DETECTED** — current move may be false. Demand strongest confirmation.")
+
+        if wc and wc.get("take_profit_signal"):
+            lines.append("  NOTE: Take profit signal active — not ideal for new entries")
+
+        # Level count
+        levels = mm.get("levels", {})
+        level = levels.get("current") if levels else None
+        if level is not None:
+            lines.append(f"- **Level Count:** {level} / 3")
+            if level >= 3:
+                lines.append(f"  CAUTION: Level {level} reached — expect reversal. Do NOT enter in current direction.")
+            if levels.get("is_extended"):
+                lines.append("  Extended level (4+) — correction imminent")
+
+        # Formation validation
+        formation = mm.get("formation")
+        if formation and formation.get("type"):
+            f_type = formation["type"]
+            desc = f"{'M (bearish)' if f_type.upper() == 'M' else 'W (bullish)' if f_type.upper() == 'W' else f_type}"
+            f_confirmed = formation.get("confirmed", False)
+            variant = formation.get("variant", "")
+            quality = formation.get("quality")
+            parts = [f"{'confirmed' if f_confirmed else 'unconfirmed'}"]
+            if variant:
+                parts.append(variant)
+            if quality:
+                parts.append(f"quality={quality:.0f}")
+            lines.append(f"- **Formation:** {desc} ({', '.join(parts)})")
+
+        # Session
+        session = mm.get("session", {})
+        if session and session.get("name"):
+            session_name = session["name"]
+            lines.append(f"- **Session:** {session_name}")
+            if session.get("is_gap"):
+                lines.append("  In session gap — formations here are high probability")
+
+        # EMA state
+        ema = mm.get("ema", {})
+        if ema:
+            ema_parts = []
+            if ema.get("broke_50"):
+                vol_confirm = "with volume" if ema.get("break_volume_confirmed") else "NO volume confirm"
+                ema_parts.append(f"50 EMA BROKEN ({vol_confirm})")
+            if ema.get("price_dist_50") is not None:
+                direction = "above" if ema["price_dist_50"] > 0 else "below"
+                ema_parts.append(f"Price {abs(ema['price_dist_50']):.2f}% {direction} 50 EMA")
+            if ema_parts:
+                lines.append(f"- **EMA:** {' | '.join(ema_parts)}")
+
+        # SVC
+        if levels and (levels.get("svc_detected") or levels.get("svc_confirmed")):
+            lines.append("- **Stopping Volume Candle detected** — trend exhaustion, avoid entering with trend")
+
+        # Weekend Trap / FMWB
+        wt = mm.get("weekend_trap")
+        if wt and wt.get("fmwb_detected"):
+            fmwb_real = wt.get("fmwb_real_direction", "?")
+            lines.append(f"- **FMWB detected** — false move {wt.get('fmwb_direction', '?')}, expect {fmwb_real}")
+            lines.append(f"  Weekend bias: {wt.get('bias', '?')}")
+
+        # Targets and R:R
+        targets = mm.get("targets", {})
+        if targets and targets.get("l1_price"):
+            rr = targets.get("rr_to_l1", 0)
+            lines.append(f"- **L1 Target:** {targets['l1_price']:.2f} ({targets.get('l1_source', '?')}) — R:R to L1 = {rr:.1f}")
+            if rr < 1.4:
+                lines.append("  CAUTION: R:R below 1.4 — 'don't get out of bed' territory")
+            elif rr < 3.0:
+                lines.append("  MARGINAL: R:R below 3.0 — only for aggressive entries")
+
+        # Confluence score
+        conf = mm.get("confluence", {})
+        if conf and conf.get("score") is not None:
+            grade = conf.get("grade", "?")
+            lines.append(f"- **MM Confluence:** {conf['score']} (grade: {grade})")
+
+        return "\n".join(lines) + "\n" if len(lines) > 1 else ""
 
     @staticmethod
     def _build_history_section(ctx: dict) -> str:

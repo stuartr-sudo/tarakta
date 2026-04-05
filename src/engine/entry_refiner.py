@@ -1102,6 +1102,8 @@ class EntryRefiner:
             # Sentiment + headlines (passed from Agent 1 context)
             "sentiment_score": getattr(signal, "_sentiment_score", None),
             "sentiment_headlines": getattr(signal, "_sentiment_headlines", []) or [],
+            # MM Method context — weekly cycle, formations, levels, sessions, EMAs
+            "mm_method": ac.get("mm_method"),
         }
 
     def _create_refined_signal_from_agent(

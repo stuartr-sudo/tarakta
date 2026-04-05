@@ -30,9 +30,10 @@ from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Weight allocation (base = 100, max with leverage bonus = 110)
+# Weight allocation (base = 100, max with leverage bonus = 110, max with MM = 125)
 # Trade Travel Chill: sweep + displacement + pullback are required components.
 # Leverage alignment is a bonus scored in the scanner after the base score.
+# MM Method confluence is an optional bonus scored in the scanner after base score.
 WEIGHTS = {
     "sweep_detected": 35,
     "displacement_confirmed": 25,
@@ -40,6 +41,7 @@ WEIGHTS = {
     "htf_aligned": 15,
     "timing_optimal": 15,
     "leverage_aligned": 10,  # Bonus: scored in scanner._score_leverage, not here
+    "mm_method": 15,  # Bonus: scored in scanner._score_mm_method, not here
 }
 
 # Backward compat alias

@@ -486,17 +486,17 @@ Daily 3-level rise = Weekly Level 1 (~3 months)
 | `src/strategy/mm_targets.py` | Target identification (Vectors, FRVP, HOW/LOW, EMAs, liquidation) | 47, 48, 49 |
 | `src/strategy/mm_risk.py` | Position sizing, leverage calc, partial profit framework | 52, 53, 54 |
 
-### Modified Existing Modules
+### Modified Existing Modules (all ✅ COMPLETE)
 
-| Module | Changes |
-|--------|---------|
-| `src/strategy/scanner.py` | Add MM cycle state to signal scoring |
-| `src/strategy/confluence.py` | Integrate MM confluence factors |
-| `src/strategy/agent_analyst.py` | Add MM context (cycle position, session, level count, formation) to Agent 1 prompt |
-| `src/strategy/refiner_agent.py` | Add MM entry criteria validation to Agent 2 |
-| `src/strategy/position_agent.py` | Add MM-based SL tightening and TP extension rules to Agent 3 |
-| `src/risk/` | Add MM position sizing (1% risk, Level 1 target for R:R calc) |
-| `src/exchange/models.py` | Add MM-specific dataclasses (WeeklyCycleState, Formation, Level, etc.) |
+| Module | Changes | Status |
+|--------|---------|--------|
+| `src/strategy/scanner.py` | MM analysis pipeline, scoring, agent context enrichment | ✅ |
+| `src/strategy/confluence.py` | Added `mm_method: 15` weight | ✅ |
+| `src/config.py` | Added `mm_method_enabled`, `mm_method_weight`, `mm_min_confluence_score`, `mm_min_rr` | ✅ |
+| `src/strategy/agent_analyst.py` | MM prompt section + `_format_mm_method_context()` | ✅ |
+| `src/strategy/refiner_agent.py` | MM entry rules prompt + `_format_mm_method_context()` | ✅ |
+| `src/strategy/position_agent.py` | MM position rules prompt + `_format_mm_method_context()` | ✅ |
+| `src/engine/entry_refiner.py` | Passes `mm_method` through to Agent 2 context | ✅ |
 
 ### Data Requirements
 
@@ -515,33 +515,38 @@ Daily 3-level rise = Weekly Level 1 (~3 months)
 
 ### Implementation Priority
 
-**Phase 1 — Core Weekly Setup (MVP):**
-1. Session timing module
-2. HOW/LOW/HOD/LOD calculation
-3. EMA framework (5 EMAs on 1H)
-4. Level counting with PVSRA volume
-5. M/W formation detection (basic)
-6. Weekly cycle state machine
-7. Confluence scoring (simplified)
-8. Entry/exit rules integration with agents
+**Phase 1 — Core Weekly Setup (MVP): ✅ COMPLETE**
+1. ✅ Session timing module (`mm_sessions.py` — 319 lines)
+2. ✅ HOW/LOW/HOD/LOD calculation (in `mm_weekly_cycle.py`)
+3. ✅ EMA framework (`mm_ema_framework.py` — 527 lines)
+4. ✅ Level counting with PVSRA volume (`mm_levels.py` — 710 lines)
+5. ✅ M/W formation detection (`mm_formations.py` — 1,290 lines)
+6. ✅ Weekly cycle state machine (`mm_weekly_cycle.py` — 1,165 lines)
+7. ✅ Confluence scoring (`mm_confluence.py` — 730 lines)
+8. ✅ Entry/exit rules integration with agents (all 3 agent prompts + formatters)
 
-**Phase 2 — Enhanced Detection:**
-9. Multi-session M/W detection
-10. Board meeting detection and entries
-11. Stopping Volume Candle detection
-12. Weekend trap box marking
-13. FMWB identification
-14. Fibonacci retracement integration
+**Phase 2 — Enhanced Detection: ✅ COMPLETE**
+9. ✅ Multi-session M/W detection (in `mm_formations.py`)
+10. ✅ Board meeting detection and entries (`mm_board_meetings.py` — 524 lines)
+11. ✅ Stopping Volume Candle detection (in `mm_levels.py`)
+12. ✅ Weekend trap box marking (`mm_weekend_trap.py` — 443 lines)
+13. ✅ FMWB identification (in `mm_weekend_trap.py`)
+14. ✅ Fibonacci retracement integration (in `mm_board_meetings.py`)
+15. ✅ Target identification (`mm_targets.py` — 507 lines)
+16. ✅ Risk management (`mm_risk.py` — 427 lines)
 
-**Phase 3 — Advanced Features:**
-15. Order flow integration (Hyblock, order book depth)
-16. Open Interest analysis
-17. Correlation analysis (DXY, NASDAQ, dominances)
-18. News event integration
-19. Moon cycle confluence
-20. The Linda Trade (multi-TF scaling)
+**Phase 3 — Advanced Features (TODO):**
+17. Order flow integration (Hyblock, order book depth)
+18. Open Interest analysis
+19. Correlation analysis (DXY, NASDAQ, dominances)
+20. News event integration
+21. Moon cycle confluence
+22. The Linda Trade (multi-TF scaling)
+
+**Total: 10 modules, 6,642 lines of MM Method implementation**
 
 ---
 
 *Document generated from 55 TBD course transcripts (9,970 cues) on 2026-04-05.*
+*Phase 1-2 implementation completed 2026-04-05.*
 *For the tarakta trading bot — github.com/stuarta/tarakta*

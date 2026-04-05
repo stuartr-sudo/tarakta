@@ -96,6 +96,12 @@ class Settings(BaseSettings):
     max_hold_hours: float = 0.0  # 0 = disabled — no time-based auto-close
     stale_close_below_rr: float = 0.0  # Only auto-close if trade is in the red (negative PnL)
 
+    # MM Method — Market Makers Method analysis (sessions, EMA framework, formations, levels, weekly cycle)
+    mm_method_enabled: bool = True  # Master toggle for MM Method analysis modules
+    mm_method_weight: float = 15.0  # Max bonus points from MM confluence in PostSweepEngine
+    mm_min_confluence_score: float = 40.0  # Minimum MM confluence score (%) to contribute to signal
+    mm_min_rr: float = 3.0  # Minimum R:R ratio for MM confluence scoring
+
     # Weekly cycle — Fake Move Monday & Mid-Week Reversal (ICT concepts)
     weekly_cycle_enabled: bool = True  # Master toggle for weekly cycle features
     monday_manipulation_penalty: float = 15.0  # Score penalty during Monday manipulation window

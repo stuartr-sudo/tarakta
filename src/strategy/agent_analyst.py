@@ -171,7 +171,53 @@ The formula system already filters heavily — if a signal reaches you, it has m
 - **Displacement** — A large-bodied candle with above-average volume that shows aggressive institutional order flow
 - **Liquidity Sweep** — Price wicks through a key level (swing high/low, equal highs/lows) to trigger resting stop-loss orders, then reverses
 - **Kill Zone** — ICT-defined high-probability trading sessions: London Open (02:00–05:00 UTC), NY Open (12:00–15:00 UTC), NY PM (19:00–21:00 UTC)
-- **Judas Swing** — A fake initial move at session open designed to trap traders before price reverses in the true direction"""
+- **Judas Swing** — A fake initial move at session open designed to trap traders before price reverses in the true direction
+
+## Market Makers Method (MM Method) Context
+
+If MM Method data is provided in the signal context, use it as a HIGH-WEIGHT overlay on your analysis. \
+The MM Method models institutional behavior as a repeating weekly business cycle.
+
+### Weekly Cycle Phases
+1. **Weekend Trap** (Fri 5pm - Sun 5pm NY): Sideways consolidation, stop hunt spike near end
+2. **False Move Week Beginning (FMWB)**: Trap move at/near Sun 5pm NY — stops out weekend traders
+3. **M/W Formation**: Forms after FMWB — entry on 2nd peak (M=bearish, W=bullish)
+4. **3-Level Swing** (~3 days): Level 1 -> Level 2 -> Level 3 with board meetings between
+5. **Midweek Reversal** (Wed/Thu crypto): M or W at Level 3, signals direction change
+6. **Friday UK Trap** (UK session 3:30am-9am NY): False move then trend, exit by UK close
+
+### Session Timing (NY time, immutable)
+- Dead Zone: 5pm-8pm (no MMs, skip)
+- Asia: 8:30pm-3am (creates daily range, BTC range should be <=2%)
+- UK: 3:30am-9am (TRUE trend, slow steady moves)
+- US: 9:30am-5pm (continues or reverses UK trend)
+- M/W formations are most reliable when they form at session changeovers (gap times)
+
+### M/W Formations
+- M = bearish (High -> Lower High), W = bullish (Low -> Higher Low)
+- 2nd peak must NOT reach the 1st peak — that's the trap
+- Multi-session M/W (peaks in different sessions) = strongest setup
+- Three Hits Rule: 3 tests of HOW/LOW without breaking = reversal imminent at Level 3
+
+### Level Counting
+- Always count to 3 levels. Level 1 liquidates 100x traders, Level 2 liquidates 50x, Level 3 liquidates 25x
+- A 4th level (Extended Rise/Drop) almost always brings correction
+- Previous week's High/Low and previous day's High/Low are the key S/R levels
+
+### EMA Framework (all timeframes)
+- 10/20 EMA: Entry confirmation (price crosses on M/W 2nd peak)
+- 50 EMA: Level 1 break target, retest level, trend confirmation
+- 200 EMA: Level 2 target, rejection = take profit zone
+- 800 EMA: Level 2/3 target
+
+### How to Use MM Context in Your Decision
+- If cycle is in FMWB or Weekend Trap: current move is likely FALSE — be cautious entering with it
+- If M/W formation detected at session changeover: HIGH confidence setup, especially multi-session
+- If level count is 3+: expect reversal, do NOT enter in the current direction
+- If confluence score is high: supports entry. Each factor adds weight:
+  - M/W at session changeover (HIGH), 50 EMA break with volume (HIGH), SVC present (HIGH)
+  - Unrecovered Vector zone (MEDIUM), liquidation cluster (MEDIUM), EMA alignment (MEDIUM)
+  - R:R must be calculated to Level 1 target only — beyond is bonus"""
 
 
 JSON_FORMAT_INSTRUCTION = """
@@ -878,10 +924,174 @@ class AgentEntryAnalyst:
 ### Similar Past Trades (RAG Knowledge Base)
 {context.get("rag_context", "  Not available")}
 {context.get("lessons_context", "")}
+{self._format_mm_method_context(ac)}
 ### Scanner Observations (factual only — directional conclusions removed)
 {chr(10).join(f"  - {r}" for r in self._neutralize_reasons(signal.reasons))}
 {self._reassessment_section(context)}
 Analyze this setup and respond with your JSON decision."""
+
+    @staticmethod
+    def _format_mm_method_context(ac: dict) -> str:
+        """Format MM Method context from agent_context for the prompt.
+
+        The mm_method dict from the scanner has nested keys:
+          session.{name, is_gap, minutes_remaining}
+          ema.{alignment_4h, fan_out_4h, price_dist_50, price_dist_200, broke_50, break_volume_confirmed}
+          trend.{direction_4h, strength_4h, is_accelerating, is_flattening}
+          formation.{type, variant, quality, direction, at_key_level, confirmed}
+          levels.{current, direction, is_extended, volume_degrading, svc_detected, svc_confirmed}
+          weekly_cycle.{phase, direction, how, low, fmwb_detected, midweek_reversal_expected, take_profit_signal}
+          confluence.{score, score_pct, grade}
+        """
+        mm = ac.get("mm_method") if ac else None
+        if not mm:
+            return ""
+
+        lines = ["### MM Method Analysis"]
+
+        # Weekly cycle phase
+        wc = mm.get("weekly_cycle", {})
+        phase = wc.get("phase") if wc else None
+        if phase:
+            lines.append(f"- **Cycle Phase:** {phase} (direction: {wc.get('direction', '?')})")
+            phase_lower = phase.lower()
+            if "fmwb" in phase_lower or "false move" in phase_lower or wc.get("fmwb_detected"):
+                lines.append("  WARNING: Current move is likely a FALSE MOVE (FMWB) — trap for weekend traders")
+            elif "weekend trap" in phase_lower:
+                lines.append("  WARNING: Weekend Trap phase — sideways with stop hunt spikes")
+            if wc.get("midweek_reversal_expected"):
+                lines.append("  NOTE: Midweek reversal expected — look for M/W at Level 3")
+            if wc.get("take_profit_signal"):
+                lines.append("  NOTE: Take profit signal active — consider exiting positions")
+        elif wc.get("fmwb_detected"):
+            lines.append("- **FMWB DETECTED** — current move is likely FALSE")
+
+        # HOW/LOW from weekly cycle
+        how = wc.get("how")
+        low = wc.get("low")
+        if how or low:
+            kl_parts = []
+            if how:
+                kl_parts.append(f"HOW: {how:.6g}")
+            if low:
+                kl_parts.append(f"LOW: {low:.6g}")
+            lines.append(f"- **Weekly Range:** {' | '.join(kl_parts)}")
+
+        # Level count
+        levels = mm.get("levels", {})
+        level = levels.get("current") if levels else None
+        if level is not None:
+            ext = " (EXTENDED — 4th level, expect correction)" if levels.get("is_extended") else ""
+            lines.append(f"- **Current Level:** {level} / 3{ext}")
+            if level >= 3:
+                lines.append("  WARNING: Level 3+ reached — expect reversal, do NOT enter in current direction")
+            if levels.get("volume_degrading"):
+                lines.append("  Volume degrading — momentum fading")
+
+        # SVC (Stopping Volume Candle)
+        if levels and (levels.get("svc_detected") or levels.get("svc_confirmed")):
+            confirmed = "CONFIRMED" if levels.get("svc_confirmed") else "detected"
+            lines.append(f"- **Stopping Volume Candle {confirmed}** — Level 3 exhaustion signal, expect reversal")
+
+        # Formation
+        formation = mm.get("formation")
+        if formation and formation.get("type"):
+            f_type = formation["type"]
+            desc = f"{'M (bearish)' if f_type.upper() == 'M' else 'W (bullish)' if f_type.upper() == 'W' else f_type}"
+            flags = []
+            variant = formation.get("variant")
+            if variant:
+                flags.append(variant)
+            if formation.get("at_key_level"):
+                flags.append("at key level")
+            if formation.get("confirmed"):
+                flags.append("confirmed")
+            else:
+                flags.append("not yet confirmed")
+            quality = formation.get("quality")
+            if quality:
+                flags.append(f"quality={quality:.0f}")
+            lines.append(f"- **Formation:** {desc} ({', '.join(flags)})")
+
+        # Session info
+        session = mm.get("session", {})
+        if session and session.get("name"):
+            sess_str = session["name"]
+            if session.get("minutes_remaining"):
+                sess_str += f" ({session['minutes_remaining']:.0f}min remaining)"
+            lines.append(f"- **Current Session:** {sess_str}")
+            if session.get("is_gap"):
+                lines.append("  NOTE: In session gap — M/W forming here is HIGH probability")
+
+        # EMA state
+        ema = mm.get("ema", {})
+        if ema:
+            ema_parts = []
+            if ema.get("price_dist_50") is not None:
+                lines_dir = "above" if ema["price_dist_50"] > 0 else "below"
+                ema_parts.append(f"Price {abs(ema['price_dist_50']):.2f}% {lines_dir} 50 EMA")
+            if ema.get("price_dist_200") is not None:
+                lines_dir = "above" if ema["price_dist_200"] > 0 else "below"
+                ema_parts.append(f"{abs(ema['price_dist_200']):.2f}% {lines_dir} 200 EMA")
+            if ema.get("broke_50"):
+                vol_confirm = "with volume" if ema.get("break_volume_confirmed") else "NO volume confirm"
+                ema_parts.append(f"50 EMA BROKEN ({vol_confirm})")
+            if ema.get("alignment_4h"):
+                ema_parts.append(f"4H alignment: {ema['alignment_4h']}")
+            if ema.get("fan_out_4h"):
+                ema_parts.append("EMAs fanning out (trend acceleration)")
+            if ema_parts:
+                lines.append(f"- **EMA State:** {' | '.join(ema_parts)}")
+
+        # Trend
+        trend = mm.get("trend", {})
+        if trend and trend.get("direction_4h"):
+            trend_parts = [f"4H: {trend['direction_4h']}"]
+            if trend.get("strength_4h"):
+                trend_parts.append(f"strength={trend['strength_4h']:.0f}")
+            if trend.get("is_accelerating"):
+                trend_parts.append("ACCELERATING")
+            if trend.get("is_flattening"):
+                trend_parts.append("FLATTENING (trend ending?)")
+            lines.append(f"- **MM Trend:** {' | '.join(trend_parts)}")
+
+        # Weekend Trap Box
+        wt = mm.get("weekend_trap")
+        if wt and wt.get("detected"):
+            wt_parts = [f"Box: {wt.get('box_low', 0):.2f}-{wt.get('box_high', 0):.2f}"]
+            trap_dir = wt.get("trap_direction")
+            if trap_dir == "long":
+                wt_parts.append("longs trapped → bearish bias")
+            elif trap_dir == "short":
+                wt_parts.append("shorts trapped → bullish bias")
+            if wt.get("fmwb_detected"):
+                wt_parts.append(f"FMWB {wt.get('fmwb_direction', '?')} (expect {wt.get('fmwb_real_direction', '?')})")
+            lines.append(f"- **Weekend Trap:** {' | '.join(wt_parts)}")
+
+        # Targets
+        targets = mm.get("targets", {})
+        if targets:
+            tgt_parts = []
+            if targets.get("l1_price"):
+                tgt_parts.append(f"L1: {targets['l1_price']:.2f} ({targets.get('l1_source', '?')})")
+            if targets.get("l2_price"):
+                tgt_parts.append(f"L2: {targets['l2_price']:.2f} ({targets.get('l2_source', '?')})")
+            if targets.get("l3_price"):
+                tgt_parts.append(f"L3: {targets['l3_price']:.2f} ({targets.get('l3_source', '?')})")
+            if tgt_parts:
+                lines.append(f"- **Targets:** {' | '.join(tgt_parts)}")
+            uvecs = targets.get("unrecovered_vectors", 0)
+            if uvecs:
+                lines.append(f"  {uvecs} unrecovered vector candle(s) as additional targets")
+
+        # Confluence score
+        conf = mm.get("confluence", {})
+        if conf and conf.get("score") is not None:
+            grade = conf.get("grade", "?")
+            score_pct = conf.get("score_pct", 0)
+            lines.append(f"- **MM Confluence:** {conf['score']} ({score_pct:.0f}%, grade: {grade})")
+
+        return "\n".join(lines) + "\n" if len(lines) > 1 else ""
 
     @staticmethod
     def _neutralize_reasons(reasons: list[str]) -> list[str]:
