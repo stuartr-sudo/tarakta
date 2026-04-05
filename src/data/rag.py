@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -180,7 +179,7 @@ class TradeRAG:
                 "chunk_index": 0,
                 "chunk_hash": content_hash,
                 "content": content,
-                "embedding": json.dumps(embedding),
+                "embedding": embedding,
                 "url": source_url,
                 "heading": f"{symbol} {direction}",
                 "metadata": {
@@ -218,7 +217,7 @@ class TradeRAG:
             return True
 
         except Exception as e:
-            logger.warning("rag_ingest_failed", trade_id=trade_id, error=str(e)[:100])
+            logger.warning("rag_ingest_failed", trade_id=trade_id, error=str(e)[:300], error_type=type(e).__name__)
             return False
 
     async def backfill_trades(self, limit: int = 200) -> int:
@@ -289,7 +288,7 @@ class TradeRAG:
                         "p_user_name": RAG_USER,
                         "p_domain": RAG_DOMAIN,
                         "p_query": query,
-                        "p_query_embedding": json.dumps(query_embedding),
+                        "p_query_embedding": query_embedding,
                         "p_k": k,
                         "p_rrf_k": 60,
                         "p_min_similarity": min_similarity,
@@ -317,17 +316,21 @@ class TradeRAG:
         symbol: str,
         direction: str | None = None,
         setup_context: str = "",
+        market_regime: str = "",
         k: int = 5,
     ) -> list[dict[str, Any]]:
         """Retrieve past trade knowledge relevant to a specific symbol/setup.
 
-        Builds a semantic query from the symbol, direction, and setup context.
+        Builds a semantic query from the symbol, direction, setup context,
+        and market regime for more relevant retrieval.
         """
         parts = [symbol]
         if direction:
             parts.append(direction.upper())
         if setup_context:
             parts.append(setup_context)
+        if market_regime:
+            parts.append(f"market {market_regime}")
         query = " ".join(parts)
         return await self.retrieve(query, k=k)
 

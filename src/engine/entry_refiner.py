@@ -1099,6 +1099,9 @@ class EntryRefiner:
             "rag_context": getattr(signal, "_rag_context", "") or "",
             # Learned lessons from post-mortems
             "lessons_context": getattr(signal, "_lessons_context", "") or "",
+            # Sentiment + headlines (passed from Agent 1 context)
+            "sentiment_score": getattr(signal, "_sentiment_score", None),
+            "sentiment_headlines": getattr(signal, "_sentiment_headlines", []) or [],
         }
 
     def _create_refined_signal_from_agent(

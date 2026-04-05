@@ -365,32 +365,46 @@ async def format_lessons_for_prompt(
         Formatted string to inject into the agent prompt.
     """
     lessons: list[dict] = []
+    seen_ids: set = set()
 
-    # Get general lessons for this agent (high+ severity first)
+    # Priority 1: Symbol-specific lessons for this agent (most relevant)
+    if symbol:
+        symbol_lessons = await repo.get_lessons_for_symbol(symbol, limit=4)
+        for l in symbol_lessons:
+            # Prefer symbol lessons that also apply to this agent
+            applies = l.get("applies_to", [])
+            if isinstance(applies, str):
+                applies = [applies]
+            if agent_name in applies or not applies:
+                if l["id"] not in seen_ids and len(lessons) < max_lessons:
+                    lessons.append(l)
+                    seen_ids.add(l["id"])
+
+    # Priority 2: High severity agent-specific lessons
     high_lessons = await repo.get_recent_lessons(
         applies_to=agent_name, limit=max_lessons, min_severity="high"
     )
-    lessons.extend(high_lessons)
+    for l in high_lessons:
+        if l["id"] not in seen_ids and len(lessons) < max_lessons:
+            lessons.append(l)
+            seen_ids.add(l["id"])
 
-    # Fill remaining with medium severity
+    # Priority 3: Medium severity agent-specific lessons (fill remaining)
     remaining = max_lessons - len(lessons)
     if remaining > 0:
         all_lessons = await repo.get_recent_lessons(
-            applies_to=agent_name, limit=remaining + len(lessons)
+            applies_to=agent_name, limit=remaining + len(seen_ids)
         )
-        # Deduplicate
-        seen_ids = {l["id"] for l in lessons}
         for l in all_lessons:
             if l["id"] not in seen_ids and len(lessons) < max_lessons:
                 lessons.append(l)
                 seen_ids.add(l["id"])
 
-    # Add symbol-specific lessons if provided
-    if symbol:
-        symbol_lessons = await repo.get_lessons_for_symbol(symbol, limit=3)
-        seen_ids = {l["id"] for l in lessons}
-        for l in symbol_lessons:
-            if l["id"] not in seen_ids:
+    # Priority 4: Any remaining symbol-specific lessons (even if not tagged for this agent)
+    if symbol and len(lessons) < max_lessons:
+        all_symbol_lessons = await repo.get_lessons_for_symbol(symbol, limit=4)
+        for l in all_symbol_lessons:
+            if l["id"] not in seen_ids and len(lessons) < max_lessons:
                 lessons.append(l)
                 seen_ids.add(l["id"])
 

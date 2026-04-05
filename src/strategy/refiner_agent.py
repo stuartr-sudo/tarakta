@@ -88,11 +88,15 @@ BTC macro context, and your own previous analysis for reasoning continuity.
 
 For EVERY check, you must perform these concrete data checks:
 
-### Step 0: Check the must_reach_price gate
-If a must_reach_price is set and shows "NOT YET REACHED", note it but still proceed to \
-Step 1 — the system applies a tolerance automatically. Focus on whether the displacement \
-move has clearly occurred (price moved significantly from the sweep level). If displacement \
-is evident in the candle data, treat the gate as satisfied and continue evaluation.
+### Step 0: Check the must_reach_price gate (MANDATORY)
+If a must_reach_price is set and shows "NOT YET REACHED":
+- Check if the displacement move has clearly occurred in the candle data (price moved \
+significantly past the sweep level toward the must_reach_price).
+- If displacement is NOT evident (price never moved meaningfully toward must_reach_price), \
+you MUST output WAIT. The institutional displacement move hasn't happened yet, and entering \
+before it occurs means entering before the thesis is confirmed.
+- Only if displacement is clearly evident in candles (large body candle through the sweep \
+level, strong volume) may you treat the gate as satisfied and proceed to Step 1.
 
 ### Step 1: Has a rejection occurred at or near the entry zone?
 Scan ALL candles in the table (not just the latest) looking for rejection evidence:
@@ -362,7 +366,7 @@ class RefinerMonitorAgent:
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 json_schema=REFINER_RESPONSE_SCHEMA,
-                temperature=1.0,
+                temperature=0.5,
                 timeout=self._timeout,
                 caller="agent2",
                 repo=getattr(self, "_repo", None),
@@ -504,6 +508,18 @@ class RefinerMonitorAgent:
         btc_trend = ctx.get("btc_trend", "unknown")
         btc_price = ctx.get("btc_price", 0)
         btc_1h_change = ctx.get("btc_1h_change", 0)
+
+        # ── Section 6b: Sentiment & news ──
+        sentiment_score = ctx.get("sentiment_score")
+        sentiment_headlines = ctx.get("sentiment_headlines", [])
+        sent_parts = []
+        if sentiment_score is not None:
+            sent_parts.append(f"- Sentiment Score: {sentiment_score:+.1f} (range -10 to +10)")
+        if sentiment_headlines:
+            sent_parts.append("- Recent Headlines:")
+            for h in sentiment_headlines[:5]:
+                sent_parts.append(f"  - {h}")
+        sentiment_section = "\n".join(sent_parts) if sent_parts else "  Not available"
 
         # ── Section 7: Structural levels (flat dict from scanner) ──
         structural = ctx.get("structural_levels", {})
@@ -827,6 +843,9 @@ class RefinerMonitorAgent:
 - Price: {btc_price:.2f}
 - 1H Change: {btc_1h_change:+.2f}%
 
+### Sentiment & News
+{sentiment_section}
+
 ### Structural Levels (1H from scanner)
 {structural_section}
 
@@ -850,8 +869,13 @@ class RefinerMonitorAgent:
 
 ### Similar Past Trades (RAG Knowledge Base)
 {ctx.get("rag_context", "  Not available")}
+
 {ctx.get("lessons_context", "")}
+
 {ctx.get("advisor_insights", "")}
+
+**IMPORTANT: If lessons or advisor insights are shown above, actively apply them to your ENTER/WAIT decision. These are real mistakes the bot made before — do not repeat them.**
+
 Run through the 3-step analysis: (1) price vs zone, (2) latest candle rejection signals, \
 (3) structural confirmation. Check order book for liquidity support. \
 If previous trades on this symbol show repeated losses, demand stronger 5m confirmation. \

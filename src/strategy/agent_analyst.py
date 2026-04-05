@@ -385,7 +385,7 @@ class AgentEntryAnalyst:
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 json_schema=AGENT1_RESPONSE_SCHEMA,
-                temperature=1.0,
+                temperature=0.4,
                 timeout=self._timeout,
                 caller="agent1",
                 repo=getattr(self, "_repo", None),

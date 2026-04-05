@@ -968,15 +968,30 @@ class TradingEngine:
                     if self.trade_rag:
                         try:
                             sweep_type = signal.sweep_result.sweep_type if signal.sweep_result else ""
+                            # Build richer query context for better retrieval
+                            setup_parts = []
+                            if sweep_type:
+                                setup_parts.append(f"sweep {sweep_type}")
+                            ac = signal.agent_context or {}
+                            ms = ac.get("market_structure", {})
+                            if ms.get("4h", {}).get("trend"):
+                                setup_parts.append(ms["4h"]["trend"])
+                            vol = ac.get("volume", {})
+                            if vol.get("displacement_detected"):
+                                setup_parts.append("displacement confirmed")
+                            setup_context = " ".join(setup_parts) if setup_parts else ""
+                            # Get market regime from 4H trend for query enrichment
+                            market_regime = ms.get("4h", {}).get("trend", "")
                             rag_results = await self.trade_rag.retrieve_for_symbol(
                                 signal.symbol,
                                 direction=signal.direction,
-                                setup_context=f"sweep {sweep_type}",
+                                setup_context=setup_context,
+                                market_regime=market_regime,
                                 k=getattr(self.config, "rag_max_results", 5),
                             )
                             rag_context = self.trade_rag.format_context(rag_results)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("rag_retrieval_failed", error=str(e)[:200])
 
                     # Attach RAG context to signal so Agent 2 can also access it
                     signal._rag_context = rag_context
@@ -992,6 +1007,9 @@ class TradingEngine:
 
                     # Attach lessons to signal so Agent 2 can also access them
                     signal._lessons_context = lessons_context
+                    # Attach sentiment to signal so Agent 2 can also access it
+                    signal._sentiment_score = early_sentiment
+                    signal._sentiment_headlines = early_headlines
 
                     # Fetch advisor insights for Agent 1 context
                     advisor_insights_text = ""
@@ -999,8 +1017,10 @@ class TradingEngine:
                         from src.advisor.insights import get_recent_insights, format_insights_for_agent
                         insights = await get_recent_insights(self.repo.db, self.config.instance_id)
                         advisor_insights_text = format_insights_for_agent(insights)
-                    except Exception:
-                        pass  # Advisor insights are optional
+                        if not advisor_insights_text:
+                            logger.debug("advisor_insights_empty", symbol=signal.symbol)
+                    except Exception as e:
+                        logger.warning("advisor_insights_fetch_failed", error=str(e)[:200])
 
                     ai_context = {
                         "sentiment_score": early_sentiment,

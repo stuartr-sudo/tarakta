@@ -243,7 +243,7 @@ class PositionManagerAgent:
                 system_prompt=POSITION_SYSTEM_PROMPT + POSITION_JSON_FORMAT,
                 user_prompt=prompt,
                 json_schema=POSITION_RESPONSE_SCHEMA,
-                temperature=1.0,
+                temperature=0.3,
                 timeout=self._timeout,
                 caller="agent3",
                 repo=getattr(self, "_repo", None),
@@ -401,6 +401,9 @@ class PositionManagerAgent:
 
 {candles_1h_section}
 {ctx.get("lessons_context", "")}
+
+**IMPORTANT: If position management lessons are shown above, actively apply them. These come from real past trades where the bot made mistakes with SL tightening or TP extension.**
+
 Evaluate this position and respond with your JSON decision. Default to HOLD unless you see clear evidence for action."""
 
     @staticmethod
