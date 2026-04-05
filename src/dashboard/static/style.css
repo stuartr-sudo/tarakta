@@ -1129,3 +1129,73 @@ select:focus {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.07); border-radius: 2px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.12); }
+
+/* ── Hamburger button ─────────────────────────────────────── */
+.hamburger-btn {
+    display: none; /* hidden on desktop */
+    background: none; border: none; cursor: pointer;
+    padding: 6px; margin-right: 4px; color: var(--text-primary);
+    flex-shrink: 0;
+}
+.hamburger-btn svg { width: 22px; height: 22px; display: block; }
+
+/* Sidebar overlay backdrop */
+.sidebar-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 99;
+}
+.sidebar-overlay.active { display: block; }
+
+/* ── Mobile responsive ────────────────────────────────────── */
+@media (max-width: 768px) {
+    :root { --sidebar-w: 260px; }
+
+    .hamburger-btn { display: block; }
+
+    .sidebar {
+        position: fixed; top: 0; left: 0; bottom: 0;
+        z-index: 100;
+        transform: translateX(-100%);
+        transition: transform 0.25s ease;
+        box-shadow: none;
+    }
+    .sidebar.open {
+        transform: translateX(0);
+        box-shadow: 4px 0 24px rgba(0,0,0,0.5);
+    }
+
+    .app-main { width: 100%; }
+
+    .topbar { padding: 0 12px; gap: 8px; }
+    .topbar-title { font-size: 13px; }
+
+    .scan-timer { display: none; }
+
+    .content { padding: 8px; }
+
+    .mode-banner { font-size: 11px; padding: 6px 12px; }
+
+    /* Stat cards: 2 columns on mobile */
+    .stat-card { padding: 12px; }
+    .stat-value { font-size: 1.3rem; }
+    .stat-label { font-size: 9px; }
+
+    /* Panels */
+    .panel-header h2 { font-size: 13px; }
+
+    /* Data tables: allow horizontal scroll */
+    .data-table { font-size: 11px; }
+    .data-table th, .data-table td { padding: 6px 8px; }
+
+    /* Instance dropdown */
+    .instance-switcher { display: none; }
+}
+
+@media (max-width: 480px) {
+    .topbar-title { font-size: 12px; }
+    .stat-value { font-size: 1.1rem; }
+    .gs-toolbar { gap: 4px; }
+    .gs-lock-btn, .gs-reset-btn { font-size: 10px; padding: 4px 8px; }
+}

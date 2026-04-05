@@ -136,11 +136,19 @@
             {% endif %}
         </aside>
 
+        <!-- Sidebar overlay for mobile -->
+        <div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleSidebar()"></div>
+
         <!-- ── App main ──────────────────────────────────── -->
         <div class="app-main">
 
             <!-- Topbar -->
             <header class="topbar">
+                <button class="hamburger-btn" id="hamburger-btn" onclick="toggleSidebar()" aria-label="Menu">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+                    </svg>
+                </button>
                 <div class="topbar-title">{% block topbar_title %}{% endblock %}</div>
 
                 {% if filtered | length > 1 %}
@@ -227,6 +235,19 @@
         if (!_ACTIVE_INSTANCE) return path;
         return path + (path.includes('?') ? '&' : '?') + 'instance=' + encodeURIComponent(_ACTIVE_INSTANCE);
     }
+    </script>
+    <script>
+    function toggleSidebar() {
+        document.querySelector('.sidebar').classList.toggle('open');
+        document.getElementById('sidebar-overlay').classList.toggle('active');
+    }
+    // Close sidebar when a nav link is clicked (mobile)
+    document.querySelectorAll('.sidebar-link').forEach(function(link) {
+        link.addEventListener('click', function() {
+            document.querySelector('.sidebar').classList.remove('open');
+            document.getElementById('sidebar-overlay').classList.remove('active');
+        });
+    });
     </script>
     {% block scripts %}{% endblock %}
 </body>

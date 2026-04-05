@@ -388,14 +388,16 @@ let _grid = null;
 let _gridLocked = true;
 
 function initGrid() {
+    const isMobile = window.innerWidth <= 768;
     _grid = GridStack.init({
-        column: 12,
-        cellHeight: 60,
-        margin: 4,
+        column: isMobile ? 2 : 12,
+        cellHeight: isMobile ? 70 : 60,
+        margin: isMobile ? 3 : 4,
         float: false,
         disableDrag: true,
         disableResize: true,
-        animate: true
+        animate: true,
+        columnOpts: { breakpoints: [{w: 768, c: 2}, {w: 1100, c: 6}, {w: 9999, c: 12}] }
     }, '#dashboard-grid');
 
     // Load saved layout
