@@ -25,6 +25,25 @@
     .grid-stack-item-content > .stat-card { box-sizing: border-box; }
     /* Remove old layout grids — gridstack handles positioning */
     .dash-stats, .dash-mid, .dash-bottom { display: contents; }
+
+    /* Mobile: disable GridStack absolute positioning, stack items naturally */
+    @media (max-width: 768px) {
+        .grid-stack { display: grid !important; grid-template-columns: 1fr 1fr; gap: 6px; height: auto !important; min-height: 0 !important; }
+        .grid-stack > .grid-stack-item { position: static !important; width: auto !important; height: auto !important; margin: 0 !important; }
+        .grid-stack > .grid-stack-item > .grid-stack-item-content { position: static !important; inset: auto !important; min-height: 80px; }
+        /* Full-width panels on mobile */
+        .grid-stack > .grid-stack-item[gs-id="chart"],
+        .grid-stack > .grid-stack-item[gs-id="positions"],
+        .grid-stack > .grid-stack-item[gs-id="mm-engine"],
+        .grid-stack > .grid-stack-item[gs-id="signals"],
+        .grid-stack > .grid-stack-item[gs-id="agent-activity"],
+        .grid-stack > .grid-stack-item[gs-id="refiner"],
+        .grid-stack > .grid-stack-item[gs-id="agent-stats"],
+        .grid-stack > .grid-stack-item[gs-id="advisor"] { grid-column: 1 / -1; }
+        .grid-stack > .grid-stack-item[gs-id="chart"] .chart-container { min-height: 200px; height: 200px; }
+        .grid-stack > .grid-stack-item > .grid-stack-item-content > .panel { min-height: 150px; }
+        .gs-toolbar { display: none; } /* hide drag controls on mobile */
+    }
 </style>
 {% endblock %}
 
@@ -388,16 +407,14 @@ let _grid = null;
 let _gridLocked = true;
 
 function initGrid() {
-    const isMobile = window.innerWidth <= 768;
     _grid = GridStack.init({
-        column: isMobile ? 2 : 12,
-        cellHeight: isMobile ? 70 : 60,
-        margin: isMobile ? 3 : 4,
+        column: 12,
+        cellHeight: 60,
+        margin: 4,
         float: false,
         disableDrag: true,
         disableResize: true,
-        animate: true,
-        columnOpts: { breakpoints: [{w: 768, c: 2}, {w: 1100, c: 6}, {w: 9999, c: 12}] }
+        animate: true
     }, '#dashboard-grid');
 
     // Load saved layout
