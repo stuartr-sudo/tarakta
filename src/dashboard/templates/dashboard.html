@@ -49,12 +49,6 @@
 
 <!-- Hidden elements for JS compatibility -->
 <div style="display:none;">
-    <span id="unrealized-profit-sub"></span><span id="unrealized-loss-value"></span><span id="unrealized-loss-sub"></span>
-    <span id="net-pnl-value"></span><span id="net-pnl-sub"></span>
-    <span id="available-value">${{ "%.2f"|format(balance - allocated) }}</span>
-    <span id="total-pnl-value">{{ "+" if (snapshot.total_pnl_usd|default(0)|float) >= 0 else "" }}${{ "%.2f"|format(snapshot.total_pnl_usd|default(0)|float) }}</span>
-    <span id="drawdown-value">{{ "%.1f"|format((snapshot.drawdown_pct|default(0)|float) * 100) }}%</span>
-    <span id="unrealized-card"></span><span id="unrealized-loss-card"></span><span id="net-pnl-card"></span>
     <span id="last-updated"></span><span id="main-config-badge"></span>
     <button id="refresh-btn" onclick="manualRefresh()"></button>
     <table><tbody id="positions-tbody">
@@ -110,8 +104,75 @@
         </div>
     </div>
 
+    <!-- Stat card row 2: Cash, Allocated, Total P&L, Drawdown -->
+    <div class="grid-stack-item" gs-id="stat-cash" gs-x="0" gs-y="2" gs-w="3" gs-h="2" gs-min-w="2" gs-min-h="2">
+        <div class="grid-stack-item-content">
+            <div class="stat-card">
+                <div class="stat-label">Available Cash</div>
+                <div class="stat-value" id="available-value">${{ "%.2f"|format(balance - allocated) }}</div>
+                <div class="stat-sub">free to trade</div>
+            </div>
+        </div>
+    </div>
+    <div class="grid-stack-item" gs-id="stat-allocated" gs-x="3" gs-y="2" gs-w="3" gs-h="2" gs-min-w="2" gs-min-h="2">
+        <div class="grid-stack-item-content">
+            <div class="stat-card">
+                <div class="stat-label">Allocated</div>
+                <div class="stat-value" id="allocated-value">${{ "%.2f"|format(allocated) }}</div>
+                <div class="stat-sub">across {{ trades|length }} position{{ 's' if (trades|length) != 1 else '' }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="grid-stack-item" gs-id="stat-total-pnl" gs-x="6" gs-y="2" gs-w="3" gs-h="2" gs-min-w="2" gs-min-h="2">
+        <div class="grid-stack-item-content">
+            <div class="stat-card">
+                <div class="stat-label">Total P&L</div>
+                <div class="stat-value {{ 'positive' if (snapshot.total_pnl_usd|default(0)|float) >= 0 else 'negative' }}" id="total-pnl-value">{{ "+" if (snapshot.total_pnl_usd|default(0)|float) >= 0 else "" }}${{ "%.2f"|format(snapshot.total_pnl_usd|default(0)|float) }}</div>
+                <div class="stat-sub">all-time realized</div>
+            </div>
+        </div>
+    </div>
+    <div class="grid-stack-item" gs-id="stat-drawdown" gs-x="9" gs-y="2" gs-w="3" gs-h="2" gs-min-w="2" gs-min-h="2">
+        <div class="grid-stack-item-content">
+            <div class="stat-card">
+                <div class="stat-label">Drawdown</div>
+                <div class="stat-value {{ 'negative' if (snapshot.drawdown_pct|default(0)|float) > 0.05 else '' }}" id="drawdown-value">{{ "%.1f"|format((snapshot.drawdown_pct|default(0)|float) * 100) }}%</div>
+                <div class="stat-sub">circuit break {{ "%.0f"|format(config.circuit_breaker_pct * 100) if config else 15 }}%</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Stat card row 3: Unrealized Profit, Unrealized Loss, Net P&L -->
+    <div class="grid-stack-item" gs-id="stat-unreal-profit" gs-x="0" gs-y="4" gs-w="4" gs-h="2" gs-min-w="2" gs-min-h="2">
+        <div class="grid-stack-item-content">
+            <div class="stat-card" id="unrealized-card">
+                <div class="stat-label">Unrealized Profit</div>
+                <div class="stat-value positive" id="unrealized-profit-value">--</div>
+                <div class="stat-sub" id="unrealized-profit-sub">Loading...</div>
+            </div>
+        </div>
+    </div>
+    <div class="grid-stack-item" gs-id="stat-unreal-loss" gs-x="4" gs-y="4" gs-w="4" gs-h="2" gs-min-w="2" gs-min-h="2">
+        <div class="grid-stack-item-content">
+            <div class="stat-card" id="unrealized-loss-card">
+                <div class="stat-label">Unrealized Loss</div>
+                <div class="stat-value negative" id="unrealized-loss-value">--</div>
+                <div class="stat-sub" id="unrealized-loss-sub">Loading...</div>
+            </div>
+        </div>
+    </div>
+    <div class="grid-stack-item" gs-id="stat-net-pnl" gs-x="8" gs-y="4" gs-w="4" gs-h="2" gs-min-w="2" gs-min-h="2">
+        <div class="grid-stack-item-content">
+            <div class="stat-card" id="net-pnl-card">
+                <div class="stat-label">Net P&L</div>
+                <div class="stat-value" id="net-pnl-value">--</div>
+                <div class="stat-sub" id="net-pnl-sub">realized + unrealized</div>
+            </div>
+        </div>
+    </div>
+
     <!-- Chart panel -->
-    <div class="grid-stack-item" gs-id="chart" gs-x="0" gs-y="2" gs-w="8" gs-h="5" gs-min-w="4" gs-min-h="3">
+    <div class="grid-stack-item" gs-id="chart" gs-x="0" gs-y="6" gs-w="8" gs-h="5" gs-min-w="4" gs-min-h="3">
         <div class="grid-stack-item-content">
             <div class="panel dash-chart-panel" style="height:100%; display:flex; flex-direction:column;">
                 <div class="panel-header">
@@ -131,7 +192,7 @@
     </div>
 
     <!-- Open Positions panel -->
-    <div class="grid-stack-item" gs-id="positions" gs-x="8" gs-y="2" gs-w="4" gs-h="5" gs-min-w="3" gs-min-h="3">
+    <div class="grid-stack-item" gs-id="positions" gs-x="8" gs-y="6" gs-w="4" gs-h="5" gs-min-w="3" gs-min-h="3">
         <div class="grid-stack-item-content">
             <div class="panel dash-positions-panel" style="height:100%; display:flex; flex-direction:column;">
                 <div class="panel-header">
@@ -162,8 +223,8 @@
                     <div class="empty-state" style="padding:20px 12px;"><p>No open positions</p></div>
                     {% endif %}
                     <div class="pos-card-footer">
-                        <div><div class="pos-card-dlbl">Unrealised</div><div class="pos-card-dval mono positive" id="unrealized-profit-value" style="font-size:14px;">--</div></div>
-                        <div><div class="pos-card-dlbl">Exposure</div><div class="pos-card-dval mono" id="allocated-value" style="font-size:14px;">${{ "%.2f"|format(allocated) }}</div></div>
+                        <div><div class="pos-card-dlbl">Unrealised</div><div class="pos-card-dval mono positive pos-unrealized-mirror" style="font-size:14px;">--</div></div>
+                        <div><div class="pos-card-dlbl">Exposure</div><div class="pos-card-dval mono pos-allocated-mirror" style="font-size:14px;">${{ "%.2f"|format(allocated) }}</div></div>
                     </div>
                 </div>
             </div>
@@ -172,7 +233,7 @@
 
     <!-- MM Engine Controls -->
     {% if role == 'admin' %}
-    <div class="grid-stack-item" gs-id="mm-engine" gs-x="0" gs-y="7" gs-w="12" gs-h="3" gs-min-w="4" gs-min-h="2">
+    <div class="grid-stack-item" gs-id="mm-engine" gs-x="0" gs-y="11" gs-w="12" gs-h="3" gs-min-w="4" gs-min-h="2">
         <div class="grid-stack-item-content">
             <div class="panel" id="mm-engine-panel" style="height:100%; display:flex; flex-direction:column;">
                 <div class="panel-header">
@@ -202,7 +263,7 @@
     {% endif %}
 
     <!-- Recent Signals -->
-    <div class="grid-stack-item" gs-id="signals" gs-x="0" gs-y="10" gs-w="6" gs-h="5" gs-min-w="4" gs-min-h="3">
+    <div class="grid-stack-item" gs-id="signals" gs-x="0" gs-y="14" gs-w="6" gs-h="5" gs-min-w="4" gs-min-h="3">
         <div class="grid-stack-item-content">
             <div class="panel" style="height:100%; display:flex; flex-direction:column;">
                 <div class="panel-header">
@@ -236,7 +297,7 @@
     </div>
 
     <!-- Agent Activity -->
-    <div class="grid-stack-item" gs-id="agent-activity" gs-x="6" gs-y="10" gs-w="6" gs-h="5" gs-min-w="3" gs-min-h="3">
+    <div class="grid-stack-item" gs-id="agent-activity" gs-x="6" gs-y="14" gs-w="6" gs-h="5" gs-min-w="3" gs-min-h="3">
         <div class="grid-stack-item-content">
             <div class="panel" style="height:100%; display:flex; flex-direction:column;">
                 <div class="panel-header">
@@ -254,7 +315,7 @@
 
     <!-- Admin panels -->
     {% if role == 'admin' %}
-    <div class="grid-stack-item" gs-id="refiner" gs-x="0" gs-y="15" gs-w="12" gs-h="4" gs-min-w="6" gs-min-h="3">
+    <div class="grid-stack-item" gs-id="refiner" gs-x="0" gs-y="19" gs-w="12" gs-h="4" gs-min-w="6" gs-min-h="3">
         <div class="grid-stack-item-content">
             <div class="panel" id="refiner-panel" style="height:100%; display:flex; flex-direction:column;">
                 <div class="panel-header">
@@ -275,7 +336,7 @@
         </div>
     </div>
 
-    <div class="grid-stack-item" gs-id="agent-stats" gs-x="0" gs-y="19" gs-w="6" gs-h="3" gs-min-w="4" gs-min-h="2">
+    <div class="grid-stack-item" gs-id="agent-stats" gs-x="0" gs-y="23" gs-w="6" gs-h="3" gs-min-w="4" gs-min-h="2">
         <div class="grid-stack-item-content">
             <div class="panel" id="agent-panel" style="height:100%; display:flex; flex-direction:column;">
                 <div class="panel-header"><h2>AI Entry Agent <span id="agent-model-badge" class="badge" style="background:var(--teal-dim);color:var(--teal);">--</span></h2></div>
@@ -293,7 +354,7 @@
         </div>
     </div>
 
-    <div class="grid-stack-item" gs-id="advisor" gs-x="6" gs-y="19" gs-w="6" gs-h="3" gs-min-w="4" gs-min-h="2">
+    <div class="grid-stack-item" gs-id="advisor" gs-x="6" gs-y="23" gs-w="6" gs-h="3" gs-min-w="4" gs-min-h="2">
         <div class="grid-stack-item-content">
             <div class="panel" id="advisor-panel" style="height:100%; display:flex; flex-direction:column;">
                 <div class="panel-header">
@@ -784,13 +845,13 @@ function renderPnlData(data) {
 
     if (profitEl) {
         profitEl.textContent = '+$' + totalProfit.toFixed(2);
-        profitEl.className = 'stat-value sm positive';
+        profitEl.className = 'stat-value positive';
     }
     if (profitSub) profitSub.textContent = profitCount + ' winning position' + (profitCount !== 1 ? 's' : '');
 
     if (lossEl) {
         lossEl.textContent = '$' + totalLoss.toFixed(2);
-        lossEl.className = 'stat-value sm negative';
+        lossEl.className = 'stat-value negative';
     }
     if (lossSub) lossSub.textContent = lossCount + ' losing position' + (lossCount !== 1 ? 's' : '');
 
@@ -802,6 +863,7 @@ function renderPnlData(data) {
     data.positions.forEach(p => { totalAllocated += (p.margin_used || p.cost_usd || 0); });
     const allocEl = document.getElementById('allocated-value');
     if (allocEl) allocEl.textContent = '$' + totalAllocated.toFixed(2);
+    document.querySelectorAll('.pos-allocated-mirror').forEach(el => { el.textContent = '$' + totalAllocated.toFixed(2); });
 
     const eqText = (document.getElementById('equity-value') || {}).textContent || '';
     const eqVal = parseFloat(eqText.replace(/[^0-9.\-]/g, '')) || 0;
@@ -866,13 +928,12 @@ function syncPositionCards(data) {
         if (fill) fill.style.width = pct + '%';
     });
 
-    // Update unrealised total in card footer
+    // Update unrealised total in card footer + mirror
     const netPnl = data.positions.reduce((s, p) => s + (p.current_price !== null ? p.unrealized_pnl : 0), 0);
-    const unrEl = document.getElementById('unrealized-profit-value');
-    if (unrEl) {
-        unrEl.textContent = (netPnl >= 0 ? '+' : '') + '$' + netPnl.toFixed(2);
-        unrEl.className = 'stat-value sm ' + (netPnl >= 0 ? 'positive' : 'negative');
-    }
+    document.querySelectorAll('.pos-unrealized-mirror').forEach(el => {
+        el.textContent = (netPnl >= 0 ? '+' : '') + '$' + netPnl.toFixed(2);
+        el.className = 'pos-card-dval mono ' + (netPnl >= 0 ? 'positive' : 'negative');
+    });
 }
 
 async function loadUnrealizedPnl() {
