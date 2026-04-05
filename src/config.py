@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
@@ -111,12 +111,6 @@ class Settings(BaseSettings):
     funding_gate_threshold: float = 0.0005  # 0.05% per 8h = extreme funding
     signal_persistence_scans: int = 1  # 1 = pass on first sighting (no deploy blackout)
     max_per_correlation_cluster: int = 0  # 0 = unlimited per correlated group
-
-    # Signal reversal — disabled for Trade Travel Chill (no reversals, accept the loss)
-    reversal_enabled: bool = False
-    reversal_min_score: float = 70.0       # Legacy, inactive
-    reversal_min_hold_minutes: int = 60    # Legacy, inactive
-    reversal_cooldown_minutes: int = 120   # Legacy, inactive
 
     # Scanning
     scan_interval_minutes: int = 15  # Scan every 15 min to catch pullback entries

@@ -1,0 +1,76 @@
+{
+  "lessons": [
+    {
+      "title": "The Market Session Times Indicator Tutorial",
+      "url": "https://tradetravelchill.club/lessons/the-market-session-times-indicator-tutorial/",
+      "section": "Unknown"
+    },
+    {
+      "title": "The Trade By Design Indicator Suite Tutorial",
+      "url": "https://tradetravelchill.club/lessons/the-trade-by-design-indicator-tutorial/",
+      "section": "Unknown"
+    },
+    {
+      "title": "The Trade By Design Basic Indicator Tutorial",
+      "url": "https://tradetravelchill.club/lessons/the-trade-by-design-basic-indicator-tutorial/",
+      "section": "Unknown"
+    },
+    {
+      "title": "The TTC Liquidation Heatmap Tutorial",
+      "url": "https://tradetravelchill.club/lessons/the-ttc-liquidation-heatmap-tutorial/",
+      "section": "Unknown"
+    },
+    {
+      "title": "TradingView Tutorial",
+      "url": "https://tradetravelchill.club/lessons/tradingview-tutorial/",
+      "section": "Unknown"
+    },
+    {
+      "title": "TradingView Layouts & Object Tree",
+      "url": "https://tradetravelchill.club/lessons/tradingview-layouts-object-tree/",
+      "section": "Unknown"
+    },
+    {
+      "title": "Hyblock Tutorial",
+      "url": "https://tradetravelchill.club/lessons/hyblock-tutorial/",
+      "section": "Unknown"
+    },
+    {
+      "title": "Kiyotaka Tutorial",
+      "url": "https://tradetravelchill.club/lessons/kiyotaka-tutorial/",
+      "section": "Unknown"
+    }
+  ],
+  "completed": {
+    "https://tradetravelchill.club/lessons/the-market-session-times-indicator-tutorial/": {
+      "num": 1,
+      "title": "The Market Session Times Indicator Tutorial",
+      "cues": 134,
+      "file": "01_the-market-session-times-indicator-tutorial.md",
+      "extracted": "2026-04-05T07:32:16.040478+00:00"
+    },
+    "https://tradetravelchill.club/lessons/the-ttc-liquidation-heatmap-tutorial/": {
+      "num": 4,
+      "title": "The TTC Liquidation Heatmap Tutorial",
+      "cues": 145,
+      "file": "04_the-ttc-liquidation-heatmap-tutorial.md",
+      "extracted": "2026-04-05T07:32:45.955862+00:00"
+    }
+  },
+  "completed_list": [
+    {
+      "num": 1,
+      "title": "The Market Session Times Indicator Tutorial",
+      "section": "Unknown",
+      "url": "https://tradetravelchill.club/lessons/the-market-session-times-indicator-tutorial/",
+      "cues": 134
+    },
+    {
+      "num": 4,
+      "title": "The TTC Liquidation Heatmap Tutorial",
+      "section": "Unknown",
+      "url": "https://tradetravelchill.club/lessons/the-ttc-liquidation-heatmap-tutorial/",
+      "cues": 145
+    }
+  ]
+}

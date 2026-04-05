@@ -21,8 +21,8 @@ ruff format src/ tests/
 docker compose up --build
 
 # Deploy
-fly deploy --depot=false --remote-only --app tarakta
-fly deploy --depot=false --remote-only --app tarakta-expanded  # expanded footprint variant
+fly deploy --depot=false --remote-only --app tarakta-expanded  # ACTIVE production app
+# fly deploy --depot=false --remote-only --app tarakta         # inactive/legacy
 ```
 
 ## Architecture
@@ -48,6 +48,7 @@ Automated crypto trading bot using Smart Money Concepts with three OpenAI-powere
 - `src/execution/` — Order execution and position monitoring (`orders.py`, `monitor.py`)
 - `src/engine/` — Core loop (`core.py`), consensus voting (`consensus.py`), scan scheduler (`scheduler.py`), engine state (`state.py`), pullback watchlist (`watchlist.py`, `entry_refiner.py`)
 - `src/strategy/` indicators — `fair_value_gaps.py`, `order_blocks.py`, `liquidity.py`, `sweep_detector.py`, `market_structure.py`, `footprint.py`, `sentiment.py`, `volume.py`, `sessions.py`, `weekly_cycle.py`, `pullback.py`
+- `src/advisor/` — Trade advisor using Claude Agent SDK. Fetches missed signals (`missed_signals.py`), simulates outcomes (`outcome_simulator.py`), stores findings in `advisor_insights` table (`insights.py`), and injects learnings into Agent 1/2 context. Runs daily on reset or manually via dashboard button / `POST /advisor/run`. Runner: `runner.py`, MCP tools: `tools.py`
 
 **Data flow to agents:**
 - Scanner → `signal.agent_context` (OBs, FVGs, liquidity, market structure, volume, leverage) → Agent 1
@@ -55,7 +56,6 @@ Automated crypto trading bot using Smart Money Concepts with three OpenAI-powere
 - Footprint analyzer runs live in entry_refiner before Agent 2, then again as a hard gate in core.py before execution
 - Advisor insights (daily) are injected into Agent 1 and Agent 2 prompts via `format_insights_for_agent()`
 - Trade lessons (per-trade) are injected into all agent prompts from `trade_lessons` table
-- `src/advisor/` — Trade advisor using Claude Agent SDK. Fetches missed signals (`missed_signals.py`), simulates outcomes (`outcome_simulator.py`), stores findings in `advisor_insights` table (`insights.py`), and injects learnings into Agent 1/2 context. Runs daily on reset or manually via dashboard button / `POST /advisor/run`. Runner: `runner.py`, MCP tools: `tools.py`
 
 **Usage tracking:** All `generate_json()` calls in `llm_client.py` log to `api_usage` table (fire-and-forget). Each caller passes `caller="agent1|agent2|agent3|lessons"` and optionally `repo`, `trade_id`, `signal_id`. Cost calculated via `MODEL_PRICING` dict. Dashboard at `/usage` shows spend charts, per-model/per-agent breakdowns, and configurable alert threshold (stored in `engine_state.config_overrides` as `usage_alert_threshold_usd`).
 
@@ -70,6 +70,7 @@ Automated crypto trading bot using Smart Money Concepts with three OpenAI-powere
 - **Instance isolation**: `engine_state` is keyed by `instance_id` (not singleton) — multiple bot instances share one DB
 - **OOM risk**: Bot runs on Fly.io shared-cpu-1x with 2GB RAM. Memory-heavy operations (large candle fetches, multiple concurrent agent calls) can OOM — monitor via `fly logs -a tarakta`
 - **python3 only**: No bare `python` on macOS — always use `python3`
+- **Data models location**: `FootprintResult`, `SignalCandidate`, and other dataclasses live in `src/exchange/models.py`, not in the strategy files that use them
 
 ## Environment
 
@@ -83,8 +84,8 @@ Required (see `.env.example`):
 
 ## Deployment
 
-Fly.io app `tarakta` — region `ams` (Amsterdam), shared-cpu-1x, 2GB RAM. Config in `fly.toml`. Always deploy with `--depot=false --remote-only`.
+Fly.io app `tarakta-expanded` (active production) — region `ams` (Amsterdam), shared-cpu-1x, 2GB RAM. Config in `fly.toml`. Always deploy with `--depot=false --remote-only`. Legacy app `tarakta` exists but is not the active deployment.
 
 ## Database
 
-Supabase project **SWSP** (ref: `uounrdaescblpgwkgbdq`, region: ap-southeast-1). Migrations in `migrations/` numbered 001-014 (008 and 011 don't exist). Key tables: `trades`, `signals`, `engine_state`, `portfolio_snapshots`, `knowledge_sources`, `knowledge_chunks`, `candle_cache`, `advisor_insights`, `api_usage`.
+Supabase project **SWSP** (ref: `uounrdaescblpgwkgbdq`, region: ap-southeast-1). Migrations in `migrations/` numbered 001-014 (008 and 011 don't exist). Key tables: `trades`, `signals`, `engine_state`, `portfolio_snapshots`, `knowledge_sources`, `knowledge_chunks`, `candle_cache`, `advisor_insights`, `api_usage`, `trade_lessons`.
