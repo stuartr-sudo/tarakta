@@ -193,7 +193,7 @@
 <script>
 let _mmScanning = false;
 let _mmAvailable = false;
-const _mmTotalPnl = {{ "%.2f" | format(mm_total_pnl) }};
+const _mmTotalPnl = {{ "%.2f" | format(mm_snapshot.total_pnl_usd | default(0) | float) }};
 
 async function loadMMStatus() {
     try {
