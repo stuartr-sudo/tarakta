@@ -15,9 +15,10 @@
     .grid-stack-item-content > .panel > .chart-container,
     .grid-stack-item-content > .panel .chart-container { flex: 1; min-height: 0; }
     .grid-stack > .grid-stack-item > .grid-stack-item-content { inset: 4px; border-radius: var(--radius-lg); }
-    .gs-lock-btn { position: absolute; top: 8px; right: 8px; z-index: 10; background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text-muted); border-radius: 6px; padding: 4px 10px; font-size: 11px; cursor: pointer; font-family: var(--font-body); }
-    .gs-lock-btn:hover { color: var(--teal); border-color: var(--teal); }
-    .gs-lock-btn.locked { color: var(--text-dim); }
+    .gs-toolbar { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 8px; }
+    .gs-lock-btn, .gs-reset-btn { background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text-secondary); border-radius: 6px; padding: 6px 14px; font-size: 12px; cursor: pointer; font-family: var(--font-body); font-weight: 500; transition: all 0.15s; }
+    .gs-lock-btn:hover, .gs-reset-btn:hover { color: var(--teal); border-color: var(--teal); background: var(--teal-dim); }
+    .gs-lock-btn.unlocked { color: var(--teal); border-color: var(--teal); background: var(--teal-dim); }
     /* Override gridstack defaults for our dark theme */
     .grid-stack-placeholder > .placeholder-content { border: 1px dashed var(--teal) !important; background: var(--teal-faint) !important; border-radius: var(--radius-lg); }
     /* Stat cards inside gridstack */
@@ -40,8 +41,11 @@
 {% endfor %}{% endif %}
 {% set allocated = ns.allocated %}
 
-<!-- Lock/unlock toggle -->
-<button class="gs-lock-btn" id="gs-lock-btn" onclick="toggleGridLock()" title="Toggle drag &amp; resize">Unlock Layout</button>
+<!-- Grid layout toolbar -->
+<div class="gs-toolbar">
+    <button class="gs-reset-btn" onclick="resetGridLayout()" title="Reset to default layout">Reset Layout</button>
+    <button class="gs-lock-btn" id="gs-lock-btn" onclick="toggleGridLock()" title="Toggle drag &amp; resize">Unlock Layout</button>
+</div>
 
 <!-- Hidden elements for JS compatibility -->
 <div style="display:none;">
@@ -356,12 +360,12 @@ function toggleGridLock() {
         _grid.enableMove(false);
         _grid.enableResize(false);
         btn.textContent = 'Unlock Layout';
-        btn.classList.add('locked');
+        btn.classList.remove('unlocked');
     } else {
         _grid.enableMove(true);
         _grid.enableResize(true);
         btn.textContent = 'Lock Layout';
-        btn.classList.remove('locked');
+        btn.classList.add('unlocked');
     }
 }
 
