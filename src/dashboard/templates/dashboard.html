@@ -39,7 +39,6 @@
         /* Full-width panels on mobile */
         .grid-stack > .grid-stack-item[gs-id="chart"],
         .grid-stack > .grid-stack-item[gs-id="positions"],
-        .grid-stack > .grid-stack-item[gs-id="mm-engine"],
         .grid-stack > .grid-stack-item[gs-id="signals"],
         .grid-stack > .grid-stack-item[gs-id="agent-activity"],
         .grid-stack > .grid-stack-item[gs-id="refiner"],
@@ -261,36 +260,7 @@
         </div>
     </div>
 
-    <!-- MM Engine Controls -->
-    {% if role == 'admin' %}
-    <div class="grid-stack-item" gs-id="mm-engine" gs-x="0" gs-y="11" gs-w="12" gs-h="3" gs-min-w="4" gs-min-h="2">
-        <div class="grid-stack-item-content">
-            <div class="panel" id="mm-engine-panel" style="height:100%; display:flex; flex-direction:column;">
-                <div class="panel-header">
-                    <h2>MM Engine
-                        <span class="account-badge" style="background:rgba(0,229,212,0.12); color:#00e5d4;">Algorithmic</span>
-                        <span id="mm-status-badge" class="status-badge closed-loss">LOADING</span>
-                    </h2>
-                    <div style="display:flex; align-items:center; gap:8px;">
-                        <button id="mm-start-btn" class="btn primary" onclick="toggleMMEngine()" disabled>&#9654; Start</button>
-                    </div>
-                </div>
-                <div class="panel-body" style="padding:12px 16px; flex:1;">
-                    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(100px, 1fr)); gap:12px; font-size:0.8rem;">
-                        <div><div style="color:var(--text-muted); font-size:0.7rem;">Cycle</div><div id="mm-cycle" class="mono" style="font-size:1rem; font-weight:600;">0</div></div>
-                        <div><div style="color:var(--text-muted); font-size:0.7rem;">Session</div><div id="mm-session" class="mono" style="font-size:0.9rem;">&mdash;</div></div>
-                        <div><div style="color:var(--text-muted); font-size:0.7rem;">Positions</div><div id="mm-positions" class="mono" style="font-size:1rem; font-weight:600;">0</div></div>
-                        <div><div style="color:var(--text-muted); font-size:0.7rem;">Balance</div><div id="mm-balance" class="mono" style="font-size:0.9rem; color:var(--teal);">${{ "%.0f" | format(config.mm_initial_balance | default(10000) | float) }}</div></div>
-                    </div>
-                    <div id="mm-positions-list" style="margin-top:10px; display:none;">
-                        <div style="color:var(--text-muted); font-size:0.7rem; margin-bottom:4px;">Open MM Positions</div>
-                        <div id="mm-positions-body" style="font-size:0.75rem;"></div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    {% endif %}
+    <!-- MM Engine moved to /mm page — use bot toggle to switch -->
 
     <!-- Recent Signals -->
     <div class="grid-stack-item" gs-id="signals" gs-x="0" gs-y="14" gs-w="6" gs-h="5" gs-min-w="4" gs-min-h="3">
