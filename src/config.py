@@ -227,6 +227,7 @@ class Settings(BaseSettings):
     mm_scan_interval_minutes: float = 5.0    # How often the MM engine scans
     mm_max_positions: int = 3                # Max concurrent MM positions
     mm_risk_per_trade_pct: float = 1.0       # Risk % per MM trade
+    mm_initial_balance: float = 10000.0      # Separate paper balance for MM engine
 
     # One-time force reset — set FORCE_RESET=true to wipe all data on next startup
     force_reset: bool = False

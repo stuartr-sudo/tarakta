@@ -134,12 +134,25 @@ async def main() -> None:
     if config.mm_method_enabled:
         from src.strategy.mm_engine import MMEngine
 
-        # Reuse the primary market's exchange + candle_manager
+        # Use primary market's live exchange for market data, but give MM its own paper balance
         first_market = list(engines.keys())[0]
         first_engine = engines[first_market]
-        mm_exchange = first_engine.exchange
+        mm_live_exchange = live_exchanges[0]
+
+        mm_exchange = PaperExchange(
+            initial_balance=config.mm_initial_balance,
+            live_exchange=mm_live_exchange,
+            account_type=config.markets[first_market].account_type,
+            leverage=config.markets[first_market].leverage,
+        )
+        logger.info(
+            "mm_paper_exchange_created",
+            balance=config.mm_initial_balance,
+            note="isolated from SMC engine balance",
+        )
+
         mm_candle_mgr = first_engine.candle_manager if hasattr(first_engine, "candle_manager") else CandleManager(
-            exchange=live_exchanges[0], repo=repo,
+            exchange=mm_live_exchange, repo=repo,
         )
 
         mm_engine = MMEngine(
@@ -149,7 +162,11 @@ async def main() -> None:
             config=config,
             scan_interval_minutes=config.mm_scan_interval_minutes,
         )
-        logger.info("mm_engine_created", scan_interval=config.mm_scan_interval_minutes)
+        logger.info(
+            "mm_engine_created",
+            scan_interval=config.mm_scan_interval_minutes,
+            balance=config.mm_initial_balance,
+        )
 
     # Graceful shutdown
     loop = asyncio.get_event_loop()
