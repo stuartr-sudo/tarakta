@@ -811,19 +811,73 @@
     <div class="accordion-item" data-section="9">
         <div class="accordion-header" onclick="toggleSection(this)">
             <span class="accordion-number">09</span>
-            <span class="accordion-title">Dashboard Pages</span>
+            <span class="accordion-title">Dashboard &amp; Navigation Guide</span>
             <span class="accordion-chevron">&#9654;</span>
         </div>
         <div class="accordion-body">
             <div class="accordion-content">
+                <h3>Dashboard Overview</h3>
+                <p>The main dashboard provides a real-time overview of your trading activity. It displays live stat cards, an equity chart, open positions, recent signals, agent activity, and engine controls &mdash; all in a single view.</p>
+                <img src="https://uounrdaescblpgwkgbdq.supabase.co/storage/v1/object/public/images/training/dashboard/01-dashboard-overview.jpg" alt="Dashboard overview" style="max-width:100%; border-radius:10px; border:1px solid var(--border); margin:12px 0;" />
+
+                <h3>Bot Selector Toggle</h3>
+                <p>At the top of the dashboard you'll find the <strong>bot toggle</strong>. This lets you switch between the <strong>Footprint Bot</strong> (AI-powered, uses three LLM agents) and the <strong>MM Bot</strong> (purely algorithmic Market Makers Method).</p>
+                <p>Click <strong>MM Bot</strong> to view the MM Engine dashboard with its own stat cards, positions, and trade history. Click <strong>Footprint Bot</strong> to return to the main AI-powered dashboard.</p>
+                <img src="https://uounrdaescblpgwkgbdq.supabase.co/storage/v1/object/public/images/training/dashboard/02-bot-toggle.jpg" alt="Bot toggle selector" style="max-width:100%; border-radius:10px; border:1px solid var(--border); margin:12px 0;" />
+
+                <h3>Stat Cards</h3>
+                <p>The dashboard displays three rows of stat cards providing a full financial snapshot:</p>
+                <img src="https://uounrdaescblpgwkgbdq.supabase.co/storage/v1/object/public/images/training/dashboard/03-stat-cards.jpg" alt="Dashboard stat cards" style="max-width:100%; border-radius:10px; border:1px solid var(--border); margin:12px 0;" />
+                <table class="score-table">
+                    <tr><th>Card</th><th>Description</th></tr>
+                    <tr><td><strong>Portfolio Value</strong></td><td>Current equity balance with percentage change from initial deposit.</td></tr>
+                    <tr><td><strong>Today's P&amp;L</strong></td><td>Profit or loss for the current day, with win/loss count.</td></tr>
+                    <tr><td><strong>Win Rate</strong></td><td>7-day rolling win rate with trade count.</td></tr>
+                    <tr><td><strong>Active Signals</strong></td><td>Number of current signals plus open trades and queued refinements.</td></tr>
+                    <tr><td><strong>Available Cash</strong></td><td>Balance minus allocated margin &mdash; how much is free to trade.</td></tr>
+                    <tr><td><strong>Allocated</strong></td><td>Total margin currently tied up across open positions.</td></tr>
+                    <tr><td><strong>Total P&amp;L</strong></td><td>All-time realized profit/loss from closed trades.</td></tr>
+                    <tr><td><strong>Drawdown</strong></td><td>Current drawdown from peak, with circuit breaker threshold.</td></tr>
+                    <tr><td><strong>Unrealized Profit</strong></td><td>Total unrealized gains from winning open positions (updates live).</td></tr>
+                    <tr><td><strong>Unrealized Loss</strong></td><td>Total unrealized losses from losing open positions (updates live).</td></tr>
+                    <tr><td><strong>Net P&amp;L</strong></td><td>Combined realized + unrealized P&amp;L &mdash; your true current standing.</td></tr>
+                </table>
+
+                <h3>Drag-and-Drop Layout</h3>
+                <p>Every panel on the dashboard can be rearranged to suit your workflow. Click <strong>Unlock Layout</strong> (top-right) to enable drag-and-drop &mdash; then drag any panel to a new position or resize it by pulling the edges. Your layout is saved automatically in your browser.</p>
+                <img src="https://uounrdaescblpgwkgbdq.supabase.co/storage/v1/object/public/images/training/dashboard/04-unlock-layout.jpg" alt="Unlock layout button" style="max-width:100%; border-radius:10px; border:1px solid var(--border); margin:12px 0;" />
+                <ul>
+                    <li><strong>Unlock Layout</strong> &mdash; enables dragging and resizing of all panels</li>
+                    <li><strong>Lock Layout</strong> &mdash; freezes panels in place (default state)</li>
+                    <li><strong>Reset Layout</strong> &mdash; restores the default panel arrangement</li>
+                </ul>
+                <div class="info-box"><strong>Tip:</strong> Layouts are stored in your browser's localStorage. Clearing browser data will reset the layout. Use <strong>Reset Layout</strong> if panels get stuck or overlap.</div>
+
+                <h3>MM Bot Dashboard</h3>
+                <p>The MM Bot dashboard mirrors the Footprint Bot layout but shows MM-specific data. It includes balance, total P&amp;L, win rate, drawdown, cycle count, session, and risk-per-trade. No AI agent panels are shown since the MM Engine is purely algorithmic.</p>
+                <img src="https://uounrdaescblpgwkgbdq.supabase.co/storage/v1/object/public/images/training/dashboard/05-mm-dashboard.jpg" alt="MM Bot dashboard" style="max-width:100%; border-radius:10px; border:1px solid var(--border); margin:12px 0;" />
+                <p>The MM dashboard also shows:</p>
+                <ul>
+                    <li><strong>Open Positions</strong> &mdash; live MM positions with entry price, stop loss, and level</li>
+                    <li><strong>Recent MM Trades</strong> &mdash; closed trades with formation type, confluence grade, and cycle phase</li>
+                    <li><strong>Start / Stop</strong> &mdash; control the MM scanning engine directly from the dashboard</li>
+                </ul>
+
+                <h3>Mobile &amp; Responsive</h3>
+                <p>The dashboard is fully responsive. On mobile devices (under 768px), the sidebar collapses and a <strong>hamburger menu</strong> appears in the top-left corner. Tap it to slide out the navigation sidebar. Stat cards reflow into a 2-column layout.</p>
+                <img src="https://uounrdaescblpgwkgbdq.supabase.co/storage/v1/object/public/images/training/dashboard/07-mobile-dashboard.jpg" alt="Mobile dashboard view" style="max-width:320px; border-radius:10px; border:1px solid var(--border); margin:12px auto; display:block;" />
+                <img src="https://uounrdaescblpgwkgbdq.supabase.co/storage/v1/object/public/images/training/dashboard/09-mobile-sidebar.jpg" alt="Mobile sidebar navigation" style="max-width:320px; border-radius:10px; border:1px solid var(--border); margin:12px auto; display:block;" />
+
+                <h3>All Pages</h3>
                 <table class="score-table">
                     <tr><th>Page</th><th>What It Shows</th></tr>
-                    <tr><td><strong>Dashboard</strong></td><td>Live overview: balance, PnL, open positions with real-time unrealised profit/loss, engine status.</td></tr>
+                    <tr><td><strong>Dashboard</strong></td><td>Live overview: stat cards, equity chart, open positions, engine controls, signals, agent activity.</td></tr>
                     <tr><td><strong>Trades</strong></td><td>Complete history with entry/exit prices, PnL, R:R, confluence score, exit reason, agent reasoning.</td></tr>
                     <tr><td><strong>Signals</strong></td><td>Every signal detected, whether traded or not. Shows components, agent decisions, and outcome.</td></tr>
                     <tr><td><strong>Analytics</strong></td><td>Performance charts: PnL curve, win rate, R:R distribution, performance by symbol/direction/time.</td></tr>
                     <tr><td><strong>Usage</strong></td><td>API cost tracking. Spend by model and agent, daily/cumulative charts, configurable alerts.</td></tr>
                     <tr><td><strong>Chart</strong></td><td>Embedded TradingView chart for manual analysis of any trading pair.</td></tr>
+                    <tr><td><strong>MM Engine</strong></td><td>Dedicated MM Bot dashboard with algorithmic trading stats, positions, and engine controls.</td></tr>
                     <tr><td><strong>Settings</strong></td><td>All configurable parameters. Changes take effect immediately, no restart needed.</td></tr>
                     <tr><td><strong>Training</strong></td><td>This page. A comprehensive guide to how Tarakta works.</td></tr>
                 </table>
