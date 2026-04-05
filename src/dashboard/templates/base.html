@@ -4,17 +4,27 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Tarakta{% endblock %}</title>
-    <link rel="stylesheet" href="/static/style.css?v=4">
+    <link rel="stylesheet" href="/static/style.css?v=5">
     {% block head %}{% endblock %}
 </head>
 <body>
     {% set current_page = request.url.path %}
     {% set mode = (state.mode | default('paper')) if state else 'paper' %}
 
-    <!-- Instance Tabs -->
-    {% if all_instances is defined and all_instances | length > 1 %}
-    <div class="instance-tabs">
+    <!-- Instance Tabs (only show active bots) -->
+    {% set active_ids = ['tarakta-stream', 'footprint'] %}
+    {% set filtered = [] %}
+    {% if all_instances is defined %}
         {% for inst in all_instances %}
+            {% set iid = inst.instance_id if inst.instance_id is defined else inst %}
+            {% if iid in active_ids %}
+                {% if filtered.append(inst) %}{% endif %}
+            {% endif %}
+        {% endfor %}
+    {% endif %}
+    {% if filtered | length > 1 %}
+    <div class="instance-tabs">
+        {% for inst in filtered %}
         {% set iid = inst.instance_id if inst.instance_id is defined else inst %}
         <a href="?instance={{ iid }}"
            class="instance-tab {{ 'active' if iid == active_instance else '' }}">
@@ -32,9 +42,9 @@
     <!-- Mode Banner -->
     <div class="mode-banner {{ mode }}">
         {% if mode == 'paper' %}
-            PAPER TRADING — No real money is being used. All trades are simulated.
+            Paper Trading — All trades are simulated
         {% else %}
-            LIVE TRADING — Real orders are being placed.
+            Live Trading — Real orders active
         {% endif %}
         {% if enabled_markets and enabled_markets | length > 1 %}
         <span class="market-badges">
@@ -51,7 +61,7 @@
     <!-- Navigation -->
     {% set _iq = '?instance=' ~ active_instance if active_instance is defined and active_instance != config.instance_id else '' %}
     <nav class="top-nav">
-        <a href="/" class="brand">Tarakta</a>
+        <a href="/" class="brand">tarakta</a>
         <div class="nav-links">
             <a href="/{{ _iq }}" class="{{ 'active' if current_page == '/' else '' }}">Dashboard</a>
             <a href="/trades{{ _iq }}" class="{{ 'active' if current_page == '/trades' else '' }}">Trades</a>
@@ -70,14 +80,14 @@
                     <div class="timer-bar-fill" id="timerBarFill"></div>
                 </div>
             </div>
-            {% if role == 'viewer' %}<span class="badge text-muted" style="font-size:0.7rem;">view-only</span>{% endif %}
+            {% if role == 'viewer' %}<span class="badge text-muted" style="font-size:0.65rem;">view-only</span>{% endif %}
             <a href="/logout" class="btn nav-logout">Logout</a>
         </div>
     </nav>
 
     {% if db_offline %}
-    <div style="background:#b91c1c;color:#fff;text-align:center;padding:8px;font-weight:600">
-        Database unreachable &mdash; showing cached/empty data. Engines will auto-retry.
+    <div style="background:rgba(248,113,113,0.15);color:var(--red);text-align:center;padding:8px;font-weight:600;font-size:0.78rem;font-family:var(--font-mono);">
+        Database unreachable &mdash; showing cached/empty data
     </div>
     {% endif %}
 
@@ -94,7 +104,7 @@
     </main>
 
     <footer class="site-footer">
-        Tarakta Trading Bot &mdash; Private Use Only
+        Tarakta Trading System
     </footer>
     <script>
     (function() {
@@ -107,8 +117,6 @@
             const now = new Date();
             const utcMs = now.getTime();
             const intervalMs = INTERVAL * 60 * 1000;
-
-            // Next aligned tick: ceiling to interval boundary
             const nextTick = Math.ceil(utcMs / intervalMs) * intervalMs;
             const remainMs = nextTick - utcMs;
             const remainSec = Math.max(0, Math.floor(remainMs / 1000));
@@ -117,12 +125,10 @@
             const secs = remainSec % 60;
             timerEl.textContent = String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
 
-            // Progress bar: how far through the interval we are
             const elapsed = intervalMs - remainMs;
             const pct = Math.min(100, (elapsed / intervalMs) * 100);
             barEl.style.width = pct + '%';
 
-            // Color shift as we approach scan
             if (remainSec <= 30) {
                 timerEl.classList.add('imminent');
             } else {
@@ -135,7 +141,6 @@
     })();
     </script>
     <script>
-    /* Global helper: append ?instance= to API URLs so all tabs fetch the right data */
     const _ACTIVE_INSTANCE = '{{ active_instance | default("") }}';
     function apiUrl(path) {
         if (!_ACTIVE_INSTANCE) return path;
