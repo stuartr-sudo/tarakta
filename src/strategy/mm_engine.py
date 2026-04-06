@@ -572,38 +572,22 @@ class MMEngine:
         if not result or result.status != "closed":
             return
 
-        trade_id = f"mm-{uuid4().hex[:8]}"
         fill_price = result.avg_price or signal.entry_price
+        cost_usd = result.filled_quantity * fill_price
 
-        # Create MM position
-        position = MMPosition(
-            trade_id=trade_id,
-            symbol=signal.symbol,
-            direction=signal.direction,
-            entry_price=fill_price,
-            quantity=result.filled_quantity,
-            stop_loss=signal.stop_loss,
-            current_level=0,
-            cost_usd=result.filled_quantity * fill_price,
-            margin_used=pos_result.position_size_usd / pos_result.recommended_leverage,
-            target_l1=signal.target_l1,
-            target_l2=signal.target_l2,
-            target_l3=signal.target_l3,
-        )
-
-        self.positions[signal.symbol] = position
-
-        # Log to database
+        # Log to database first to get the DB-generated id
+        trade_id = f"mm-{uuid4().hex[:8]}"  # fallback if DB insert fails
         try:
-            await self.repo.insert_trade({
-                "trade_id": trade_id,
+            db_row = await self.repo.insert_trade({
                 "symbol": signal.symbol,
                 "direction": signal.direction,
                 "entry_price": fill_price,
-                "quantity": result.filled_quantity,
+                "entry_quantity": result.filled_quantity,
+                "original_quantity": result.filled_quantity,
+                "remaining_quantity": result.filled_quantity,
                 "stop_loss": signal.stop_loss,
                 "take_profit": signal.target_l1,
-                "cost_usd": position.cost_usd,
+                "entry_cost_usd": cost_usd,
                 "strategy": STRATEGY_TAG,
                 "entry_reason": signal.reason,
                 "confluence_score": signal.confluence_score,
@@ -612,8 +596,28 @@ class MMEngine:
                 "mm_confluence_grade": signal.confluence_grade,
                 "status": "open",
             })
+            if db_row and db_row.get("id"):
+                trade_id = str(db_row["id"])
         except Exception as e:
             logger.debug("mm_trade_db_insert_failed", error=str(e))
+
+        # Create MM position with DB id for later updates
+        position = MMPosition(
+            trade_id=trade_id,
+            symbol=signal.symbol,
+            direction=signal.direction,
+            entry_price=fill_price,
+            quantity=result.filled_quantity,
+            stop_loss=signal.stop_loss,
+            current_level=0,
+            cost_usd=cost_usd,
+            margin_used=pos_result.position_size_usd / pos_result.recommended_leverage,
+            target_l1=signal.target_l1,
+            target_l2=signal.target_l2,
+            target_l3=signal.target_l3,
+        )
+
+        self.positions[signal.symbol] = position
 
         logger.info(
             "mm_trade_entered",

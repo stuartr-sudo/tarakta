@@ -46,6 +46,7 @@ class Repository:
         "last_agent3_action", "last_agent3_reasoning", "agent3_confidence",
         "last_agent3_sl",
         "instance_id",
+        "strategy", "entry_reason", "mm_formation", "mm_cycle_phase", "mm_confluence_grade",
         "created_at", "updated_at",
     }
 

@@ -9,6 +9,7 @@ primary_region = "sin"
   LOG_FORMAT = "json"
   PORT = "8080"
   POSITION_AGENT_ENABLED = "true"
+  MM_METHOD_ENABLED = "true"
 
 [http_service]
   internal_port = 8080
