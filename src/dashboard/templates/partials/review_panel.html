@@ -1,0 +1,50 @@
+<!-- Review Panel: Slide-over from left -->
+<div class="review-panel-overlay" id="reviewPanelOverlay"></div>
+<div class="review-panel" id="reviewPanel">
+  <!-- Header -->
+  <div style="padding:16px 20px;border-bottom:1px solid var(--border);flex-shrink:0">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h2 style="margin:0;font-size:16px;color:var(--text-primary)">Review Requests</h2>
+      <button id="reviewPanelClose" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:22px;padding:0;line-height:1">&times;</button>
+    </div>
+    <!-- Filter Chips -->
+    <div class="review-filter-chips" id="reviewFilterChips">
+      <button class="review-chip active" data-status="">All <span class="review-chip-count">0</span></button>
+      <button class="review-chip" data-status="pending">Pending <span class="review-chip-count">0</span></button>
+      <button class="review-chip" data-status="in_progress">In Progress <span class="review-chip-count">0</span></button>
+      <button class="review-chip" data-status="needs_info">Needs Info <span class="review-chip-count">0</span></button>
+      <button class="review-chip" data-status="resolved">Resolved <span class="review-chip-count">0</span></button>
+      <button class="review-chip" data-status="closed">Closed <span class="review-chip-count">0</span></button>
+    </div>
+  </div>
+
+  <!-- Request List -->
+  <div id="reviewList" style="flex:1;overflow-y:auto;padding:12px 20px">
+    <div style="color:var(--text-muted);font-size:13px;text-align:center;padding:40px 0">Loading...</div>
+  </div>
+
+  <!-- Expanded View (hidden by default) -->
+  <div id="reviewDetail" style="display:none;flex:1;overflow-y:auto;padding:16px 20px">
+    <button id="reviewDetailBack" style="background:none;border:none;color:var(--teal);cursor:pointer;font-size:13px;padding:0;margin-bottom:12px">&larr; Back to list</button>
+
+    <div id="reviewDetailContent"></div>
+
+    <!-- Comment Thread -->
+    <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
+      <h4 style="margin:0 0 8px;font-size:13px;color:var(--text-secondary)">Comments</h4>
+      <div id="reviewComments"></div>
+
+      <!-- Add Comment -->
+      <div style="margin-top:12px">
+        <textarea id="reviewCommentInput" rows="2" placeholder="Add a comment..." style="width:100%;background:var(--bg-surface);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);padding:8px;font-size:13px;resize:vertical;font-family:var(--font-body)"></textarea>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <button id="reviewCommentSubmit" class="review-submit-btn" style="padding:6px 14px;font-size:12px">Add Comment</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Status Actions -->
+    <div id="reviewStatusActions" style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap">
+    </div>
+  </div>
+</div>

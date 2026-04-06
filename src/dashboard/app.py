@@ -36,8 +36,10 @@ def create_dashboard_app(config: Settings, repo: Repository, exchange=None, engi
     # Register routes
     from src.dashboard.routes import create_router as create_page_router
     from src.dashboard.api import create_router as create_api_router
+    from src.dashboard.reviews_api import create_reviews_router
 
     app.include_router(create_page_router(config, repo))
+    app.include_router(create_reviews_router(repo), prefix="/api")
 
     # Resolve API credentials for dashboard exchange client
     # Use crypto market config if available, fallback to legacy flat config

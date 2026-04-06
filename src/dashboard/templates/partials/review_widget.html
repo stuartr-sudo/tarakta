@@ -1,0 +1,90 @@
+<!-- Review Widget: Floating button + submit form -->
+<div id="reviewWidget" class="review-widget">
+  <!-- Floating Button -->
+  <button class="review-widget-btn" id="reviewWidgetBtn" title="Submit feedback">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+    </svg>
+    <span class="review-widget-badge" id="reviewBadge" style="display:none">0</span>
+  </button>
+
+  <!-- Submit Form (popup) -->
+  <div class="review-form-card" id="reviewFormCard" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h3 style="margin:0;font-size:14px;color:var(--text-primary)">Submit Review</h3>
+      <div style="display:flex;gap:8px;align-items:center">
+        <a href="#" id="reviewViewAll" style="font-size:12px;color:var(--teal);text-decoration:none">View All</a>
+        <button id="reviewFormClose" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:18px;padding:0;line-height:1">&times;</button>
+      </div>
+    </div>
+
+    <form id="reviewForm" autocomplete="off">
+      <!-- Tool -->
+      <div class="review-field">
+        <label>Tool <span style="color:#ef4444">*</span></label>
+        <select id="reviewTool" required>
+          <option value="">Select subsystem...</option>
+        </select>
+      </div>
+
+      <!-- Endpoint -->
+      <div class="review-field" id="reviewEndpointWrap" style="display:none">
+        <label>Endpoint</label>
+        <select id="reviewEndpoint">
+          <option value="">Any</option>
+        </select>
+      </div>
+
+      <!-- Type -->
+      <div class="review-field">
+        <label>Type <span style="color:#ef4444">*</span></label>
+        <select id="reviewType" required>
+          <option value="">Select type...</option>
+        </select>
+      </div>
+
+      <!-- Priority -->
+      <div class="review-field">
+        <label>Priority</label>
+        <div class="review-priority-pills" id="reviewPriority">
+          <button type="button" data-value="low">Low</button>
+          <button type="button" data-value="medium" class="active">Medium</button>
+          <button type="button" data-value="high">High</button>
+        </div>
+      </div>
+
+      <!-- Title -->
+      <div class="review-field">
+        <label>Title <span style="color:#ef4444">*</span></label>
+        <input type="text" id="reviewTitle" placeholder="Brief summary..." required maxlength="200">
+      </div>
+
+      <!-- Description -->
+      <div class="review-field">
+        <label>Description</label>
+        <textarea id="reviewDescription" rows="3" placeholder="Details, logs, steps to reproduce..."></textarea>
+      </div>
+
+      <!-- Screenshot -->
+      <div class="review-field">
+        <label>Screenshot</label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <label class="review-file-btn">
+            Choose file
+            <input type="file" id="reviewFile" accept="image/*" style="display:none">
+          </label>
+          <span style="font-size:11px;color:var(--text-muted)">or Ctrl+V to paste</span>
+        </div>
+        <div id="reviewThumb" style="display:none;margin-top:8px">
+          <img id="reviewThumbImg" style="max-width:100%;max-height:120px;border-radius:6px;border:1px solid var(--border)">
+          <button type="button" id="reviewThumbClear" style="background:none;border:none;color:#ef4444;cursor:pointer;font-size:11px;margin-left:4px">&times; Remove</button>
+        </div>
+      </div>
+
+      <!-- Submit -->
+      <button type="submit" class="review-submit-btn" id="reviewSubmitBtn">Submit</button>
+      <div id="reviewFormMsg" style="font-size:12px;margin-top:6px;display:none"></div>
+    </form>
+  </div>
+</div>
