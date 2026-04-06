@@ -784,7 +784,7 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
         mm = _get_mm_engine(request)
         if not mm:
             return {"available": False, "scanning_active": False}
-        status = mm.get_status()
+        status = await mm.get_status()
         status["available"] = True
         return status
 

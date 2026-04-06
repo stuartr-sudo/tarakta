@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Required Reading
+
+Before modifying any MM Engine code (`src/strategy/mm_engine.py`, `src/strategy/mm_*.py`, MM-related routes/API/templates), you **MUST** read `docs/MM_ENGINE_INTEGRATION_GUIDE.md` first. It contains the DB column contract, persistence rules, and a checklist that prevents silent data loss.
+
 ## Commands
 
 ```bash
@@ -49,6 +53,7 @@ Automated crypto trading bot using Smart Money Concepts with three OpenAI-powere
 - `src/engine/` — Core loop (`core.py`), consensus voting (`consensus.py`), scan scheduler (`scheduler.py`), engine state (`state.py`), pullback watchlist (`watchlist.py`, `entry_refiner.py`)
 - `src/strategy/` indicators — `fair_value_gaps.py`, `order_blocks.py`, `liquidity.py`, `sweep_detector.py`, `market_structure.py`, `footprint.py`, `sentiment.py`, `volume.py`, `sessions.py`, `weekly_cycle.py`, `pullback.py`
 - `src/advisor/` — Trade advisor using Claude Agent SDK. Fetches missed signals (`missed_signals.py`), simulates outcomes (`outcome_simulator.py`), stores findings in `advisor_insights` table (`insights.py`), and injects learnings into Agent 1/2 context. Runs daily on reset or manually via dashboard button / `POST /advisor/run`. Runner: `runner.py`, MCP tools: `tools.py`
+- `src/strategy/mm_engine.py` — Standalone MM Method trading engine (no LLM). Runs parallel to SMC engine with its own paper balance. Tags trades with `strategy='mm_method'`. **See `docs/MM_ENGINE_INTEGRATION_GUIDE.md` for integration rules — DB columns, persistence, and common mistakes.**
 
 **Data flow to agents:**
 - Scanner → `signal.agent_context` (OBs, FVGs, liquidity, market structure, volume, leverage) → Agent 1
@@ -71,6 +76,8 @@ Automated crypto trading bot using Smart Money Concepts with three OpenAI-powere
 - **OOM risk**: Bot runs on Fly.io shared-cpu-1x with 2GB RAM. Memory-heavy operations (large candle fetches, multiple concurrent agent calls) can OOM — monitor via `fly logs -a tarakta`
 - **python3 only**: No bare `python` on macOS — always use `python3`
 - **Data models location**: `FootprintResult`, `SignalCandidate`, and other dataclasses live in `src/exchange/models.py`, not in the strategy files that use them
+- **MM Engine DB contract**: Adding a new MM trade column requires THREE changes: (1) DB migration, (2) add to `_TRADE_COLUMNS` in `repository.py`, (3) use exact DB column name in `mm_engine.py`. Missing any step = data silently dropped. See `docs/MM_ENGINE_INTEGRATION_GUIDE.md`
+- **MM Engine state persistence**: Every in-memory position change (SL, level, partial close) must be followed by `repo.update_trade()`. Otherwise restarts lose progress and can double-enter or re-close partials
 
 ## Environment
 

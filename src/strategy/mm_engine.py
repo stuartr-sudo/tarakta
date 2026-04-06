@@ -205,6 +205,37 @@ class MMEngine:
         except Exception as e:
             logger.debug("mm_engine_state_restore_failed", error=str(e))
 
+        # Restore open MM positions from DB (survives restarts)
+        try:
+            open_trades = await self.repo.get_open_trades()
+            mm_trades = [t for t in open_trades if t.get("strategy") == STRATEGY_TAG]
+            for t in mm_trades:
+                symbol = t["symbol"]
+                if symbol in self.positions:
+                    continue
+                # Determine partial closed % from original vs remaining qty
+                orig_qty = t.get("original_quantity") or t.get("entry_quantity", 0)
+                remain_qty = t.get("remaining_quantity") or orig_qty
+                closed_pct = 1.0 - (remain_qty / orig_qty) if orig_qty > 0 else 0.0
+                self.positions[symbol] = MMPosition(
+                    trade_id=str(t["id"]),
+                    symbol=symbol,
+                    direction=t.get("direction", "long"),
+                    entry_price=float(t.get("entry_price", 0)),
+                    quantity=float(remain_qty),
+                    stop_loss=float(t.get("stop_loss", 0)),
+                    current_level=int(t.get("current_tier") or 0),
+                    partial_closed_pct=closed_pct,
+                    entry_time=datetime.fromisoformat(t["entry_time"]) if t.get("entry_time") else datetime.now(timezone.utc),
+                    cost_usd=float(t.get("entry_cost_usd", 0)),
+                    target_l1=float(t.get("take_profit", 0)),
+                )
+            if mm_trades:
+                logger.info("mm_positions_restored", count=len(mm_trades),
+                            symbols=[t["symbol"] for t in mm_trades])
+        except Exception as e:
+            logger.warning("mm_position_restore_failed", error=str(e))
+
         logger.info("mm_engine_started", scanning_active=self._scanning_active)
 
         while self._running:
@@ -223,9 +254,35 @@ class MMEngine:
         """Graceful shutdown."""
         self._running = False
 
-    def get_status(self) -> dict:
+    async def get_status(self) -> dict:
         """Return a status snapshot for the dashboard API."""
         session = self.session_analyzer.get_current_session()
+        positions_out = []
+        total_unrealized = 0.0
+        for pos in self.positions.values():
+            unrealized = 0.0
+            current_price = pos.entry_price
+            try:
+                ticker = await self.exchange.fetch_ticker(pos.symbol)
+                current_price = float(ticker.get("last", pos.entry_price))
+                if pos.direction == "long":
+                    unrealized = (current_price - pos.entry_price) * pos.quantity
+                else:
+                    unrealized = (pos.entry_price - current_price) * pos.quantity
+            except Exception:
+                pass
+            total_unrealized += unrealized
+            positions_out.append({
+                "symbol": pos.symbol,
+                "direction": pos.direction,
+                "entry_price": pos.entry_price,
+                "current_price": current_price,
+                "stop_loss": pos.stop_loss,
+                "current_level": pos.current_level,
+                "partial_closed_pct": round(pos.partial_closed_pct * 100),
+                "trade_id": pos.trade_id,
+                "unrealized_pnl": round(unrealized, 4),
+            })
         return {
             "scanning_active": self._scanning_active,
             "running": self._running,
@@ -233,18 +290,8 @@ class MMEngine:
             "open_positions": len(self.positions),
             "session": session.session_name if session else "unknown",
             "is_weekend": session.is_weekend if session else False,
-            "positions": [
-                {
-                    "symbol": pos.symbol,
-                    "direction": pos.direction,
-                    "entry_price": pos.entry_price,
-                    "stop_loss": pos.stop_loss,
-                    "current_level": pos.current_level,
-                    "partial_closed_pct": round(pos.partial_closed_pct * 100),
-                    "trade_id": pos.trade_id,
-                }
-                for pos in self.positions.values()
-            ],
+            "total_unrealized_pnl": round(total_unrealized, 4),
+            "positions": positions_out,
         }
 
     async def _cycle(self) -> None:
@@ -682,6 +729,15 @@ class MMEngine:
 
             pos.current_level = new_level
 
+            # Persist level advance + SL change to DB
+            try:
+                await self.repo.update_trade(pos.trade_id, {
+                    "stop_loss": pos.stop_loss,
+                    "current_tier": new_level,
+                })
+            except Exception as e:
+                logger.debug("mm_level_db_update_failed", error=str(e))
+
         # Check for Stopping Volume Candle at Level 3
         if new_level >= 3 and level_analysis.svc and level_analysis.svc.detected:
             logger.info("mm_svc_detected", symbol=symbol, level=new_level)
@@ -769,6 +825,14 @@ class MMEngine:
             if result and result.status == "closed":
                 pos.partial_closed_pct = target_close_pct
                 pos.quantity -= close_qty
+                # Persist to DB so restarts don't re-close the same partials
+                try:
+                    await self.repo.update_trade(pos.trade_id, {
+                        "remaining_quantity": pos.quantity,
+                        "current_tier": level,
+                    })
+                except Exception as e:
+                    logger.debug("mm_partial_db_update_failed", error=str(e))
                 logger.info(
                     "mm_partial_profit",
                     symbol=pos.symbol,
@@ -808,8 +872,10 @@ class MMEngine:
             await self.repo.update_trade(pos.trade_id, {
                 "status": "closed",
                 "exit_price": price,
+                "exit_quantity": pos.quantity,
                 "exit_reason": reason,
                 "pnl_usd": round(pnl, 4),
+                "remaining_quantity": 0,
                 "exit_time": datetime.now(timezone.utc).isoformat(),
             })
         except Exception as e:
