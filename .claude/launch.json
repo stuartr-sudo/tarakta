@@ -3,9 +3,21 @@
   "configurations": [
     {
       "name": "tarakta",
-      "runtimeExecutable": "python3",
+      "runtimeExecutable": "/Users/stuarta/tarakta/.venv/bin/python3.12",
       "runtimeArgs": ["-m", "src.main"],
       "port": 8080
+    },
+    {
+      "name": "burnlink",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd /Users/stuarta/burnlink && python3 -m uvicorn main:app --port 9999 --host 0.0.0.0"],
+      "port": 9999
+    },
+    {
+      "name": "stitch",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd /Users/stuarta/stitch && /opt/homebrew/bin/node node_modules/.bin/vite --port 4390"],
+      "port": 4390
     }
   ]
 }
