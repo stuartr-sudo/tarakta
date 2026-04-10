@@ -30,7 +30,6 @@ def create_dashboard_app(config: Settings, repo: Repository, exchange=None, engi
 
     # Build repo lookup for multi-instance dashboard viewing
     # Key = instance_id, value = Repository scoped to that instance
-    from src.data.db import Database as _DB
     app.state.repos = {config.instance_id: repo}
 
     # Register routes

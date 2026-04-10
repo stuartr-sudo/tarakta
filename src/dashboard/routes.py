@@ -125,6 +125,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ):
             request.session["authenticated"] = True
             request.session["role"] = "admin"
+            request.session["username"] = username
             return RedirectResponse(url="/", status_code=303)
 
         # Check viewer credentials
@@ -135,6 +136,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ):
             request.session["authenticated"] = True
             request.session["role"] = "viewer"
+            request.session["username"] = username
             return RedirectResponse(url="/", status_code=303)
 
         return templates.TemplateResponse(

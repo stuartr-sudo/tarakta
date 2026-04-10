@@ -994,17 +994,14 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
                 engine.position_agent._model = model
                 engine.position_agent._api_key = engine.config.openai_api_key
                 active = model
-                db_field = "agent3_model"
             elif agent_key == "agent2":
                 if not engine.refiner_agent:
                     return {"error": "Agent 2 not available (no API key)"}
                 active = engine.refiner_agent.set_model(model)
-                db_field = "agent2_model"
             else:
                 if not engine.agent_analyst:
                     return {"error": "Agent 1 not available (no API key)"}
                 active = engine.agent_analyst.set_model(model)
-                db_field = "agent1_model"
 
             # Persist to DB inside config_overrides JSONB (avoids column issues)
             try:

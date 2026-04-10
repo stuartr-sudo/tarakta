@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -31,7 +30,7 @@ class Repository:
 
     # Known columns in the Supabase trades table
     _TRADE_COLUMNS = {
-        "symbol", "direction", "status", "mode", "market",
+        "symbol", "direction", "status", "mode",
         "entry_price", "entry_quantity", "entry_cost_usd", "entry_order_id", "entry_time",
         "exit_price", "exit_quantity", "exit_order_id", "exit_time", "exit_reason",
         "stop_loss", "take_profit", "risk_usd", "risk_reward",
