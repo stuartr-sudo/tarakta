@@ -303,12 +303,12 @@ class MMEngine:
         session = self.session_analyzer.get_current_session()
         if session.is_weekend:
             if self.cycle_count % 12 == 0:  # Log every hour
-                logger.debug("mm_engine_weekend_skip")
+                logger.info("mm_engine_weekend_skip", cycle=self.cycle_count)
             return
 
         if session.session_name == "dead_zone":
             if self.cycle_count % 12 == 0:
-                logger.debug("mm_engine_dead_zone_skip")
+                logger.info("mm_engine_dead_zone_skip", cycle=self.cycle_count)
             return
 
         logger.info(
