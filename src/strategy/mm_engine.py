@@ -506,13 +506,23 @@ class MMEngine:
                                     ema_50=ema_values.get(50), entry=entry_price)
                         return None
 
-        # R:R check (to Level 1 only — per course rules, beyond is bonus)
+        # R:R check — try L1 first, fall back to L2 if L1 R:R is too low
         risk = abs(entry_price - sl_price)
-        reward = abs(t_l1 - entry_price)
         if risk <= 0:
             logger.info("mm_reject_zero_risk", symbol=symbol)
             return None
+
+        reward = abs(t_l1 - entry_price)
         rr = reward / risk
+
+        # If L1 target gives poor R:R, try L2 as the primary target
+        if rr < MIN_RR_AGGRESSIVE and t_l2 and self._is_valid_target(t_l2, trade_direction, entry_price):
+            reward_l2 = abs(t_l2 - entry_price)
+            rr_l2 = reward_l2 / risk
+            if rr_l2 >= MIN_RR_AGGRESSIVE:
+                logger.info("mm_target_upgraded_to_l2", symbol=symbol, rr_l1=round(rr, 2), rr_l2=round(rr_l2, 2))
+                t_l1 = t_l2  # Use L2 as the effective target
+                rr = rr_l2
 
         if rr < MIN_RR_AGGRESSIVE:
             logger.info("mm_reject_low_rr", symbol=symbol, rr=round(rr, 2), min_required=MIN_RR_AGGRESSIVE, entry=entry_price, sl=sl_price, t1=t_l1)
