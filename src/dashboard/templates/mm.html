@@ -122,10 +122,11 @@
                         <th>Symbol</th>
                         <th>Direction</th>
                         <th>Entry</th>
+                        <th>Current</th>
                         <th>Stop Loss</th>
+                        <th>Unrealized P&L</th>
                         <th>Level</th>
                         <th>Closed %</th>
-                        <th>Trade ID</th>
                     </tr>
                 </thead>
                 <tbody id="mm-positions-tbody"></tbody>
@@ -252,17 +253,21 @@ function updateMMPage(data) {
         if (posBody) posBody.style.display = 'block';
         if (posEmpty) posEmpty.style.display = 'none';
         if (posTbody) {
-            posTbody.innerHTML = data.positions.map(p =>
-                `<tr>
+            posTbody.innerHTML = data.positions.map(p => {
+                const pnl = p.unrealized_pnl || 0;
+                const pnlClass = pnl >= 0 ? 'text-green' : 'text-red';
+                const pnlSign = pnl >= 0 ? '+' : '';
+                return `<tr>
                     <td><strong>${p.symbol.replace(':USDT','').replace('/USDT','')}</strong></td>
                     <td><span class="dir-badge ${p.direction === 'long' ? 'long' : 'short'}">${p.direction.toUpperCase()}</span></td>
                     <td class="mono">$${p.entry_price.toFixed(4)}</td>
+                    <td class="mono">$${(p.current_price || p.entry_price).toFixed(4)}</td>
                     <td class="mono">$${p.stop_loss.toFixed(4)}</td>
+                    <td class="mono ${pnlClass}">${pnlSign}$${pnl.toFixed(2)}</td>
                     <td>Level ${p.current_level}</td>
                     <td>${p.partial_closed_pct}%</td>
-                    <td class="mono" style="font-size:0.7rem;">${p.trade_id}</td>
-                </tr>`
-            ).join('');
+                </tr>`;
+            }).join('');
         }
 
         // Calculate unrealized P&L from positions (if current_price available)

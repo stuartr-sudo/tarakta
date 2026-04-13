@@ -303,7 +303,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             mm_trades = [t for t in all_trades if t.get("strategy") == "mm_method"]
             mm_trades.sort(key=lambda t: t.get("created_at", ""), reverse=True)
 
-            closed = [t for t in mm_trades if t.get("status") == "closed"]
+            closed = [t for t in mm_trades if t.get("status") == "closed" and t.get("exit_reason") != "orphan_cleanup"]
             open_mm = [t for t in mm_trades if t.get("status") == "open"]
             if closed:
                 wins = sum(1 for t in closed if (t.get("pnl_usd") or 0) > 0)
