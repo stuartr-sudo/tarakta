@@ -375,16 +375,15 @@ class MMEngine:
         Returns an MMSignal if entry conditions are met, None otherwise.
         """
         # Fetch candles (1H primary, 4H for EMA trend)
-        # Need 800+ 4H candles for the 800 EMA — fetch 900 to have headroom
         try:
             candles_1h = await self.candle_manager.get_candles(symbol, "1h", limit=500)
-            candles_4h = await self.candle_manager.get_candles(symbol, "4h", limit=900)
+            candles_4h = await self.candle_manager.get_candles(symbol, "4h", limit=250)
         except Exception as e:
-            logger.info("mm_reject_candle_fetch", symbol=symbol, error=str(e))
+            logger.debug("mm_reject_candle_fetch", symbol=symbol, error=str(e))
             return None
 
         if candles_1h is None or candles_1h.empty or len(candles_1h) < 50:
-            logger.info("mm_reject_insufficient_candles", symbol=symbol, count=0 if candles_1h is None or (hasattr(candles_1h, 'empty') and candles_1h.empty) else len(candles_1h))
+            logger.debug("mm_reject_insufficient_candles", symbol=symbol, count=0 if candles_1h is None or (hasattr(candles_1h, 'empty') and candles_1h.empty) else len(candles_1h))
             return None
 
         current_price = float(candles_1h.iloc[-1]["close"])
@@ -394,7 +393,7 @@ class MMEngine:
         # EMA Framework (4H for macro trend)
         ema_state = None
         ema_values = {}
-        if candles_4h is not None and not candles_4h.empty and len(candles_4h) >= 800:
+        if candles_4h is not None and not candles_4h.empty and len(candles_4h) > 200:
             ema_state = self.ema_framework.calculate(candles_4h)
             _trend_state = self.ema_framework.get_trend_state(candles_4h)  # noqa: F841 — kept for future use
             ema_values = ema_state.values
@@ -406,13 +405,13 @@ class MMEngine:
         formations = self.formation_detector.detect(candles_1h)
 
         if not formations:
-            logger.info("mm_reject_no_formation", symbol=symbol)
+            logger.debug("mm_reject_no_formation", symbol=symbol)
             return None  # No formation = no entry
 
         best_formation = formations[0]
 
         if best_formation.quality_score < MIN_FORMATION_QUALITY:
-            logger.info("mm_reject_low_formation_quality", symbol=symbol, quality=best_formation.quality_score, min_required=MIN_FORMATION_QUALITY)
+            logger.debug("mm_reject_low_formation_quality", symbol=symbol, quality=best_formation.quality_score, min_required=MIN_FORMATION_QUALITY)
             return None
 
         # Level tracking (1H) — count levels AFTER the formation, not all history.
@@ -426,7 +425,7 @@ class MMEngine:
 
         # Don't enter if Level 3+ already reached (expect reversal)
         if level_analysis.current_level >= 3:
-            logger.info("mm_reject_level_too_advanced", symbol=symbol, level=level_analysis.current_level, post_formation_candles=len(candles_post_formation))
+            logger.debug("mm_reject_level_too_advanced", symbol=symbol, level=level_analysis.current_level, post_formation_candles=len(candles_post_formation))
             return None
 
         # Weekly cycle
@@ -434,12 +433,12 @@ class MMEngine:
 
         # Don't enter during FMWB (it's the false move)
         if cycle_state.phase == "FMWB":
-            logger.info("mm_reject_fmwb_phase", symbol=symbol, phase=cycle_state.phase)
+            logger.debug("mm_reject_fmwb_phase", symbol=symbol, phase=cycle_state.phase)
             return None
 
         # Don't enter during Friday trap phase
         if cycle_state.phase == "FRIDAY_TRAP":
-            logger.info("mm_reject_friday_trap", symbol=symbol, phase=cycle_state.phase)
+            logger.debug("mm_reject_friday_trap", symbol=symbol, phase=cycle_state.phase)
             return None
 
         # Weekend trap analysis
@@ -481,26 +480,42 @@ class MMEngine:
         t_l2 = target_analysis.primary_l2.price if target_analysis.primary_l2 else None
         t_l3 = target_analysis.primary_l3.price if target_analysis.primary_l3 else None
 
-        # Fallback targets based on EMA values if target analyzer didn't find anything
+        # Fallback targets if target analyzer didn't find L1
         if not t_l1:
-            ema_50 = ema_values.get(50)
-            if ema_50 and self._is_valid_target(ema_50, trade_direction, entry_price):
-                t_l1 = ema_50
+            # Try cascading fallbacks:
+            # 1. L2 target (200 EMA / HOW/LOW) as a conservative L1
+            # 2. EMA-50 (even on the wrong side — it's still a magnet)
+            # 3. Recent swing high/low as target
+            if t_l2 and self._is_valid_target(t_l2, trade_direction, entry_price):
+                t_l1 = t_l2
             else:
-                # Can't determine target → skip
-                logger.info("mm_reject_no_target", symbol=symbol, direction=trade_direction, ema_50=ema_values.get(50), entry=entry_price)
-                return None
+                ema_200 = ema_values.get(200)
+                if ema_200 and self._is_valid_target(ema_200, trade_direction, entry_price):
+                    t_l1 = ema_200
+                else:
+                    # Use recent swing as target: highest high (for long) or lowest low (for short)
+                    recent = candles_1h.iloc[-40:]
+                    if trade_direction == "long":
+                        swing_target = float(recent["high"].max())
+                    else:
+                        swing_target = float(recent["low"].min())
+                    if self._is_valid_target(swing_target, trade_direction, entry_price):
+                        t_l1 = swing_target
+                    else:
+                        logger.info("mm_reject_no_target", symbol=symbol, direction=trade_direction,
+                                    ema_50=ema_values.get(50), entry=entry_price)
+                        return None
 
         # R:R check (to Level 1 only — per course rules, beyond is bonus)
         risk = abs(entry_price - sl_price)
         reward = abs(t_l1 - entry_price)
         if risk <= 0:
-            logger.info("mm_reject_zero_risk", symbol=symbol)
+            logger.debug("mm_reject_zero_risk", symbol=symbol)
             return None
         rr = reward / risk
 
         if rr < MIN_RR_AGGRESSIVE:
-            logger.info("mm_reject_low_rr", symbol=symbol, rr=round(rr, 2), min_required=MIN_RR_AGGRESSIVE, entry=entry_price, sl=sl_price, t1=t_l1)
+            logger.debug("mm_reject_low_rr", symbol=symbol, rr=round(rr, 2), min_required=MIN_RR_AGGRESSIVE, entry=entry_price, sl=sl_price, t1=t_l1)
             return None
 
         # Confluence scoring
@@ -541,12 +556,12 @@ class MMEngine:
 
         # Check confluence meets minimum
         if confluence_result.score_pct < MIN_CONFLUENCE_PCT:
-            logger.info("mm_reject_low_confluence", symbol=symbol, score=confluence_result.score_pct, min_required=MIN_CONFLUENCE_PCT, grade=confluence_result.grade, formation=best_formation.type, rr=round(rr, 2))
+            logger.debug("mm_reject_low_confluence", symbol=symbol, score=confluence_result.score_pct, min_required=MIN_CONFLUENCE_PCT, formation=best_formation.type)
             return None
 
         # Check retest conditions (need >= 2)
         if confluence_result.retest_conditions_met < 2:
-            logger.info("mm_reject_low_retest", symbol=symbol, retest_met=confluence_result.retest_conditions_met, confluence=confluence_result.score_pct, rr=round(rr, 2))
+            logger.debug("mm_reject_low_retest", symbol=symbol, retest_met=confluence_result.retest_conditions_met, confluence=confluence_result.score_pct)
             return None
 
         # Build signal
@@ -921,8 +936,6 @@ class MMEngine:
     @staticmethod
     def _is_valid_target(price: float, direction: str, entry: float) -> bool:
         """Check if a target price is in the right direction."""
-        if price <= 0:
-            return False
         if direction == "long":
             return price > entry
         else:
