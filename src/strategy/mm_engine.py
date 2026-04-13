@@ -51,11 +51,11 @@ logger = get_logger(__name__)
 DEFAULT_SCAN_INTERVAL = 5
 
 # Minimum confluence score (%) to consider an entry
-MIN_CONFLUENCE_PCT = 25.0
+MIN_CONFLUENCE_PCT = 15.0
 
 # Minimum R:R ratio (to Level 1 target)
 MIN_RR = 3.0
-MIN_RR_AGGRESSIVE = 1.5
+MIN_RR_AGGRESSIVE = 1.0
 
 # Minimum formation quality to act on
 MIN_FORMATION_QUALITY = 0.4
@@ -565,10 +565,9 @@ class MMEngine:
             logger.info("mm_reject_low_confluence", symbol=symbol, score=confluence_result.score_pct, min_required=MIN_CONFLUENCE_PCT, formation=best_formation.type)
             return None
 
-        # Check retest conditions (need >= 2)
+        # Log retest conditions (informational, not a gate — too many dead data feeds)
         if confluence_result.retest_conditions_met < 2:
-            logger.info("mm_reject_low_retest", symbol=symbol, retest_met=confluence_result.retest_conditions_met, confluence=confluence_result.score_pct)
-            return None
+            logger.info("mm_retest_low", symbol=symbol, retest_met=confluence_result.retest_conditions_met, confluence=confluence_result.score_pct)
 
         # Build signal
         signal = MMSignal(
