@@ -55,7 +55,7 @@ MIN_CONFLUENCE_PCT = 40.0
 
 # Minimum R:R ratio (to Level 1 target)
 MIN_RR = 3.0
-MIN_RR_AGGRESSIVE = 2.0
+MIN_RR_AGGRESSIVE = 1.5
 
 # Minimum formation quality to act on
 MIN_FORMATION_QUALITY = 0.4
