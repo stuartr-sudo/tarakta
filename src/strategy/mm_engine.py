@@ -380,11 +380,11 @@ class MMEngine:
             candles_1h = await self.candle_manager.get_candles(symbol, "1h", limit=500)
             candles_4h = await self.candle_manager.get_candles(symbol, "4h", limit=900)
         except Exception as e:
-            logger.debug("mm_reject_candle_fetch", symbol=symbol, error=str(e))
+            logger.info("mm_reject_candle_fetch", symbol=symbol, error=str(e))
             return None
 
         if candles_1h is None or candles_1h.empty or len(candles_1h) < 50:
-            logger.debug("mm_reject_insufficient_candles", symbol=symbol, count=0 if candles_1h is None or (hasattr(candles_1h, 'empty') and candles_1h.empty) else len(candles_1h))
+            logger.info("mm_reject_insufficient_candles", symbol=symbol, count=0 if candles_1h is None or (hasattr(candles_1h, 'empty') and candles_1h.empty) else len(candles_1h))
             return None
 
         current_price = float(candles_1h.iloc[-1]["close"])
@@ -406,13 +406,13 @@ class MMEngine:
         formations = self.formation_detector.detect(candles_1h)
 
         if not formations:
-            logger.debug("mm_reject_no_formation", symbol=symbol)
+            logger.info("mm_reject_no_formation", symbol=symbol)
             return None  # No formation = no entry
 
         best_formation = formations[0]
 
         if best_formation.quality_score < MIN_FORMATION_QUALITY:
-            logger.debug("mm_reject_low_formation_quality", symbol=symbol, quality=best_formation.quality_score, min_required=MIN_FORMATION_QUALITY)
+            logger.info("mm_reject_low_formation_quality", symbol=symbol, quality=best_formation.quality_score, min_required=MIN_FORMATION_QUALITY)
             return None
 
         # Level tracking (1H) — count levels AFTER the formation, not all history.
@@ -426,7 +426,7 @@ class MMEngine:
 
         # Don't enter if Level 3+ already reached (expect reversal)
         if level_analysis.current_level >= 3:
-            logger.debug("mm_reject_level_too_advanced", symbol=symbol, level=level_analysis.current_level, post_formation_candles=len(candles_post_formation))
+            logger.info("mm_reject_level_too_advanced", symbol=symbol, level=level_analysis.current_level, post_formation_candles=len(candles_post_formation))
             return None
 
         # Weekly cycle
@@ -434,12 +434,12 @@ class MMEngine:
 
         # Don't enter during FMWB (it's the false move)
         if cycle_state.phase == "FMWB":
-            logger.debug("mm_reject_fmwb_phase", symbol=symbol, phase=cycle_state.phase)
+            logger.info("mm_reject_fmwb_phase", symbol=symbol, phase=cycle_state.phase)
             return None
 
         # Don't enter during Friday trap phase
         if cycle_state.phase == "FRIDAY_TRAP":
-            logger.debug("mm_reject_friday_trap", symbol=symbol, phase=cycle_state.phase)
+            logger.info("mm_reject_friday_trap", symbol=symbol, phase=cycle_state.phase)
             return None
 
         # Weekend trap analysis
@@ -488,19 +488,19 @@ class MMEngine:
                 t_l1 = ema_50
             else:
                 # Can't determine target → skip
-                logger.debug("mm_reject_no_target", symbol=symbol, direction=trade_direction)
+                logger.info("mm_reject_no_target", symbol=symbol, direction=trade_direction, ema_50=ema_values.get(50), entry=entry_price)
                 return None
 
         # R:R check (to Level 1 only — per course rules, beyond is bonus)
         risk = abs(entry_price - sl_price)
         reward = abs(t_l1 - entry_price)
         if risk <= 0:
-            logger.debug("mm_reject_zero_risk", symbol=symbol)
+            logger.info("mm_reject_zero_risk", symbol=symbol)
             return None
         rr = reward / risk
 
         if rr < MIN_RR_AGGRESSIVE:
-            logger.debug("mm_reject_low_rr", symbol=symbol, rr=round(rr, 2), min_required=MIN_RR_AGGRESSIVE, entry=entry_price, sl=sl_price, t1=t_l1)
+            logger.info("mm_reject_low_rr", symbol=symbol, rr=round(rr, 2), min_required=MIN_RR_AGGRESSIVE, entry=entry_price, sl=sl_price, t1=t_l1)
             return None
 
         # Confluence scoring
@@ -541,12 +541,12 @@ class MMEngine:
 
         # Check confluence meets minimum
         if confluence_result.score_pct < MIN_CONFLUENCE_PCT:
-            logger.debug("mm_reject_low_confluence", symbol=symbol, score=confluence_result.score_pct, min_required=MIN_CONFLUENCE_PCT, formation=best_formation.type)
+            logger.info("mm_reject_low_confluence", symbol=symbol, score=confluence_result.score_pct, min_required=MIN_CONFLUENCE_PCT, grade=confluence_result.grade, formation=best_formation.type, rr=round(rr, 2))
             return None
 
         # Check retest conditions (need >= 2)
         if confluence_result.retest_conditions_met < 2:
-            logger.debug("mm_reject_low_retest", symbol=symbol, retest_met=confluence_result.retest_conditions_met, confluence=confluence_result.score_pct)
+            logger.info("mm_reject_low_retest", symbol=symbol, retest_met=confluence_result.retest_conditions_met, confluence=confluence_result.score_pct, rr=round(rr, 2))
             return None
 
         # Build signal
