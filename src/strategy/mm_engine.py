@@ -628,7 +628,7 @@ class MMEngine:
         """Execute an MM Method trade entry."""
         # Get balance for position sizing
         balance = await self.exchange.get_balance()
-        account_balance = balance.get("USDT", 0)
+        account_balance = balance.get("USDT", 0) or balance.get("USD", 0)
 
         if account_balance <= 0:
             logger.info("mm_entry_skip_no_balance", symbol=signal.symbol, balance=account_balance)
