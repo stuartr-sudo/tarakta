@@ -480,15 +480,31 @@ class MMEngine:
         t_l2 = target_analysis.primary_l2.price if target_analysis.primary_l2 else None
         t_l3 = target_analysis.primary_l3.price if target_analysis.primary_l3 else None
 
-        # Fallback targets based on EMA values if target analyzer didn't find anything
+        # Fallback targets if target analyzer didn't find L1
         if not t_l1:
-            ema_50 = ema_values.get(50)
-            if ema_50 and self._is_valid_target(ema_50, trade_direction, entry_price):
-                t_l1 = ema_50
+            # Try cascading fallbacks:
+            # 1. L2 target (200 EMA / HOW/LOW) as a conservative L1
+            # 2. EMA-50 (even on the wrong side — it's still a magnet)
+            # 3. Recent swing high/low as target
+            if t_l2 and self._is_valid_target(t_l2, trade_direction, entry_price):
+                t_l1 = t_l2
             else:
-                # Can't determine target → skip
-                logger.debug("mm_reject_no_target", symbol=symbol, direction=trade_direction)
-                return None
+                ema_200 = ema_values.get(200)
+                if ema_200 and self._is_valid_target(ema_200, trade_direction, entry_price):
+                    t_l1 = ema_200
+                else:
+                    # Use recent swing as target: highest high (for long) or lowest low (for short)
+                    recent = candles_1h.iloc[-40:]
+                    if trade_direction == "long":
+                        swing_target = float(recent["high"].max())
+                    else:
+                        swing_target = float(recent["low"].min())
+                    if self._is_valid_target(swing_target, trade_direction, entry_price):
+                        t_l1 = swing_target
+                    else:
+                        logger.info("mm_reject_no_target", symbol=symbol, direction=trade_direction,
+                                    ema_50=ema_values.get(50), entry=entry_price)
+                        return None
 
         # R:R check (to Level 1 only — per course rules, beyond is bonus)
         risk = abs(entry_price - sl_price)
