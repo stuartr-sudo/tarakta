@@ -51,7 +51,7 @@ logger = get_logger(__name__)
 DEFAULT_SCAN_INTERVAL = 5
 
 # Minimum confluence score (%) to consider an entry
-MIN_CONFLUENCE_PCT = 40.0
+MIN_CONFLUENCE_PCT = 25.0
 
 # Minimum R:R ratio (to Level 1 target)
 MIN_RR = 3.0
