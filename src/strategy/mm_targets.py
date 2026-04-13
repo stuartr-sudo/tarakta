@@ -441,6 +441,8 @@ class TargetAnalyzer:
     @staticmethod
     def _is_valid_target(price: float, direction: str, entry_price: float) -> bool:
         """Check if a target price is in the right direction from entry."""
+        if price <= 0:
+            return False
         if direction == "bullish":
             return price > entry_price
         else:

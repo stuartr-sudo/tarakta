@@ -375,9 +375,10 @@ class MMEngine:
         Returns an MMSignal if entry conditions are met, None otherwise.
         """
         # Fetch candles (1H primary, 4H for EMA trend)
+        # Need 800+ 4H candles for the 800 EMA — fetch 900 to have headroom
         try:
             candles_1h = await self.candle_manager.get_candles(symbol, "1h", limit=500)
-            candles_4h = await self.candle_manager.get_candles(symbol, "4h", limit=250)
+            candles_4h = await self.candle_manager.get_candles(symbol, "4h", limit=900)
         except Exception as e:
             logger.debug("mm_reject_candle_fetch", symbol=symbol, error=str(e))
             return None
@@ -393,7 +394,7 @@ class MMEngine:
         # EMA Framework (4H for macro trend)
         ema_state = None
         ema_values = {}
-        if candles_4h is not None and not candles_4h.empty and len(candles_4h) > 200:
+        if candles_4h is not None and not candles_4h.empty and len(candles_4h) >= 800:
             ema_state = self.ema_framework.calculate(candles_4h)
             _trend_state = self.ema_framework.get_trend_state(candles_4h)  # noqa: F841 — kept for future use
             ema_values = ema_state.values
@@ -920,6 +921,8 @@ class MMEngine:
     @staticmethod
     def _is_valid_target(price: float, direction: str, entry: float) -> bool:
         """Check if a target price is in the right direction."""
+        if price <= 0:
+            return False
         if direction == "long":
             return price > entry
         else:

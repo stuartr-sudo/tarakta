@@ -516,10 +516,14 @@ class EMAFramework:
         return round(((price - ema_value) / ema_value) * 100.0, 4)
 
     def _empty_ema_state(self) -> EMAState:
-        """Return an empty/neutral EMAState when data is insufficient."""
+        """Return an empty/neutral EMAState when data is insufficient.
+
+        Uses empty dicts so downstream code (target analyzer) doesn't
+        treat zero-price entries as valid targets.
+        """
         return EMAState(
-            values={p: 0.0 for p in self.periods},
-            slopes={p: 0.0 for p in self.periods},
+            values={},
+            slopes={},
             alignment="mixed",
             fan_out_score=0.0,
             price_distance_from_50=0.0,
