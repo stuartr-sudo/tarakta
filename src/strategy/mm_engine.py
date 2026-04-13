@@ -209,15 +209,30 @@ class MMEngine:
         except Exception as e:
             logger.debug("mm_engine_state_restore_failed", error=str(e))
 
-        # Restore open MM positions from DB (survives restarts)
+        # Restore open MM positions from DB (survives restarts).
+        # Keep only the LATEST trade per symbol; close older duplicates as orphans.
         try:
             open_trades = await self.repo.get_open_trades()
             mm_trades = [t for t in open_trades if t.get("strategy") == STRATEGY_TAG]
+            # Sort newest first so we keep the latest per symbol
+            mm_trades.sort(key=lambda t: t.get("created_at", ""), reverse=True)
+            restored = 0
+            orphaned = 0
             for t in mm_trades:
                 symbol = t["symbol"]
                 if symbol in self.positions:
+                    # Duplicate open trade for same symbol — close it as orphan
+                    try:
+                        await self.repo.update_trade(str(t["id"]), {
+                            "status": "closed",
+                            "exit_reason": "orphan_cleanup",
+                            "pnl_usd": 0,
+                            "exit_time": datetime.now(timezone.utc).isoformat(),
+                        })
+                        orphaned += 1
+                    except Exception:
+                        pass
                     continue
-                # Determine partial closed % from original vs remaining qty
                 orig_qty = t.get("original_quantity") or t.get("entry_quantity", 0)
                 remain_qty = t.get("remaining_quantity") or orig_qty
                 closed_pct = 1.0 - (remain_qty / orig_qty) if orig_qty > 0 else 0.0
@@ -234,9 +249,10 @@ class MMEngine:
                     cost_usd=float(t.get("entry_cost_usd", 0)),
                     target_l1=float(t.get("take_profit", 0)),
                 )
+                restored += 1
             if mm_trades:
-                logger.info("mm_positions_restored", count=len(mm_trades),
-                            symbols=[t["symbol"] for t in mm_trades])
+                logger.info("mm_positions_restored", restored=restored, orphaned=orphaned,
+                            symbols=list(self.positions.keys()))
         except Exception as e:
             logger.warning("mm_position_restore_failed", error=str(e))
 
@@ -321,7 +337,17 @@ class MMEngine:
             positions=len(self.positions),
         )
 
-        # 2. Only scan for new entries if scanning is active
+        # 2. Manage existing positions FIRST (before scanning)
+        #    This ensures SL exits happen before we consider new entries,
+        #    preventing the scan-then-manage churn where a stopped-out
+        #    position gets re-entered in the same cycle.
+        for symbol in list(self.positions.keys()):
+            try:
+                await self._manage_position(symbol)
+            except Exception as e:
+                logger.warning("mm_manage_error", symbol=symbol, error=str(e))
+
+        # 3. Only scan for new entries if scanning is active
         if self._scanning_active:
             # Get tradeable pairs
             try:
@@ -330,7 +356,7 @@ class MMEngine:
                 logger.warning("mm_engine_pairs_error", error=str(e))
                 pairs = []
 
-            # 3. Scan each pair
+            # 4. Scan each pair
             signals: list[MMSignal] = []
             for pair in pairs:
                 try:
@@ -347,17 +373,10 @@ class MMEngine:
                 cycle=self.cycle_count,
             )
 
-            # 4. Rank signals and enter best ones
+            # 5. Rank signals and enter best ones
             if signals:
                 signals.sort(key=lambda s: s.confluence_score, reverse=True)
                 await self._process_entries(signals)
-
-        # 5. Manage existing positions (always, even when paused)
-        for symbol in list(self.positions.keys()):
-            try:
-                await self._manage_position(symbol)
-            except Exception as e:
-                logger.warning("mm_manage_error", symbol=symbol, error=str(e))
 
     async def _get_pairs(self) -> list[str]:
         """Get the list of pairs to scan."""
@@ -622,7 +641,10 @@ class MMEngine:
             if open_count >= MAX_MM_POSITIONS:
                 break
 
+            # Check in-memory positions AND cooldowns
             if signal.symbol in self.positions:
+                continue
+            if signal.symbol in self._cooldowns:
                 continue
 
             try:
