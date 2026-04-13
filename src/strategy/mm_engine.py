@@ -631,6 +631,7 @@ class MMEngine:
         account_balance = balance.get("USDT", 0)
 
         if account_balance <= 0:
+            logger.info("mm_entry_skip_no_balance", symbol=signal.symbol, balance=account_balance)
             return
 
         # Calculate position size (1% risk)
@@ -641,7 +642,7 @@ class MMEngine:
         )
 
         if not pos_result.is_viable or pos_result.position_size_usd < 10:
-            logger.debug("mm_position_too_small", symbol=signal.symbol, size=pos_result.position_size_usd)
+            logger.info("mm_position_too_small", symbol=signal.symbol, size=pos_result.position_size_usd, viable=pos_result.is_viable, balance=account_balance)
             return
 
         # Calculate quantity
@@ -660,6 +661,7 @@ class MMEngine:
             return
 
         if not result or result.status != "closed":
+            logger.info("mm_order_not_filled", symbol=signal.symbol, status=getattr(result, 'status', None))
             return
 
         fill_price = result.avg_price or signal.entry_price
