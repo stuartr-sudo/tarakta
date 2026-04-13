@@ -669,6 +669,7 @@ class MMEngine:
 
         # Log to database first to get the DB-generated id
         trade_id = str(uuid4())  # valid UUID fallback if DB insert fails
+        risk_usd = abs(fill_price - signal.stop_loss) * result.filled_quantity
         try:
             db_row = await self.repo.insert_trade({
                 "symbol": signal.symbol,
@@ -680,6 +681,10 @@ class MMEngine:
                 "stop_loss": signal.stop_loss,
                 "take_profit": signal.target_l1,
                 "entry_cost_usd": cost_usd,
+                "risk_usd": round(risk_usd, 2),
+                "leverage": getattr(self.config, 'markets', {}).get('crypto', None) and self.config.markets['crypto'].leverage or 10,
+                "instance_id": getattr(self.config, 'instance_id', 'footprint'),
+                "entry_time": datetime.now(timezone.utc).isoformat(),
                 "strategy": STRATEGY_TAG,
                 "entry_reason": signal.reason,
                 "confluence_score": signal.confluence_score,
