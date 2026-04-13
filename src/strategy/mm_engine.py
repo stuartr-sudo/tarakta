@@ -179,6 +179,7 @@ class MMEngine:
         # State
         self.positions: dict[str, MMPosition] = {}
         self._cooldowns: dict[str, datetime] = {}  # symbol -> earliest re-entry time
+        self._last_prices: dict[str, float] = {}  # symbol -> last known price (survives fetch failures)
         self.cycle_count = 0
         self._running = True
         self._scanning_active = True  # MM Engine starts active (unlike main bot)
@@ -280,17 +281,18 @@ class MMEngine:
         positions_out = []
         total_unrealized = 0.0
         for pos in self.positions.values():
-            unrealized = 0.0
-            current_price = pos.entry_price
+            # Use cached price as fallback so P&L doesn't blank out during dead zone
+            current_price = self._last_prices.get(pos.symbol, pos.entry_price)
             try:
                 ticker = await self.exchange.fetch_ticker(pos.symbol)
-                current_price = float(ticker.get("last", pos.entry_price))
-                if pos.direction == "long":
-                    unrealized = (current_price - pos.entry_price) * pos.quantity
-                else:
-                    unrealized = (pos.entry_price - current_price) * pos.quantity
+                current_price = float(ticker.get("last", current_price))
+                self._last_prices[pos.symbol] = current_price
             except Exception:
-                pass
+                pass  # keep cached price
+            if pos.direction == "long":
+                unrealized = (current_price - pos.entry_price) * pos.quantity
+            else:
+                unrealized = (pos.entry_price - current_price) * pos.quantity
             total_unrealized += unrealized
             positions_out.append({
                 "symbol": pos.symbol,
@@ -770,6 +772,7 @@ class MMEngine:
         try:
             ticker = await self.exchange.fetch_ticker(symbol)
             current_price = float(ticker["last"])
+            self._last_prices[symbol] = current_price
         except Exception:
             return
 
