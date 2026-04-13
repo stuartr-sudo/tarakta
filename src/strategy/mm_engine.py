@@ -461,18 +461,14 @@ class MMEngine:
 
         # Stop loss placement per MM rules
         if best_formation.type.upper() == "W":
-            # W = bullish: SL below the formation's low
-            sl_price = min(
-                float(candles_1h.iloc[-20:]["low"].min()),
-                entry_price * 0.985,  # Max 1.5% SL
-            )
+            # W = bullish: SL below the formation's low, capped at 1.5%
+            formation_low = float(candles_1h.iloc[-20:]["low"].min())
+            sl_price = max(formation_low, entry_price * 0.985)  # max() = tighter SL
             trade_direction = "long"
         else:
-            # M = bearish: SL above the formation's high
-            sl_price = max(
-                float(candles_1h.iloc[-20:]["high"].max()),
-                entry_price * 1.015,  # Max 1.5% SL
-            )
+            # M = bearish: SL above the formation's high, capped at 1.5%
+            formation_high = float(candles_1h.iloc[-20:]["high"].max())
+            sl_price = min(formation_high, entry_price * 1.015)  # min() = tighter SL
             trade_direction = "short"
 
         # Targets from target analyzer
