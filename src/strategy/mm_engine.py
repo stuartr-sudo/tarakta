@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pandas as pd
@@ -68,6 +68,9 @@ ASIA_RANGE_SKIP_PCT = 2.0
 
 # Position sizing: risk per trade as % of balance
 RISK_PER_TRADE_PCT = 1.0
+
+# Cooldown after a trade closes on a symbol (hours) — prevents re-entry churn
+SYMBOL_COOLDOWN_HOURS = 4
 
 # Partial profit schedule (cumulative close %)
 PROFIT_SCHEDULE = {
@@ -175,6 +178,7 @@ class MMEngine:
 
         # State
         self.positions: dict[str, MMPosition] = {}
+        self._cooldowns: dict[str, datetime] = {}  # symbol -> earliest re-entry time
         self.cycle_count = 0
         self._running = True
         self._scanning_active = True  # MM Engine starts active (unlike main bot)
@@ -361,8 +365,11 @@ class MMEngine:
             quote_currencies=["USDT"],
             min_volume_usd=getattr(self.config, "min_volume_usd", 5_000_000),
         )
-        # Filter out pairs we already have positions in
-        return [p for p in pairs if p not in self.positions]
+        now = datetime.now(timezone.utc)
+        # Expire old cooldowns
+        self._cooldowns = {s: t for s, t in self._cooldowns.items() if t > now}
+        # Filter out pairs with open positions or on cooldown
+        return [p for p in pairs if p not in self.positions and p not in self._cooldowns]
 
     async def _analyze_pair(
         self,
@@ -945,6 +952,8 @@ class MMEngine:
         )
 
         self.positions.pop(pos.symbol, None)
+        # Cooldown: don't re-enter this symbol for SYMBOL_COOLDOWN_HOURS
+        self._cooldowns[pos.symbol] = datetime.now(timezone.utc) + timedelta(hours=SYMBOL_COOLDOWN_HOURS)
 
     @staticmethod
     def _is_valid_target(price: float, direction: str, entry: float) -> bool:
