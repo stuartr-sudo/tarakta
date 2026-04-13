@@ -668,7 +668,7 @@ class MMEngine:
         cost_usd = result.filled_quantity * fill_price
 
         # Log to database first to get the DB-generated id
-        trade_id = f"mm-{uuid4().hex[:8]}"  # fallback if DB insert fails
+        trade_id = str(uuid4())  # valid UUID fallback if DB insert fails
         try:
             db_row = await self.repo.insert_trade({
                 "symbol": signal.symbol,
@@ -686,12 +686,13 @@ class MMEngine:
                 "mm_formation": signal.formation_type,
                 "mm_cycle_phase": signal.cycle_phase,
                 "mm_confluence_grade": signal.confluence_grade,
+                "mode": self.config.trading_mode if hasattr(self.config, 'trading_mode') else "paper",
                 "status": "open",
             })
             if db_row and db_row.get("id"):
                 trade_id = str(db_row["id"])
         except Exception as e:
-            logger.debug("mm_trade_db_insert_failed", error=str(e))
+            logger.warning("mm_trade_db_insert_failed", symbol=signal.symbol, error=str(e))
 
         # Create MM position with DB id for later updates
         position = MMPosition(
