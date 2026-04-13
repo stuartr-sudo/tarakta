@@ -787,9 +787,18 @@ class MMEngine:
         if candles_1h is None or candles_1h.empty:
             return
 
-        # Update level count
+        # Update level count — only count levels SINCE trade entry, not all history.
+        # This prevents the level tracker from seeing pre-trade vector clusters
+        # and falsely reporting level 3+ on a brand-new position.
         direction = "bullish" if pos.direction == "long" else "bearish"
-        level_analysis = self.level_tracker.analyze(candles_1h, direction=direction)
+        if pos.entry_time:
+            candles_since_entry = candles_1h[candles_1h.index >= pos.entry_time] if hasattr(candles_1h.index, 'tz') else candles_1h
+            # Fall back to full candles if timestamp filtering doesn't work
+            if candles_since_entry.empty or len(candles_since_entry) < 3:
+                candles_since_entry = candles_1h.tail(10)
+        else:
+            candles_since_entry = candles_1h.tail(10)
+        level_analysis = self.level_tracker.analyze(candles_since_entry, direction=direction)
         new_level = level_analysis.current_level
 
         # Level progression — take partials and tighten SL
