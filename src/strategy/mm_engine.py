@@ -55,8 +55,13 @@ DEFAULT_SCAN_INTERVAL = 5
 MIN_CONFLUENCE_PCT = 40.0
 
 # Minimum R:R ratio (to Level 1 target)
+# Course lesson 53: 1.4 is the "don't get out of bed" floor — below that the
+# trade isn't worth taking regardless of setup quality. 3.0 is the typical
+# course default for new traders. We engine-default to 1.4 (the absolute
+# floor per the course) and let users raise it via /mm/settings.
 MIN_RR = 3.0
-MIN_RR_AGGRESSIVE = 1.0
+MIN_RR_COURSE_FLOOR = 1.4  # Lesson 53 "don't get out of bed" threshold
+MIN_RR_AGGRESSIVE = 1.4    # was 1.0 — 1.0 is below the course floor
 
 # Minimum formation quality to act on
 MIN_FORMATION_QUALITY = 0.4
@@ -232,6 +237,68 @@ class MMEngine:
         """
         logger.info(f"mm_reject_{reason}", symbol=symbol, **kwargs)
         self._scan_reject_counts[reason] = self._scan_reject_counts.get(reason, 0) + 1
+        return None
+
+    def _try_three_hits_formation(self, candles_1h, cycle_state):
+        """Course lesson-18 alternative: 3 hits at HOW/LOW at Level 3 replace M/W.
+
+        Per lesson 18 (direct quote):
+            "after three levels have completed. There are also other reversal
+            signals that you could get, that would replace the M or W. If the
+            Market Maker comes to test a weekly High or Low three times, and
+            they don't break it, it's likely a reversal is imminent. This
+            would also depend on price being at level three."
+
+        Returns a synthesized :class:`Formation` when the conditions match, or
+        ``None`` otherwise. The synthesized formation is consumed by the same
+        pipeline as a real M/W so SL/target/confluence/retest gates still run.
+        """
+        from src.strategy.mm_formations import Formation  # local — avoids cycle
+
+        # --- HOW 3-hits → bearish reversal → short setup (M-style) ---
+        if cycle_state.how and cycle_state.how > 0:
+            hits_how = self.formation_detector.detect_three_hits(candles_1h, cycle_state.how)
+            if hits_how.detected and hits_how.expected_outcome == "reversal":
+                # Course: the prior trend up to HOW must be a completed 3-level
+                # swing. Measure bullish levels over the full recent window.
+                level = self.level_tracker.analyze(candles_1h, direction="bullish")
+                if level.current_level >= 3 and len(hits_how.hit_indices) >= 3:
+                    mid = hits_how.hit_indices[len(hits_how.hit_indices) // 2]
+                    return Formation(
+                        type="M",
+                        variant="three_hits_how",
+                        peak1_idx=hits_how.hit_indices[0],
+                        peak1_price=cycle_state.how,
+                        peak2_idx=hits_how.hit_indices[-1],
+                        peak2_price=cycle_state.how,
+                        trough_idx=mid,
+                        trough_price=cycle_state.how * 0.99,  # approximate
+                        direction="bearish",
+                        quality_score=0.5,   # synthetic — gate removed anyway
+                        at_key_level=True,   # HOW is a key level by definition
+                    )
+
+        # --- LOW 3-hits → bullish reversal → long setup (W-style) ---
+        if cycle_state.low and cycle_state.low < float("inf") and cycle_state.low > 0:
+            hits_low = self.formation_detector.detect_three_hits(candles_1h, cycle_state.low)
+            if hits_low.detected and hits_low.expected_outcome == "reversal":
+                level = self.level_tracker.analyze(candles_1h, direction="bearish")
+                if level.current_level >= 3 and len(hits_low.hit_indices) >= 3:
+                    mid = hits_low.hit_indices[len(hits_low.hit_indices) // 2]
+                    return Formation(
+                        type="W",
+                        variant="three_hits_low",
+                        peak1_idx=hits_low.hit_indices[0],
+                        peak1_price=cycle_state.low,
+                        peak2_idx=hits_low.hit_indices[-1],
+                        peak2_price=cycle_state.low,
+                        trough_idx=mid,
+                        trough_price=cycle_state.low * 1.01,
+                        direction="bullish",
+                        quality_score=0.5,
+                        at_key_level=True,
+                    )
+
         return None
 
     def begin_scanning(self) -> None:
@@ -574,16 +641,31 @@ class MMEngine:
         else:
             ema_break = None
 
+        # Weekly cycle — computed up front so both the formation path and the
+        # lesson-18 three-hits alternative can use HOW/LOW and phase data.
+        cycle_state = self.weekly_cycle_tracker.update(candles_1h, now)
+
         # Formation detection (1H)
         formations = self.formation_detector.detect(candles_1h)
 
-        if not formations:
-            return self._reject("no_formation", symbol)  # No formation = no entry
-
-        best_formation = formations[0]
-
-        if best_formation.quality_score < self.min_formation_quality:
-            return self._reject("low_formation_quality", symbol, quality=best_formation.quality_score, min_required=self.min_formation_quality)
+        if formations:
+            best_formation = formations[0]
+        else:
+            # Course lesson 18 alternative: 3 hits at HOW/LOW at Level 3
+            # "replace the M or W". Synthesize a Formation-shaped object so
+            # the rest of the pipeline works uniformly.
+            best_formation = self._try_three_hits_formation(candles_1h, cycle_state)
+            if best_formation is None:
+                return self._reject("no_formation", symbol)
+            logger.info("mm_three_hits_formation_synthesized",
+                        symbol=symbol, type=best_formation.type,
+                        variant=best_formation.variant,
+                        level=cycle_state.how if best_formation.type == "M" else cycle_state.low)
+        # Course-faithful change (2026-04): the raw course (lesson 20) does not
+        # score formation "quality" — an M/W either satisfies its three MM
+        # appearances or it is not an M/W. quality_score is still used by
+        # FormationDetector to rank candidates, but we no longer hard-reject
+        # a weak-quality formation that passes the other course rules.
 
         # Level tracking (1H) — count levels AFTER the formation, not all history.
         # peak2_idx is relative to the last DEFAULT_LOOKBACK (40) candles,
@@ -600,9 +682,6 @@ class MMEngine:
         # Don't enter if Level 3+ already reached (expect reversal)
         if level_analysis.current_level >= 3:
             return self._reject("level_too_advanced", symbol, level=level_analysis.current_level, post_formation_candles=len(candles_post_formation))
-
-        # Weekly cycle
-        cycle_state = self.weekly_cycle_tracker.update(candles_1h, now)
 
         # Don't enter during FMWB (it's the false move)
         if cycle_state.phase == "FMWB":
@@ -678,24 +757,41 @@ class MMEngine:
             sl_price = highest_high * 1.002  # 0.2% buffer above invalidation
             trade_direction = "short"
 
-        # Check SL distance isn't too wide (formation structure too large to trade)
+        # Course-faithful change (2026-04): the course (lesson 53) is explicit —
+        # "SL goes where it needs to go. NEVER tighten SL to improve R:R."
+        # Risk is controlled by position sizing (1% of account / SL distance),
+        # NOT by refusing to trade wide-SL setups. The previous 5% cap was a
+        # code invention not found anywhere in the course. Logged for telemetry
+        # only so we can see when SL is unusually wide.
         sl_distance_pct = abs(entry_price - sl_price) / entry_price * 100
         if sl_distance_pct > self.max_sl_pct:
-            return self._reject("sl_too_wide", symbol, sl_distance_pct=round(sl_distance_pct, 2), max=self.max_sl_pct)
+            logger.info("mm_wide_sl_warning", symbol=symbol,
+                        sl_distance_pct=round(sl_distance_pct, 2), threshold=self.max_sl_pct)
 
         # Targets from target analyzer
         t_l1 = target_analysis.primary_l1.price if target_analysis.primary_l1 else None
         t_l2 = target_analysis.primary_l2.price if target_analysis.primary_l2 else None
         t_l3 = target_analysis.primary_l3.price if target_analysis.primary_l3 else None
 
-        # No valid L1 target = no trade. Per the course, the 50 EMA is the
-        # primary L1 target. If it's not in a valid position, the setup doesn't
-        # qualify. Don't force entry with a weaker target — an occupied slot
-        # with a weak target blocks a valid setup from entering.
+        # Course-faithful change (2026-04): the course target hierarchy (lesson
+        # 47, spec section 8) is "50 EMA (primary) → 200 EMA (if 50 already
+        # broken) → first unrecovered Vector candle". The prior implementation
+        # rejected outright when primary_l1 was missing (e.g., when 50 EMA is
+        # on the wrong side of price because it already broke). Instead, fall
+        # back to the L2 target and use it as the effective L1.
+        if not t_l1 and t_l2:
+            logger.info("mm_l1_target_fallback_to_l2", symbol=symbol, entry=entry_price,
+                        ema_50=ema_values.get(50), target_l2=t_l2,
+                        formation=best_formation.type)
+            t_l1 = t_l2
+
+        # Only reject if NO target is available at any level (no EMAs, no
+        # vectors, no HOW/LOW in direction).
         if not t_l1:
-            return self._reject("no_l1_target", symbol, direction=trade_direction,
-                                ema_50=ema_values.get(50), entry=entry_price,
-                                formation=best_formation.type, quality=best_formation.quality_score)
+            return self._reject("no_target_available", symbol, direction=trade_direction,
+                                ema_50=ema_values.get(50), ema_200=ema_values.get(200),
+                                vectors=len(target_analysis.unrecovered_vectors),
+                                entry=entry_price, formation=best_formation.type)
 
         # R:R check — try L1 first, fall back to L2 if L1 R:R is too low
         risk = abs(entry_price - sl_price)

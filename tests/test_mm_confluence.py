@@ -4,7 +4,6 @@ from __future__ import annotations
 import pytest
 
 from src.strategy.mm_confluence import (
-    DONT_GET_OUT_OF_BED_RR,
     GRADE_A_THRESHOLD,
     GRADE_B_THRESHOLD,
     GRADE_C_THRESHOLD,
@@ -67,7 +66,10 @@ def _minimal_context(**overrides) -> MMContext:
 class TestConstants:
     def test_max_possible(self):
         assert MAX_POSSIBLE == sum(WEIGHTS.values())
-        assert MAX_POSSIBLE == 111.0
+        # 2026-04 course-faithful change: OI promoted from LOW(4) to MEDIUM(8)
+        # per lesson 29 ("can also be used to identify trapped Traders").
+        # Total rose by 4 → 115.0. See docs/MM_COURSE_FAITHFUL_REDESIGN.md.
+        assert MAX_POSSIBLE == 115.0
 
     def test_all_factors_have_weights(self):
         expected_factors = [

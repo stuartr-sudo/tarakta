@@ -54,10 +54,14 @@ WEIGHTS: dict[str, float] = {
     "unrecovered_vector": 8.0,
     "liquidation_cluster": 8.0,
     "ema_alignment": 8.0,
+    # Course lesson 29 names Open Interest specifically as a trapped-trader
+    # detector ("can also be used to identify trapped Traders"). Trapped
+    # traders are the setup — promoted from LOW(4) to MEDIUM(8) in 2026-04
+    # course-faithful redesign.
+    "oi_behavior": 8.0,
     "fib_alignment": 6.0,
     "news_event": 6.0,
     # LOW weight — bonus
-    "oi_behavior": 4.0,
     "correlation_confirmed": 4.0,
     "moon_cycle": 2.0,
 }
