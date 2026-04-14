@@ -1123,12 +1123,14 @@ class MMEngine:
             # Ms if there is no spike out of the weekend box." The absence of
             # an FMWB doesn't invalidate a valid M/W — we explicitly allow
             # the trade through. Log for telemetry.
-            if weekend.box and weekend.box.detected:
+            # WeekendAnalysis exposes the box as `trap_box` (not `box`).
+            trap_box = getattr(weekend, "trap_box", None)
+            if trap_box is not None and getattr(trap_box, "detected", False):
                 logger.info("mm_weekend_box_no_fmwb_accepting_mw",
                             symbol=symbol, direction=trade_direction,
                             formation_variant=best_formation.variant,
-                            box_high=float(getattr(weekend.box, "box_high", 0.0)),
-                            box_low=float(getattr(weekend.box, "box_low", 0.0)))
+                            box_high=float(getattr(trap_box, "box_high", 0.0)),
+                            box_low=float(getattr(trap_box, "box_low", 0.0)))
             else:
                 logger.info("mm_warn_no_weekly_bias", symbol=symbol, direction=trade_direction)
 
