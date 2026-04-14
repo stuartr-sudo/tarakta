@@ -216,7 +216,21 @@ class MMEngine:
         self._running = True
         self._scanning_active = True  # MM Engine starts active (unlike main bot)
 
+        # Per-cycle funnel counter — reset at start of each scan, reported in mm_scan_funnel
+        self._scan_reject_counts: dict[str, int] = {}
+
         logger.info("mm_engine_initialized", scan_interval=scan_interval_minutes)
+
+    def _reject(self, reason: str, symbol: str, **kwargs) -> None:
+        """Log a rejection and increment the per-cycle funnel counter.
+
+        Replaces the prior pattern ``logger.info("mm_reject_X", ...); return None``
+        so ``mm_scan_funnel`` at end of scan can report how many pairs dropped
+        off at each filter stage. Returns ``None`` so callers can ``return self._reject(...)``.
+        """
+        logger.info(f"mm_reject_{reason}", symbol=symbol, **kwargs)
+        self._scan_reject_counts[reason] = self._scan_reject_counts.get(reason, 0) + 1
+        return None
 
     def begin_scanning(self) -> None:
         """Resume the MM engine's scan loop (called from dashboard)."""
@@ -459,7 +473,9 @@ class MMEngine:
                 logger.warning("mm_engine_pairs_error", error=str(e))
                 pairs = []
 
-            # 4. Scan each pair
+            # 4. Scan each pair — reset funnel counter so mm_scan_funnel is per-cycle
+            self._scan_reject_counts = {}
+            exceptions_raised = 0
             signals: list[MMSignal] = []
             for pair in pairs:
                 try:
@@ -467,8 +483,23 @@ class MMEngine:
                     if signal:
                         signals.append(signal)
                 except Exception as e:
+                    exceptions_raised += 1
                     logger.warning("mm_analyze_pair_error", symbol=pair, error=str(e), error_type=type(e).__name__)
 
+            # Funnel summary — shows exactly where symbols dropped off this cycle
+            rejected_total = sum(self._scan_reject_counts.values())
+            unaccounted = len(pairs) - rejected_total - len(signals) - exceptions_raised
+            logger.info(
+                "mm_scan_funnel",
+                cycle=self.cycle_count,
+                pairs_scanned=len(pairs),
+                signals_found=len(signals),
+                rejected_total=rejected_total,
+                exceptions=exceptions_raised,
+                unaccounted=unaccounted,
+                rejects=dict(sorted(self._scan_reject_counts.items(), key=lambda kv: -kv[1])),
+            )
+            # Keep mm_scan_summary for existing alerts/dashboards
             logger.info(
                 "mm_scan_summary",
                 pairs_scanned=len(pairs),
@@ -508,12 +539,10 @@ class MMEngine:
             candles_1h = await self.candle_manager.get_candles(symbol, "1h", limit=500)
             candles_4h = await self.candle_manager.get_candles(symbol, "4h", limit=250)
         except Exception as e:
-            logger.info("mm_reject_candle_fetch", symbol=symbol, error=str(e))
-            return None
+            return self._reject("candle_fetch", symbol, error=str(e))
 
         if candles_1h is None or candles_1h.empty or len(candles_1h) < 50:
-            logger.info("mm_reject_insufficient_candles", symbol=symbol, count=0 if candles_1h is None or (hasattr(candles_1h, 'empty') and candles_1h.empty) else len(candles_1h))
-            return None
+            return self._reject("insufficient_candles", symbol, count=0 if candles_1h is None or (hasattr(candles_1h, 'empty') and candles_1h.empty) else len(candles_1h))
 
         current_price = float(candles_1h.iloc[-1]["close"])
 
@@ -534,14 +563,12 @@ class MMEngine:
         formations = self.formation_detector.detect(candles_1h)
 
         if not formations:
-            logger.info("mm_reject_no_formation", symbol=symbol)
-            return None  # No formation = no entry
+            return self._reject("no_formation", symbol)  # No formation = no entry
 
         best_formation = formations[0]
 
         if best_formation.quality_score < self.min_formation_quality:
-            logger.info("mm_reject_low_formation_quality", symbol=symbol, quality=best_formation.quality_score, min_required=self.min_formation_quality)
-            return None
+            return self._reject("low_formation_quality", symbol, quality=best_formation.quality_score, min_required=self.min_formation_quality)
 
         # Level tracking (1H) — count levels AFTER the formation, not all history.
         # peak2_idx is relative to the last DEFAULT_LOOKBACK (40) candles,
@@ -557,26 +584,22 @@ class MMEngine:
 
         # Don't enter if Level 3+ already reached (expect reversal)
         if level_analysis.current_level >= 3:
-            logger.info("mm_reject_level_too_advanced", symbol=symbol, level=level_analysis.current_level, post_formation_candles=len(candles_post_formation))
-            return None
+            return self._reject("level_too_advanced", symbol, level=level_analysis.current_level, post_formation_candles=len(candles_post_formation))
 
         # Weekly cycle
         cycle_state = self.weekly_cycle_tracker.update(candles_1h, now)
 
         # Don't enter during FMWB (it's the false move)
         if cycle_state.phase == "FMWB":
-            logger.info("mm_reject_fmwb_phase", symbol=symbol, phase=cycle_state.phase)
-            return None
+            return self._reject("fmwb_phase", symbol, phase=cycle_state.phase)
 
         # Don't enter during Friday trap phase
         if cycle_state.phase == "FRIDAY_TRAP":
-            logger.info("mm_reject_friday_trap", symbol=symbol, phase=cycle_state.phase)
-            return None
+            return self._reject("friday_trap", symbol, phase=cycle_state.phase)
 
         # Bug 3: Phase machine enforcement — only enter during valid phases
         if cycle_state.phase not in VALID_ENTRY_PHASES:
-            logger.info("mm_reject_wrong_phase", symbol=symbol, phase=cycle_state.phase)
-            return None
+            return self._reject("wrong_phase", symbol, phase=cycle_state.phase)
 
         # Weekend trap analysis
         weekend = self.weekend_trap_analyzer.analyze(candles_1h, now)
@@ -588,10 +611,9 @@ class MMEngine:
             # "down" false move → real direction bullish → only longs
             real_direction = "short" if weekend.fmwb.direction == "up" else "long"
             if trade_direction != real_direction:
-                logger.info("mm_reject_against_weekly_bias", symbol=symbol,
-                            trade_dir=trade_direction, fmwb_dir=weekend.fmwb.direction,
-                            real_dir=real_direction)
-                return None
+                return self._reject("against_weekly_bias", symbol,
+                                    trade_dir=trade_direction, fmwb_dir=weekend.fmwb.direction,
+                                    real_dir=real_direction)
         else:
             logger.info("mm_warn_no_weekly_bias", symbol=symbol, direction=trade_direction)
 
@@ -644,8 +666,7 @@ class MMEngine:
         # Check SL distance isn't too wide (formation structure too large to trade)
         sl_distance_pct = abs(entry_price - sl_price) / entry_price * 100
         if sl_distance_pct > self.max_sl_pct:
-            logger.info("mm_reject_sl_too_wide", symbol=symbol, sl_distance_pct=round(sl_distance_pct, 2), max=self.max_sl_pct)
-            return None
+            return self._reject("sl_too_wide", symbol, sl_distance_pct=round(sl_distance_pct, 2), max=self.max_sl_pct)
 
         # Targets from target analyzer
         t_l1 = target_analysis.primary_l1.price if target_analysis.primary_l1 else None
@@ -657,16 +678,14 @@ class MMEngine:
         # qualify. Don't force entry with a weaker target — an occupied slot
         # with a weak target blocks a valid setup from entering.
         if not t_l1:
-            logger.info("mm_reject_no_l1_target", symbol=symbol, direction=trade_direction,
-                        ema_50=ema_values.get(50), entry=entry_price,
-                        formation=best_formation.type, quality=best_formation.quality_score)
-            return None
+            return self._reject("no_l1_target", symbol, direction=trade_direction,
+                                ema_50=ema_values.get(50), entry=entry_price,
+                                formation=best_formation.type, quality=best_formation.quality_score)
 
         # R:R check — try L1 first, fall back to L2 if L1 R:R is too low
         risk = abs(entry_price - sl_price)
         if risk <= 0:
-            logger.info("mm_reject_zero_risk", symbol=symbol)
-            return None
+            return self._reject("zero_risk", symbol)
 
         reward = abs(t_l1 - entry_price)
         rr = reward / risk
@@ -681,8 +700,7 @@ class MMEngine:
                 rr = rr_l2
 
         if rr < self.min_rr:
-            logger.info("mm_reject_low_rr", symbol=symbol, rr=round(rr, 2), min_required=self.min_rr, entry=entry_price, sl=sl_price, t1=t_l1)
-            return None
+            return self._reject("low_rr", symbol, rr=round(rr, 2), min_required=self.min_rr, entry=entry_price, sl=sl_price, t1=t_l1)
 
         # Confluence scoring
         at_how = abs(current_price - cycle_state.how) / current_price < 0.005 if cycle_state.how > 0 else False
@@ -729,13 +747,11 @@ class MMEngine:
 
         # Check confluence meets minimum
         if confluence_result.score_pct < self.min_confluence:
-            logger.info("mm_reject_low_confluence", symbol=symbol, score=confluence_result.score_pct, min_required=self.min_confluence, formation=best_formation.type)
-            return None
+            return self._reject("low_confluence", symbol, score=confluence_result.score_pct, min_required=self.min_confluence, formation=best_formation.type)
 
         # Bug 1: Retest conditions — course requires 2+ of 4 retest conditions met
         if confluence_result.retest_conditions_met < 2:
-            logger.info("mm_reject_low_retest", symbol=symbol, retest_met=confluence_result.retest_conditions_met, confluence=confluence_result.score_pct)
-            return None
+            return self._reject("low_retest", symbol, retest_met=confluence_result.retest_conditions_met, confluence=confluence_result.score_pct)
 
         # Build signal
         signal = MMSignal(
