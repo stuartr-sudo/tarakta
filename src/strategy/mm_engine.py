@@ -351,10 +351,25 @@ class MMEngine:
     async def get_status(self) -> dict:
         """Return a status snapshot for the dashboard API.
 
-        Uses cached prices only — no network calls. The main cycle
-        updates _last_prices via fetch_ticker during _manage_position.
-        This keeps the API fast and avoids cross-thread event loop issues.
+        Fetches live prices for all open positions in parallel, then
+        falls back to cached prices if any individual fetch fails.
         """
+        # Refresh prices for all open positions in parallel
+        if self.positions:
+            async def _fetch_price(symbol: str) -> tuple[str, float | None]:
+                try:
+                    ticker = await self.exchange.fetch_ticker(symbol)
+                    return symbol, float(ticker["last"])
+                except Exception:
+                    return symbol, None
+
+            results = await asyncio.gather(
+                *[_fetch_price(s) for s in self.positions], return_exceptions=True
+            )
+            for r in results:
+                if isinstance(r, tuple) and r[1] is not None:
+                    self._last_prices[r[0]] = r[1]
+
         session = self.session_analyzer.get_current_session()
         positions_out = []
         total_unrealized = 0.0
