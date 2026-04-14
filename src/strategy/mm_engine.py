@@ -221,8 +221,23 @@ class MMEngine:
         self._running = True
         self._scanning_active = True  # MM Engine starts active (unlike main bot)
 
-        # Per-cycle funnel counter — reset at start of each scan, reported in mm_scan_funnel
+        # Per-cycle funnel state — all reset at start of each scan, reported in mm_scan_funnel.
+        # Rejection reasons (why pairs drop out).
         self._scan_reject_counts: dict[str, int] = {}
+        # Stage counters (how many pairs PASS each gate). Answers the positive
+        # question: "are the scoring stages actually being reached?"
+        self._scan_stage_counts: dict[str, int] = {}
+        # Among pairs that reached the scoring stage, how often did each
+        # confluence factor fire (score > 0). Proves the scoring factors are
+        # actively being evaluated, not just the hard gates.
+        self._scan_factor_hits: dict[str, int] = {}
+        # Confluence score percentages seen in this cycle (pre-retest).
+        # Used to compute min/avg/max/median + grade distribution.
+        self._scan_score_samples: list[float] = []
+        # Grade distribution (A/B/C/F) from this cycle's confluence calls.
+        self._scan_grade_counts: dict[str, int] = {}
+        # Retest-conditions-met distribution (0,1,2,3,4).
+        self._scan_retest_counts: dict[int, int] = {}
         # Last funnel snapshot surfaced to the dashboard (updated at end of each scan)
         self.last_funnel: dict | None = None
 
@@ -238,6 +253,17 @@ class MMEngine:
         logger.info(f"mm_reject_{reason}", symbol=symbol, **kwargs)
         self._scan_reject_counts[reason] = self._scan_reject_counts.get(reason, 0) + 1
         return None
+
+    def _advance(self, stage: str) -> None:
+        """Increment the per-cycle stage counter when a pair passes a gate.
+
+        Paired with ``_reject`` so the funnel shows BOTH sides: how many pairs
+        dropped off at each reason (``_scan_reject_counts``) and how many
+        advanced past each stage (``_scan_stage_counts``). This is what proves
+        to the dashboard viewer that the scoring stages are actually being
+        reached, not just the hard gates.
+        """
+        self._scan_stage_counts[stage] = self._scan_stage_counts.get(stage, 0) + 1
 
     def _try_three_hits_formation(self, candles_1h, cycle_state):
         """Course lesson-18 alternative: 3 hits at HOW/LOW at Level 3 replace M/W.
@@ -543,8 +569,14 @@ class MMEngine:
                 logger.warning("mm_engine_pairs_error", error=str(e))
                 pairs = []
 
-            # 4. Scan each pair — reset funnel counter so mm_scan_funnel is per-cycle
+            # 4. Scan each pair — reset ALL per-cycle telemetry so mm_scan_funnel
+            # shows just this cycle's activity.
             self._scan_reject_counts = {}
+            self._scan_stage_counts = {}
+            self._scan_factor_hits = {}
+            self._scan_score_samples = []
+            self._scan_grade_counts = {}
+            self._scan_retest_counts = {}
             exceptions_raised = 0
             signals: list[MMSignal] = []
             for pair in pairs:
@@ -560,6 +592,31 @@ class MMEngine:
             rejected_total = sum(self._scan_reject_counts.values())
             unaccounted = len(pairs) - rejected_total - len(signals) - exceptions_raised
             funnel_rejects = dict(sorted(self._scan_reject_counts.items(), key=lambda kv: -kv[1]))
+
+            # Score distribution stats for pairs that reached the scoring stage
+            scored_count = len(self._scan_score_samples)
+            if scored_count:
+                sorted_scores = sorted(self._scan_score_samples)
+                score_stats = {
+                    "count": scored_count,
+                    "min": round(sorted_scores[0], 2),
+                    "max": round(sorted_scores[-1], 2),
+                    "avg": round(sum(sorted_scores) / scored_count, 2),
+                    "median": round(sorted_scores[scored_count // 2], 2),
+                }
+            else:
+                score_stats = {"count": 0, "min": 0, "max": 0, "avg": 0, "median": 0}
+
+            # Stages in canonical pipeline order (matches _analyze_pair flow)
+            stage_order = [
+                "candles_ok", "formation_found", "level_ok", "phase_valid",
+                "direction_ok", "target_acquired", "rr_passed", "scored",
+                "confluence_passed", "retest_passed", "signal_built",
+            ]
+            stages = {k: self._scan_stage_counts.get(k, 0) for k in stage_order}
+
+            funnel_factors = dict(sorted(self._scan_factor_hits.items(), key=lambda kv: -kv[1]))
+
             logger.info(
                 "mm_scan_funnel",
                 cycle=self.cycle_count,
@@ -569,6 +626,11 @@ class MMEngine:
                 exceptions=exceptions_raised,
                 unaccounted=unaccounted,
                 rejects=funnel_rejects,
+                stages=stages,
+                factor_hits=funnel_factors,
+                score_stats=score_stats,
+                grades=dict(self._scan_grade_counts),
+                retest_counts={str(k): v for k, v in sorted(self._scan_retest_counts.items())},
             )
             # Stash for dashboard — lets the UI render live selectivity per cycle
             self.last_funnel = {
@@ -580,6 +642,11 @@ class MMEngine:
                 "exceptions": exceptions_raised,
                 "unaccounted": unaccounted,
                 "rejects": funnel_rejects,
+                "stages": stages,
+                "factor_hits": funnel_factors,
+                "score_stats": score_stats,
+                "grades": dict(self._scan_grade_counts),
+                "retest_counts": {str(k): v for k, v in sorted(self._scan_retest_counts.items())},
             }
             # Keep mm_scan_summary for existing alerts/dashboards
             logger.info(
@@ -626,6 +693,7 @@ class MMEngine:
         if candles_1h is None or candles_1h.empty or len(candles_1h) < 50:
             return self._reject("insufficient_candles", symbol, count=0 if candles_1h is None or (hasattr(candles_1h, 'empty') and candles_1h.empty) else len(candles_1h))
 
+        self._advance("candles_ok")
         current_price = float(candles_1h.iloc[-1]["close"])
 
         # --- Run all MM modules ---
@@ -661,6 +729,8 @@ class MMEngine:
                         symbol=symbol, type=best_formation.type,
                         variant=best_formation.variant,
                         level=cycle_state.how if best_formation.type == "M" else cycle_state.low)
+
+        self._advance("formation_found")
         # Course-faithful change (2026-04): the raw course (lesson 20) does not
         # score formation "quality" — an M/W either satisfies its three MM
         # appearances or it is not an M/W. quality_score is still used by
@@ -683,6 +753,8 @@ class MMEngine:
         if level_analysis.current_level >= 3:
             return self._reject("level_too_advanced", symbol, level=level_analysis.current_level, post_formation_candles=len(candles_post_formation))
 
+        self._advance("level_ok")
+
         # Don't enter during FMWB (it's the false move)
         if cycle_state.phase == "FMWB":
             return self._reject("fmwb_phase", symbol, phase=cycle_state.phase)
@@ -694,6 +766,8 @@ class MMEngine:
         # Bug 3: Phase machine enforcement — only enter during valid phases
         if cycle_state.phase not in VALID_ENTRY_PHASES:
             return self._reject("wrong_phase", symbol, phase=cycle_state.phase)
+
+        self._advance("phase_valid")
 
         # Weekend trap analysis
         weekend = self.weekend_trap_analyzer.analyze(candles_1h, now)
@@ -710,6 +784,8 @@ class MMEngine:
                                     real_dir=real_direction)
         else:
             logger.info("mm_warn_no_weekly_bias", symbol=symbol, direction=trade_direction)
+
+        self._advance("direction_ok")
 
         # Bug 5: Three hits rule — check HOW and LOW for reversal/continuation signals
         three_hits_at_how = None
@@ -793,6 +869,8 @@ class MMEngine:
                                 vectors=len(target_analysis.unrecovered_vectors),
                                 entry=entry_price, formation=best_formation.type)
 
+        self._advance("target_acquired")
+
         # R:R check — try L1 first, fall back to L2 if L1 R:R is too low
         risk = abs(entry_price - sl_price)
         if risk <= 0:
@@ -812,6 +890,8 @@ class MMEngine:
 
         if rr < self.min_rr:
             return self._reject("low_rr", symbol, rr=round(rr, 2), min_required=self.min_rr, entry=entry_price, sl=sl_price, t1=t_l1)
+
+        self._advance("rr_passed")
 
         # Confluence scoring
         at_how = abs(current_price - cycle_state.how) / current_price < 0.005 if cycle_state.how > 0 else False
@@ -855,14 +935,31 @@ class MMEngine:
         )
 
         confluence_result = self.confluence_scorer.score(mm_ctx)
+        self._advance("scored")
+
+        # Telemetry: record which confluence factors actually fired (score > 0)
+        # plus the score percentage, grade, and retest-conditions-met count.
+        # This is the "other areas are being considered" proof — the dashboard
+        # can render factor hit rates and score distribution from this.
+        for factor_name, factor_score in confluence_result.factors.items():
+            if factor_score > 0:
+                self._scan_factor_hits[factor_name] = self._scan_factor_hits.get(factor_name, 0) + 1
+        self._scan_score_samples.append(confluence_result.score_pct)
+        self._scan_grade_counts[confluence_result.grade] = self._scan_grade_counts.get(confluence_result.grade, 0) + 1
+        self._scan_retest_counts[confluence_result.retest_conditions_met] = \
+            self._scan_retest_counts.get(confluence_result.retest_conditions_met, 0) + 1
 
         # Check confluence meets minimum
         if confluence_result.score_pct < self.min_confluence:
             return self._reject("low_confluence", symbol, score=confluence_result.score_pct, min_required=self.min_confluence, formation=best_formation.type)
 
+        self._advance("confluence_passed")
+
         # Bug 1: Retest conditions — course requires 2+ of 4 retest conditions met
         if confluence_result.retest_conditions_met < 2:
             return self._reject("low_retest", symbol, retest_met=confluence_result.retest_conditions_met, confluence=confluence_result.score_pct)
+
+        self._advance("retest_passed")
 
         # Build signal
         signal = MMSignal(
@@ -899,6 +996,7 @@ class MMEngine:
             rr=round(rr, 2),
             confluence=round(confluence_result.score_pct, 1),
         )
+        self._advance("signal_built")
 
         return signal
 

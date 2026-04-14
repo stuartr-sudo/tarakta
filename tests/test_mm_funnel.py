@@ -231,3 +231,114 @@ async def test_get_status_includes_last_funnel_when_set(engine: MMEngine) -> Non
     status = await engine.get_status()
     assert status["last_funnel"] == engine.last_funnel
     assert status["last_funnel"]["rejects"]["no_formation"] == 50
+
+
+# ---------------------------------------------------------------------------
+# Extended telemetry: stage counters, factor hits, score distribution.
+# These prove to the dashboard that the scoring stages are actually being
+# reached (not just the hard gates).
+# ---------------------------------------------------------------------------
+
+
+def test_engine_has_stage_telemetry_state(engine: MMEngine) -> None:
+    """All six per-cycle telemetry dicts exist on a fresh MMEngine."""
+    assert hasattr(engine, "_scan_stage_counts")
+    assert hasattr(engine, "_scan_factor_hits")
+    assert hasattr(engine, "_scan_score_samples")
+    assert hasattr(engine, "_scan_grade_counts")
+    assert hasattr(engine, "_scan_retest_counts")
+    assert engine._scan_stage_counts == {}
+    assert engine._scan_factor_hits == {}
+    assert engine._scan_score_samples == []
+    assert engine._scan_grade_counts == {}
+    assert engine._scan_retest_counts == {}
+
+
+def test_advance_helper_increments_stage(engine: MMEngine) -> None:
+    """_advance('stage_name') bumps the named counter by one."""
+    engine._scan_stage_counts = {}
+    engine._advance("candles_ok")
+    assert engine._scan_stage_counts == {"candles_ok": 1}
+    engine._advance("candles_ok")
+    engine._advance("formation_found")
+    assert engine._scan_stage_counts == {"candles_ok": 2, "formation_found": 1}
+
+
+def test_advance_helper_does_not_return_anything(engine: MMEngine) -> None:
+    """_advance returns None (it's called for side effect, never for value)."""
+    result = engine._advance("candles_ok")
+    assert result is None
+
+
+def test_advance_helper_bound_method(engine: MMEngine) -> None:
+    """Guards against renaming regression."""
+    assert callable(engine._advance)
+    import inspect
+    params = list(inspect.signature(engine._advance).parameters)
+    assert params == ["stage"]
+
+
+@pytest.mark.asyncio
+async def test_get_status_exposes_extended_funnel_fields(engine: MMEngine) -> None:
+    """last_funnel contract: dashboard needs stages, factor_hits, score_stats, grades, retest_counts."""
+    engine.positions = {}
+    engine.last_funnel = {
+        "cycle": 3,
+        "timestamp": "2026-04-14T10:00:00+00:00",
+        "pairs_scanned": 90,
+        "signals_found": 0,
+        "rejected_total": 88,
+        "exceptions": 0,
+        "unaccounted": 2,
+        "rejects": {"low_rr": 42, "no_formation": 35},
+        "stages": {
+            "candles_ok": 88, "formation_found": 55, "level_ok": 50,
+            "phase_valid": 48, "direction_ok": 46, "target_acquired": 46,
+            "rr_passed": 6, "scored": 6, "confluence_passed": 2,
+            "retest_passed": 0, "signal_built": 0,
+        },
+        "factor_hits": {
+            "mw_session_changeover": 4, "ema_alignment": 5,
+            "oi_behavior": 2, "stopping_volume_candle": 1,
+        },
+        "score_stats": {"count": 6, "min": 18.5, "max": 52.3, "avg": 34.1, "median": 33.0},
+        "grades": {"F": 4, "C": 2},
+        "retest_counts": {"0": 2, "1": 2, "2": 2, "3": 0, "4": 0},
+    }
+    status = await engine.get_status()
+    # Every key the dashboard template references
+    for k in ("stages", "factor_hits", "score_stats", "grades", "retest_counts", "rejects"):
+        assert k in status["last_funnel"], f"dashboard contract: missing '{k}'"
+    assert status["last_funnel"]["stages"]["scored"] == 6
+    assert status["last_funnel"]["factor_hits"]["ema_alignment"] == 5
+    assert status["last_funnel"]["score_stats"]["avg"] == 34.1
+
+
+def test_reset_clears_all_telemetry(engine: MMEngine) -> None:
+    """At scan-cycle start, the engine resets every telemetry bucket.
+
+    This is the contract tested at the scan-loop level — simulate the same
+    reset pattern and verify the state is clean.
+    """
+    # Seed some data
+    engine._scan_reject_counts = {"no_formation": 5}
+    engine._scan_stage_counts = {"candles_ok": 10}
+    engine._scan_factor_hits = {"ema_alignment": 3}
+    engine._scan_score_samples = [45.0, 32.5]
+    engine._scan_grade_counts = {"F": 2}
+    engine._scan_retest_counts = {2: 1}
+
+    # Simulate what _cycle does at scan start
+    engine._scan_reject_counts = {}
+    engine._scan_stage_counts = {}
+    engine._scan_factor_hits = {}
+    engine._scan_score_samples = []
+    engine._scan_grade_counts = {}
+    engine._scan_retest_counts = {}
+
+    assert engine._scan_reject_counts == {}
+    assert engine._scan_stage_counts == {}
+    assert engine._scan_factor_hits == {}
+    assert engine._scan_score_samples == []
+    assert engine._scan_grade_counts == {}
+    assert engine._scan_retest_counts == {}

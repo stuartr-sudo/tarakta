@@ -184,6 +184,27 @@
             .funnel-table td.pct { text-align:right; color:var(--text-muted); font-variant-numeric: tabular-nums; }
             .funnel-bar { position:relative; height:4px; background:rgba(0,229,212,0.08); border-radius:2px; overflow:hidden; margin-top:3px; }
             .funnel-bar-fill { position:absolute; left:0; top:0; bottom:0; background:var(--teal); border-radius:2px; }
+            .funnel-section-header { color:var(--text-muted); font-size:11px; font-weight:600; text-transform:uppercase; margin:16px 0 6px; letter-spacing:0.5px; }
+            .funnel-section-header:first-child { margin-top:0; }
+            .stage-list { list-style:none; padding:0; margin:0; display:grid; grid-template-columns: 1fr; gap:4px; }
+            .stage-row { display:grid; grid-template-columns: 150px 1fr 50px 55px; gap:8px; align-items:center; padding:4px 0; font-size:12px; }
+            .stage-row .stage-name { font-family:monospace; color:var(--text-primary); }
+            .stage-row .stage-bar { height:6px; background:rgba(0,229,212,0.08); border-radius:3px; position:relative; overflow:hidden; }
+            .stage-row .stage-bar-fill { position:absolute; left:0; top:0; bottom:0; background:linear-gradient(to right, var(--teal), #66ffe5); border-radius:3px; }
+            .stage-row .stage-count { text-align:right; font-variant-numeric:tabular-nums; font-weight:600; color:var(--teal); }
+            .stage-row .stage-pct { text-align:right; color:var(--text-muted); font-variant-numeric:tabular-nums; }
+            .score-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap:8px; }
+            .score-cell { background:var(--bg-elevated); border:1px solid var(--border); border-radius:6px; padding:8px 10px; }
+            .score-cell .score-label { color:var(--text-muted); font-size:10px; text-transform:uppercase; letter-spacing:0.5px; }
+            .score-cell .score-value { font-size:1.1rem; font-weight:600; color:var(--text-primary); font-variant-numeric:tabular-nums; }
+            .grade-pill { display:inline-block; padding:2px 8px; border-radius:10px; font-family:monospace; font-size:11px; font-weight:600; margin-right:6px; }
+            .grade-pill.grade-A { background:rgba(0,229,212,0.18); color:var(--teal); }
+            .grade-pill.grade-B { background:rgba(131,238,255,0.14); color:#83eeff; }
+            .grade-pill.grade-C { background:rgba(255,170,0,0.14); color:#ffaa00; }
+            .grade-pill.grade-F { background:rgba(255,100,100,0.12); color:#ff6464; }
+            .retest-strip { display:flex; gap:4px; flex-wrap:wrap; }
+            .retest-chip { background:var(--bg-elevated); border:1px solid var(--border); border-radius:4px; padding:3px 8px; font-family:monospace; font-size:11px; color:var(--text-muted); }
+            .retest-chip .retest-count-val { color:var(--text-primary); font-weight:600; margin-left:4px; }
         </style>
         <div class="funnel-summary">
             <div class="stat-card">
@@ -203,6 +224,54 @@
                 <div class="stat-value" id="mm-funnel-exceptions">--</div>
             </div>
         </div>
+
+        <!-- Pipeline stages — proves the scoring stages are actually reached, not just the hard gates -->
+        <div class="funnel-section-header">Pipeline Stages — pairs advancing past each gate</div>
+        <ul class="stage-list" id="mm-funnel-stages">
+            <li style="color:var(--text-muted);text-align:center;padding:12px;font-size:12px;">Waiting for first scan...</li>
+        </ul>
+
+        <!-- Confluence factor hit rates — proves scoring factors are being evaluated -->
+        <div class="funnel-section-header">Confluence Factors Fired — among pairs that reached scoring</div>
+        <div id="mm-funnel-factors-wrap">
+            <table class="funnel-table">
+                <thead>
+                    <tr><th>Factor</th><th style="text-align:right;">Hits</th><th style="text-align:right;">% of scored</th></tr>
+                </thead>
+                <tbody id="mm-funnel-factors-tbody">
+                    <tr><td colspan="3" style="text-align:center;color:var(--text-muted);padding:12px;">Nothing reached scoring yet.</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Score + grade + retest distribution -->
+        <div class="funnel-section-header">Confluence Score Distribution</div>
+        <div class="score-grid" id="mm-funnel-score-grid">
+            <div class="score-cell"><div class="score-label">Scored</div><div class="score-value" id="mm-funnel-score-count">--</div></div>
+            <div class="score-cell"><div class="score-label">Min %</div><div class="score-value" id="mm-funnel-score-min">--</div></div>
+            <div class="score-cell"><div class="score-label">Avg %</div><div class="score-value" id="mm-funnel-score-avg">--</div></div>
+            <div class="score-cell"><div class="score-label">Median %</div><div class="score-value" id="mm-funnel-score-median">--</div></div>
+            <div class="score-cell"><div class="score-label">Max %</div><div class="score-value" id="mm-funnel-score-max">--</div></div>
+        </div>
+        <div class="funnel-section-header">Grades &amp; Retest Conditions Met</div>
+        <div style="display:flex; flex-wrap:wrap; gap:16px; align-items:center;">
+            <div id="mm-funnel-grades" style="display:flex; gap:4px;">
+                <span class="grade-pill grade-A">A <span id="mm-funnel-grade-A" style="margin-left:4px;">0</span></span>
+                <span class="grade-pill grade-B">B <span id="mm-funnel-grade-B" style="margin-left:4px;">0</span></span>
+                <span class="grade-pill grade-C">C <span id="mm-funnel-grade-C" style="margin-left:4px;">0</span></span>
+                <span class="grade-pill grade-F">F <span id="mm-funnel-grade-F" style="margin-left:4px;">0</span></span>
+            </div>
+            <div class="retest-strip" id="mm-funnel-retest-strip">
+                <span class="retest-chip">0/4<span class="retest-count-val" data-rc="0">0</span></span>
+                <span class="retest-chip">1/4<span class="retest-count-val" data-rc="1">0</span></span>
+                <span class="retest-chip">2/4<span class="retest-count-val" data-rc="2">0</span></span>
+                <span class="retest-chip">3/4<span class="retest-count-val" data-rc="3">0</span></span>
+                <span class="retest-chip">4/4<span class="retest-count-val" data-rc="4">0</span></span>
+            </div>
+        </div>
+
+        <!-- Rejection distribution -->
+        <div class="funnel-section-header">Rejection Reasons — where pairs dropped off</div>
         <div id="mm-funnel-table-wrap">
             <table class="funnel-table">
                 <thead>
@@ -472,6 +541,79 @@ function updateScanFunnel(funnel) {
         exceptionsEl.className = 'stat-value ' + (exCount > 0 ? 'negative' : '');
     }
 
+    // --- Pipeline stages (proves symbols reach scoring, not just hard-gated) ---
+    const stagesEl = document.getElementById('mm-funnel-stages');
+    if (stagesEl) {
+        const stages = funnel.stages || {};
+        const totalScanned = funnel.pairs_scanned || 0;
+        const stageKeys = Object.keys(stages);
+        if (stageKeys.length === 0 || totalScanned === 0) {
+            stagesEl.innerHTML = '<li style="color:var(--text-muted);text-align:center;padding:12px;font-size:12px;">Waiting for first scan...</li>';
+        } else {
+            const maxStageCount = Math.max(1, ...Object.values(stages));
+            stagesEl.innerHTML = stageKeys.map(k => {
+                const count = stages[k];
+                const pct = totalScanned > 0 ? ((count / totalScanned) * 100).toFixed(1) : '0.0';
+                const barPct = ((count / maxStageCount) * 100).toFixed(1);
+                return `<li class="stage-row">
+                    <span class="stage-name">${k}</span>
+                    <div class="stage-bar"><div class="stage-bar-fill" style="width:${barPct}%"></div></div>
+                    <span class="stage-count">${count}</span>
+                    <span class="stage-pct">${pct}%</span>
+                </li>`;
+            }).join('');
+        }
+    }
+
+    // --- Confluence factor hit rates (proves scoring factors are evaluated) ---
+    const factorTbody = document.getElementById('mm-funnel-factors-tbody');
+    if (factorTbody) {
+        const hits = funnel.factor_hits || {};
+        const scored = (funnel.stages && funnel.stages.scored) || 0;
+        const factorEntries = Object.entries(hits).sort((a, b) => b[1] - a[1]);
+        if (scored === 0 || factorEntries.length === 0) {
+            factorTbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--text-muted);padding:12px;">Nothing reached scoring yet.</td></tr>';
+        } else {
+            const maxHits = factorEntries[0][1];
+            factorTbody.innerHTML = factorEntries.map(([factor, count]) => {
+                const pct = scored > 0 ? ((count / scored) * 100).toFixed(1) : '0.0';
+                const barPct = ((count / maxHits) * 100).toFixed(1);
+                return `<tr>
+                    <td class="reason">${factor}<div class="funnel-bar"><div class="funnel-bar-fill" style="width:${barPct}%"></div></div></td>
+                    <td class="count">${count}</td>
+                    <td class="pct">${pct}%</td>
+                </tr>`;
+            }).join('');
+        }
+    }
+
+    // --- Score distribution stats ---
+    const scoreStats = funnel.score_stats || {};
+    const setScore = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = (val == null || scoreStats.count === 0) ? '--' : val;
+    };
+    setScore('mm-funnel-score-count', scoreStats.count);
+    setScore('mm-funnel-score-min', scoreStats.min);
+    setScore('mm-funnel-score-avg', scoreStats.avg);
+    setScore('mm-funnel-score-median', scoreStats.median);
+    setScore('mm-funnel-score-max', scoreStats.max);
+
+    // --- Grade distribution ---
+    const grades = funnel.grades || {};
+    ['A', 'B', 'C', 'F'].forEach(g => {
+        const el = document.getElementById('mm-funnel-grade-' + g);
+        if (el) el.textContent = grades[g] || 0;
+    });
+
+    // --- Retest conditions distribution ---
+    const retest = funnel.retest_counts || {};
+    document.querySelectorAll('.retest-count-val').forEach(el => {
+        const rc = el.dataset.rc;
+        el.textContent = retest[rc] || 0;
+    });
+
+    // --- Rejection distribution ---
     if (tbody) {
         const rejects = funnel.rejects || {};
         const entries = Object.entries(rejects).sort((a, b) => b[1] - a[1]);
