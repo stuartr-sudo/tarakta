@@ -1,4 +1,4 @@
-app = "tarakta"
+app = "tarakta-mm"
 primary_region = "sin"
 
 [build]

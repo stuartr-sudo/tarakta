@@ -28,9 +28,11 @@ def create_dashboard_app(config: Settings, repo: Repository, exchange=None) -> F
     # Routes
     from src.dashboard.routes import create_router as create_page_router
     from src.dashboard.api import create_router as create_api_router
+    from src.dashboard.reviews_api import create_reviews_router
 
     app.include_router(create_page_router(config, repo))
     app.include_router(create_api_router(repo), prefix="/api")
+    app.include_router(create_reviews_router(repo), prefix="/api")
 
     @app.get("/health")
     async def health():

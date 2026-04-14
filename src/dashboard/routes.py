@@ -29,16 +29,18 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         return other_repo
 
     async def _base_context(request: Request) -> dict:
+        db_offline = False
         try:
             state = await repo.get_engine_state()
         except Exception:
             state = None
+            db_offline = True
         return {
             "request": request,
             "state": state,
             "config": config,
             "role": request.session.get("role", "viewer"),
-            "db_offline": state is None,
+            "db_offline": db_offline,
         }
 
     # --- Auth ---
