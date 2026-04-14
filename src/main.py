@@ -1,3 +1,9 @@
+"""Tarakta — Market Makers Method trading bot.
+
+Runs the MM Method engine: a standalone algorithmic trading system
+that detects M/W formations, tracks levels, and manages positions
+with zero LLM calls.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -11,59 +17,10 @@ from src.config import Settings
 from src.data.candles import CandleManager
 from src.data.db import Database
 from src.data.repository import Repository
-from src.engine.core import TradingEngine
 from src.exchange.client import create_exchange
 from src.exchange.paper import PaperExchange
+from src.strategy.mm_engine import MMEngine
 from src.utils.logging import get_logger, setup_logging
-
-
-def _create_market_exchange(market_name: str, market_config, config: Settings, logger):
-    """Create exchange + paper wrapper for a single market."""
-    connector_name = market_config.connector
-
-    # Build connector kwargs based on connector type
-    if connector_name.startswith("binance"):
-        live_exchange = create_exchange(
-            config.exchange_name,
-            market_config.api_key or config.binance_api_key,
-            market_config.api_secret or config.binance_api_secret,
-            account_type=market_config.account_type,
-            leverage=market_config.leverage,
-            margin_mode=market_config.margin_mode,
-        )
-    else:
-        # Non-crypto connectors (yfinance, alpaca, etc.)
-        # Ensure connectors module is imported to register them
-        import src.exchange.connectors  # noqa: F401
-        from src.exchange.factory import create_exchange as factory_create
-
-        live_exchange = factory_create(
-            connector_name,
-            symbol_universe=market_config.symbol_universe,
-            api_key=market_config.api_key,
-            api_secret=market_config.api_secret,
-        )
-
-    # Always paper trade non-crypto markets initially, and crypto if config says paper
-    is_paper = config.trading_mode == "paper" or not connector_name.startswith("binance")
-    if is_paper:
-        exchange = PaperExchange(
-            initial_balance=market_config.initial_balance,
-            live_exchange=live_exchange,
-            account_type=market_config.account_type,
-            leverage=market_config.leverage,
-        )
-        logger.info(
-            "market_paper_mode",
-            market=market_name,
-            connector=connector_name,
-            balance=market_config.initial_balance,
-        )
-    else:
-        exchange = live_exchange
-        logger.info("market_live_mode", market=market_name, connector=connector_name)
-
-    return live_exchange, exchange
 
 
 async def main() -> None:
@@ -71,53 +28,50 @@ async def main() -> None:
     setup_logging(log_level=config.log_level, log_format=config.log_format)
     logger = get_logger("tarakta")
 
-    logger.info("tarakta_starting", mode=config.trading_mode, markets=list(config.markets.keys()))
+    logger.info("tarakta_starting", mode=config.trading_mode)
 
-    # Database (scoped to this instance)
+    # Database
     db = Database(config.supabase_url, config.supabase_key)
     repo = Repository(db, instance_id=config.instance_id)
 
-    # Create engines for each enabled market
-    engines: dict[str, TradingEngine] = {}
-    live_exchanges = []
-    primary_exchange = None  # For dashboard (first market)
+    # Exchange — use first market config for credentials/leverage
+    market_name = list(config.markets.keys())[0]
+    market_config = config.markets[market_name]
 
-    for market_name, market_config in config.markets.items():
-        if not market_config.enabled:
-            continue
+    live_exchange = create_exchange(
+        config.exchange_name,
+        market_config.api_key or config.binance_api_key,
+        market_config.api_secret or config.binance_api_secret,
+        account_type=market_config.account_type,
+        leverage=market_config.leverage,
+        margin_mode=market_config.margin_mode,
+    )
 
-        try:
-            live_exchange, exchange = _create_market_exchange(market_name, market_config, config, logger)
-            live_exchanges.append(live_exchange)
+    mm_exchange = PaperExchange(
+        initial_balance=config.mm_initial_balance,
+        live_exchange=live_exchange,
+        account_type=market_config.account_type,
+        leverage=market_config.leverage,
+    )
+    logger.info("mm_paper_exchange_created", balance=config.mm_initial_balance)
 
-            if primary_exchange is None:
-                primary_exchange = exchange
+    candle_manager = CandleManager(exchange=live_exchange, repo=repo)
 
-            candle_manager = CandleManager(exchange=live_exchange, repo=repo)
+    # MM Engine
+    mm_engine = MMEngine(
+        exchange=mm_exchange,
+        repo=repo,
+        candle_manager=candle_manager,
+        config=config,
+        scan_interval_minutes=config.mm_scan_interval_minutes,
+    )
+    logger.info("mm_engine_created", scan_interval=config.mm_scan_interval_minutes, balance=config.mm_initial_balance)
 
-            engine = TradingEngine(
-                config=config,
-                exchange=exchange,
-                repo=repo,
-                candle_manager=candle_manager,
-            )
-            engine._market_name = market_name
-
-            engines[market_name] = engine
-            logger.info("market_engine_created", market=market_name, connector=market_config.connector)
-
-        except Exception as e:
-            logger.error("market_engine_failed", market=market_name, error=str(e), exc_info=True)
-            continue
-
-    if not engines:
-        logger.critical("no_engines_created", hint="Check your market configuration")
-        return
-
-    # Dashboard (uses primary market's exchange for live data)
+    # Dashboard
     from src.dashboard.app import create_dashboard_app
 
-    dashboard_app = create_dashboard_app(config, repo, primary_exchange, engine=list(engines.values())[0], engines=engines)
+    dashboard_app = create_dashboard_app(config, repo, mm_exchange)
+    dashboard_app.state.mm_engine = mm_engine
     port = int(os.getenv("PORT", config.port))
 
     dashboard_thread = threading.Thread(
@@ -129,119 +83,36 @@ async def main() -> None:
     dashboard_thread.start()
     logger.info("dashboard_started", port=port)
 
-    # --- MM Method Engine (standalone, parallel, no LLM) ---
-    mm_engine = None
-    if config.mm_method_enabled:
-        from src.strategy.mm_engine import MMEngine
-
-        # Use primary market's live exchange for market data, but give MM its own paper balance
-        first_market = list(engines.keys())[0]
-        first_engine = engines[first_market]
-        mm_live_exchange = live_exchanges[0]
-
-        mm_exchange = PaperExchange(
-            initial_balance=config.mm_initial_balance,
-            live_exchange=mm_live_exchange,
-            account_type=config.markets[first_market].account_type,
-            leverage=config.markets[first_market].leverage,
-        )
-        logger.info(
-            "mm_paper_exchange_created",
-            balance=config.mm_initial_balance,
-            note="isolated from SMC engine balance",
-        )
-
-        mm_candle_mgr = first_engine.candle_manager if hasattr(first_engine, "candle_manager") else CandleManager(
-            exchange=mm_live_exchange, repo=repo,
-        )
-
-        mm_engine = MMEngine(
-            exchange=mm_exchange,
-            repo=repo,
-            candle_manager=mm_candle_mgr,
-            config=config,
-            scan_interval_minutes=config.mm_scan_interval_minutes,
-        )
-        logger.info(
-            "mm_engine_created",
-            scan_interval=config.mm_scan_interval_minutes,
-            balance=config.mm_initial_balance,
-        )
-
-    # Wire mm_engine into dashboard so API can access it
-    if mm_engine:
-        dashboard_app.state.mm_engine = mm_engine
-    else:
-        dashboard_app.state.mm_engine = None
-
     # Graceful shutdown
     loop = asyncio.get_event_loop()
-
-    async def shutdown_all():
-        for engine in engines.values():
-            await engine.shutdown()
-        if mm_engine:
-            await mm_engine.shutdown()
-
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown_all()))
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(mm_engine.shutdown()))
 
-    # Run all market engines concurrently (with restart-on-crash)
-    async def run_engine(name: str, engine: TradingEngine):
-        backoff = 30
-        max_backoff = 600  # 10 min cap
-        while True:
+    # Run MM engine with restart-on-crash
+    backoff = 30
+    max_backoff = 600
+    while True:
+        try:
+            await mm_engine.run()
+            break
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.critical("mm_engine_fatal", error=str(e), exc_info=True)
             try:
-                await engine.run()
-                # Engine exited cleanly (shutdown requested)
-                break
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.critical("engine_fatal", market=name, error=str(e), exc_info=True)
-                try:
-                    await repo.log_error(f"engine_{name}", "critical", str(e))
-                except Exception:
-                    pass
-                logger.info("engine_restart_backoff", market=name, seconds=backoff)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
-
-    async def run_mm_engine():
-        """Run the MM Method engine with restart-on-crash."""
-        backoff = 30
-        max_backoff = 600
-        while True:
-            try:
-                await mm_engine.run()
-                break
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.critical("mm_engine_fatal", error=str(e), exc_info=True)
-                try:
-                    await repo.log_error("mm_engine", "critical", str(e))
-                except Exception:
-                    pass
-                logger.info("mm_engine_restart_backoff", seconds=backoff)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
-
-    # Gather all tasks: SMC engines + optional MM engine
-    tasks = [run_engine(name, eng) for name, eng in engines.items()]
-    if mm_engine:
-        tasks.append(run_mm_engine())
-        logger.info("mm_engine_added_to_tasks", total_tasks=len(tasks))
-
-    try:
-        await asyncio.gather(*tasks)
-    finally:
-        for live_ex in live_exchanges:
-            try:
-                await live_ex.close()
+                await repo.log_error("mm_engine", "critical", str(e))
             except Exception:
                 pass
-        logger.info("tarakta_stopped")
+            logger.info("mm_engine_restart_backoff", seconds=backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
+
+    # Cleanup
+    try:
+        await live_exchange.close()
+    except Exception:
+        pass
+    logger.info("tarakta_stopped")
 
 
 if __name__ == "__main__":

@@ -22,11 +22,10 @@
 {% set mm_total_pnl = mm_snapshot.total_pnl_usd | default(0) | float %}
 {% set mm_drawdown = mm_snapshot.drawdown_pct | default(0) | float %}
 
-<!-- Bot Selector -->
+<!-- Controls -->
 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
-    <div class="bot-toggle">
-        <a href="/">Footprint Bot</a>
-        <a href="/mm" class="active">MM Bot</a>
+    <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:1.1rem; font-weight:600; color:var(--teal);">MM Engine</span>
     </div>
     <div style="display: flex; align-items: center; gap: 8px;">
         <a href="/mm/settings" class="account-badge" style="background:rgba(0,229,212,0.12); color:#00e5d4; text-decoration:none; cursor:pointer;" title="MM Settings">&#9881; Settings</a>
