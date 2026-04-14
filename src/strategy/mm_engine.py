@@ -1273,6 +1273,52 @@ class MMEngine:
         if three_hits_at_low and three_hits_at_low.detected and three_hits_at_low.expected_outcome == "reversal":
             three_hit_boost = True
 
+        # Course-faithful retest-gate inputs (2026-04 critical fix).
+        # Prior code never populated the 4 flags the retest gate reads,
+        # capping `retest_conditions_met` at 1 → no trade could ever clear
+        # the ≥2/4 threshold. Populate all four from data we already have.
+
+        # (1) at_50_ema: price within 0.3% of the 50 EMA
+        ema50_now = self._compute_50ema(candles_1h)
+        at_50_ema = False
+        if ema50_now and ema50_now > 0:
+            at_50_ema = abs(entry_price - ema50_now) / ema50_now < 0.003
+
+        # (3) higher_low (W) / lower_high (M): derived from formation peaks
+        # Standard W: two LOWS; a higher-low means peak2_price > peak1_price
+        # Standard M: two HIGHS; a lower-high means peak2_price < peak1_price
+        hl_lh = False
+        try:
+            p1 = float(best_formation.peak1_price)
+            p2 = float(best_formation.peak2_price)
+            if best_formation.type.upper() == "W":
+                hl_lh = p2 > p1
+            elif best_formation.type.upper() == "M":
+                hl_lh = p2 < p1
+        except Exception:
+            hl_lh = False
+
+        # (4) at_liquidity_cluster: approximate from free signals we have
+        # — HOW/LOW proximity (within 0.5%) OR unrecovered-vector proximity.
+        # Course lesson 27 treats liquidation clusters as a Hyblock signal,
+        # but HOW/LOW and unrecovered vectors ARE where Market Makers go
+        # to pick up liquidity in the absence of Hyblock data.
+        at_liq_cluster = False
+        try:
+            for lvl in (cycle_state.how, cycle_state.low):
+                if lvl and lvl > 0 and lvl != float("inf"):
+                    if abs(entry_price - lvl) / entry_price < 0.005:
+                        at_liq_cluster = True
+                        break
+            if not at_liq_cluster and target_analysis.unrecovered_vectors:
+                for v in target_analysis.unrecovered_vectors[:3]:
+                    vp = getattr(v, "midpoint", None) or getattr(v, "high", None)
+                    if vp and abs(entry_price - float(vp)) / entry_price < 0.005:
+                        at_liq_cluster = True
+                        break
+        except Exception:
+            at_liq_cluster = False
+
         mm_ctx = MMContext(
             formation={
                 "type": best_formation.type,
@@ -1280,21 +1326,32 @@ class MMEngine:
                 "quality": best_formation.quality_score,
                 "at_key_level": best_formation.at_key_level,
                 "session": session.session_name,
+                # Retest condition 3 inputs
+                "higher_low": hl_lh and best_formation.type.upper() == "W",
+                "lower_high": hl_lh and best_formation.type.upper() == "M",
+                "higher_low_or_lower_high": hl_lh,
             },
             ema_state={
                 "alignment": ema_state.alignment if ema_state else "mixed",
                 "broke_50": ema_break.broke_ema if ema_break else False,
                 "volume_confirmed": ema_break.volume_confirmed if ema_break else False,
-            } if ema_state else None,
+                # Retest condition 1 input
+                "at_50_ema": at_50_ema,
+            } if ema_state else {"at_50_ema": at_50_ema},
             level_state={
                 "current_level": level_analysis.current_level,
                 "svc_detected": level_analysis.svc.detected if level_analysis.svc else False,
                 "volume_degrading": level_analysis.volume_degrading,
+                # Retest condition 2 input (already covered by has_unrecovered_vector fallback,
+                # but populate explicitly for clarity)
+                "at_level1_vector": len(target_analysis.unrecovered_vectors) > 0,
             },
             cycle_state={
                 "phase": cycle_state.phase,
                 "direction": cycle_state.direction,
             },
+            # Retest condition 4 input
+            has_liquidation_cluster=at_liq_cluster,
             entry_price=entry_price,
             stop_loss=sl_price,
             target_price=t_l1,
