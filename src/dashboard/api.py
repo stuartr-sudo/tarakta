@@ -90,6 +90,7 @@ def create_router(repo: Repository) -> APIRouter:
         "mm_min_formation_quality": (float, 0.05, 1.0),
         "mm_scan_interval":         (float, 1.0, 60.0),
         "mm_cooldown_hours":        (float, 0.0, 48.0),
+        "mm_max_sl_pct":            (float, 1.0, 15.0),
     }
 
     @router.post("/mm/settings")

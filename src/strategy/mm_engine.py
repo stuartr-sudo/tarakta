@@ -66,6 +66,11 @@ MAX_MM_POSITIONS = 3
 # Asia session range threshold — skip day if BTC range > 2%
 ASIA_RANGE_SKIP_PCT = 2.0
 
+# Maximum SL distance (%) — skip formations with structures too wide to trade
+# A 5% wide formation means $100 risk only buys $2000 notional at 10x = $200 margin
+# Below ~$200 margin, exchange fees eat the edge
+MAX_SL_DISTANCE_PCT = 5.0
+
 # Position sizing: risk per trade as % of balance
 RISK_PER_TRADE_PCT = 1.0
 
@@ -137,6 +142,13 @@ class MMPosition:
     target_l1: float = 0.0
     target_l2: float = 0.0
     target_l3: float = 0.0
+
+    # Entry metadata (for dashboard display)
+    entry_reason: str = ""
+    formation_type: str = ""
+    confluence_grade: str = ""
+    cycle_phase: str = ""
+    confluence_score: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +273,11 @@ class MMEngine:
                     entry_time=datetime.fromisoformat(t["entry_time"]) if t.get("entry_time") else datetime.now(timezone.utc),
                     cost_usd=float(t.get("entry_cost_usd", 0)),
                     target_l1=float(t.get("take_profit", 0)),
+                    entry_reason=t.get("entry_reason", ""),
+                    formation_type=t.get("mm_formation", ""),
+                    confluence_grade=t.get("mm_confluence_grade", ""),
+                    cycle_phase=t.get("mm_cycle_phase", ""),
+                    confluence_score=float(t.get("confluence_score") or 0),
                 )
                 restored += 1
             if mm_trades:
@@ -321,6 +338,12 @@ class MMEngine:
                 "margin_used": round(pos.margin_used, 2),
                 "leverage": 10,
                 "target_l1": pos.target_l1,
+                "entry_reason": pos.entry_reason,
+                "formation_type": pos.formation_type,
+                "confluence_grade": pos.confluence_grade,
+                "cycle_phase": pos.cycle_phase,
+                "confluence_score": pos.confluence_score,
+                "entry_time": pos.entry_time.isoformat() if pos.entry_time else "",
             })
         total_margin = sum(p.margin_used for p in self.positions.values())
         total_notional = sum(p.cost_usd for p in self.positions.values())
@@ -522,6 +545,12 @@ class MMEngine:
             highest_high = max(best_formation.peak1_price, best_formation.peak2_price)
             sl_price = highest_high * 1.002  # 0.2% buffer above invalidation
             trade_direction = "short"
+
+        # Check SL distance isn't too wide (formation structure too large to trade)
+        sl_distance_pct = abs(entry_price - sl_price) / entry_price * 100
+        if sl_distance_pct > MAX_SL_DISTANCE_PCT:
+            logger.info("mm_reject_sl_too_wide", symbol=symbol, sl_distance_pct=round(sl_distance_pct, 2), max=MAX_SL_DISTANCE_PCT)
+            return None
 
         # Targets from target analyzer
         t_l1 = target_analysis.primary_l1.price if target_analysis.primary_l1 else None
@@ -768,6 +797,11 @@ class MMEngine:
             target_l1=signal.target_l1,
             target_l2=signal.target_l2,
             target_l3=signal.target_l3,
+            entry_reason=signal.reason,
+            formation_type=signal.formation_type,
+            confluence_grade=signal.confluence_grade,
+            cycle_phase=signal.cycle_phase,
+            confluence_score=signal.confluence_score,
         )
 
         self.positions[signal.symbol] = position

@@ -383,6 +383,23 @@ function showTradeDetail(trade) {
         ${trade.status === 'closed' ? `<span class="mono ${pnl >= 0 ? 'positive' : 'negative'}" style="margin-left:12px;font-size:1.1rem;">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</span>` : '<span class="status-badge open" style="margin-left:8px;">OPEN</span>'}
     `;
 
+    // Expected timeframe: MM Method 3-level cycle runs ~3 days (72h).
+    // Level 1 ~24h, Level 2 ~24h, Level 3 ~24h.
+    const enteredAt = trade.created_at || trade.entry_time || '';
+    let holdInfo = '';
+    let expectedInfo = '';
+    if (enteredAt) {
+        const entryDate = new Date(enteredAt);
+        const now = new Date();
+        const holdHours = Math.round((now - entryDate) / 3600000);
+        const holdDays = (holdHours / 24).toFixed(1);
+        holdInfo = holdHours < 24 ? `${holdHours}h` : `${holdDays} days`;
+        if (trade.status !== 'closed') {
+            const remainHours = Math.max(0, 72 - holdHours);
+            expectedInfo = remainHours > 24 ? `~${(remainHours/24).toFixed(0)} days remaining` : remainHours > 0 ? `~${remainHours}h remaining` : 'Expected cycle complete';
+        }
+    }
+
     document.getElementById('modal-body').innerHTML = `
         <table class="config-table" style="width:100%;">
             <tr><td style="color:var(--text-muted);">Entry Price</td><td class="mono">$${entry.toFixed(dp)}</td></tr>
@@ -394,6 +411,20 @@ function showTradeDetail(trade) {
             <tr><td style="color:var(--text-muted);">Leverage</td><td class="mono">${trade.leverage || 10}x</td></tr>
             <tr><td style="color:var(--text-muted);">SL Distance</td><td class="mono">${(Math.abs(entry - sl) / entry * 100).toFixed(3)}%</td></tr>
         </table>
+        ${holdInfo || expectedInfo ? `
+        <div style="margin-top:16px; padding:12px; background:var(--bg-dim); border-radius:8px; border-left:3px solid #8b5cf6;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                    <div style="font-size:0.75rem; color:var(--text-muted);">TIMEFRAME</div>
+                    <div style="font-size:0.95rem; margin-top:2px;">Held: <strong>${holdInfo}</strong> of ~3 day cycle</div>
+                </div>
+                ${expectedInfo ? `<div style="font-size:0.8rem; color:#8b5cf6;">${expectedInfo}</div>` : ''}
+            </div>
+            <div style="margin-top:8px; height:4px; background:rgba(139,92,246,0.15); border-radius:2px; overflow:hidden;">
+                <div style="height:100%; background:#8b5cf6; border-radius:2px; width:${Math.min(100, (holdInfo ? parseInt(holdInfo) : 0) / 72 * 100)}%;"></div>
+            </div>
+            <div style="font-size:0.65rem; color:var(--text-muted); margin-top:4px;">MM Method: Level 1 (~day 1) &rarr; Level 2 (~day 2) &rarr; Level 3 + SVC (~day 3)</div>
+        </div>` : ''}
         <div style="margin-top:16px; padding:12px; background:var(--bg-dim); border-radius:8px; border-left:3px solid var(--teal);">
             <div style="font-size:0.75rem; color:var(--text-muted); margin-bottom:4px;">ENTRY REASONING</div>
             <div style="font-size:0.85rem; line-height:1.5;">${trade.entry_reason || 'No reasoning recorded'}</div>
@@ -408,7 +439,7 @@ function showTradeDetail(trade) {
                 <tr><td style="color:var(--text-muted);">Formation</td><td>${trade.mm_formation || '—'} (${trade.mm_confluence_grade || '—'})</td></tr>
                 <tr><td style="color:var(--text-muted);">Phase</td><td>${trade.mm_cycle_phase || '—'}</td></tr>
                 <tr><td style="color:var(--text-muted);">Confluence</td><td>${trade.confluence_score || '—'}</td></tr>
-                <tr><td style="color:var(--text-muted);">Entered</td><td style="font-size:0.8rem;">${(trade.created_at || '').substring(0, 19)}</td></tr>
+                <tr><td style="color:var(--text-muted);">Entered</td><td style="font-size:0.8rem;">${enteredAt.substring(0, 19)}${holdInfo ? ` (${holdInfo} ago)` : ''}</td></tr>
                 ${trade.exit_time ? `<tr><td style="color:var(--text-muted);">Exited</td><td style="font-size:0.8rem;">${trade.exit_time.substring(0, 19)}</td></tr>` : ''}
             </table>
         </div>
@@ -441,12 +472,12 @@ function showOpenPositionDetail(p) {
         risk_usd: Math.abs(p.entry_price - p.stop_loss) * p.quantity,
         status: 'open',
         pnl_usd: p.unrealized_pnl,
-        entry_reason: 'View live data — entry reasoning available in closed trades',
-        mm_formation: '',
-        mm_confluence_grade: '',
-        mm_cycle_phase: '',
-        confluence_score: '',
-        created_at: '',
+        entry_reason: p.entry_reason || '',
+        mm_formation: p.formation_type || '',
+        mm_confluence_grade: p.confluence_grade || '',
+        mm_cycle_phase: p.cycle_phase || '',
+        confluence_score: p.confluence_score || '',
+        created_at: p.entry_time || '',
     });
 }
 </script>

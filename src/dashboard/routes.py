@@ -140,6 +140,7 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             "min_formation_quality": mm_settings.get("mm_min_formation_quality", 0.4),
             "scan_interval": mm_settings.get("mm_scan_interval", getattr(config, "mm_scan_interval_minutes", 5)),
             "cooldown_hours": mm_settings.get("mm_cooldown_hours", 4),
+            "max_sl_pct": mm_settings.get("mm_max_sl_pct", 5.0),
             "initial_balance": getattr(config, "mm_initial_balance", 10000.0),
         }
         ctx["instance_id"] = config.instance_id
