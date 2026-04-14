@@ -163,6 +163,7 @@ class MMEngine:
         self.candle_manager = candle_manager
         self.config = config
         self.scan_interval = scan_interval_minutes * 60  # Convert to seconds
+        self.max_positions = getattr(config, "mm_max_positions", MAX_MM_POSITIONS)
 
         # MM Method modules
         self.session_analyzer = MMSessionAnalyzer()
@@ -649,7 +650,7 @@ class MMEngine:
         open_count = len(self.positions)
 
         for signal in signals:
-            if open_count >= MAX_MM_POSITIONS:
+            if open_count >= self.max_positions:
                 break
 
             # Check in-memory positions AND cooldowns
