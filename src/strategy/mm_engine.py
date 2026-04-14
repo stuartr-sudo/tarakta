@@ -50,8 +50,8 @@ logger = get_logger(__name__)
 # Scan interval (minutes) — how often the MM engine runs
 DEFAULT_SCAN_INTERVAL = 5
 
-# Minimum confluence score (%) to consider an entry
-MIN_CONFLUENCE_PCT = 15.0
+# Minimum confluence score (%) to consider an entry — course requires Grade C+ (40%)
+MIN_CONFLUENCE_PCT = 40.0
 
 # Minimum R:R ratio (to Level 1 target)
 MIN_RR = 3.0
@@ -60,8 +60,11 @@ MIN_RR_AGGRESSIVE = 1.0
 # Minimum formation quality to act on
 MIN_FORMATION_QUALITY = 0.4
 
-# Maximum concurrent MM positions
-MAX_MM_POSITIONS = 3
+# Maximum concurrent MM positions (6 for bots — 3 was for human traders)
+MAX_MM_POSITIONS = 6
+
+# Maximum margin utilization — don't open new positions if margin > 60% of balance
+MAX_MARGIN_UTILIZATION = 0.60
 
 # Asia session range threshold — skip day if BTC range > 2%
 ASIA_RANGE_SKIP_PCT = 2.0
@@ -82,6 +85,12 @@ PROFIT_SCHEDULE = {
     1: 0.30,   # Close 30% at Level 1
     2: 0.50,   # Close to 50% total at Level 2
     3: 1.00,   # Close remaining at Level 3
+}
+
+# Valid phases for new entries (weekly cycle phase machine)
+VALID_ENTRY_PHASES = {
+    "FORMATION_PENDING", "LEVEL_1", "LEVEL_2", "LEVEL_3",
+    "BOARD_MEETING_1", "BOARD_MEETING_2",
 }
 
 # Strategy tag for database
@@ -511,8 +520,43 @@ class MMEngine:
             logger.info("mm_reject_friday_trap", symbol=symbol, phase=cycle_state.phase)
             return None
 
+        # Bug 3: Phase machine enforcement — only enter during valid phases
+        if cycle_state.phase not in VALID_ENTRY_PHASES:
+            logger.info("mm_reject_wrong_phase", symbol=symbol, phase=cycle_state.phase)
+            return None
+
         # Weekend trap analysis
         weekend = self.weekend_trap_analyzer.analyze(candles_1h, now)
+
+        # Bug 6: Weekly bias gating — FMWB direction determines allowed trade direction
+        # FMWB direction is the FALSE move. Real move is opposite.
+        if weekend.fmwb.detected:
+            # "up" false move → real direction bearish → only shorts
+            # "down" false move → real direction bullish → only longs
+            real_direction = "short" if weekend.fmwb.direction == "up" else "long"
+            if trade_direction != real_direction:
+                logger.info("mm_reject_against_weekly_bias", symbol=symbol,
+                            trade_dir=trade_direction, fmwb_dir=weekend.fmwb.direction,
+                            real_dir=real_direction)
+                return None
+        else:
+            logger.info("mm_warn_no_weekly_bias", symbol=symbol, direction=trade_direction)
+
+        # Bug 5: Three hits rule — check HOW and LOW for reversal/continuation signals
+        three_hits_at_how = None
+        three_hits_at_low = None
+        if cycle_state.how > 0:
+            three_hits_at_how = self.formation_detector.detect_three_hits(candles_1h, cycle_state.how)
+            if three_hits_at_how.detected:
+                log_event = "mm_signal_four_hits" if three_hits_at_how.hit_count >= 4 else "mm_signal_three_hits"
+                logger.info(log_event, symbol=symbol, level=cycle_state.how,
+                            hits=three_hits_at_how.hit_count, outcome=three_hits_at_how.expected_outcome)
+        if cycle_state.low < float("inf"):
+            three_hits_at_low = self.formation_detector.detect_three_hits(candles_1h, cycle_state.low)
+            if three_hits_at_low.detected:
+                log_event = "mm_signal_four_hits" if three_hits_at_low.hit_count >= 4 else "mm_signal_three_hits"
+                logger.info(log_event, symbol=symbol, level=cycle_state.low,
+                            hits=three_hits_at_low.hit_count, outcome=three_hits_at_low.expected_outcome)
 
         # Target identification
         target_analysis = self.target_analyzer.analyze(
@@ -591,6 +635,13 @@ class MMEngine:
         at_how = abs(current_price - cycle_state.how) / current_price < 0.005 if cycle_state.how > 0 else False
         at_low = abs(current_price - cycle_state.low) / current_price < 0.005 if cycle_state.low < float("inf") else False
 
+        # Bug 5: Three hits boosts at_key_level — 3-hit reversal at HOW/LOW strengthens confluence
+        three_hit_boost = False
+        if three_hits_at_how and three_hits_at_how.detected and three_hits_at_how.expected_outcome == "reversal":
+            three_hit_boost = True
+        if three_hits_at_low and three_hits_at_low.detected and three_hits_at_low.expected_outcome == "reversal":
+            three_hit_boost = True
+
         mm_ctx = MMContext(
             formation={
                 "type": best_formation.type,
@@ -617,7 +668,7 @@ class MMEngine:
             stop_loss=sl_price,
             target_price=t_l1,
             at_session_changeover=session.is_gap,
-            at_how_low=at_how or at_low,
+            at_how_low=at_how or at_low or three_hit_boost,
             has_unrecovered_vector=len(target_analysis.unrecovered_vectors) > 0,
         )
 
@@ -628,9 +679,10 @@ class MMEngine:
             logger.info("mm_reject_low_confluence", symbol=symbol, score=confluence_result.score_pct, min_required=MIN_CONFLUENCE_PCT, formation=best_formation.type)
             return None
 
-        # Log retest conditions (informational, not a gate — too many dead data feeds)
+        # Bug 1: Retest conditions — course requires 2+ of 4 retest conditions met
         if confluence_result.retest_conditions_met < 2:
-            logger.info("mm_retest_low", symbol=symbol, retest_met=confluence_result.retest_conditions_met, confluence=confluence_result.score_pct)
+            logger.info("mm_reject_low_retest", symbol=symbol, retest_met=confluence_result.retest_conditions_met, confluence=confluence_result.score_pct)
+            return None
 
         # Build signal
         signal = MMSignal(
@@ -674,6 +726,13 @@ class MMEngine:
         """Process entry signals — execute the best ones."""
         open_count = len(self.positions)
 
+        # Get balance for margin utilization check
+        try:
+            balance = await self.exchange.get_balance()
+            account_balance = balance.get("USDT", 0) or balance.get("USD", 0)
+        except Exception:
+            account_balance = 0
+
         for signal in signals:
             if open_count >= self.max_positions:
                 break
@@ -683,6 +742,16 @@ class MMEngine:
                 continue
             if signal.symbol in self._cooldowns:
                 continue
+
+            # Margin utilization check — don't exceed 60% of balance
+            if account_balance > 0:
+                total_margin = sum(p.margin_used for p in self.positions.values())
+                utilization = total_margin / account_balance
+                if utilization > MAX_MARGIN_UTILIZATION:
+                    logger.info("mm_reject_margin_limit", symbol=signal.symbol,
+                                utilization_pct=round(utilization * 100, 1),
+                                max_pct=round(MAX_MARGIN_UTILIZATION * 100, 0))
+                    break  # Stop trying — all remaining signals would also fail
 
             try:
                 await self._enter_trade(signal)
@@ -821,28 +890,45 @@ class MMEngine:
             await self._close_position(pos, current_price, "stop_loss")
             return
 
-        # Fetch fresh candles for level analysis
+        # Bug 2: Target-based level advancement — check if price has reached targets.
+        # This complements the PVSRA vector-based level tracker which needs time
+        # to accumulate enough candles. Price hitting the EMA target IS the level.
+        target_level = pos.current_level
+        is_long = pos.direction == "long"
+        if pos.target_l1 and target_level < 1:
+            if (is_long and current_price >= pos.target_l1) or (not is_long and current_price <= pos.target_l1):
+                target_level = 1
+                logger.info("mm_level_target_hit", symbol=symbol, level=1, target=pos.target_l1, price=current_price)
+        if pos.target_l2 and target_level < 2:
+            if (is_long and current_price >= pos.target_l2) or (not is_long and current_price <= pos.target_l2):
+                target_level = 2
+                logger.info("mm_level_target_hit", symbol=symbol, level=2, target=pos.target_l2, price=current_price)
+        if pos.target_l3 and target_level < 3:
+            if (is_long and current_price >= pos.target_l3) or (not is_long and current_price <= pos.target_l3):
+                target_level = 3
+                logger.info("mm_level_target_hit", symbol=symbol, level=3, target=pos.target_l3, price=current_price)
+
+        # Fetch fresh candles for PVSRA level analysis
         try:
             candles_1h = await self.candle_manager.get_candles(symbol, "1h", limit=100)
         except Exception:
-            return
+            candles_1h = None
 
-        if candles_1h is None or candles_1h.empty:
-            return
-
-        # Update level count — only count levels SINCE trade entry, not all history.
-        # This prevents the level tracker from seeing pre-trade vector clusters
-        # and falsely reporting level 3+ on a brand-new position.
-        direction = "bullish" if pos.direction == "long" else "bearish"
-        if pos.entry_time:
-            candles_since_entry = candles_1h[candles_1h.index >= pos.entry_time] if hasattr(candles_1h.index, 'tz') else candles_1h
-            # Fall back to full candles if timestamp filtering doesn't work
-            if candles_since_entry.empty or len(candles_since_entry) < 3:
+        # PVSRA vector-based level tracker (complementary to target-based)
+        new_level = target_level
+        if candles_1h is not None and not candles_1h.empty:
+            direction = "bullish" if is_long else "bearish"
+            if pos.entry_time:
+                candles_since_entry = candles_1h[candles_1h.index >= pos.entry_time] if hasattr(candles_1h.index, 'tz') else candles_1h
+                if candles_since_entry.empty or len(candles_since_entry) < 3:
+                    candles_since_entry = candles_1h.tail(10)
+            else:
                 candles_since_entry = candles_1h.tail(10)
+            level_analysis = self.level_tracker.analyze(candles_since_entry, direction=direction)
+            # Use the higher of target-based and PVSRA-based level
+            new_level = max(target_level, level_analysis.current_level)
         else:
-            candles_since_entry = candles_1h.tail(10)
-        level_analysis = self.level_tracker.analyze(candles_since_entry, direction=direction)
-        new_level = level_analysis.current_level
+            level_analysis = None
 
         # Level progression — take partials and tighten SL
         if new_level > pos.current_level:
@@ -857,7 +943,8 @@ class MMEngine:
             await self._take_partial(pos, new_level, current_price)
 
             # Tighten SL per MM rules
-            self._tighten_sl(pos, new_level, candles_1h)
+            if candles_1h is not None:
+                self._tighten_sl(pos, new_level, candles_1h)
 
             pos.current_level = new_level
 
@@ -870,8 +957,22 @@ class MMEngine:
             except Exception as e:
                 logger.debug("mm_level_db_update_failed", error=str(e))
 
+        # Bug 4: Board meeting detection after level advance (logging only for now)
+        if new_level > pos.current_level and candles_1h is not None and new_level in (1, 2):
+            direction_str = "bullish" if is_long else "bearish"
+            bm_detection = self.board_meeting_detector.detect(candles_1h, level_direction=direction_str)
+            if bm_detection.detected:
+                logger.info("mm_board_meeting_detected", symbol=symbol,
+                            level_before=new_level, bm_type=bm_detection.bm_type,
+                            duration=bm_detection.duration_candles,
+                            stop_hunt=bm_detection.stop_hunt_detected,
+                            has_entry=bm_detection.entry is not None,
+                            fib_entry=bm_detection.entry.entry_price if bm_detection.entry else None,
+                            fib_sl=bm_detection.entry.stop_loss if bm_detection.entry else None,
+                            fib_rr=bm_detection.entry.risk_reward if bm_detection.entry else None)
+
         # Check for Stopping Volume Candle at Level 3
-        if new_level >= 3 and level_analysis.svc and level_analysis.svc.detected:
+        if new_level >= 3 and level_analysis and level_analysis.svc and level_analysis.svc.detected:
             logger.info("mm_svc_detected", symbol=symbol, level=new_level)
             # Close remaining position
             if pos.partial_closed_pct < 1.0:
@@ -887,7 +988,7 @@ class MMEngine:
                 return
 
         # Volume degradation at Level 3 = exit
-        if new_level >= 3 and level_analysis.volume_degrading:
+        if new_level >= 3 and level_analysis and level_analysis.volume_degrading:
             logger.info("mm_volume_degradation_exit", symbol=symbol)
             await self._close_position(pos, current_price, "volume_degradation")
             return
