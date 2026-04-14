@@ -23,6 +23,7 @@ distinguished from SMC trades in the database and dashboard.
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -186,6 +187,14 @@ class MMEngine:
         self.scan_interval = scan_interval_minutes * 60  # Convert to seconds
         self.max_positions = getattr(config, "mm_max_positions", MAX_MM_POSITIONS)
 
+        # Tunable parameters (overridable via settings page)
+        self.risk_pct = RISK_PER_TRADE_PCT
+        self.leverage = 10
+        self.min_rr = MIN_RR_AGGRESSIVE
+        self.min_confluence = MIN_CONFLUENCE_PCT
+        self.min_formation_quality = MIN_FORMATION_QUALITY
+        self.max_sl_pct = MAX_SL_DISTANCE_PCT
+
         # MM Method modules
         self.session_analyzer = MMSessionAnalyzer()
         self.ema_framework = EMAFramework()
@@ -236,6 +245,19 @@ class MMEngine:
                         self.scan_interval = float(mm_settings["mm_scan_interval"]) * 60
                     if "mm_cooldown_hours" in mm_settings:
                         self._cooldown_hours = float(mm_settings["mm_cooldown_hours"])
+                    if "mm_risk_pct" in mm_settings:
+                        self.risk_pct = float(mm_settings["mm_risk_pct"])
+                        self.risk_calculator = MMRiskCalculator(risk_per_trade=self.risk_pct / 100)
+                    if "mm_leverage" in mm_settings:
+                        self.leverage = int(mm_settings["mm_leverage"])
+                    if "mm_min_rr" in mm_settings:
+                        self.min_rr = float(mm_settings["mm_min_rr"])
+                    if "mm_min_confluence" in mm_settings:
+                        self.min_confluence = float(mm_settings["mm_min_confluence"])
+                    if "mm_min_formation_quality" in mm_settings:
+                        self.min_formation_quality = float(mm_settings["mm_min_formation_quality"])
+                    if "mm_max_sl_pct" in mm_settings:
+                        self.max_sl_pct = float(mm_settings["mm_max_sl_pct"])
                     logger.info("mm_engine_restored_settings",
                                 scanning_active=self._scanning_active,
                                 max_positions=self.max_positions,
@@ -270,6 +292,16 @@ class MMEngine:
                 orig_qty = t.get("original_quantity") or t.get("entry_quantity", 0)
                 remain_qty = t.get("remaining_quantity") or orig_qty
                 closed_pct = 1.0 - (remain_qty / orig_qty) if orig_qty > 0 else 0.0
+                # Restore L2/L3 targets from tp_tiers JSON
+                tp_l2, tp_l3 = 0.0, 0.0
+                raw_tiers = t.get("tp_tiers")
+                if raw_tiers:
+                    try:
+                        tiers = json.loads(raw_tiers) if isinstance(raw_tiers, str) else raw_tiers
+                        tp_l2 = float(tiers.get("l2", 0))
+                        tp_l3 = float(tiers.get("l3", 0))
+                    except (json.JSONDecodeError, TypeError, AttributeError):
+                        pass
                 self.positions[symbol] = MMPosition(
                     trade_id=str(t["id"]),
                     symbol=symbol,
@@ -281,7 +313,10 @@ class MMEngine:
                     partial_closed_pct=closed_pct,
                     entry_time=datetime.fromisoformat(t["entry_time"]) if t.get("entry_time") else datetime.now(timezone.utc),
                     cost_usd=float(t.get("entry_cost_usd", 0)),
+                    margin_used=float(t.get("margin_used") or 0),
                     target_l1=float(t.get("take_profit", 0)),
+                    target_l2=tp_l2,
+                    target_l3=tp_l3,
                     entry_reason=t.get("entry_reason", ""),
                     formation_type=t.get("mm_formation", ""),
                     confluence_grade=t.get("mm_confluence_grade", ""),
@@ -489,8 +524,8 @@ class MMEngine:
 
         best_formation = formations[0]
 
-        if best_formation.quality_score < MIN_FORMATION_QUALITY:
-            logger.info("mm_reject_low_formation_quality", symbol=symbol, quality=best_formation.quality_score, min_required=MIN_FORMATION_QUALITY)
+        if best_formation.quality_score < self.min_formation_quality:
+            logger.info("mm_reject_low_formation_quality", symbol=symbol, quality=best_formation.quality_score, min_required=self.min_formation_quality)
             return None
 
         # Level tracking (1H) — count levels AFTER the formation, not all history.
@@ -590,8 +625,8 @@ class MMEngine:
 
         # Check SL distance isn't too wide (formation structure too large to trade)
         sl_distance_pct = abs(entry_price - sl_price) / entry_price * 100
-        if sl_distance_pct > MAX_SL_DISTANCE_PCT:
-            logger.info("mm_reject_sl_too_wide", symbol=symbol, sl_distance_pct=round(sl_distance_pct, 2), max=MAX_SL_DISTANCE_PCT)
+        if sl_distance_pct > self.max_sl_pct:
+            logger.info("mm_reject_sl_too_wide", symbol=symbol, sl_distance_pct=round(sl_distance_pct, 2), max=self.max_sl_pct)
             return None
 
         # Targets from target analyzer
@@ -619,16 +654,16 @@ class MMEngine:
         rr = reward / risk
 
         # If L1 target gives poor R:R, try L2 as the primary target
-        if rr < MIN_RR_AGGRESSIVE and t_l2 and self._is_valid_target(t_l2, trade_direction, entry_price):
+        if rr < self.min_rr and t_l2 and self._is_valid_target(t_l2, trade_direction, entry_price):
             reward_l2 = abs(t_l2 - entry_price)
             rr_l2 = reward_l2 / risk
-            if rr_l2 >= MIN_RR_AGGRESSIVE:
+            if rr_l2 >= self.min_rr:
                 logger.info("mm_target_upgraded_to_l2", symbol=symbol, rr_l1=round(rr, 2), rr_l2=round(rr_l2, 2))
                 t_l1 = t_l2  # Use L2 as the effective target
                 rr = rr_l2
 
-        if rr < MIN_RR_AGGRESSIVE:
-            logger.info("mm_reject_low_rr", symbol=symbol, rr=round(rr, 2), min_required=MIN_RR_AGGRESSIVE, entry=entry_price, sl=sl_price, t1=t_l1)
+        if rr < self.min_rr:
+            logger.info("mm_reject_low_rr", symbol=symbol, rr=round(rr, 2), min_required=self.min_rr, entry=entry_price, sl=sl_price, t1=t_l1)
             return None
 
         # Confluence scoring
@@ -675,8 +710,8 @@ class MMEngine:
         confluence_result = self.confluence_scorer.score(mm_ctx)
 
         # Check confluence meets minimum
-        if confluence_result.score_pct < MIN_CONFLUENCE_PCT:
-            logger.info("mm_reject_low_confluence", symbol=symbol, score=confluence_result.score_pct, min_required=MIN_CONFLUENCE_PCT, formation=best_formation.type)
+        if confluence_result.score_pct < self.min_confluence:
+            logger.info("mm_reject_low_confluence", symbol=symbol, score=confluence_result.score_pct, min_required=self.min_confluence, formation=best_formation.type)
             return None
 
         # Bug 1: Retest conditions — course requires 2+ of 4 retest conditions met
@@ -805,6 +840,7 @@ class MMEngine:
         # Log to database first to get the DB-generated id
         trade_id = str(uuid4())  # valid UUID fallback if DB insert fails
         risk_usd = abs(fill_price - signal.stop_loss) * result.filled_quantity
+        margin = pos_result.position_size_usd / pos_result.recommended_leverage
         try:
             db_row = await self.repo.insert_trade({
                 "symbol": signal.symbol,
@@ -815,6 +851,8 @@ class MMEngine:
                 "remaining_quantity": result.filled_quantity,
                 "stop_loss": signal.stop_loss,
                 "take_profit": signal.target_l1,
+                "tp_tiers": json.dumps({"l2": signal.target_l2, "l3": signal.target_l3}),
+                "margin_used": round(margin, 2),
                 "entry_cost_usd": cost_usd,
                 "risk_usd": round(risk_usd, 2),
                 "leverage": getattr(self.config, 'markets', {}).get('crypto', None) and self.config.markets['crypto'].leverage or 10,
@@ -844,7 +882,7 @@ class MMEngine:
             stop_loss=signal.stop_loss,
             current_level=0,
             cost_usd=cost_usd,
-            margin_used=pos_result.position_size_usd / pos_result.recommended_leverage,
+            margin_used=margin,
             target_l1=signal.target_l1,
             target_l2=signal.target_l2,
             target_l3=signal.target_l3,
@@ -946,6 +984,21 @@ class MMEngine:
             if candles_1h is not None:
                 self._tighten_sl(pos, new_level, candles_1h)
 
+            # Bug 4: Board meeting detection after level advance (logging only for now)
+            # Check BEFORE updating pos.current_level so the condition fires.
+            if candles_1h is not None and new_level in (1, 2):
+                direction_str = "bullish" if is_long else "bearish"
+                bm_detection = self.board_meeting_detector.detect(candles_1h, level_direction=direction_str)
+                if bm_detection.detected:
+                    logger.info("mm_board_meeting_detected", symbol=symbol,
+                                level_before=new_level, bm_type=bm_detection.bm_type,
+                                duration=bm_detection.duration_candles,
+                                stop_hunt=bm_detection.stop_hunt_detected,
+                                has_entry=bm_detection.entry is not None,
+                                fib_entry=bm_detection.entry.entry_price if bm_detection.entry else None,
+                                fib_sl=bm_detection.entry.stop_loss if bm_detection.entry else None,
+                                fib_rr=bm_detection.entry.risk_reward if bm_detection.entry else None)
+
             pos.current_level = new_level
 
             # Persist level advance + SL change to DB
@@ -956,20 +1009,6 @@ class MMEngine:
                 })
             except Exception as e:
                 logger.debug("mm_level_db_update_failed", error=str(e))
-
-        # Bug 4: Board meeting detection after level advance (logging only for now)
-        if new_level > pos.current_level and candles_1h is not None and new_level in (1, 2):
-            direction_str = "bullish" if is_long else "bearish"
-            bm_detection = self.board_meeting_detector.detect(candles_1h, level_direction=direction_str)
-            if bm_detection.detected:
-                logger.info("mm_board_meeting_detected", symbol=symbol,
-                            level_before=new_level, bm_type=bm_detection.bm_type,
-                            duration=bm_detection.duration_candles,
-                            stop_hunt=bm_detection.stop_hunt_detected,
-                            has_entry=bm_detection.entry is not None,
-                            fib_entry=bm_detection.entry.entry_price if bm_detection.entry else None,
-                            fib_sl=bm_detection.entry.stop_loss if bm_detection.entry else None,
-                            fib_rr=bm_detection.entry.risk_reward if bm_detection.entry else None)
 
         # Check for Stopping Volume Candle at Level 3
         if new_level >= 3 and level_analysis and level_analysis.svc and level_analysis.svc.detected:

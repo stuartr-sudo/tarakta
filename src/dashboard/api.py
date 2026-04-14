@@ -132,6 +132,20 @@ def create_router(repo: Repository) -> APIRouter:
                 mm.scan_interval = parsed["mm_scan_interval"] * 60
             if "mm_cooldown_hours" in parsed:
                 mm._cooldown_hours = parsed["mm_cooldown_hours"]
+            if "mm_risk_pct" in parsed:
+                mm.risk_pct = parsed["mm_risk_pct"]
+                from src.strategy.mm_risk import MMRiskCalculator
+                mm.risk_calculator = MMRiskCalculator(risk_per_trade=mm.risk_pct / 100)
+            if "mm_leverage" in parsed:
+                mm.leverage = parsed["mm_leverage"]
+            if "mm_min_rr" in parsed:
+                mm.min_rr = parsed["mm_min_rr"]
+            if "mm_min_confluence" in parsed:
+                mm.min_confluence = parsed["mm_min_confluence"]
+            if "mm_min_formation_quality" in parsed:
+                mm.min_formation_quality = parsed["mm_min_formation_quality"]
+            if "mm_max_sl_pct" in parsed:
+                mm.max_sl_pct = parsed["mm_max_sl_pct"]
 
         logger.info("mm_settings_saved", settings=parsed)
         return {"success": True, "saved": parsed}
