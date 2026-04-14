@@ -305,19 +305,17 @@ class MMEngine:
         self._running = False
 
     async def get_status(self) -> dict:
-        """Return a status snapshot for the dashboard API."""
+        """Return a status snapshot for the dashboard API.
+
+        Uses cached prices only — no network calls. The main cycle
+        updates _last_prices via fetch_ticker during _manage_position.
+        This keeps the API fast and avoids cross-thread event loop issues.
+        """
         session = self.session_analyzer.get_current_session()
         positions_out = []
         total_unrealized = 0.0
         for pos in self.positions.values():
-            # Use cached price as fallback so P&L doesn't blank out during dead zone
             current_price = self._last_prices.get(pos.symbol, pos.entry_price)
-            try:
-                ticker = await self.exchange.fetch_ticker(pos.symbol)
-                current_price = float(ticker.get("last", current_price))
-                self._last_prices[pos.symbol] = current_price
-            except Exception:
-                pass  # keep cached price
             if pos.direction == "long":
                 unrealized = (current_price - pos.entry_price) * pos.quantity
             else:
