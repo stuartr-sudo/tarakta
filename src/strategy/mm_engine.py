@@ -140,6 +140,9 @@ class MMSignal:
     # Course lesson 49 Refund Zone — only 2nd-peak aggressive entries use it
     entry_type: str = "conservative"  # "aggressive" (2nd-peak) or "conservative" (post-L1)
     peak2_wick_price: float = 0.0     # For W: 2nd-peak low wick; for M: 2nd-peak high wick
+    # Course lessons 20, 23 — SVC "Trapped Traders" zone for post-entry invalidation
+    svc_high: float = 0.0
+    svc_low: float = 0.0
 
 
 @dataclass
@@ -178,6 +181,15 @@ class MMPosition:
     original_stop_loss: float = 0.0      # Immutable original SL for monotonic-SL enforcement
     sl_moved_to_breakeven: bool = False  # Track breakeven move after L2 starts
     sl_moved_under_50ema: bool = False   # Track "SL under 50 EMA once L2 running"
+
+    # Course lesson 20, 23 — Stopping Volume Candle "Trapped Traders zone".
+    # "We always want to see price fail to get back to the wick of a stopping
+    # volume candle." If a 1H CLOSE returns into [svc_low, svc_high], the
+    # formation is invalidated and we cut the position.
+    svc_high: float = 0.0   # Top of the SVC range (body+wick)
+    svc_low: float = 0.0    # Bottom of the SVC range
+    # Track whether we've already taken the 200-EMA hammer partial (C6)
+    took_200ema_partial: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +252,13 @@ class MMEngine:
         from src.strategy.mm_data_feeds import DataFeedRegistry
         self.data_feeds = getattr(config, "mm_data_feeds", None) or DataFeedRegistry()
 
+        # Course G1 (lesson 55): Linda Trade multi-TF level cascade tracker.
+        # Tracks per-symbol 3-level cycle completion across 15m → 1h → 4h →
+        # 1d → 1w. Fed from `_analyze_pair` / `_manage_position` when a
+        # level is observed.
+        from src.strategy.mm_linda import LindaTracker
+        self.linda = LindaTracker()
+
         # Course E1 (lesson 54): "if you have $10K OKX and $10K Binance,
         # 1% of $20K" — multi-exchange combined balance for 1% risk.
         # Expect config.mm_extra_exchanges: list of additional exchange clients
@@ -292,6 +311,124 @@ class MMEngine:
         reached, not just the hard gates.
         """
         self._scan_stage_counts[stage] = self._scan_stage_counts.get(stage, 0) + 1
+
+    def _try_board_meeting_formation(self, candles_1h):
+        """Course lesson 22: board-meeting M/W as an entry trigger.
+
+        "within a board meeting you should be looking for either stop hunt,
+        for your indication that price is going to break to the next level,
+        or an M or W."
+
+        Uses the existing BoardMeetingDetector; when it yields a concrete
+        `entry` suggestion we synthesize a Formation with variant='board_meeting'.
+        """
+        from src.strategy.mm_formations import Formation
+
+        if candles_1h is None or candles_1h.empty or len(candles_1h) < 30:
+            return None
+
+        # Try both directions — the BM detector is direction-sensitive
+        for direction in ("bullish", "bearish"):
+            try:
+                bm = self.board_meeting_detector.detect(candles_1h, level_direction=direction)
+            except Exception:
+                continue
+            if not bm.detected or bm.entry is None:
+                continue
+            # Need at least 2 retracement candidates in the BM to call it "M/W-shaped"
+            entry = bm.entry
+            if entry.risk_reward <= 0 or entry.entry_price <= 0:
+                continue
+            # Map direction → W (bullish long) / M (bearish short)
+            ftype = "W" if direction == "bullish" else "M"
+            # peak1/peak2 prices — approximate from BM bounds
+            p1 = float(entry.entry_price)
+            p2 = float(entry.entry_price)
+            trough = float(entry.target) if entry.target else p1
+            return Formation(
+                type=ftype,
+                variant="board_meeting",
+                peak1_idx=max(0, bm.start_idx) if bm.start_idx >= 0 else 0,
+                peak1_price=p1,
+                peak2_idx=max(0, bm.end_idx) if bm.end_idx >= 0 else len(candles_1h) - 1,
+                peak2_price=p2,
+                trough_idx=max(0, bm.start_idx) if bm.start_idx >= 0 else 0,
+                trough_price=trough,
+                direction=direction,
+                quality_score=float(entry.confidence),
+                at_key_level=True,
+            )
+        return None
+
+    def _try_200ema_rejection_formation(self, candles_1h, candles_4h, candles_15m):
+        """Course lesson 18 alternative #2: 200 EMA rejection trade.
+
+        "Besides these M or W replacement trigger, there is one more. And
+        this is a 200 EMA rejection trade. The 200 EMA rejection trade is
+        the 2nd setup in the weekly cycle."
+
+        Triggers when:
+          - Price is currently within 1% of the 4H 200 EMA
+          - The last 15m bar is a hammer (long setup) or inverted hammer (short)
+          - The hammer/inverted hammer is the recent reversal candle
+
+        Returns a synthesized Formation object (treated as "200ema_rejection"
+        variant) or ``None`` if criteria not met.
+        """
+        from src.strategy.mm_formations import Formation, _is_hammer, _is_inverted_hammer
+
+        if candles_1h is None or candles_1h.empty or len(candles_1h) < 5:
+            return None
+        if candles_15m is None or candles_15m.empty or len(candles_15m) < 3:
+            return None
+
+        try:
+            # Prefer 4H 200 EMA (macro-level rejection signal per lesson 24).
+            if candles_4h is not None and not candles_4h.empty and len(candles_4h) >= 200:
+                ema200 = candles_4h["close"].ewm(span=200, adjust=False).mean()
+                ema200_now = float(ema200.iloc[-1])
+            else:
+                # Fall back to 1H 200 EMA
+                if len(candles_1h) < 200:
+                    return None
+                ema200 = candles_1h["close"].ewm(span=200, adjust=False).mean()
+                ema200_now = float(ema200.iloc[-1])
+
+            last_price = float(candles_1h.iloc[-1]["close"])
+            if ema200_now <= 0 or last_price <= 0:
+                return None
+
+            # Within 1% of 200 EMA?
+            distance_pct = abs(last_price - ema200_now) / last_price
+            if distance_pct > 0.01:
+                return None
+
+            # Check last 15m candle for hammer (price approached from above → bullish bounce)
+            # or inverted hammer (price approached from below → bearish rejection)
+            recent_15m = candles_15m.tail(4)
+            for _, row in recent_15m.iloc[::-1].iterrows():
+                o, h, low, c = float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"])
+                # Hammer = bullish reversal (W-style) — typically when price dropped to 200 EMA and bounced
+                if _is_hammer(o, h, low, c) and last_price > ema200_now:
+                    return Formation(
+                        type="W", variant="200ema_rejection",
+                        peak1_idx=len(candles_1h) - 2, peak1_price=ema200_now,
+                        peak2_idx=len(candles_1h) - 1, peak2_price=ema200_now,
+                        trough_idx=len(candles_1h) - 1, trough_price=low,
+                        direction="bullish", quality_score=0.5, at_key_level=True,
+                    )
+                # Inverted hammer = bearish reversal (M-style) — price rallied to 200 EMA and got rejected
+                if _is_inverted_hammer(o, h, low, c) and last_price < ema200_now:
+                    return Formation(
+                        type="M", variant="200ema_rejection",
+                        peak1_idx=len(candles_1h) - 2, peak1_price=ema200_now,
+                        peak2_idx=len(candles_1h) - 1, peak2_price=ema200_now,
+                        trough_idx=len(candles_1h) - 1, trough_price=h,
+                        direction="bearish", quality_score=0.5, at_key_level=True,
+                    )
+            return None
+        except Exception:
+            return None
 
     def _try_three_hits_formation(self, candles_1h, cycle_state):
         """Course lesson-18 alternative: 3 hits at HOW/LOW at Level 3 replace M/W.
@@ -812,16 +949,40 @@ class MMEngine:
         if formations:
             best_formation = formations[0]
         else:
-            # Course lesson 18 alternative: 3 hits at HOW/LOW at Level 3
+            # Course lesson 18 alternative #1: 3 hits at HOW/LOW at Level 3
             # "replace the M or W". Synthesize a Formation-shaped object so
             # the rest of the pipeline works uniformly.
             best_formation = self._try_three_hits_formation(candles_1h, cycle_state)
             if best_formation is None:
+                # Course lesson 18 alternative #2: 200 EMA rejection trade.
+                best_formation = self._try_200ema_rejection_formation(
+                    candles_1h=candles_1h,
+                    candles_4h=candles_4h,
+                    candles_15m=candles_15m,
+                )
+                if best_formation is not None:
+                    logger.info("mm_200ema_rejection_synthesized",
+                                symbol=symbol, type=best_formation.type,
+                                variant=best_formation.variant)
+            else:
+                logger.info("mm_three_hits_formation_synthesized",
+                            symbol=symbol, type=best_formation.type,
+                            variant=best_formation.variant,
+                            level=cycle_state.how if best_formation.type == "M" else cycle_state.low)
+
+            # Course lesson 22 alternative #3: board-meeting M/W.
+            # "Within a board meeting you should be looking for either stop
+            # hunt... or an M or W." Detector already runs — if it has a
+            # concrete entry suggestion, use it.
+            if best_formation is None:
+                best_formation = self._try_board_meeting_formation(candles_1h)
+                if best_formation is not None:
+                    logger.info("mm_board_meeting_formation_synthesized",
+                                symbol=symbol, type=best_formation.type,
+                                variant=best_formation.variant)
+
+            if best_formation is None:
                 return self._reject("no_formation", symbol)
-            logger.info("mm_three_hits_formation_synthesized",
-                        symbol=symbol, type=best_formation.type,
-                        variant=best_formation.variant,
-                        level=cycle_state.how if best_formation.type == "M" else cycle_state.low)
 
         self._advance("formation_found")
 
@@ -835,6 +996,26 @@ class MMEngine:
             ):
                 return self._reject("final_damage_no_hammer_15m", symbol,
                                     formation_type=best_formation.type)
+
+        # Course B1 (lesson 20): "3 inside right-side hits" requirement.
+        # After the Stopping Volume Candle (1st MM appearance) the market maker
+        # must show up THREE times on the inside right side of the formation
+        # — visible only by dropping to a lower timeframe. We enforce this on
+        # standard formations; relax for synthetic variants where the concept
+        # doesn't cleanly apply (three_hits_*, board_meeting — which the course
+        # itself says "don't follow the same criteria").
+        if best_formation.variant in ("standard", "multi_session", "final_damage"):
+            if candles_1h is not None and candles_15m is not None:
+                _lookback_start = max(0, len(candles_1h) - 40)
+                if not self._check_inside_hits_15m(
+                    best_formation=best_formation,
+                    candles_1h=candles_1h,
+                    candles_15m=candles_15m,
+                    lookback_start=_lookback_start,
+                ):
+                    return self._reject("no_inside_hits_15m", symbol,
+                                        formation_type=best_formation.type,
+                                        variant=best_formation.variant)
 
         # Course-faithful change (2026-04): the raw course (lesson 20) does not
         # score formation "quality" — an M/W either satisfies its three MM
@@ -853,6 +1034,20 @@ class MMEngine:
         formation_abs_idx = lookback_start + best_formation.peak2_idx
         candles_post_formation = candles_1h.iloc[formation_abs_idx:]
         level_analysis = self.level_tracker.analyze(candles_post_formation, direction=direction)
+
+        # Feed the Linda multi-TF level tracker (course G1, lesson 55).
+        # We record the 1H level we're seeing — cascades automatically tick
+        # higher TFs when a 3-level cycle completes.
+        try:
+            self.linda.record(
+                symbol=symbol,
+                timeframe="1h",
+                level=int(level_analysis.current_level),
+                direction=direction,
+                now=now,
+            )
+        except Exception:
+            pass  # Telemetry only — don't break scan on Linda errors
 
         # Don't enter if Level 3+ already reached (expect reversal)
         if level_analysis.current_level >= 3:
@@ -923,7 +1118,19 @@ class MMEngine:
                                     trade_dir=trade_direction, fmwb_dir=weekend.fmwb.direction,
                                     real_dir=real_direction)
         else:
-            logger.info("mm_warn_no_weekly_bias", symbol=symbol, direction=trade_direction)
+            # Course C2 (lesson 15): "if you don't see the false breakout in
+            # your weekend box, also look for W's and Ms. Look for W's and
+            # Ms if there is no spike out of the weekend box." The absence of
+            # an FMWB doesn't invalidate a valid M/W — we explicitly allow
+            # the trade through. Log for telemetry.
+            if weekend.box and weekend.box.detected:
+                logger.info("mm_weekend_box_no_fmwb_accepting_mw",
+                            symbol=symbol, direction=trade_direction,
+                            formation_variant=best_formation.variant,
+                            box_high=float(getattr(weekend.box, "box_high", 0.0)),
+                            box_low=float(getattr(weekend.box, "box_low", 0.0)))
+            else:
+                logger.info("mm_warn_no_weekly_bias", symbol=symbol, direction=trade_direction)
 
         self._advance("direction_ok")
 
@@ -1141,6 +1348,26 @@ class MMEngine:
         except Exception:
             peak2_wick_price = float(best_formation.peak2_price)
 
+        # Course B4 (lessons 20, 23): capture SVC zone for post-entry
+        # "Trapped Traders" invalidation check in _manage_position.
+        # Use the Stopping Volume Candle if detected, else fall back to the
+        # 1st peak candle as a reasonable proxy.
+        svc_high = svc_low = 0.0
+        try:
+            if level_analysis.svc and level_analysis.svc.detected:
+                # mm_levels SVC carries index + high/low
+                svc_high = float(getattr(level_analysis.svc, "candle_high", 0.0))
+                svc_low = float(getattr(level_analysis.svc, "candle_low", 0.0))
+            if svc_high == 0.0 or svc_low == 0.0:
+                # Fallback: the 1st-peak candle's full range
+                peak1_abs_idx = lookback_start + best_formation.peak1_idx
+                if 0 <= peak1_abs_idx < len(candles_1h):
+                    p1 = candles_1h.iloc[peak1_abs_idx]
+                    svc_high = float(p1["high"])
+                    svc_low = float(p1["low"])
+        except Exception:
+            svc_high = svc_low = 0.0
+
         # Build signal
         signal = MMSignal(
             symbol=symbol,
@@ -1164,6 +1391,8 @@ class MMEngine:
             weekend_bias=weekend.bias,
             entry_type=entry_type,
             peak2_wick_price=peak2_wick_price,
+            svc_high=svc_high,
+            svc_low=svc_low,
             reason=f"{best_formation.type} formation ({best_formation.variant}) "
                    f"grade={confluence_result.grade} R:R={rr:.1f} "
                    f"phase={cycle_state.phase} entry={entry_type}",
@@ -1325,6 +1554,8 @@ class MMEngine:
             entry_type=getattr(signal, "entry_type", "conservative"),
             peak2_wick_price=getattr(signal, "peak2_wick_price", 0.0),
             original_stop_loss=signal.stop_loss,
+            svc_high=getattr(signal, "svc_high", 0.0),
+            svc_low=getattr(signal, "svc_low", 0.0),
         )
 
         self.positions[signal.symbol] = position
@@ -1356,6 +1587,25 @@ class MMEngine:
             self._last_prices[symbol] = current_price
         except Exception:
             return
+
+        # Course B4 (lessons 20, 23): SVC "Trapped Traders" zone invalidation.
+        # If a 1H candle CLOSES back inside the Stopping Volume Candle range,
+        # the formation thesis is invalidated — cut the trade before SL hits.
+        # Only enforced pre-L1 (once price has run past L1 the SVC check is
+        # no longer relevant; the move is in progress).
+        if pos.current_level == 0 and pos.svc_high > 0 and pos.svc_low > 0:
+            try:
+                candles_short = await self.candle_manager.get_candles(symbol, "1h", limit=5)
+                if candles_short is not None and not candles_short.empty and len(candles_short) >= 2:
+                    last_close = float(candles_short.iloc[-2]["close"])
+                    if pos.svc_low <= last_close <= pos.svc_high:
+                        logger.info("mm_svc_wick_return_cut", symbol=symbol,
+                                    last_close=last_close,
+                                    svc_high=pos.svc_high, svc_low=pos.svc_low)
+                        await self._close_position(pos, current_price, "svc_wick_return")
+                        return
+            except Exception as e:
+                logger.debug("mm_svc_check_failed", symbol=symbol, error=str(e))
 
         # Course-faithful: REFUND ZONE check (lesson 49).
         # Only for 2nd-peak aggressive entries. If price CLOSES past the 2nd
@@ -1478,6 +1728,42 @@ class MMEngine:
             if pos.partial_closed_pct < 1.0:
                 await self._close_position(pos, current_price, "svc_level_3")
                 return
+
+        # Course C6 (lessons 10, 24, 48): 200 EMA rejection with hammer /
+        # inverted hammer = partial TP trigger. "Usually it will then make a
+        # run for the 200 and reject there. That rejection starts to pull
+        # back into the board meeting."
+        # Only fires once per position (took_200ema_partial guard).
+        if not pos.took_200ema_partial and candles_1h is not None and len(candles_1h) >= 200:
+            try:
+                ema200 = candles_1h["close"].ewm(span=200, adjust=False).mean()
+                ema200_now = float(ema200.iloc[-1])
+                last = candles_1h.iloc[-2] if len(candles_1h) >= 2 else None
+                if last is not None and ema200_now > 0:
+                    o = float(last["open"])
+                    h = float(last["high"])
+                    low = float(last["low"])
+                    c = float(last["close"])
+                    # Distance to 200 EMA as % of price
+                    dist_pct = abs(current_price - ema200_now) / current_price
+                    near_200ema = dist_pct < 0.015  # within 1.5%
+                    if near_200ema:
+                        from src.strategy.mm_formations import _is_hammer, _is_inverted_hammer
+                        rejected = False
+                        # Long position → look for hammer at 200 EMA (support bounce)
+                        if pos.direction == "long" and _is_hammer(o, h, low, c):
+                            rejected = True
+                        # Short position → look for inverted hammer at 200 EMA
+                        elif pos.direction == "short" and _is_inverted_hammer(o, h, low, c):
+                            rejected = True
+                        if rejected:
+                            logger.info("mm_200ema_hammer_partial", symbol=symbol,
+                                        ema_200=ema200_now, price=current_price,
+                                        direction=pos.direction)
+                            await self._take_partial(pos, level=max(pos.current_level, 1), current_price=current_price)
+                            pos.took_200ema_partial = True
+            except Exception as e:
+                logger.debug("mm_200ema_partial_check_failed", symbol=symbol, error=str(e))
 
         # Check Friday UK session exit
         session = self.session_analyzer.get_current_session()
@@ -1630,6 +1916,71 @@ class MMEngine:
             return float(ema.iloc[-1])
         except Exception:
             return None
+
+    def _check_inside_hits_15m(
+        self,
+        best_formation,
+        candles_1h: pd.DataFrame,
+        candles_15m: pd.DataFrame,
+        lookback_start: int,
+    ) -> bool:
+        """Course B1 (lesson 20): verify ≥3 inducement candles on the 15m
+        timeframe between the pullback valley and the 2nd peak.
+
+        For M formations we count GREEN candles trying to push UP
+        (inducing longs into the 2nd peak). For W formations we count RED
+        candles trying to push DOWN (inducing shorts into the 2nd peak).
+
+        Returns False only when we have enough 15m data to decide AND the
+        count < 3. If 15m data is insufficient, return True (fail-open —
+        don't block on missing data, matching the course's "drop a timeframe"
+        is an inspection tool, not a disqualifier when the tool is missing).
+        """
+        try:
+            if candles_15m is None or candles_15m.empty or len(candles_15m) < 4:
+                return True  # fail-open on missing 15m data
+
+            # Resolve peak1/peak2 absolute indices on the 1H chart
+            peak1_abs = lookback_start + best_formation.peak1_idx
+            peak2_abs = lookback_start + best_formation.peak2_idx
+            if peak1_abs >= len(candles_1h) or peak2_abs >= len(candles_1h):
+                return True
+
+            trough_abs = lookback_start + best_formation.trough_idx
+            trough_abs = max(peak1_abs, min(trough_abs, peak2_abs))
+
+            # Get the timestamp window (inside right-side = trough → peak2)
+            try:
+                ts_start = candles_1h.index[trough_abs]
+                ts_end = candles_1h.index[peak2_abs]
+            except Exception:
+                return True
+
+            # Select 15m candles in this window
+            try:
+                m15_window = candles_15m.loc[ts_start:ts_end]
+            except Exception:
+                return True
+
+            if m15_window.empty or len(m15_window) < 3:
+                # Not enough 15m candles in the inside-right-side window
+                return True  # fail-open
+
+            opens = m15_window["open"].values
+            closes = m15_window["close"].values
+
+            if best_formation.type.upper() == "M":
+                # M = bearish formation. Looking for 3 GREEN (close > open)
+                # candles trying to induce longs before the reversal.
+                inducement = sum(1 for o, c in zip(opens, closes) if c > o)
+            else:
+                # W = bullish formation. Looking for 3 RED (close < open)
+                # candles trying to induce shorts before the reversal.
+                inducement = sum(1 for o, c in zip(opens, closes) if c < o)
+
+            return inducement >= 3
+        except Exception:
+            return True  # fail-open on unexpected errors
 
     async def _combined_balance(self, primary_balance: float) -> float:
         """Course E1 (lesson 54): sum USDT balance across ALL configured
