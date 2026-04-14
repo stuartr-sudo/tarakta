@@ -467,7 +467,7 @@ class MMEngine:
                     if signal:
                         signals.append(signal)
                 except Exception as e:
-                    logger.debug("mm_analyze_pair_error", symbol=pair, error=str(e))
+                    logger.warning("mm_analyze_pair_error", symbol=pair, error=str(e), error_type=type(e).__name__)
 
             logger.info(
                 "mm_scan_summary",
@@ -547,6 +547,9 @@ class MMEngine:
         # peak2_idx is relative to the last DEFAULT_LOOKBACK (40) candles,
         # so translate to the full DataFrame index.
         direction = best_formation.direction or "bullish"
+        # Derive trade_direction early — used below in weekly bias gating before
+        # SL/target calc redefines it. Must match: bullish (W) → long, bearish (M) → short.
+        trade_direction = "long" if direction == "bullish" else "short"
         lookback_start = max(0, len(candles_1h) - 40)  # same window formation detector used
         formation_abs_idx = lookback_start + best_formation.peak2_idx
         candles_post_formation = candles_1h.iloc[formation_abs_idx:]
