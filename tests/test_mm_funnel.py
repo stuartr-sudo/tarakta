@@ -167,3 +167,67 @@ def test_mock_scan_cycle_funnel_totals() -> None:
     sorted_rejects = dict(sorted(engine._scan_reject_counts.items(), key=lambda kv: -kv[1]))
     assert list(sorted_rejects.keys()) == ["no_formation", "against_weekly_bias", "low_rr"]
     assert list(sorted_rejects.values()) == [5, 3, 1]
+
+
+# ---------------------------------------------------------------------------
+# last_funnel — the snapshot the dashboard reads via get_status()
+# ---------------------------------------------------------------------------
+
+
+def test_last_funnel_initialized_none(engine: MMEngine) -> None:
+    """Fresh engine has no funnel yet — dashboard should render the empty state."""
+    assert hasattr(engine, "last_funnel")
+    assert engine.last_funnel is None
+
+
+def test_last_funnel_shape_when_populated(engine: MMEngine) -> None:
+    """Simulate what the scan loop stores and verify every key the dashboard needs."""
+    # Match the exact dict the scan loop builds (see mm_engine.py _cycle)
+    engine.last_funnel = {
+        "cycle": 14,
+        "timestamp": "2026-04-14T10:03:02.375557+00:00",
+        "pairs_scanned": 67,
+        "signals_found": 0,
+        "rejected_total": 67,
+        "exceptions": 0,
+        "unaccounted": 0,
+        "rejects": {"no_formation": 43, "no_l1_target": 14, "sl_too_wide": 6},
+    }
+    f = engine.last_funnel
+    # Every key that mm.html reads must be present
+    for key in ("cycle", "timestamp", "pairs_scanned", "signals_found",
+                "rejected_total", "exceptions", "unaccounted", "rejects"):
+        assert key in f, f"dashboard contract: last_funnel must contain '{key}'"
+    # Sort invariant used by the UI bar chart
+    counts = list(f["rejects"].values())
+    assert counts == sorted(counts, reverse=True)
+
+
+@pytest.mark.asyncio
+async def test_get_status_includes_last_funnel_when_none(engine: MMEngine) -> None:
+    """get_status() must surface last_funnel=None on fresh boot (not missing key)."""
+    # No positions, no exchange calls needed
+    engine.positions = {}
+    # session_analyzer is a real instance from __init__; safe to call
+    status = await engine.get_status()
+    assert "last_funnel" in status, "/api/mm/status must expose last_funnel"
+    assert status["last_funnel"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_status_includes_last_funnel_when_set(engine: MMEngine) -> None:
+    """get_status() must pass through a populated last_funnel snapshot verbatim."""
+    engine.positions = {}
+    engine.last_funnel = {
+        "cycle": 7,
+        "timestamp": "2026-04-14T09:00:00+00:00",
+        "pairs_scanned": 67,
+        "signals_found": 0,
+        "rejected_total": 67,
+        "exceptions": 0,
+        "unaccounted": 0,
+        "rejects": {"no_formation": 50, "sl_too_wide": 17},
+    }
+    status = await engine.get_status()
+    assert status["last_funnel"] == engine.last_funnel
+    assert status["last_funnel"]["rejects"]["no_formation"] == 50

@@ -162,6 +162,60 @@
     </div>
 </div>
 
+<!-- Scan Funnel — live selectivity view -->
+<div class="panel" id="mm-funnel-panel">
+    <div class="panel-header">
+        <h2>Scan Funnel
+            <span id="mm-funnel-cycle-badge" class="badge" style="background:var(--teal-dim);color:var(--teal);">cycle --</span>
+            <span id="mm-funnel-time" class="badge" style="background:rgba(255,255,255,0.06);color:var(--text-muted);font-weight:normal;">awaiting first scan</span>
+        </h2>
+    </div>
+    <div class="panel-body">
+        <style>
+            .funnel-summary { display:grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap:8px; margin-bottom:12px; }
+            .funnel-summary .stat-card { padding:8px 10px; }
+            .funnel-summary .stat-label { font-size:10px; }
+            .funnel-summary .stat-value { font-size:1.1rem; }
+            .funnel-table { width:100%; border-collapse:collapse; font-size:12px; }
+            .funnel-table th, .funnel-table td { padding:6px 8px; text-align:left; border-bottom:1px solid var(--border); }
+            .funnel-table th { color:var(--text-muted); font-weight:600; font-size:11px; text-transform:uppercase; }
+            .funnel-table td.reason { font-family:monospace; color:var(--text-primary); }
+            .funnel-table td.count { text-align:right; font-variant-numeric: tabular-nums; font-weight:600; color:var(--teal); }
+            .funnel-table td.pct { text-align:right; color:var(--text-muted); font-variant-numeric: tabular-nums; }
+            .funnel-bar { position:relative; height:4px; background:rgba(0,229,212,0.08); border-radius:2px; overflow:hidden; margin-top:3px; }
+            .funnel-bar-fill { position:absolute; left:0; top:0; bottom:0; background:var(--teal); border-radius:2px; }
+        </style>
+        <div class="funnel-summary">
+            <div class="stat-card">
+                <div class="stat-label">Pairs Scanned</div>
+                <div class="stat-value" id="mm-funnel-pairs">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Signals Found</div>
+                <div class="stat-value" id="mm-funnel-signals">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Rejected</div>
+                <div class="stat-value" id="mm-funnel-rejected">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Exceptions</div>
+                <div class="stat-value" id="mm-funnel-exceptions">--</div>
+            </div>
+        </div>
+        <div id="mm-funnel-table-wrap">
+            <table class="funnel-table">
+                <thead>
+                    <tr><th>Rejection Reason</th><th style="text-align:right;">Count</th><th style="text-align:right;">% of scanned</th></tr>
+                </thead>
+                <tbody id="mm-funnel-tbody">
+                    <tr><td colspan="3" style="text-align:center;color:var(--text-muted);padding:16px;">Waiting for first scan to complete...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
 <!-- Closed MM Trades -->
 <div class="panel">
     <div class="panel-header">
@@ -360,6 +414,81 @@ function updateMMPage(data) {
         if (netEl) {
             netEl.textContent = (netPnl >= 0 ? '+' : '') + '$' + netPnl.toFixed(2);
             netEl.className = 'stat-value ' + (netPnl >= 0 ? 'positive' : 'negative');
+        }
+    }
+
+    // --- Scan Funnel ---
+    updateScanFunnel(data.last_funnel);
+}
+
+function updateScanFunnel(funnel) {
+    const cycleBadge = document.getElementById('mm-funnel-cycle-badge');
+    const timeBadge = document.getElementById('mm-funnel-time');
+    const pairsEl = document.getElementById('mm-funnel-pairs');
+    const signalsEl = document.getElementById('mm-funnel-signals');
+    const rejectedEl = document.getElementById('mm-funnel-rejected');
+    const exceptionsEl = document.getElementById('mm-funnel-exceptions');
+    const tbody = document.getElementById('mm-funnel-tbody');
+
+    if (!funnel) {
+        if (cycleBadge) cycleBadge.textContent = 'cycle --';
+        if (timeBadge) timeBadge.textContent = 'awaiting first scan';
+        if (pairsEl) pairsEl.textContent = '--';
+        if (signalsEl) signalsEl.textContent = '--';
+        if (rejectedEl) rejectedEl.textContent = '--';
+        if (exceptionsEl) exceptionsEl.textContent = '--';
+        if (tbody) tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--text-muted);padding:16px;">Waiting for first scan to complete...</td></tr>';
+        return;
+    }
+
+    if (cycleBadge) cycleBadge.textContent = 'cycle ' + (funnel.cycle ?? '--');
+
+    if (timeBadge) {
+        if (funnel.timestamp) {
+            const ageSec = Math.max(0, Math.floor((Date.now() - new Date(funnel.timestamp).getTime()) / 1000));
+            let ageStr;
+            if (ageSec < 60) ageStr = ageSec + 's ago';
+            else if (ageSec < 3600) ageStr = Math.floor(ageSec / 60) + 'm ' + (ageSec % 60) + 's ago';
+            else ageStr = Math.floor(ageSec / 3600) + 'h ' + Math.floor((ageSec % 3600) / 60) + 'm ago';
+            timeBadge.textContent = ageStr;
+        } else {
+            timeBadge.textContent = '';
+        }
+    }
+
+    if (pairsEl) pairsEl.textContent = funnel.pairs_scanned ?? 0;
+
+    if (signalsEl) {
+        const sigCount = funnel.signals_found ?? 0;
+        signalsEl.textContent = sigCount;
+        signalsEl.className = 'stat-value ' + (sigCount > 0 ? 'positive' : '');
+    }
+
+    if (rejectedEl) rejectedEl.textContent = funnel.rejected_total ?? 0;
+
+    if (exceptionsEl) {
+        const exCount = funnel.exceptions ?? 0;
+        exceptionsEl.textContent = exCount;
+        exceptionsEl.className = 'stat-value ' + (exCount > 0 ? 'negative' : '');
+    }
+
+    if (tbody) {
+        const rejects = funnel.rejects || {};
+        const entries = Object.entries(rejects).sort((a, b) => b[1] - a[1]);
+        const total = funnel.pairs_scanned || 1;
+        const maxCount = entries.length > 0 ? entries[0][1] : 1;
+        if (entries.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--text-muted);padding:16px;">No rejections this cycle (nothing scanned, or all scans in flight).</td></tr>';
+        } else {
+            tbody.innerHTML = entries.map(([reason, count]) => {
+                const pct = ((count / total) * 100).toFixed(1);
+                const barPct = ((count / maxCount) * 100).toFixed(1);
+                return `<tr>
+                    <td class="reason">${reason}<div class="funnel-bar"><div class="funnel-bar-fill" style="width:${barPct}%"></div></div></td>
+                    <td class="count">${count}</td>
+                    <td class="pct">${pct}%</td>
+                </tr>`;
+            }).join('');
         }
     }
 }

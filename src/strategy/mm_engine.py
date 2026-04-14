@@ -218,6 +218,8 @@ class MMEngine:
 
         # Per-cycle funnel counter — reset at start of each scan, reported in mm_scan_funnel
         self._scan_reject_counts: dict[str, int] = {}
+        # Last funnel snapshot surfaced to the dashboard (updated at end of each scan)
+        self.last_funnel: dict | None = None
 
         logger.info("mm_engine_initialized", scan_interval=scan_interval_minutes)
 
@@ -429,6 +431,7 @@ class MMEngine:
             "total_margin_used": round(total_margin, 2),
             "total_notional": round(total_notional, 2),
             "positions": positions_out,
+            "last_funnel": self.last_funnel,
         }
 
     async def _cycle(self) -> None:
@@ -489,6 +492,7 @@ class MMEngine:
             # Funnel summary — shows exactly where symbols dropped off this cycle
             rejected_total = sum(self._scan_reject_counts.values())
             unaccounted = len(pairs) - rejected_total - len(signals) - exceptions_raised
+            funnel_rejects = dict(sorted(self._scan_reject_counts.items(), key=lambda kv: -kv[1]))
             logger.info(
                 "mm_scan_funnel",
                 cycle=self.cycle_count,
@@ -497,8 +501,19 @@ class MMEngine:
                 rejected_total=rejected_total,
                 exceptions=exceptions_raised,
                 unaccounted=unaccounted,
-                rejects=dict(sorted(self._scan_reject_counts.items(), key=lambda kv: -kv[1])),
+                rejects=funnel_rejects,
             )
+            # Stash for dashboard — lets the UI render live selectivity per cycle
+            self.last_funnel = {
+                "cycle": self.cycle_count,
+                "timestamp": now.isoformat(),
+                "pairs_scanned": len(pairs),
+                "signals_found": len(signals),
+                "rejected_total": rejected_total,
+                "exceptions": exceptions_raised,
+                "unaccounted": unaccounted,
+                "rejects": funnel_rejects,
+            }
             # Keep mm_scan_summary for existing alerts/dashboards
             logger.info(
                 "mm_scan_summary",
