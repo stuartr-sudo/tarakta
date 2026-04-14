@@ -304,7 +304,14 @@ class MMEngine:
                 "partial_closed_pct": round(pos.partial_closed_pct * 100),
                 "trade_id": pos.trade_id,
                 "unrealized_pnl": round(unrealized, 4),
+                "quantity": pos.quantity,
+                "cost_usd": round(pos.cost_usd, 2),
+                "margin_used": round(pos.margin_used, 2),
+                "leverage": 10,
+                "target_l1": pos.target_l1,
             })
+        total_margin = sum(p.margin_used for p in self.positions.values())
+        total_notional = sum(p.cost_usd for p in self.positions.values())
         return {
             "scanning_active": self._scanning_active,
             "running": self._running,
@@ -313,6 +320,8 @@ class MMEngine:
             "session": session.session_name if session else "unknown",
             "is_weekend": session.is_weekend if session else False,
             "total_unrealized_pnl": round(total_unrealized, 4),
+            "total_margin_used": round(total_margin, 2),
+            "total_notional": round(total_notional, 2),
             "positions": positions_out,
         }
 
