@@ -180,6 +180,7 @@ class MMEngine:
         # State
         self.positions: dict[str, MMPosition] = {}
         self._cooldowns: dict[str, datetime] = {}  # symbol -> earliest re-entry time
+        self._cooldown_hours: float = SYMBOL_COOLDOWN_HOURS  # configurable via settings
         self._last_prices: dict[str, float] = {}  # symbol -> last known price (survives fetch failures)
         self.cycle_count = 0
         self._running = True
@@ -199,15 +200,25 @@ class MMEngine:
 
     async def run(self) -> None:
         """Main loop — runs scan/trade/manage cycles."""
-        # Restore scanning state from DB if persisted
+        # Restore settings from DB
         try:
             state = await self.repo.get_engine_state()
             if state:
                 overrides = state.get("config_overrides", {}) or {}
                 mm_settings = overrides.get("mm_engine_settings", {})
-                if isinstance(mm_settings, dict) and "scanning_active" in mm_settings:
-                    self._scanning_active = bool(mm_settings["scanning_active"])
-                    logger.info("mm_engine_restored_state", scanning_active=self._scanning_active)
+                if isinstance(mm_settings, dict):
+                    if "scanning_active" in mm_settings:
+                        self._scanning_active = bool(mm_settings["scanning_active"])
+                    if "mm_max_positions" in mm_settings:
+                        self.max_positions = int(mm_settings["mm_max_positions"])
+                    if "mm_scan_interval" in mm_settings:
+                        self.scan_interval = float(mm_settings["mm_scan_interval"]) * 60
+                    if "mm_cooldown_hours" in mm_settings:
+                        self._cooldown_hours = float(mm_settings["mm_cooldown_hours"])
+                    logger.info("mm_engine_restored_settings",
+                                scanning_active=self._scanning_active,
+                                max_positions=self.max_positions,
+                                scan_interval_min=self.scan_interval / 60)
         except Exception as e:
             logger.debug("mm_engine_state_restore_failed", error=str(e))
 
@@ -996,8 +1007,8 @@ class MMEngine:
         )
 
         self.positions.pop(pos.symbol, None)
-        # Cooldown: don't re-enter this symbol for SYMBOL_COOLDOWN_HOURS
-        self._cooldowns[pos.symbol] = datetime.now(timezone.utc) + timedelta(hours=SYMBOL_COOLDOWN_HOURS)
+        # Cooldown: don't re-enter this symbol for _cooldown_hours
+        self._cooldowns[pos.symbol] = datetime.now(timezone.utc) + timedelta(hours=self._cooldown_hours)
 
     @staticmethod
     def _is_valid_target(price: float, direction: str, entry: float) -> bool:

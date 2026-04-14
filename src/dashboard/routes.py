@@ -335,6 +335,37 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         }
         return templates.TemplateResponse(request, "mm.html", context=ctx)
 
+    @router.get("/mm/settings", response_class=HTMLResponse)
+    @login_required
+    async def mm_settings_page(request: Request):
+        ctx = await _base_context(request)
+        active_repo = _get_repo_for_request(request)
+
+        # Load saved MM settings from DB
+        mm_settings = {}
+        try:
+            state = await active_repo.get_engine_state()
+            if state:
+                overrides = state.get("config_overrides", {}) or {}
+                mm_settings = overrides.get("mm_engine_settings", {}) or {}
+        except Exception:
+            pass
+
+        # Build context with DB values falling back to config/code defaults
+        ctx["mm"] = {
+            "risk_pct": mm_settings.get("mm_risk_pct", getattr(config, "mm_risk_per_trade_pct", 1.0)),
+            "max_positions": mm_settings.get("mm_max_positions", getattr(config, "mm_max_positions", 3)),
+            "leverage": mm_settings.get("mm_leverage", 10),
+            "min_rr": mm_settings.get("mm_min_rr", 1.5),
+            "min_confluence": mm_settings.get("mm_min_confluence", 40),
+            "min_formation_quality": mm_settings.get("mm_min_formation_quality", 0.4),
+            "scan_interval": mm_settings.get("mm_scan_interval", getattr(config, "mm_scan_interval_minutes", 5)),
+            "cooldown_hours": mm_settings.get("mm_cooldown_hours", 4),
+            "initial_balance": getattr(config, "mm_initial_balance", 10000.0),
+        }
+        ctx["instance_id"] = config.instance_id
+        return templates.TemplateResponse(request, "mm_settings.html", context=ctx)
+
     @router.get("/training", response_class=HTMLResponse)
     @login_required
     async def training_page(request: Request):

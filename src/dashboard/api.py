@@ -840,6 +840,66 @@ def create_router(repo: Repository, exchange=None, exchange_name: str = "binance
             logger.warning("stop_mm_persist_failed", error=str(e))
         return {"success": True, "message": "MM Engine scanning paused (still managing positions)"}
 
+    # --- MM Settings ---
+    _MM_SETTINGS_VALIDATION = {
+        "mm_risk_pct":              (float, 0.1, 10.0),
+        "mm_max_positions":         (int,   1,   50),
+        "mm_leverage":              (int,   1,   100),
+        "mm_min_rr":                (float, 0.5, 10.0),
+        "mm_min_confluence":        (float, 5.0, 100.0),
+        "mm_min_formation_quality": (float, 0.05, 1.0),
+        "mm_scan_interval":         (float, 1.0, 60.0),
+        "mm_cooldown_hours":        (float, 0.0, 48.0),
+    }
+
+    @router.post("/mm/settings")
+    @login_required
+    async def save_mm_settings(request: Request):
+        """Save MM Engine settings to DB and apply to running engine."""
+        body = await request.json()
+        parsed = {}
+        for key, val in body.items():
+            if key not in _MM_SETTINGS_VALIDATION:
+                continue
+            typ, lo, hi = _MM_SETTINGS_VALIDATION[key]
+            try:
+                v = typ(val)
+                v = max(lo, min(hi, v))
+                parsed[key] = v
+            except (ValueError, TypeError):
+                continue
+
+        if not parsed:
+            return {"error": "No valid settings"}, 400
+
+        # Persist to DB
+        try:
+            state = await repo.get_engine_state() or {}
+            overrides = state.get("config_overrides", {}) or {}
+            mm_settings = overrides.get("mm_engine_settings", {}) or {}
+            mm_settings.update(parsed)
+            overrides["mm_engine_settings"] = mm_settings
+            state["config_overrides"] = overrides
+            await repo.upsert_engine_state(state)
+        except Exception as e:
+            logger.warning("mm_settings_save_failed", error=str(e))
+            return {"error": str(e)}
+
+        # Apply to running engine
+        mm = _get_mm_engine(request)
+        if mm:
+            if "mm_max_positions" in parsed:
+                mm.max_positions = parsed["mm_max_positions"]
+            if "mm_scan_interval" in parsed:
+                mm.scan_interval = parsed["mm_scan_interval"] * 60
+            if "mm_cooldown_hours" in parsed:
+                from src.strategy.mm_engine import SYMBOL_COOLDOWN_HOURS  # noqa: F811
+                # Can't change module constant at runtime, but we can store it
+                mm._cooldown_hours = parsed["mm_cooldown_hours"]
+
+        logger.info("mm_settings_saved", settings=parsed)
+        return {"success": True, "saved": parsed}
+
     # ── Entry Refiner Queue ───────────────────────────────────────────
     @router.get("/refiner/main")
     @login_required
