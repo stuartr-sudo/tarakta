@@ -109,7 +109,7 @@ body::after {
     display: flex; min-height: 100vh;
 }
 
-/* ── Sidebar ───────────────────────────────────────────────── */
+/* ── Sidebar — full by default, .collapsed hides text ─────── */
 .sidebar {
     width: var(--sidebar-w);
     flex-shrink: 0;
@@ -118,11 +118,37 @@ body::after {
     display: flex; flex-direction: column;
     position: sticky; top: 0;
     height: 100vh; overflow-y: auto;
+    transition: width 0.2s ease;
+    z-index: 50;
+}
+.sidebar.collapsed {
+    width: 52px;
+    overflow: hidden;
 }
 .sidebar::-webkit-scrollbar { display: none; }
 
+/* Collapsed: hide text, show only icons */
+.sidebar.collapsed .sidebar-logo,
+.sidebar.collapsed .sidebar-section,
+.sidebar.collapsed .sidebar-instances {
+    display: none;
+}
+.sidebar.collapsed .sidebar-link {
+    overflow: hidden; white-space: nowrap;
+    padding-left: 16px; padding-right: 16px;
+}
+.sidebar .sidebar-link svg { flex-shrink: 0; min-width: 15px; }
+
+/* Sidebar toggle button */
+.sidebar-toggle {
+    display: flex; align-items: center; justify-content: center;
+    padding: 12px 0; cursor: pointer; border: none; background: none;
+    color: var(--text-muted); transition: color 0.15s;
+}
+.sidebar-toggle:hover { color: var(--teal); }
+
 .sidebar-logo {
-    padding: 22px 20px 18px;
+    padding: 22px 14px 18px;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
 }
@@ -149,7 +175,7 @@ body::after {
 
 .sidebar-link {
     display: flex; align-items: center; gap: 9px;
-    padding: 8px 12px; border-radius: 7px;
+    padding: 8px 14px; border-radius: 7px;
     font-size: 13px; font-weight: 400;
     color: var(--text-secondary);
     transition: color var(--transition-fast), background var(--transition-fast);

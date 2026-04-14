@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "fp=$(python3 -c \"import json,os;print(json.loads(os.environ.get('CLAUDE_TOOL_INPUT','{}')).get('file_path',''))\" 2>/dev/null); if echo \"$fp\" | grep -qE '(^src/|/src/|^tests/|/tests/)'; then cd /Users/stuarta/tarakta && python3 -m pytest tests/ -x --timeout=30 2>&1; fi",
+            "timeout": 120000
+          }
+        ]
+      }
+    ]
+  }
+}

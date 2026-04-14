@@ -3,9 +3,9 @@
   "configurations": [
     {
       "name": "tarakta",
-      "runtimeExecutable": "/Users/stuarta/tarakta/.venv/bin/python3.12",
-      "runtimeArgs": ["-m", "src.main"],
-      "port": 8080
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "ln -sf /Users/stuarta/tarakta/.env /Users/stuarta/tarakta/.claude/worktrees/elegant-bohr/.env 2>/dev/null; cd /Users/stuarta/tarakta/.claude/worktrees/elegant-bohr && PORT=4444 MM_METHOD_ENABLED=true INSTANCE_ID=footprint /Users/stuarta/tarakta/.venv/bin/python3.12 -m src.main"],
+      "port": 4444
     },
     {
       "name": "burnlink",

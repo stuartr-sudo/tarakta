@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}Tarakta - MM Settings{% endblock %}
+{% block topbar_title %}MM Engine Settings{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>MM Engine Settings</h1>
+    <span id="save-status" class="badge" style="font-size:0.7rem; color:var(--text-muted);">Live</span>
+</div>
+
+{% macro slider(id, label, val, min, max, step, suffix, desc) %}
+<div style="display:flex; flex-direction:column; gap:0.4rem;">
+    <label style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">
+        {{ label }}:
+        <span id="val-{{ id }}" style="color:var(--teal); font-size:1rem;">{{ val }}{{ suffix }}</span>
+    </label>
+    <div style="display:flex; align-items:center; gap:0.5rem;">
+        <span style="font-size:0.65rem; color:var(--text-muted);">{{ min }}</span>
+        <input type="range" id="slider-{{ id }}" min="{{ min }}" max="{{ max }}" step="{{ step }}" value="{{ val }}"
+               style="flex:1; accent-color:var(--teal); cursor:pointer;" data-key="{{ id }}">
+        <span style="font-size:0.65rem; color:var(--text-muted);">{{ max }}</span>
+    </div>
+    <div style="font-size:0.6rem; color:var(--text-muted);">{{ desc }}</div>
+</div>
+{% endmacro %}
+
+<!-- Position Sizing & Risk -->
+<div class="panel" style="border-left: 3px solid var(--teal);">
+    <div class="panel-header"><h2>Position Sizing & Risk</h2></div>
+    <div class="panel-body">
+        <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:1.5rem;">
+            {{ slider("mm_risk_pct", "Risk per Trade", mm.risk_pct, 0.5, 5, 0.5, "%", "% of MM balance risked per trade") }}
+            {{ slider("mm_max_positions", "Max Open Positions", mm.max_positions, 1, 20, 1, "", "Maximum concurrent MM trades") }}
+            {{ slider("mm_leverage", "Leverage", mm.leverage, 1, 50, 1, "x", "Leverage multiplier for MM trades") }}
+        </div>
+    </div>
+</div>
+
+<!-- Entry Filters -->
+<div class="panel" style="border-left: 3px solid #8b5cf6;">
+    <div class="panel-header"><h2>Entry Filters</h2></div>
+    <div class="panel-body">
+        <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:1.5rem;">
+            {{ slider("mm_min_rr", "Min R:R Ratio", mm.min_rr, 1.0, 5.0, 0.5, "", "Minimum reward-to-risk to enter a trade") }}
+            {{ slider("mm_min_confluence", "Min Confluence", mm.min_confluence, 10, 80, 5, "%", "Minimum confluence score to enter") }}
+            {{ slider("mm_min_formation_quality", "Min Formation Quality", mm.min_formation_quality, 0.1, 0.9, 0.1, "", "Minimum M/W formation quality (0-1)") }}
+            {{ slider("mm_max_sl_pct", "Max SL Distance", mm.max_sl_pct, 1, 15, 0.5, "%", "Skip formations wider than this (too wide = tiny position, fees eat edge)") }}
+        </div>
+    </div>
+</div>
+
+<!-- Timing -->
+<div class="panel" style="border-left: 3px solid #e040fb;">
+    <div class="panel-header"><h2>Timing</h2></div>
+    <div class="panel-body">
+        <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:1.5rem;">
+            {{ slider("mm_scan_interval", "Scan Interval", mm.scan_interval, 1, 30, 1, " min", "How often the MM engine scans for setups") }}
+            {{ slider("mm_cooldown_hours", "Symbol Cooldown", mm.cooldown_hours, 0, 24, 1, "h", "Hours to wait before re-entering a symbol after exit") }}
+        </div>
+    </div>
+</div>
+
+<!-- Current State (read-only) -->
+<div class="panel">
+    <div class="panel-header"><h2>Current State</h2></div>
+    <div class="panel-body">
+        <table class="config-table">
+            <tr><td>Initial Balance</td><td class="mono">${{ "%.0f"|format(mm.initial_balance) }}</td></tr>
+            <tr><td>Paper Exchange</td><td><span class="status-badge paper">PAPER</span></td></tr>
+            <tr><td>Instance ID</td><td class="mono">{{ instance_id }}</td></tr>
+        </table>
+    </div>
+</div>
+
+<div style="margin-top:1rem;">
+    <a href="/mm" class="btn" style="text-decoration:none;">&larr; Back to MM Dashboard</a>
+</div>
+
+<script>
+const SETTINGS = {
+    mm_risk_pct:              { divisor: 1,   suffix: '%' },
+    mm_max_positions:         { divisor: 1,   suffix: '' },
+    mm_leverage:              { divisor: 1,   suffix: 'x' },
+    mm_min_rr:                { divisor: 1,   suffix: '' },
+    mm_min_confluence:        { divisor: 1,   suffix: '%' },
+    mm_min_formation_quality: { divisor: 1,   suffix: '' },
+    mm_scan_interval:         { divisor: 1,   suffix: ' min' },
+    mm_cooldown_hours:        { divisor: 1,   suffix: 'h' },
+    mm_max_sl_pct:            { divisor: 1,   suffix: '%' },
+};
+
+let saveTimeout = null;
+
+document.querySelectorAll('input[type=range]').forEach(slider => {
+    const key = slider.dataset.key;
+    const cfg = SETTINGS[key];
+    if (!cfg) return;
+
+    // Live display update
+    slider.addEventListener('input', () => {
+        const el = document.getElementById('val-' + key);
+        if (el) el.textContent = slider.value + cfg.suffix;
+    });
+
+    // Save on change (debounced)
+    slider.addEventListener('change', () => {
+        clearTimeout(saveTimeout);
+        saveTimeout = setTimeout(() => saveSetting(key, parseFloat(slider.value)), 300);
+    });
+});
+
+async function saveSetting(key, value) {
+    const status = document.getElementById('save-status');
+    if (status) { status.textContent = 'Saving...'; status.style.color = 'var(--teal)'; }
+
+    try {
+        const resp = await fetch('/api/mm/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ [key]: value }),
+        });
+        if (!resp.ok) throw new Error(await resp.text());
+        if (status) { status.textContent = 'Saved'; status.style.color = 'var(--teal)'; }
+    } catch (e) {
+        if (status) { status.textContent = 'Error'; status.style.color = '#f44'; }
+        console.error('Save failed:', e);
+    }
+    setTimeout(() => { if (status) { status.textContent = 'Live'; status.style.color = 'var(--text-muted)'; } }, 2000);
+}
+</script>
+{% endblock %}

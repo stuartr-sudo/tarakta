@@ -23,6 +23,7 @@ distinguished from SMC trades in the database and dashboard.
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -50,8 +51,8 @@ logger = get_logger(__name__)
 # Scan interval (minutes) — how often the MM engine runs
 DEFAULT_SCAN_INTERVAL = 5
 
-# Minimum confluence score (%) to consider an entry
-MIN_CONFLUENCE_PCT = 15.0
+# Minimum confluence score (%) to consider an entry — course requires Grade C+ (40%)
+MIN_CONFLUENCE_PCT = 40.0
 
 # Minimum R:R ratio (to Level 1 target)
 MIN_RR = 3.0
@@ -60,11 +61,19 @@ MIN_RR_AGGRESSIVE = 1.0
 # Minimum formation quality to act on
 MIN_FORMATION_QUALITY = 0.4
 
-# Maximum concurrent MM positions
-MAX_MM_POSITIONS = 3
+# Maximum concurrent MM positions (6 for bots — 3 was for human traders)
+MAX_MM_POSITIONS = 6
+
+# Maximum margin utilization — don't open new positions if margin > 60% of balance
+MAX_MARGIN_UTILIZATION = 0.60
 
 # Asia session range threshold — skip day if BTC range > 2%
 ASIA_RANGE_SKIP_PCT = 2.0
+
+# Maximum SL distance (%) — skip formations with structures too wide to trade
+# A 5% wide formation means $100 risk only buys $2000 notional at 10x = $200 margin
+# Below ~$200 margin, exchange fees eat the edge
+MAX_SL_DISTANCE_PCT = 5.0
 
 # Position sizing: risk per trade as % of balance
 RISK_PER_TRADE_PCT = 1.0
@@ -77,6 +86,12 @@ PROFIT_SCHEDULE = {
     1: 0.30,   # Close 30% at Level 1
     2: 0.50,   # Close to 50% total at Level 2
     3: 1.00,   # Close remaining at Level 3
+}
+
+# Valid phases for new entries (weekly cycle phase machine)
+VALID_ENTRY_PHASES = {
+    "FORMATION_PENDING", "LEVEL_1", "LEVEL_2", "LEVEL_3",
+    "BOARD_MEETING_1", "BOARD_MEETING_2",
 }
 
 # Strategy tag for database
@@ -138,6 +153,13 @@ class MMPosition:
     target_l2: float = 0.0
     target_l3: float = 0.0
 
+    # Entry metadata (for dashboard display)
+    entry_reason: str = ""
+    formation_type: str = ""
+    confluence_grade: str = ""
+    cycle_phase: str = ""
+    confluence_score: float = 0.0
+
 
 # ---------------------------------------------------------------------------
 # MM Engine
@@ -163,6 +185,15 @@ class MMEngine:
         self.candle_manager = candle_manager
         self.config = config
         self.scan_interval = scan_interval_minutes * 60  # Convert to seconds
+        self.max_positions = getattr(config, "mm_max_positions", MAX_MM_POSITIONS)
+
+        # Tunable parameters (overridable via settings page)
+        self.risk_pct = RISK_PER_TRADE_PCT
+        self.leverage = 10
+        self.min_rr = MIN_RR_AGGRESSIVE
+        self.min_confluence = MIN_CONFLUENCE_PCT
+        self.min_formation_quality = MIN_FORMATION_QUALITY
+        self.max_sl_pct = MAX_SL_DISTANCE_PCT
 
         # MM Method modules
         self.session_analyzer = MMSessionAnalyzer()
@@ -179,6 +210,7 @@ class MMEngine:
         # State
         self.positions: dict[str, MMPosition] = {}
         self._cooldowns: dict[str, datetime] = {}  # symbol -> earliest re-entry time
+        self._cooldown_hours: float = SYMBOL_COOLDOWN_HOURS  # configurable via settings
         self._last_prices: dict[str, float] = {}  # symbol -> last known price (survives fetch failures)
         self.cycle_count = 0
         self._running = True
@@ -198,15 +230,38 @@ class MMEngine:
 
     async def run(self) -> None:
         """Main loop — runs scan/trade/manage cycles."""
-        # Restore scanning state from DB if persisted
+        # Restore settings from DB
         try:
             state = await self.repo.get_engine_state()
             if state:
                 overrides = state.get("config_overrides", {}) or {}
                 mm_settings = overrides.get("mm_engine_settings", {})
-                if isinstance(mm_settings, dict) and "scanning_active" in mm_settings:
-                    self._scanning_active = bool(mm_settings["scanning_active"])
-                    logger.info("mm_engine_restored_state", scanning_active=self._scanning_active)
+                if isinstance(mm_settings, dict):
+                    if "scanning_active" in mm_settings:
+                        self._scanning_active = bool(mm_settings["scanning_active"])
+                    if "mm_max_positions" in mm_settings:
+                        self.max_positions = int(mm_settings["mm_max_positions"])
+                    if "mm_scan_interval" in mm_settings:
+                        self.scan_interval = float(mm_settings["mm_scan_interval"]) * 60
+                    if "mm_cooldown_hours" in mm_settings:
+                        self._cooldown_hours = float(mm_settings["mm_cooldown_hours"])
+                    if "mm_risk_pct" in mm_settings:
+                        self.risk_pct = float(mm_settings["mm_risk_pct"])
+                        self.risk_calculator = MMRiskCalculator(risk_per_trade=self.risk_pct / 100)
+                    if "mm_leverage" in mm_settings:
+                        self.leverage = int(mm_settings["mm_leverage"])
+                    if "mm_min_rr" in mm_settings:
+                        self.min_rr = float(mm_settings["mm_min_rr"])
+                    if "mm_min_confluence" in mm_settings:
+                        self.min_confluence = float(mm_settings["mm_min_confluence"])
+                    if "mm_min_formation_quality" in mm_settings:
+                        self.min_formation_quality = float(mm_settings["mm_min_formation_quality"])
+                    if "mm_max_sl_pct" in mm_settings:
+                        self.max_sl_pct = float(mm_settings["mm_max_sl_pct"])
+                    logger.info("mm_engine_restored_settings",
+                                scanning_active=self._scanning_active,
+                                max_positions=self.max_positions,
+                                scan_interval_min=self.scan_interval / 60)
         except Exception as e:
             logger.debug("mm_engine_state_restore_failed", error=str(e))
 
@@ -237,6 +292,16 @@ class MMEngine:
                 orig_qty = t.get("original_quantity") or t.get("entry_quantity", 0)
                 remain_qty = t.get("remaining_quantity") or orig_qty
                 closed_pct = 1.0 - (remain_qty / orig_qty) if orig_qty > 0 else 0.0
+                # Restore L2/L3 targets from tp_tiers JSON
+                tp_l2, tp_l3 = 0.0, 0.0
+                raw_tiers = t.get("tp_tiers")
+                if raw_tiers:
+                    try:
+                        tiers = json.loads(raw_tiers) if isinstance(raw_tiers, str) else raw_tiers
+                        tp_l2 = float(tiers.get("l2", 0))
+                        tp_l3 = float(tiers.get("l3", 0))
+                    except (json.JSONDecodeError, TypeError, AttributeError):
+                        pass
                 self.positions[symbol] = MMPosition(
                     trade_id=str(t["id"]),
                     symbol=symbol,
@@ -248,7 +313,15 @@ class MMEngine:
                     partial_closed_pct=closed_pct,
                     entry_time=datetime.fromisoformat(t["entry_time"]) if t.get("entry_time") else datetime.now(timezone.utc),
                     cost_usd=float(t.get("entry_cost_usd", 0)),
+                    margin_used=float(t.get("margin_used") or 0),
                     target_l1=float(t.get("take_profit", 0)),
+                    target_l2=tp_l2,
+                    target_l3=tp_l3,
+                    entry_reason=t.get("entry_reason", ""),
+                    formation_type=t.get("mm_formation", ""),
+                    confluence_grade=t.get("mm_confluence_grade", ""),
+                    cycle_phase=t.get("mm_cycle_phase", ""),
+                    confluence_score=float(t.get("confluence_score") or 0),
                 )
                 restored += 1
             if mm_trades:
@@ -276,19 +349,32 @@ class MMEngine:
         self._running = False
 
     async def get_status(self) -> dict:
-        """Return a status snapshot for the dashboard API."""
+        """Return a status snapshot for the dashboard API.
+
+        Fetches live prices for all open positions in parallel, then
+        falls back to cached prices if any individual fetch fails.
+        """
+        # Refresh prices for all open positions in parallel
+        if self.positions:
+            async def _fetch_price(symbol: str) -> tuple[str, float | None]:
+                try:
+                    ticker = await self.exchange.fetch_ticker(symbol)
+                    return symbol, float(ticker["last"])
+                except Exception:
+                    return symbol, None
+
+            results = await asyncio.gather(
+                *[_fetch_price(s) for s in self.positions], return_exceptions=True
+            )
+            for r in results:
+                if isinstance(r, tuple) and r[1] is not None:
+                    self._last_prices[r[0]] = r[1]
+
         session = self.session_analyzer.get_current_session()
         positions_out = []
         total_unrealized = 0.0
         for pos in self.positions.values():
-            # Use cached price as fallback so P&L doesn't blank out during dead zone
             current_price = self._last_prices.get(pos.symbol, pos.entry_price)
-            try:
-                ticker = await self.exchange.fetch_ticker(pos.symbol)
-                current_price = float(ticker.get("last", current_price))
-                self._last_prices[pos.symbol] = current_price
-            except Exception:
-                pass  # keep cached price
             if pos.direction == "long":
                 unrealized = (current_price - pos.entry_price) * pos.quantity
             else:
@@ -309,6 +395,12 @@ class MMEngine:
                 "margin_used": round(pos.margin_used, 2),
                 "leverage": 10,
                 "target_l1": pos.target_l1,
+                "entry_reason": pos.entry_reason,
+                "formation_type": pos.formation_type,
+                "confluence_grade": pos.confluence_grade,
+                "cycle_phase": pos.cycle_phase,
+                "confluence_score": pos.confluence_score,
+                "entry_time": pos.entry_time.isoformat() if pos.entry_time else "",
             })
         total_margin = sum(p.margin_used for p in self.positions.values())
         total_notional = sum(p.cost_usd for p in self.positions.values())
@@ -447,8 +539,8 @@ class MMEngine:
 
         best_formation = formations[0]
 
-        if best_formation.quality_score < MIN_FORMATION_QUALITY:
-            logger.info("mm_reject_low_formation_quality", symbol=symbol, quality=best_formation.quality_score, min_required=MIN_FORMATION_QUALITY)
+        if best_formation.quality_score < self.min_formation_quality:
+            logger.info("mm_reject_low_formation_quality", symbol=symbol, quality=best_formation.quality_score, min_required=self.min_formation_quality)
             return None
 
         # Level tracking (1H) — count levels AFTER the formation, not all history.
@@ -478,8 +570,43 @@ class MMEngine:
             logger.info("mm_reject_friday_trap", symbol=symbol, phase=cycle_state.phase)
             return None
 
+        # Bug 3: Phase machine enforcement — only enter during valid phases
+        if cycle_state.phase not in VALID_ENTRY_PHASES:
+            logger.info("mm_reject_wrong_phase", symbol=symbol, phase=cycle_state.phase)
+            return None
+
         # Weekend trap analysis
         weekend = self.weekend_trap_analyzer.analyze(candles_1h, now)
+
+        # Bug 6: Weekly bias gating — FMWB direction determines allowed trade direction
+        # FMWB direction is the FALSE move. Real move is opposite.
+        if weekend.fmwb.detected:
+            # "up" false move → real direction bearish → only shorts
+            # "down" false move → real direction bullish → only longs
+            real_direction = "short" if weekend.fmwb.direction == "up" else "long"
+            if trade_direction != real_direction:
+                logger.info("mm_reject_against_weekly_bias", symbol=symbol,
+                            trade_dir=trade_direction, fmwb_dir=weekend.fmwb.direction,
+                            real_dir=real_direction)
+                return None
+        else:
+            logger.info("mm_warn_no_weekly_bias", symbol=symbol, direction=trade_direction)
+
+        # Bug 5: Three hits rule — check HOW and LOW for reversal/continuation signals
+        three_hits_at_how = None
+        three_hits_at_low = None
+        if cycle_state.how > 0:
+            three_hits_at_how = self.formation_detector.detect_three_hits(candles_1h, cycle_state.how)
+            if three_hits_at_how.detected:
+                log_event = "mm_signal_four_hits" if three_hits_at_how.hit_count >= 4 else "mm_signal_three_hits"
+                logger.info(log_event, symbol=symbol, level=cycle_state.how,
+                            hits=three_hits_at_how.hit_count, outcome=three_hits_at_how.expected_outcome)
+        if cycle_state.low < float("inf"):
+            three_hits_at_low = self.formation_detector.detect_three_hits(candles_1h, cycle_state.low)
+            if three_hits_at_low.detected:
+                log_event = "mm_signal_four_hits" if three_hits_at_low.hit_count >= 4 else "mm_signal_three_hits"
+                logger.info(log_event, symbol=symbol, level=cycle_state.low,
+                            hits=three_hits_at_low.hit_count, outcome=three_hits_at_low.expected_outcome)
 
         # Target identification
         target_analysis = self.target_analyzer.analyze(
@@ -496,48 +623,41 @@ class MMEngine:
         # Calculate entry, SL, and targets
         entry_price = current_price
 
-        # Stop loss placement per MM rules
+        # Stop loss placement per MM Method course rules:
+        # W-bottom (long): SL below the W's lowest low (min of peak1, peak2)
+        # M-top (short): SL above the M's highest high (max of peak1, peak2)
+        # No artificial cap — position sizing adjusts size for wider stops.
         if best_formation.type.upper() == "W":
-            # W = bullish: SL below the formation's low, capped at 1.5%
-            formation_low = float(candles_1h.iloc[-20:]["low"].min())
-            sl_price = max(formation_low, entry_price * 0.985)  # max() = tighter SL
+            # W: peak1_price & peak2_price are the two lows. SL below the lowest.
+            lowest_low = min(best_formation.peak1_price, best_formation.peak2_price)
+            sl_price = lowest_low * 0.998  # 0.2% buffer below invalidation
             trade_direction = "long"
         else:
-            # M = bearish: SL above the formation's high, capped at 1.5%
-            formation_high = float(candles_1h.iloc[-20:]["high"].max())
-            sl_price = min(formation_high, entry_price * 1.015)  # min() = tighter SL
+            # M: peak1_price & peak2_price are the two highs. SL above the highest.
+            highest_high = max(best_formation.peak1_price, best_formation.peak2_price)
+            sl_price = highest_high * 1.002  # 0.2% buffer above invalidation
             trade_direction = "short"
+
+        # Check SL distance isn't too wide (formation structure too large to trade)
+        sl_distance_pct = abs(entry_price - sl_price) / entry_price * 100
+        if sl_distance_pct > self.max_sl_pct:
+            logger.info("mm_reject_sl_too_wide", symbol=symbol, sl_distance_pct=round(sl_distance_pct, 2), max=self.max_sl_pct)
+            return None
 
         # Targets from target analyzer
         t_l1 = target_analysis.primary_l1.price if target_analysis.primary_l1 else None
         t_l2 = target_analysis.primary_l2.price if target_analysis.primary_l2 else None
         t_l3 = target_analysis.primary_l3.price if target_analysis.primary_l3 else None
 
-        # Fallback targets if target analyzer didn't find L1
+        # No valid L1 target = no trade. Per the course, the 50 EMA is the
+        # primary L1 target. If it's not in a valid position, the setup doesn't
+        # qualify. Don't force entry with a weaker target — an occupied slot
+        # with a weak target blocks a valid setup from entering.
         if not t_l1:
-            # Try cascading fallbacks:
-            # 1. L2 target (200 EMA / HOW/LOW) as a conservative L1
-            # 2. EMA-50 (even on the wrong side — it's still a magnet)
-            # 3. Recent swing high/low as target
-            if t_l2 and self._is_valid_target(t_l2, trade_direction, entry_price):
-                t_l1 = t_l2
-            else:
-                ema_200 = ema_values.get(200)
-                if ema_200 and self._is_valid_target(ema_200, trade_direction, entry_price):
-                    t_l1 = ema_200
-                else:
-                    # Use recent swing as target: highest high (for long) or lowest low (for short)
-                    recent = candles_1h.iloc[-40:]
-                    if trade_direction == "long":
-                        swing_target = float(recent["high"].max())
-                    else:
-                        swing_target = float(recent["low"].min())
-                    if self._is_valid_target(swing_target, trade_direction, entry_price):
-                        t_l1 = swing_target
-                    else:
-                        logger.info("mm_reject_no_target", symbol=symbol, direction=trade_direction,
-                                    ema_50=ema_values.get(50), entry=entry_price)
-                        return None
+            logger.info("mm_reject_no_l1_target", symbol=symbol, direction=trade_direction,
+                        ema_50=ema_values.get(50), entry=entry_price,
+                        formation=best_formation.type, quality=best_formation.quality_score)
+            return None
 
         # R:R check — try L1 first, fall back to L2 if L1 R:R is too low
         risk = abs(entry_price - sl_price)
@@ -549,21 +669,28 @@ class MMEngine:
         rr = reward / risk
 
         # If L1 target gives poor R:R, try L2 as the primary target
-        if rr < MIN_RR_AGGRESSIVE and t_l2 and self._is_valid_target(t_l2, trade_direction, entry_price):
+        if rr < self.min_rr and t_l2 and self._is_valid_target(t_l2, trade_direction, entry_price):
             reward_l2 = abs(t_l2 - entry_price)
             rr_l2 = reward_l2 / risk
-            if rr_l2 >= MIN_RR_AGGRESSIVE:
+            if rr_l2 >= self.min_rr:
                 logger.info("mm_target_upgraded_to_l2", symbol=symbol, rr_l1=round(rr, 2), rr_l2=round(rr_l2, 2))
                 t_l1 = t_l2  # Use L2 as the effective target
                 rr = rr_l2
 
-        if rr < MIN_RR_AGGRESSIVE:
-            logger.info("mm_reject_low_rr", symbol=symbol, rr=round(rr, 2), min_required=MIN_RR_AGGRESSIVE, entry=entry_price, sl=sl_price, t1=t_l1)
+        if rr < self.min_rr:
+            logger.info("mm_reject_low_rr", symbol=symbol, rr=round(rr, 2), min_required=self.min_rr, entry=entry_price, sl=sl_price, t1=t_l1)
             return None
 
         # Confluence scoring
         at_how = abs(current_price - cycle_state.how) / current_price < 0.005 if cycle_state.how > 0 else False
         at_low = abs(current_price - cycle_state.low) / current_price < 0.005 if cycle_state.low < float("inf") else False
+
+        # Bug 5: Three hits boosts at_key_level — 3-hit reversal at HOW/LOW strengthens confluence
+        three_hit_boost = False
+        if three_hits_at_how and three_hits_at_how.detected and three_hits_at_how.expected_outcome == "reversal":
+            three_hit_boost = True
+        if three_hits_at_low and three_hits_at_low.detected and three_hits_at_low.expected_outcome == "reversal":
+            three_hit_boost = True
 
         mm_ctx = MMContext(
             formation={
@@ -591,20 +718,21 @@ class MMEngine:
             stop_loss=sl_price,
             target_price=t_l1,
             at_session_changeover=session.is_gap,
-            at_how_low=at_how or at_low,
+            at_how_low=at_how or at_low or three_hit_boost,
             has_unrecovered_vector=len(target_analysis.unrecovered_vectors) > 0,
         )
 
         confluence_result = self.confluence_scorer.score(mm_ctx)
 
         # Check confluence meets minimum
-        if confluence_result.score_pct < MIN_CONFLUENCE_PCT:
-            logger.info("mm_reject_low_confluence", symbol=symbol, score=confluence_result.score_pct, min_required=MIN_CONFLUENCE_PCT, formation=best_formation.type)
+        if confluence_result.score_pct < self.min_confluence:
+            logger.info("mm_reject_low_confluence", symbol=symbol, score=confluence_result.score_pct, min_required=self.min_confluence, formation=best_formation.type)
             return None
 
-        # Log retest conditions (informational, not a gate — too many dead data feeds)
+        # Bug 1: Retest conditions — course requires 2+ of 4 retest conditions met
         if confluence_result.retest_conditions_met < 2:
-            logger.info("mm_retest_low", symbol=symbol, retest_met=confluence_result.retest_conditions_met, confluence=confluence_result.score_pct)
+            logger.info("mm_reject_low_retest", symbol=symbol, retest_met=confluence_result.retest_conditions_met, confluence=confluence_result.score_pct)
+            return None
 
         # Build signal
         signal = MMSignal(
@@ -648,8 +776,15 @@ class MMEngine:
         """Process entry signals — execute the best ones."""
         open_count = len(self.positions)
 
+        # Get balance for margin utilization check
+        try:
+            balance = await self.exchange.get_balance()
+            account_balance = balance.get("USDT", 0) or balance.get("USD", 0)
+        except Exception:
+            account_balance = 0
+
         for signal in signals:
-            if open_count >= MAX_MM_POSITIONS:
+            if open_count >= self.max_positions:
                 break
 
             # Check in-memory positions AND cooldowns
@@ -657,6 +792,16 @@ class MMEngine:
                 continue
             if signal.symbol in self._cooldowns:
                 continue
+
+            # Margin utilization check — don't exceed 60% of balance
+            if account_balance > 0:
+                total_margin = sum(p.margin_used for p in self.positions.values())
+                utilization = total_margin / account_balance
+                if utilization > MAX_MARGIN_UTILIZATION:
+                    logger.info("mm_reject_margin_limit", symbol=signal.symbol,
+                                utilization_pct=round(utilization * 100, 1),
+                                max_pct=round(MAX_MARGIN_UTILIZATION * 100, 0))
+                    break  # Stop trying — all remaining signals would also fail
 
             try:
                 await self._enter_trade(signal)
@@ -710,6 +855,7 @@ class MMEngine:
         # Log to database first to get the DB-generated id
         trade_id = str(uuid4())  # valid UUID fallback if DB insert fails
         risk_usd = abs(fill_price - signal.stop_loss) * result.filled_quantity
+        margin = pos_result.position_size_usd / pos_result.recommended_leverage
         try:
             db_row = await self.repo.insert_trade({
                 "symbol": signal.symbol,
@@ -720,6 +866,8 @@ class MMEngine:
                 "remaining_quantity": result.filled_quantity,
                 "stop_loss": signal.stop_loss,
                 "take_profit": signal.target_l1,
+                "tp_tiers": json.dumps({"l2": signal.target_l2, "l3": signal.target_l3}),
+                "margin_used": round(margin, 2),
                 "entry_cost_usd": cost_usd,
                 "risk_usd": round(risk_usd, 2),
                 "leverage": getattr(self.config, 'markets', {}).get('crypto', None) and self.config.markets['crypto'].leverage or 10,
@@ -749,10 +897,15 @@ class MMEngine:
             stop_loss=signal.stop_loss,
             current_level=0,
             cost_usd=cost_usd,
-            margin_used=pos_result.position_size_usd / pos_result.recommended_leverage,
+            margin_used=margin,
             target_l1=signal.target_l1,
             target_l2=signal.target_l2,
             target_l3=signal.target_l3,
+            entry_reason=signal.reason,
+            formation_type=signal.formation_type,
+            confluence_grade=signal.confluence_grade,
+            cycle_phase=signal.cycle_phase,
+            confluence_score=signal.confluence_score,
         )
 
         self.positions[signal.symbol] = position
@@ -790,28 +943,45 @@ class MMEngine:
             await self._close_position(pos, current_price, "stop_loss")
             return
 
-        # Fetch fresh candles for level analysis
+        # Bug 2: Target-based level advancement — check if price has reached targets.
+        # This complements the PVSRA vector-based level tracker which needs time
+        # to accumulate enough candles. Price hitting the EMA target IS the level.
+        target_level = pos.current_level
+        is_long = pos.direction == "long"
+        if pos.target_l1 and target_level < 1:
+            if (is_long and current_price >= pos.target_l1) or (not is_long and current_price <= pos.target_l1):
+                target_level = 1
+                logger.info("mm_level_target_hit", symbol=symbol, level=1, target=pos.target_l1, price=current_price)
+        if pos.target_l2 and target_level < 2:
+            if (is_long and current_price >= pos.target_l2) or (not is_long and current_price <= pos.target_l2):
+                target_level = 2
+                logger.info("mm_level_target_hit", symbol=symbol, level=2, target=pos.target_l2, price=current_price)
+        if pos.target_l3 and target_level < 3:
+            if (is_long and current_price >= pos.target_l3) or (not is_long and current_price <= pos.target_l3):
+                target_level = 3
+                logger.info("mm_level_target_hit", symbol=symbol, level=3, target=pos.target_l3, price=current_price)
+
+        # Fetch fresh candles for PVSRA level analysis
         try:
             candles_1h = await self.candle_manager.get_candles(symbol, "1h", limit=100)
         except Exception:
-            return
+            candles_1h = None
 
-        if candles_1h is None or candles_1h.empty:
-            return
-
-        # Update level count — only count levels SINCE trade entry, not all history.
-        # This prevents the level tracker from seeing pre-trade vector clusters
-        # and falsely reporting level 3+ on a brand-new position.
-        direction = "bullish" if pos.direction == "long" else "bearish"
-        if pos.entry_time:
-            candles_since_entry = candles_1h[candles_1h.index >= pos.entry_time] if hasattr(candles_1h.index, 'tz') else candles_1h
-            # Fall back to full candles if timestamp filtering doesn't work
-            if candles_since_entry.empty or len(candles_since_entry) < 3:
+        # PVSRA vector-based level tracker (complementary to target-based)
+        new_level = target_level
+        if candles_1h is not None and not candles_1h.empty:
+            direction = "bullish" if is_long else "bearish"
+            if pos.entry_time:
+                candles_since_entry = candles_1h[candles_1h.index >= pos.entry_time] if hasattr(candles_1h.index, 'tz') else candles_1h
+                if candles_since_entry.empty or len(candles_since_entry) < 3:
+                    candles_since_entry = candles_1h.tail(10)
+            else:
                 candles_since_entry = candles_1h.tail(10)
+            level_analysis = self.level_tracker.analyze(candles_since_entry, direction=direction)
+            # Use the higher of target-based and PVSRA-based level
+            new_level = max(target_level, level_analysis.current_level)
         else:
-            candles_since_entry = candles_1h.tail(10)
-        level_analysis = self.level_tracker.analyze(candles_since_entry, direction=direction)
-        new_level = level_analysis.current_level
+            level_analysis = None
 
         # Level progression — take partials and tighten SL
         if new_level > pos.current_level:
@@ -826,7 +996,23 @@ class MMEngine:
             await self._take_partial(pos, new_level, current_price)
 
             # Tighten SL per MM rules
-            self._tighten_sl(pos, new_level, candles_1h)
+            if candles_1h is not None:
+                self._tighten_sl(pos, new_level, candles_1h)
+
+            # Bug 4: Board meeting detection after level advance (logging only for now)
+            # Check BEFORE updating pos.current_level so the condition fires.
+            if candles_1h is not None and new_level in (1, 2):
+                direction_str = "bullish" if is_long else "bearish"
+                bm_detection = self.board_meeting_detector.detect(candles_1h, level_direction=direction_str)
+                if bm_detection.detected:
+                    logger.info("mm_board_meeting_detected", symbol=symbol,
+                                level_before=new_level, bm_type=bm_detection.bm_type,
+                                duration=bm_detection.duration_candles,
+                                stop_hunt=bm_detection.stop_hunt_detected,
+                                has_entry=bm_detection.entry is not None,
+                                fib_entry=bm_detection.entry.entry_price if bm_detection.entry else None,
+                                fib_sl=bm_detection.entry.stop_loss if bm_detection.entry else None,
+                                fib_rr=bm_detection.entry.risk_reward if bm_detection.entry else None)
 
             pos.current_level = new_level
 
@@ -840,7 +1026,7 @@ class MMEngine:
                 logger.debug("mm_level_db_update_failed", error=str(e))
 
         # Check for Stopping Volume Candle at Level 3
-        if new_level >= 3 and level_analysis.svc and level_analysis.svc.detected:
+        if new_level >= 3 and level_analysis and level_analysis.svc and level_analysis.svc.detected:
             logger.info("mm_svc_detected", symbol=symbol, level=new_level)
             # Close remaining position
             if pos.partial_closed_pct < 1.0:
@@ -856,7 +1042,7 @@ class MMEngine:
                 return
 
         # Volume degradation at Level 3 = exit
-        if new_level >= 3 and level_analysis.volume_degrading:
+        if new_level >= 3 and level_analysis and level_analysis.volume_degrading:
             logger.info("mm_volume_degradation_exit", symbol=symbol)
             await self._close_position(pos, current_price, "volume_degradation")
             return
@@ -995,8 +1181,8 @@ class MMEngine:
         )
 
         self.positions.pop(pos.symbol, None)
-        # Cooldown: don't re-enter this symbol for SYMBOL_COOLDOWN_HOURS
-        self._cooldowns[pos.symbol] = datetime.now(timezone.utc) + timedelta(hours=SYMBOL_COOLDOWN_HOURS)
+        # Cooldown: don't re-enter this symbol for _cooldown_hours
+        self._cooldowns[pos.symbol] = datetime.now(timezone.utc) + timedelta(hours=self._cooldown_hours)
 
     @staticmethod
     def _is_valid_target(price: float, direction: str, entry: float) -> bool:

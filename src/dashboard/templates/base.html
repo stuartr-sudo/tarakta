@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Tarakta{% endblock %}</title>
-    <link rel="stylesheet" href="/static/style.css?v=9">
+    <link rel="stylesheet" href="/static/style.css?v=10">
     {% block head %}{% endblock %}
 </head>
 <body>
@@ -27,16 +27,21 @@
     <div class="app-shell">
 
         <!-- ── Sidebar ──────────────────────────────────── -->
-        <aside class="sidebar">
+        <aside class="sidebar" id="app-sidebar">
+            <button class="sidebar-toggle" onclick="document.getElementById('app-sidebar').classList.toggle('collapsed')" title="Toggle sidebar">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" width="18" height="18">
+                    <line x1="2" y1="4" x2="14" y2="4"/><line x1="2" y1="8" x2="14" y2="8"/><line x1="2" y1="12" x2="14" y2="12"/>
+                </svg>
+            </button>
             <div class="sidebar-logo">
                 <div class="brand-name">Tarakta</div>
                 <div class="brand-sub">Smart Money Bot</div>
             </div>
 
             <nav class="sidebar-nav">
-                <div class="sidebar-section">Monitor</div>
+                <div class="sidebar-section">MM Engine</div>
 
-                <a href="/{{ _iq }}" class="sidebar-link {{ 'active' if current_page == '/' else '' }}">
+                <a href="/" class="sidebar-link {{ 'active' if current_page == '/' or current_page == '/mm' else '' }}">
                     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
                         <rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1.2"/>
                         <rect x="9" y="1.5" width="5.5" height="5.5" rx="1.2"/>
@@ -46,63 +51,12 @@
                     Dashboard
                 </a>
 
-                <a href="/trades{{ _iq }}" class="sidebar-link {{ 'active' if current_page == '/trades' else '' }}">
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-                        <path d="M2 11.5 5.5 8l3 1.5 3-5.5 2.5 2.5"/>
-                        <path d="M2 14.5h12"/>
-                    </svg>
-                    Trades
-                </a>
-
-                <a href="/signals{{ _iq }}" class="sidebar-link {{ 'active' if current_page == '/signals' else '' }}">
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-                        <circle cx="8" cy="8" r="5.5"/>
-                        <path d="M8 5.5V8l1.5 1.5"/>
-                    </svg>
-                    Signals
-                </a>
-
-                <a href="/analytics{{ _iq }}" class="sidebar-link {{ 'active' if current_page == '/analytics' else '' }}">
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-                        <rect x="2" y="10" width="3" height="4.5" rx="0.5"/>
-                        <rect x="6.5" y="6.5" width="3" height="8" rx="0.5"/>
-                        <rect x="11" y="3.5" width="3" height="11" rx="0.5"/>
-                    </svg>
-                    Analytics
-                </a>
-
-                <a href="/chart{{ _iq }}" class="sidebar-link {{ 'active' if current_page == '/chart' else '' }}">
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-                        <path d="M2 12.5 5 8.5l3 2 3-6.5 3 3"/>
-                        <line x1="2" y1="14.5" x2="14" y2="14.5"/>
-                    </svg>
-                    Chart
-                </a>
-
-                <div class="sidebar-section">Manage</div>
-
-                <a href="/usage{{ _iq }}" class="sidebar-link {{ 'active' if current_page == '/usage' else '' }}">
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-                        <circle cx="8" cy="8" r="2.2"/>
-                        <path d="M8 1.5v1.3M8 13.2v1.3M1.5 8h1.3M13.2 8h1.3M3.4 3.4l.9.9M11.7 11.7l.9.9M12.6 3.4l-.9.9M4.3 11.7l-.9.9"/>
-                    </svg>
-                    Usage
-                </a>
-
-                <a href="/settings{{ _iq }}" class="sidebar-link {{ 'active' if current_page == '/settings' else '' }}">
+                <a href="/mm/settings" class="sidebar-link {{ 'active' if current_page == '/mm/settings' else '' }}">
                     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
                         <path d="M6.5 2H9.5l.5 1.5 1.3-.5 1.5 2.6-1 1.1.1 1.3-1 1.1-1.5-1-1.3.5H6.5l-.5-1.5-1.3.5L3.2 7l1-1.1-.1-1.3 1-1.1 1.5 1 1.3-.5z"/>
                         <circle cx="8" cy="8" r="1.8"/>
                     </svg>
                     Settings
-                </a>
-
-                <a href="/training{{ _iq }}" class="sidebar-link {{ 'active' if current_page == '/training' else '' }}">
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-                        <path d="M3 4.5l5-3 5 3v7l-5 3-5-3z"/>
-                        <path d="M8 1.5v14M3 4.5l5 3 5-3"/>
-                    </svg>
-                    Training
                 </a>
             </nav>
 

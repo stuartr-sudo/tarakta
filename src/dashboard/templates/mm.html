@@ -22,13 +22,13 @@
 {% set mm_total_pnl = mm_snapshot.total_pnl_usd | default(0) | float %}
 {% set mm_drawdown = mm_snapshot.drawdown_pct | default(0) | float %}
 
-<!-- Bot Selector -->
+<!-- Controls -->
 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
-    <div class="bot-toggle">
-        <a href="/">Footprint Bot</a>
-        <a href="/mm" class="active">MM Bot</a>
+    <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:1.1rem; font-weight:600; color:var(--teal);">MM Engine</span>
     </div>
     <div style="display: flex; align-items: center; gap: 8px;">
+        <a href="/mm/settings" class="account-badge" style="background:rgba(0,229,212,0.12); color:#00e5d4; text-decoration:none; cursor:pointer;" title="MM Settings">&#9881; Settings</a>
         <span class="account-badge" style="background:rgba(0,229,212,0.12); color:#00e5d4;">Algorithmic</span>
         <span id="mm-status-badge" class="status-badge closed-loss">LOADING</span>
         {% if role == 'admin' %}
@@ -116,6 +116,30 @@
     </div>
     <div id="mm-positions-body" class="panel-body no-pad" style="display:none;">
         <div class="overflow-x">
+            <style>
+                #mm-positions-table { width:100%; }
+                #mm-positions-table th, #mm-positions-table td { padding:10px 8px; white-space:nowrap; }
+                #mm-positions-table td:nth-child(1) { min-width:70px; }
+                #mm-positions-table td:nth-child(5),
+                #mm-positions-table td:nth-child(6),
+                #mm-positions-table td:nth-child(7) { white-space:normal; }
+                #mm-positions-table td:last-child { text-align:right; min-width:100px; }
+                /* Mobile card layout */
+                @media (max-width: 900px) {
+                    #mm-positions-table thead { display:none; }
+                    #mm-positions-table, #mm-positions-table tbody { display:block; }
+                    #mm-positions-table tr {
+                        display:grid; grid-template-columns: 1fr 1fr; gap:4px 12px;
+                        padding:12px; margin-bottom:8px;
+                        border:1px solid var(--border-color); border-radius:8px;
+                        background:var(--card-bg);
+                    }
+                    #mm-positions-table td { padding:4px 0; white-space:normal; }
+                    #mm-positions-table td:nth-child(1) { grid-column:1; font-size:1.1rem; }
+                    #mm-positions-table td:nth-child(2) { grid-column:2; text-align:right; }
+                    #mm-positions-table td:last-child { grid-column:1/3; text-align:center; font-size:1.2rem; padding-top:8px; border-top:1px solid var(--border-color); }
+                }
+            </style>
             <table class="data-table" id="mm-positions-table">
                 <thead>
                     <tr>
@@ -141,9 +165,10 @@
 <!-- Closed MM Trades -->
 <div class="panel">
     <div class="panel-header">
-        <h2>Recent MM Trades</h2>
+        <h2>Closed Trades <span class="badge" style="background:var(--teal-dim);color:var(--teal);">{{ mm_trades | selectattr('status', 'equalto', 'closed') | list | length }}</span></h2>
     </div>
-    {% if mm_trades %}
+    {% set closed_trades = mm_trades | selectattr('status', 'equalto', 'closed') | list %}
+    {% if closed_trades %}
     <div class="panel-body no-pad">
         <div class="overflow-x">
             <table class="data-table">
@@ -154,29 +179,27 @@
                         <th>Entry</th>
                         <th>Exit</th>
                         <th>P&L</th>
-                        <th>Grade</th>
                         <th>Formation</th>
-                        <th>Phase</th>
-                        <th>Reason</th>
+                        <th>Exit Reason</th>
                         <th>Time</th>
                     </tr>
                 </thead>
                 <tbody>
-                    {% for t in mm_trades %}
-                    <tr>
+                    {% for t in closed_trades %}
+                    {% if t.exit_reason != 'orphan_cleanup' %}
+                    <tr style="cursor:pointer;" onclick="showClosedTrade('{{ t.id }}')">
                         <td><strong>{{ t.symbol | replace(':USDT','') | replace('/USDT','') }}</strong></td>
                         <td><span class="dir-badge {{ 'long' if t.direction == 'long' else 'short' }}">{{ t.direction | upper }}</span></td>
                         <td class="mono">${{ "%.4f" | format(t.entry_price | default(0) | float) }}</td>
                         <td class="mono">{% if t.exit_price %}${{ "%.4f" | format(t.exit_price | float) }}{% else %}&mdash;{% endif %}</td>
-                        <td class="mono {{ 'positive' if (t.pnl_usd or 0) | float >= 0 else 'negative' }}">
+                        <td class="mono {{ 'positive' if (t.pnl_usd or 0) | float >= 0 else 'negative' }}" style="font-weight:bold;">
                             {% if t.pnl_usd is not none %}{{ "+" if t.pnl_usd | float >= 0 else "" }}${{ "%.2f" | format(t.pnl_usd | float) }}{% else %}&mdash;{% endif %}
                         </td>
-                        <td>{{ t.mm_confluence_grade | default('&mdash;') }}</td>
-                        <td>{{ t.mm_formation | default('&mdash;') }}</td>
-                        <td>{{ t.mm_cycle_phase | default('&mdash;') }}</td>
-                        <td style="font-size:0.7rem; max-width:200px; overflow:hidden; text-overflow:ellipsis;">{{ t.exit_reason | default(t.entry_reason | default('&mdash;')) }}</td>
-                        <td style="font-size:0.7rem;">{{ t.created_at[:16] if t.created_at else '&mdash;' }}</td>
+                        <td>{{ t.mm_formation | default('') }} {{ t.mm_confluence_grade | default('') }}</td>
+                        <td style="font-size:0.75rem;">{{ t.exit_reason | default('&mdash;') }}</td>
+                        <td style="font-size:0.75rem;">{{ t.created_at[:16] if t.created_at else '&mdash;' }}</td>
                     </tr>
+                    {% endif %}
                     {% endfor %}
                 </tbody>
             </table>
@@ -184,9 +207,20 @@
     </div>
     {% else %}
     <div class="empty-state">
-        <p>No MM Method trades yet. Trades will appear here once the engine enters positions.</p>
+        <p>No closed trades yet.</p>
     </div>
     {% endif %}
+</div>
+
+<!-- Trade Detail Modal -->
+<div id="trade-detail-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:#040812; z-index:9999; align-items:center; justify-content:center;">
+    <div style="background:#0d1320; border:1px solid rgba(0,229,212,0.2); border-radius:12px; padding:28px; max-width:600px; width:90%; max-height:85vh; overflow-y:auto; box-shadow:0 0 40px rgba(0,0,0,0.8);">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+            <h2 id="modal-title" style="margin:0;">Trade Detail</h2>
+            <button onclick="closeTradeDetail()" style="background:none; border:none; color:var(--text-muted); font-size:1.5rem; cursor:pointer;">&times;</button>
+        </div>
+        <div id="modal-body"></div>
+    </div>
 </div>
 {% endblock %}
 
@@ -194,6 +228,8 @@
 <script>
 let _mmScanning = false;
 let _mmAvailable = false;
+let _mmPositions = [];
+const _closedTrades = {{ mm_trades | tojson }};
 const _mmTotalPnl = {{ "%.2f" | format(mm_snapshot.total_pnl_usd | default(0) | float) }};
 
 async function loadMMStatus() {
@@ -249,6 +285,7 @@ function updateMMPage(data) {
     const posTbody = document.getElementById('mm-positions-tbody');
     if (posBadge) posBadge.textContent = (data.positions || []).length;
 
+    _mmPositions = data.positions || [];
     if (data.positions && data.positions.length > 0) {
         if (posBody) posBody.style.display = 'block';
         if (posEmpty) posEmpty.style.display = 'none';
@@ -261,7 +298,9 @@ function updateMMPage(data) {
                 const priceDp = cur > 10 ? 2 : cur > 0.1 ? 4 : 6;
                 const margin = p.margin_used || (p.cost_usd ? p.cost_usd / (p.leverage || 10) : 0);
                 const tp = p.target_l1 || 0;
-                return `<tr>
+                // Store position data for click handler
+                const pIdx = data.positions.indexOf(p);
+                return `<tr style="cursor:pointer;" onclick="showOpenPositionDetail(_mmPositions[${pIdx}])">
                     <td><strong>${p.symbol.replace(':USDT','').replace('/USDT','')}</strong></td>
                     <td><span class="dir-badge ${p.direction === 'long' ? 'long' : 'short'}">${p.direction.toUpperCase()}</span></td>
                     <td class="mono">$${p.entry_price.toFixed(priceDp)}</td>
@@ -348,5 +387,122 @@ async function toggleMMEngine() {
 
 loadMMStatus();
 setInterval(loadMMStatus, 15000);
+
+// --- Trade Detail Modal ---
+function showTradeDetail(trade) {
+    const sym = (trade.symbol || '').replace(':USDT','').replace('/USDT','');
+    const dir = trade.direction || '?';
+    const pnl = parseFloat(trade.pnl_usd || 0);
+    const entry = parseFloat(trade.entry_price || 0);
+    const exit = parseFloat(trade.exit_price || 0);
+    const sl = parseFloat(trade.stop_loss || 0);
+    const tp = parseFloat(trade.take_profit || 0);
+    const cost = parseFloat(trade.entry_cost_usd || 0);
+    const risk = parseFloat(trade.risk_usd || 0);
+    const dp = entry > 10 ? 2 : entry > 0.1 ? 4 : 6;
+
+    document.getElementById('modal-title').innerHTML = `
+        <strong>${sym}</strong>
+        <span class="dir-badge ${dir === 'long' ? 'long' : 'short'}" style="margin-left:8px;">${dir.toUpperCase()}</span>
+        ${trade.status === 'closed' ? `<span class="mono ${pnl >= 0 ? 'positive' : 'negative'}" style="margin-left:12px;font-size:1.1rem;">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</span>` : '<span class="status-badge open" style="margin-left:8px;">OPEN</span>'}
+    `;
+
+    // Expected timeframe: MM Method 3-level cycle runs ~3 days (72h).
+    // Level 1 ~24h, Level 2 ~24h, Level 3 ~24h.
+    const enteredAt = trade.created_at || trade.entry_time || '';
+    let holdInfo = '';
+    let expectedInfo = '';
+    if (enteredAt) {
+        const entryDate = new Date(enteredAt);
+        const now = new Date();
+        const holdHours = Math.round((now - entryDate) / 3600000);
+        const holdDays = (holdHours / 24).toFixed(1);
+        holdInfo = holdHours < 24 ? `${holdHours}h` : `${holdDays} days`;
+        if (trade.status !== 'closed') {
+            const remainHours = Math.max(0, 72 - holdHours);
+            expectedInfo = remainHours > 24 ? `~${(remainHours/24).toFixed(0)} days remaining` : remainHours > 0 ? `~${remainHours}h remaining` : 'Expected cycle complete';
+        }
+    }
+
+    document.getElementById('modal-body').innerHTML = `
+        <table class="config-table" style="width:100%;">
+            <tr><td style="color:var(--text-muted);">Entry Price</td><td class="mono">$${entry.toFixed(dp)}</td></tr>
+            ${exit ? `<tr><td style="color:var(--text-muted);">Exit Price</td><td class="mono">$${exit.toFixed(dp)}</td></tr>` : ''}
+            <tr><td style="color:var(--text-muted);">Stop Loss</td><td class="mono">$${sl.toFixed(dp)}</td></tr>
+            <tr><td style="color:var(--text-muted);">Take Profit (L1)</td><td class="mono">$${tp.toFixed(dp)}</td></tr>
+            <tr><td style="color:var(--text-muted);">Notional</td><td class="mono">$${cost.toFixed(0)}</td></tr>
+            <tr><td style="color:var(--text-muted);">Risk ($)</td><td class="mono">$${risk.toFixed(2)}</td></tr>
+            <tr><td style="color:var(--text-muted);">Leverage</td><td class="mono">${trade.leverage || 10}x</td></tr>
+            <tr><td style="color:var(--text-muted);">SL Distance</td><td class="mono">${(Math.abs(entry - sl) / entry * 100).toFixed(3)}%</td></tr>
+        </table>
+        ${holdInfo || expectedInfo ? `
+        <div style="margin-top:16px; padding:12px; background:var(--bg-dim); border-radius:8px; border-left:3px solid #8b5cf6;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                    <div style="font-size:0.75rem; color:var(--text-muted);">TIMEFRAME</div>
+                    <div style="font-size:0.95rem; margin-top:2px;">Held: <strong>${holdInfo}</strong> of ~3 day cycle</div>
+                </div>
+                ${expectedInfo ? `<div style="font-size:0.8rem; color:#8b5cf6;">${expectedInfo}</div>` : ''}
+            </div>
+            <div style="margin-top:8px; height:4px; background:rgba(139,92,246,0.15); border-radius:2px; overflow:hidden;">
+                <div style="height:100%; background:#8b5cf6; border-radius:2px; width:${Math.min(100, (holdInfo ? parseInt(holdInfo) : 0) / 72 * 100)}%;"></div>
+            </div>
+            <div style="font-size:0.65rem; color:var(--text-muted); margin-top:4px;">MM Method: Level 1 (~day 1) &rarr; Level 2 (~day 2) &rarr; Level 3 + SVC (~day 3)</div>
+        </div>` : ''}
+        <div style="margin-top:16px; padding:12px; background:var(--bg-dim); border-radius:8px; border-left:3px solid var(--teal);">
+            <div style="font-size:0.75rem; color:var(--text-muted); margin-bottom:4px;">ENTRY REASONING</div>
+            <div style="font-size:0.85rem; line-height:1.5;">${trade.entry_reason || 'No reasoning recorded'}</div>
+        </div>
+        ${trade.exit_reason ? `
+        <div style="margin-top:12px; padding:12px; background:var(--bg-dim); border-radius:8px; border-left:3px solid ${pnl >= 0 ? '#00e5d4' : '#f44'};">
+            <div style="font-size:0.75rem; color:var(--text-muted); margin-bottom:4px;">EXIT REASON</div>
+            <div style="font-size:0.85rem;">${trade.exit_reason}</div>
+        </div>` : ''}
+        <div style="margin-top:12px;">
+            <table class="config-table" style="width:100%;">
+                <tr><td style="color:var(--text-muted);">Formation</td><td>${trade.mm_formation || '—'} (${trade.mm_confluence_grade || '—'})</td></tr>
+                <tr><td style="color:var(--text-muted);">Phase</td><td>${trade.mm_cycle_phase || '—'}</td></tr>
+                <tr><td style="color:var(--text-muted);">Confluence</td><td>${trade.confluence_score || '—'}</td></tr>
+                <tr><td style="color:var(--text-muted);">Entered</td><td style="font-size:0.8rem;">${enteredAt.substring(0, 19)}${holdInfo ? ` (${holdInfo} ago)` : ''}</td></tr>
+                ${trade.exit_time ? `<tr><td style="color:var(--text-muted);">Exited</td><td style="font-size:0.8rem;">${trade.exit_time.substring(0, 19)}</td></tr>` : ''}
+            </table>
+        </div>
+    `;
+
+    const modal = document.getElementById('trade-detail-modal');
+    modal.style.display = 'flex';
+    modal.onclick = (e) => { if (e.target === modal) closeTradeDetail(); };
+}
+
+function showClosedTrade(tradeId) {
+    const trade = _closedTrades.find(t => t.id === tradeId);
+    if (trade) showTradeDetail(trade);
+}
+
+function closeTradeDetail() {
+    document.getElementById('trade-detail-modal').style.display = 'none';
+}
+
+// Make open position rows clickable too (using live API data)
+function showOpenPositionDetail(p) {
+    showTradeDetail({
+        symbol: p.symbol,
+        direction: p.direction,
+        entry_price: p.entry_price,
+        stop_loss: p.stop_loss,
+        take_profit: p.target_l1,
+        entry_cost_usd: p.cost_usd,
+        leverage: p.leverage,
+        risk_usd: Math.abs(p.entry_price - p.stop_loss) * p.quantity,
+        status: 'open',
+        pnl_usd: p.unrealized_pnl,
+        entry_reason: p.entry_reason || '',
+        mm_formation: p.formation_type || '',
+        mm_confluence_grade: p.confluence_grade || '',
+        mm_cycle_phase: p.cycle_phase || '',
+        confluence_score: p.confluence_score || '',
+        created_at: p.entry_time || '',
+    });
+}
 </script>
 {% endblock %}
