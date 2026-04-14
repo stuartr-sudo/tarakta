@@ -300,7 +300,7 @@ function updateMMPage(data) {
                 const tp = p.target_l1 || 0;
                 // Store position data for click handler
                 const pIdx = data.positions.indexOf(p);
-                return `<tr style="cursor:pointer;" onclick="showOpenPositionDetail(_mmPositions[${pIdx}])"
+                return `<tr style="cursor:pointer;" onclick="showOpenPositionDetail(_mmPositions[${pIdx}])">
                     <td><strong>${p.symbol.replace(':USDT','').replace('/USDT','')}</strong></td>
                     <td><span class="dir-badge ${p.direction === 'long' ? 'long' : 'short'}">${p.direction.toUpperCase()}</span></td>
                     <td class="mono">$${p.entry_price.toFixed(priceDp)}</td>
