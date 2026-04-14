@@ -42,7 +42,7 @@
     <div class="stat-card">
         <div class="stat-label">MM Balance</div>
         <div class="stat-value" id="mm-balance">${{ "%.2f" | format(mm_balance) }}</div>
-        <div class="stat-sub">{% set mm_pct = ((mm_balance - mm_initial) / mm_initial * 100) if mm_initial > 0 else 0 %}<span class="{{ 'positive' if mm_pct >= 0 else 'negative' }}" style="font-size:10px;">{{ "%.1f"|format(mm_pct) }}%</span> since open</div>
+        <div class="stat-sub" id="mm-balance-sub">{% set mm_pct = ((mm_balance - mm_initial) / mm_initial * 100) if mm_initial > 0 else 0 %}<span class="{{ 'positive' if mm_pct >= 0 else 'negative' }}" style="font-size:10px;">{{ "%.1f"|format(mm_pct) }}%</span> since open</div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Total P&L</div>
@@ -123,10 +123,10 @@
                         <th>Direction</th>
                         <th>Entry</th>
                         <th>Current</th>
-                        <th>Stop Loss</th>
+                        <th>SL / TP</th>
+                        <th>Qty</th>
+                        <th>Margin</th>
                         <th>Unrealized P&L</th>
-                        <th>Level</th>
-                        <th>Closed %</th>
                     </tr>
                 </thead>
                 <tbody id="mm-positions-tbody"></tbody>
@@ -257,15 +257,19 @@ function updateMMPage(data) {
                 const pnl = p.unrealized_pnl || 0;
                 const pnlClass = pnl >= 0 ? 'text-green' : 'text-red';
                 const pnlSign = pnl >= 0 ? '+' : '';
+                const cur = p.current_price || p.entry_price;
+                const priceDp = cur > 10 ? 2 : cur > 0.1 ? 4 : 6;
+                const margin = p.margin_used || (p.cost_usd ? p.cost_usd / (p.leverage || 10) : 0);
+                const tp = p.target_l1 || 0;
                 return `<tr>
                     <td><strong>${p.symbol.replace(':USDT','').replace('/USDT','')}</strong></td>
                     <td><span class="dir-badge ${p.direction === 'long' ? 'long' : 'short'}">${p.direction.toUpperCase()}</span></td>
-                    <td class="mono">$${p.entry_price.toFixed(4)}</td>
-                    <td class="mono">$${(p.current_price || p.entry_price).toFixed(4)}</td>
-                    <td class="mono">$${p.stop_loss.toFixed(4)}</td>
-                    <td class="mono ${pnlClass}">${pnlSign}$${pnl.toFixed(2)}</td>
-                    <td>Level ${p.current_level}</td>
-                    <td>${p.partial_closed_pct}%</td>
+                    <td class="mono">$${p.entry_price.toFixed(priceDp)}</td>
+                    <td class="mono">$${cur.toFixed(priceDp)}</td>
+                    <td class="mono" style="font-size:0.75rem;">SL $${p.stop_loss.toFixed(priceDp)}<br>TP $${tp.toFixed(priceDp)}</td>
+                    <td class="mono" style="font-size:0.75rem;">${p.quantity ? p.quantity.toFixed(2) : '—'}<br><span style="color:var(--text-muted);">${p.leverage || 10}x lev</span></td>
+                    <td class="mono">$${margin.toFixed(0)}<br><span style="color:var(--text-muted);font-size:0.7rem;">of $${(p.cost_usd || 0).toFixed(0)} notional</span></td>
+                    <td class="mono ${pnlClass}" style="font-size:1.1rem;font-weight:bold;">${pnlSign}$${pnl.toFixed(2)}</td>
                 </tr>`;
             }).join('');
         }
@@ -288,6 +292,11 @@ function updateMMPage(data) {
                 unrEl.className = 'stat-value ' + (totalUnrealized >= 0 ? 'positive' : 'negative');
             }
             if (unrSub) unrSub.textContent = data.positions.length + ' open position' + (data.positions.length !== 1 ? 's' : '');
+            // Update balance sub with margin allocation info
+            const balSub = document.getElementById('mm-balance-sub');
+            if (balSub && data.total_margin_used) {
+                balSub.innerHTML = '<span style="color:var(--teal);">$' + data.total_margin_used.toFixed(0) + ' margin allocated</span> &middot; $' + (data.total_notional || 0).toFixed(0) + ' notional';
+            }
             const netPnl = _mmTotalPnl + totalUnrealized;
             if (netEl) {
                 netEl.textContent = (netPnl >= 0 ? '+' : '') + '$' + netPnl.toFixed(2);
