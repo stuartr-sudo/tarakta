@@ -26,7 +26,6 @@ Take Profit Rules (from the course):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -40,11 +39,23 @@ logger = get_logger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-# EMA periods used as targets per level
+# EMA periods used as targets per level (course lessons 12, 47, 48)
+# Level 1 → 50 EMA (primary, lesson 12 "Level 1 should break the 50 EMA")
+# Level 2 → 800 EMA (lesson 12: "Depending on where the 800 EMA is, that is
+#                    often the level 2 target") — **200 was wrong before 2026-04**
+# Level 3 → higher-TF 200/800 EMA (lesson 12: "a 200 or an 800 EMA on a higher
+#                                   time frame as a Target")
 LEVEL_EMA_TARGETS = {
     1: 50,    # Level 1 targets the 50 EMA
-    2: 200,   # Level 2 targets the 200 EMA
-    3: 800,   # Level 3 targets the 800 EMA
+    2: 800,   # Level 2 targets the 800 EMA (corrected 2026-04 per course audit)
+    3: 800,   # Level 3 targets higher-TF EMA — best same-TF proxy is still 800
+}
+
+# Fallback EMAs at each level (used when primary not in direction)
+LEVEL_EMA_FALLBACKS = {
+    1: 200,   # Lesson 48: "If the 200 isn't a good target because it's too close, look for a previous unrecovered Vector candle"
+    2: 200,
+    3: 200,
 }
 
 # Minimum volume ratio to qualify as a "Vector" candle (PVSRA)

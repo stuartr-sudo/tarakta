@@ -519,12 +519,22 @@ class FormationDetector:
 
         hit_count = len(hit_indices)
 
+        # Course lesson 18: "The hits to the level also need to be in different
+        # sessions, and not one after the other" and "There can be up to two
+        # hits to a level in one session, for purpose of looking for three
+        # hits to a level, but not more than this. You don't want all your
+        # three hits to a level to appear in the exact same session."
         if hit_count >= 3:
-            # Check that hits span at least 2 different sessions.
+            # Count hits per session
+            from collections import Counter
+            session_counts = Counter(hit_sessions)
+            max_per_session = max(session_counts.values()) if session_counts else 0
             unique_sessions = set(s for s in hit_sessions if s != "unknown")
             multi_session = len(unique_sessions) >= 2 or "unknown" in hit_sessions
+            # B5 enforcement: ≤2 hits per session
+            session_cap_ok = max_per_session <= 2
 
-            if multi_session or self.session_analyzer is None:
+            if (multi_session and session_cap_ok) or self.session_analyzer is None:
                 result.detected = True
                 result.hit_count = hit_count
                 result.level_tested = level
@@ -537,6 +547,15 @@ class FormationDetector:
                     hits=hit_count,
                     level=level,
                     outcome=result.expected_outcome,
+                    sessions=hit_sessions,
+                    max_per_session=max_per_session,
+                )
+            elif not session_cap_ok:
+                logger.info(
+                    "mm_three_hits_rejected_same_session",
+                    hits=hit_count,
+                    level=level,
+                    max_per_session=max_per_session,
                     sessions=hit_sessions,
                 )
 

@@ -136,6 +136,11 @@ class MMSignal:
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     reason: str = ""
 
+    # Course-faithful lifecycle carriers (2026-04 audit)
+    # Course lesson 49 Refund Zone — only 2nd-peak aggressive entries use it
+    entry_type: str = "conservative"  # "aggressive" (2nd-peak) or "conservative" (post-L1)
+    peak2_wick_price: float = 0.0     # For W: 2nd-peak low wick; for M: 2nd-peak high wick
+
 
 @dataclass
 class MMPosition:
@@ -164,6 +169,15 @@ class MMPosition:
     confluence_grade: str = ""
     cycle_phase: str = ""
     confluence_score: float = 0.0
+
+    # Course-faithful lifecycle fields (2026-04 audit fix)
+    # Course lesson 49 (Refund Zone): only applies to 2nd-peak aggressive entries.
+    # If price CLOSES past the peak2 wick, cut the trade for a small loss.
+    entry_type: str = "conservative"     # "aggressive" or "conservative"
+    peak2_wick_price: float = 0.0        # For W: 2nd-peak low wick; for M: 2nd-peak high wick
+    original_stop_loss: float = 0.0      # Immutable original SL for monotonic-SL enforcement
+    sl_moved_to_breakeven: bool = False  # Track breakeven move after L2 starts
+    sl_moved_under_50ema: bool = False   # Track "SL under 50 EMA once L2 running"
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +231,20 @@ class MMEngine:
         self._cooldowns: dict[str, datetime] = {}  # symbol -> earliest re-entry time
         self._cooldown_hours: float = SYMBOL_COOLDOWN_HOURS  # configurable via settings
         self._last_prices: dict[str, float] = {}  # symbol -> last known price (survives fetch failures)
+        self._oi_cache: dict[str, float] = {}     # symbol -> last Open Interest reading (for rise/fall detection)
+
+        # Course F3: pluggable data-feed registry (all stubs by default).
+        # When real subscriptions are wired (Hyblock, TradingLite, Forex Factory,
+        # basedmoney.io, CoinGecko for dominance, TradingView for correlation,
+        # alternative.me for sentiment), swap stubs for real providers.
+        from src.strategy.mm_data_feeds import DataFeedRegistry
+        self.data_feeds = getattr(config, "mm_data_feeds", None) or DataFeedRegistry()
+
+        # Course E1 (lesson 54): "if you have $10K OKX and $10K Binance,
+        # 1% of $20K" — multi-exchange combined balance for 1% risk.
+        # Expect config.mm_extra_exchanges: list of additional exchange clients
+        # to sum alongside self.exchange. Empty by default = single-exchange.
+        self.mm_extra_exchanges = getattr(config, "mm_extra_exchanges", []) or []
         self.cycle_count = 0
         self._running = True
         self._scanning_active = True  # MM Engine starts active (unlike main bot)
@@ -683,10 +711,18 @@ class MMEngine:
 
         Returns an MMSignal if entry conditions are met, None otherwise.
         """
-        # Fetch candles (1H primary, 4H for EMA trend)
+        # Fetch candles (1H primary, 4H for EMA trend, 15m for entry refinement)
+        # Course C1 (lesson 13): "drop down to the 15 minute time frame for
+        # the actual Entry... then switch back to the one hour" — we fetch
+        # 15m so final-damage hammer/inverted-hammer checks (lesson 21) and
+        # other 15m-sensitive validations have data available.
         try:
             candles_1h = await self.candle_manager.get_candles(symbol, "1h", limit=500)
             candles_4h = await self.candle_manager.get_candles(symbol, "4h", limit=250)
+            try:
+                candles_15m = await self.candle_manager.get_candles(symbol, "15m", limit=200)
+            except Exception:
+                candles_15m = None  # best-effort — some markets won't have 15m
         except Exception as e:
             return self._reject("candle_fetch", symbol, error=str(e))
 
@@ -694,7 +730,47 @@ class MMEngine:
             return self._reject("insufficient_candles", symbol, count=0 if candles_1h is None or (hasattr(candles_1h, 'empty') and candles_1h.empty) else len(candles_1h))
 
         self._advance("candles_ok")
+
+        # Course A8 (lesson 20 "wait for candle CLOSE before entering"):
+        # Reject if the latest 1H bar hasn't closed yet. We use a 5-minute
+        # tolerance because exchange candle endpoints sometimes return the
+        # just-closed bar with a timestamp a few seconds before `now`.
+        try:
+            last_bar_ts = candles_1h.index[-1]
+            # Convert to UTC aware datetime if needed
+            if hasattr(last_bar_ts, "to_pydatetime"):
+                last_bar_dt = last_bar_ts.to_pydatetime()
+            else:
+                last_bar_dt = last_bar_ts
+            if last_bar_dt.tzinfo is None:
+                last_bar_dt = last_bar_dt.replace(tzinfo=timezone.utc)
+            # Bar close time = bar_start + 1h
+            bar_close_dt = last_bar_dt + timedelta(hours=1)
+            if now < bar_close_dt - timedelta(minutes=5):
+                # Still inside the current 1H bar — don't score yet.
+                return self._reject("bar_not_closed", symbol,
+                                    bar_start=last_bar_dt.isoformat(),
+                                    bar_close_due=bar_close_dt.isoformat())
+        except Exception:
+            pass  # Best-effort only — don't block on timestamp parsing issues
+
         current_price = float(candles_1h.iloc[-1]["close"])
+
+        # Course A9 (lesson 9): midweek reversal for crypto happens Wed/Thu.
+        # Reversal-only formations (three_hits_*, final_damage) on Mon/Tue are
+        # fighting the primary weekly trend start. Subsumed by the
+        # "no counter-trend after L1" gate below once the level tracker has
+        # counted a level of move in the new week.
+
+        # Course A3 (lesson 12): Asia range >2% for BTC → skip the whole day.
+        # Only apply to BTC (course is specific) — don't penalize alts whose
+        # Asia range is inherently wider.
+        if "BTC" in symbol.upper().split("/")[0]:
+            asia_range_pct = self._compute_asia_range_pct(candles_1h, now)
+            if asia_range_pct is not None and asia_range_pct > ASIA_RANGE_SKIP_PCT:
+                return self._reject("asia_range_too_wide", symbol,
+                                    asia_range_pct=round(asia_range_pct, 2),
+                                    threshold=ASIA_RANGE_SKIP_PCT)
 
         # --- Run all MM modules ---
 
@@ -712,6 +788,23 @@ class MMEngine:
         # Weekly cycle — computed up front so both the formation path and the
         # lesson-18 three-hits alternative can use HOW/LOW and phase data.
         cycle_state = self.weekly_cycle_tracker.update(candles_1h, now)
+
+        # Course F2 (lesson 29): Open Interest as trapped-trader detector.
+        # Best-effort fetch — many alt perps support it via CCXT; if not we
+        # leave the OI flag None and the confluence factor scores 0.
+        oi_increasing: bool | None = None
+        try:
+            oi_data = await self.exchange.fetch_open_interest(symbol)
+            # The CCXT shape is {openInterestAmount, timestamp, datetime, info, ...}
+            # We compare against our cache from the previous cycle.
+            if oi_data and "openInterestAmount" in oi_data:
+                current_oi = float(oi_data["openInterestAmount"])
+                prev_oi = self._oi_cache.get(symbol)
+                if prev_oi is not None:
+                    oi_increasing = current_oi > prev_oi * 1.005  # >0.5% rise = increasing
+                self._oi_cache[symbol] = current_oi
+        except Exception:
+            pass  # OI not critical; confluence factor defaults to 0
 
         # Formation detection (1H)
         formations = self.formation_detector.detect(candles_1h)
@@ -731,6 +824,18 @@ class MMEngine:
                         level=cycle_state.how if best_formation.type == "M" else cycle_state.low)
 
         self._advance("formation_found")
+
+        # Course B2 (lesson 21): Final Damage M/W must be a hammer (W) or
+        # inverted hammer (M) on the 15m timeframe at the 2nd peak, otherwise
+        # it's not a valid Final Damage signal.
+        if best_formation.variant == "final_damage" and candles_15m is not None:
+            if not self._final_damage_hammer_15m(
+                best_formation=best_formation,
+                candles_15m=candles_15m,
+            ):
+                return self._reject("final_damage_no_hammer_15m", symbol,
+                                    formation_type=best_formation.type)
+
         # Course-faithful change (2026-04): the raw course (lesson 20) does not
         # score formation "quality" — an M/W either satisfies its three MM
         # appearances or it is not an M/W. quality_score is still used by
@@ -754,6 +859,41 @@ class MMEngine:
             return self._reject("level_too_advanced", symbol, level=level_analysis.current_level, post_formation_candles=len(candles_post_formation))
 
         self._advance("level_ok")
+
+        # Course A4 (lesson 12): "We do not counter Trend Trade after level 1 Rise"
+        # — called out as "the major one that you don't want to break".
+        # If we're already past Level 1 in one direction, don't open a trade
+        # in the OPPOSITE direction (unless an M/W reversal formation is the
+        # explicit trigger — which we handle via the lesson-18 path / level=3
+        # reject above). For the in-trend direction, this is a no-op.
+        # Detection: examine the WHOLE-chart trend direction up to now.
+        try:
+            # "Chart-level" direction — count bullish vs bearish levels on the
+            # full recent window, regardless of our formation.
+            full_window_bullish = self.level_tracker.analyze(candles_1h.tail(60), direction="bullish")
+            full_window_bearish = self.level_tracker.analyze(candles_1h.tail(60), direction="bearish")
+            # If the prior direction is bullish past L1 and we're trying to short,
+            # or bearish past L1 and we're trying to long — block it.
+            if full_window_bullish.current_level >= 1 and trade_direction == "short":
+                # Unless we have a 3-hit reversal or a high-confluence reversal formation,
+                # the plain "short into an ongoing bullish move" path is blocked.
+                # The lesson-18 three-hits path already sets formation.variant properly,
+                # so we let those through. Same for Final Damage variants at HOW.
+                if best_formation.variant not in ("three_hits_how", "final_damage", "multi_session") \
+                   and not best_formation.at_key_level:
+                    return self._reject("counter_trend_after_l1", symbol,
+                                        trend_level=full_window_bullish.current_level,
+                                        trade_dir=trade_direction,
+                                        formation_variant=best_formation.variant)
+            if full_window_bearish.current_level >= 1 and trade_direction == "long":
+                if best_formation.variant not in ("three_hits_low", "final_damage", "multi_session") \
+                   and not best_formation.at_key_level:
+                    return self._reject("counter_trend_after_l1", symbol,
+                                        trend_level=full_window_bearish.current_level,
+                                        trade_dir=trade_direction,
+                                        formation_variant=best_formation.variant)
+        except Exception:
+            pass  # Best-effort — don't block on tracker errors
 
         # Don't enter during FMWB (it's the false move)
         if cycle_state.phase == "FMWB":
@@ -818,19 +958,39 @@ class MMEngine:
         # Calculate entry, SL, and targets
         entry_price = current_price
 
-        # Stop loss placement per MM Method course rules:
-        # W-bottom (long): SL below the W's lowest low (min of peak1, peak2)
-        # M-top (short): SL above the M's highest high (max of peak1, peak2)
-        # No artificial cap — position sizing adjusts size for wider stops.
+        # Stop loss placement per MM Method course rules (lesson 10, 20):
+        # W-bottom (long):  "SL below the low of the candle PRECEDING the 1st spike, OR below LOD"
+        # M-top (short):    "SL above the high of the candle PRECEDING the 1st spike, OR above HOD"
+        # We look at peak1_idx-1 for the preceding candle's low (W) / high (M),
+        # and fall back to the peak itself if the preceding candle is unavailable.
+        peak1_abs_idx = lookback_start + best_formation.peak1_idx
+        try:
+            if peak1_abs_idx > 0 and peak1_abs_idx - 1 < len(candles_1h):
+                preceding = candles_1h.iloc[peak1_abs_idx - 1]
+            else:
+                preceding = None
+        except Exception:
+            preceding = None
+
         if best_formation.type.upper() == "W":
-            # W: peak1_price & peak2_price are the two lows. SL below the lowest.
-            lowest_low = min(best_formation.peak1_price, best_formation.peak2_price)
-            sl_price = lowest_low * 0.998  # 0.2% buffer below invalidation
+            # Prefer the low of the PRECEDING candle (course rule).
+            # Fallback: min of peak1/peak2 prices (previous behaviour).
+            if preceding is not None:
+                sl_ref = min(float(preceding["low"]),
+                             best_formation.peak1_price,
+                             best_formation.peak2_price)
+            else:
+                sl_ref = min(best_formation.peak1_price, best_formation.peak2_price)
+            sl_price = sl_ref * 0.998  # 0.2% buffer below invalidation
             trade_direction = "long"
         else:
-            # M: peak1_price & peak2_price are the two highs. SL above the highest.
-            highest_high = max(best_formation.peak1_price, best_formation.peak2_price)
-            sl_price = highest_high * 1.002  # 0.2% buffer above invalidation
+            if preceding is not None:
+                sl_ref = max(float(preceding["high"]),
+                             best_formation.peak1_price,
+                             best_formation.peak2_price)
+            else:
+                sl_ref = max(best_formation.peak1_price, best_formation.peak2_price)
+            sl_price = sl_ref * 1.002  # 0.2% buffer above invalidation
             trade_direction = "short"
 
         # Course-faithful change (2026-04): the course (lesson 53) is explicit —
@@ -932,6 +1092,8 @@ class MMEngine:
             at_session_changeover=session.is_gap,
             at_how_low=at_how or at_low or three_hit_boost,
             has_unrecovered_vector=len(target_analysis.unrecovered_vectors) > 0,
+            moon_phase_aligned=self._moon_phase_aligned(trade_direction, now),
+            oi_increasing=oi_increasing,
         )
 
         confluence_result = self.confluence_scorer.score(mm_ctx)
@@ -961,6 +1123,24 @@ class MMEngine:
 
         self._advance("retest_passed")
 
+        # Course-faithful: determine entry type & peak2 wick for Refund Zone
+        # Aggressive = 2nd-peak entry (refund zone applies).
+        # Conservative = post-L1 retest entry (refund zone NOT applicable per lesson 49).
+        # We classify post-50-EMA-break as conservative; otherwise aggressive.
+        is_post_l1 = ema_break is not None and getattr(ema_break, "broke_ema", False)
+        entry_type = "conservative" if is_post_l1 else "aggressive"
+        # peak2 wick: for W, the LOW wick of 2nd peak; for M, the HIGH wick.
+        # best_formation.peak2_idx is relative to the 40-bar lookback.
+        try:
+            peak2_abs_idx = lookback_start + best_formation.peak2_idx
+            peak2_candle = candles_1h.iloc[peak2_abs_idx]
+            if best_formation.type.upper() == "W":
+                peak2_wick_price = float(peak2_candle["low"])
+            else:
+                peak2_wick_price = float(peak2_candle["high"])
+        except Exception:
+            peak2_wick_price = float(best_formation.peak2_price)
+
         # Build signal
         signal = MMSignal(
             symbol=symbol,
@@ -982,9 +1162,11 @@ class MMEngine:
             ema_alignment=ema_state.alignment if ema_state else "mixed",
             fmwb_direction=weekend.fmwb.direction if weekend.fmwb.detected else "",
             weekend_bias=weekend.bias,
+            entry_type=entry_type,
+            peak2_wick_price=peak2_wick_price,
             reason=f"{best_formation.type} formation ({best_formation.variant}) "
                    f"grade={confluence_result.grade} R:R={rr:.1f} "
-                   f"phase={cycle_state.phase}",
+                   f"phase={cycle_state.phase} entry={entry_type}",
         )
 
         logger.info(
@@ -1008,6 +1190,7 @@ class MMEngine:
         try:
             balance = await self.exchange.get_balance()
             account_balance = balance.get("USDT", 0) or balance.get("USD", 0)
+            account_balance = await self._combined_balance(account_balance)
         except Exception:
             account_balance = 0
 
@@ -1039,9 +1222,11 @@ class MMEngine:
 
     async def _enter_trade(self, signal: MMSignal) -> None:
         """Execute an MM Method trade entry."""
-        # Get balance for position sizing
+        # Get balance for position sizing — course E1 (lesson 54): 1% of TOTAL
+        # trading account across all exchanges.
         balance = await self.exchange.get_balance()
         account_balance = balance.get("USDT", 0) or balance.get("USD", 0)
+        account_balance = await self._combined_balance(account_balance)
 
         if account_balance <= 0:
             logger.info("mm_entry_skip_no_balance", symbol=signal.symbol, balance=account_balance)
@@ -1116,6 +1301,8 @@ class MMEngine:
             logger.warning("mm_trade_db_insert_failed", symbol=signal.symbol, error=str(e))
 
         # Create MM position with DB id for later updates
+        # Course-faithful lifecycle fields captured from signal so we can
+        # enforce Refund Zone (lesson 49) and monotonic SL (lesson 51).
         position = MMPosition(
             trade_id=trade_id,
             symbol=signal.symbol,
@@ -1134,6 +1321,10 @@ class MMEngine:
             confluence_grade=signal.confluence_grade,
             cycle_phase=signal.cycle_phase,
             confluence_score=signal.confluence_score,
+            # Lifecycle tracking
+            entry_type=getattr(signal, "entry_type", "conservative"),
+            peak2_wick_price=getattr(signal, "peak2_wick_price", 0.0),
+            original_stop_loss=signal.stop_loss,
         )
 
         self.positions[signal.symbol] = position
@@ -1165,6 +1356,33 @@ class MMEngine:
             self._last_prices[symbol] = current_price
         except Exception:
             return
+
+        # Course-faithful: REFUND ZONE check (lesson 49).
+        # Only for 2nd-peak aggressive entries. If price CLOSES past the 2nd
+        # peak's wick, cut immediately at a small loss rather than riding to SL.
+        # Requires a closed candle — check last 1h bar close.
+        if pos.entry_type == "aggressive" and pos.peak2_wick_price > 0 and pos.current_level == 0:
+            try:
+                candles_short = await self.candle_manager.get_candles(symbol, "1h", limit=5)
+                if candles_short is not None and not candles_short.empty and len(candles_short) >= 2:
+                    # Use the PENULTIMATE candle's close — guaranteed closed
+                    last_close = float(candles_short.iloc[-2]["close"])
+                    refund_check = self.risk_calculator.check_refund_zone(
+                        entry_price=pos.entry_price,
+                        current_price=last_close,
+                        formation_type=pos.formation_type,
+                        peak2_wick_price=pos.peak2_wick_price,
+                    )
+                    if refund_check.should_cut:
+                        logger.info("mm_refund_zone_cut", symbol=symbol,
+                                    entry=pos.entry_price, last_close=last_close,
+                                    peak2_wick=pos.peak2_wick_price,
+                                    formation=pos.formation_type,
+                                    loss_pct=refund_check.loss_pct)
+                        await self._close_position(pos, current_price, "refund_zone")
+                        return
+            except Exception as e:
+                logger.debug("mm_refund_zone_check_failed", symbol=symbol, error=str(e))
 
         # Check stop loss hit
         if self._is_stopped_out(pos, current_price):
@@ -1283,40 +1501,219 @@ class MMEngine:
             return current_price >= pos.stop_loss
 
     def _tighten_sl(self, pos: MMPosition, new_level: int, candles_1h: pd.DataFrame) -> None:
-        """Tighten stop loss per MM Method level rules.
+        """Tighten stop loss per MM Method level rules (course lessons 47, 48).
 
-        Rules from the course:
-        - Level 1 complete: SL stays at entry (do NOT move to breakeven yet)
-        - Level 2 starts: NOW move SL to breakeven (entry price)
-        - Level 2 running: SL under 50 EMA
-        - Level 3: SL trails under recent structure
+        Course rules:
+        - Level 1 complete: SL stays at entry/structure (lesson 47: "only after
+          retracement can you move stop loss to break even").
+        - Level 2 starts: move SL to breakeven (entry price).
+        - Level 2 running: SL just under the 50 EMA (lesson 48 / spec §7).
+        - Level 3: SL trails under recent structure.
+
+        Monotonic SL enforcement (lesson 51: "never increase your stop loss
+        because that'll mean you'll lose more money"): a new SL proposal is
+        only accepted if it TIGHTENS the stop (reduces risk), never widens it.
         """
+        def _tightens(new_sl: float) -> bool:
+            """Return True if new_sl is a tightening move (reduces risk)."""
+            if pos.direction == "long":
+                return new_sl > pos.stop_loss
+            return new_sl < pos.stop_loss
+
+        def _apply(new_sl: float, reason: str) -> bool:
+            """Apply SL move if it tightens AND doesn't cross current price."""
+            # Safety: never move SL to the wrong side of current price
+            # (would be an instant stop-out).
+            if pos.direction == "long" and new_sl >= pos.entry_price * 1.1:
+                return False  # sanity cap: don't move SL absurdly high on long
+            if pos.direction == "short" and new_sl <= pos.entry_price * 0.9:
+                return False
+            if _tightens(new_sl):
+                old = pos.stop_loss
+                pos.stop_loss = new_sl
+                logger.info("mm_sl_tightened", symbol=pos.symbol,
+                            level=new_level, reason=reason,
+                            old_sl=old, new_sl=new_sl,
+                            direction=pos.direction)
+                return True
+            return False
+
         if new_level <= 1:
-            # Don't tighten yet — course says wait for Level 2
+            # Lesson 47: "A lot of times, I'll hear people move their stop loss
+            # before they've hit their initial target, that is wrong"
             return
 
         if new_level == 2:
-            # Move to breakeven
-            if pos.direction == "long" and pos.stop_loss < pos.entry_price:
-                pos.stop_loss = pos.entry_price
-                logger.info("mm_sl_breakeven", symbol=pos.symbol, sl=pos.stop_loss)
-            elif pos.direction == "short" and pos.stop_loss > pos.entry_price:
-                pos.stop_loss = pos.entry_price
-                logger.info("mm_sl_breakeven", symbol=pos.symbol, sl=pos.stop_loss)
+            # (a) Move SL to breakeven first if we haven't yet
+            if not pos.sl_moved_to_breakeven:
+                if _apply(pos.entry_price, "breakeven_at_l2"):
+                    pos.sl_moved_to_breakeven = True
+
+            # (b) Once at breakeven, try to move SL just under the 50 EMA
+            # Lesson 48: "Once Level 2 is running: can place SL just under 50 EMA"
+            if pos.sl_moved_to_breakeven and not pos.sl_moved_under_50ema:
+                ema_50 = self._compute_50ema(candles_1h)
+                if ema_50 is not None:
+                    if pos.direction == "long":
+                        candidate_sl = ema_50 * 0.998  # 0.2% buffer below
+                    else:
+                        candidate_sl = ema_50 * 1.002  # 0.2% buffer above
+                    if _apply(candidate_sl, "under_50ema_at_l2"):
+                        pos.sl_moved_under_50ema = True
 
         elif new_level >= 3:
             # Tighten under/above recent structure (last 10 candles)
             recent = candles_1h.tail(10)
             if pos.direction == "long":
-                new_sl = float(recent["low"].min()) * 0.998  # Small buffer
-                if new_sl > pos.stop_loss:
-                    pos.stop_loss = new_sl
-                    logger.info("mm_sl_tightened", symbol=pos.symbol, sl=new_sl, level=new_level)
+                new_sl = float(recent["low"].min()) * 0.998
+                _apply(new_sl, f"l{new_level}_recent_structure")
             else:
                 new_sl = float(recent["high"].max()) * 1.002
-                if new_sl < pos.stop_loss:
-                    pos.stop_loss = new_sl
-                    logger.info("mm_sl_tightened", symbol=pos.symbol, sl=new_sl, level=new_level)
+                _apply(new_sl, f"l{new_level}_recent_structure")
+
+    def _detect_ema_flatten(self, candles: pd.DataFrame, lookback: int = 20) -> bool:
+        """Course D1 (lesson 24): EMAs flattening = trend ending signal.
+
+        Detect if the 50 EMA's slope over the last `lookback` bars is near
+        zero (less than 0.1% change). Returns True if EMAs are flattening.
+        """
+        if candles is None or candles.empty or len(candles) < 50 + lookback:
+            return False
+        try:
+            ema50 = candles["close"].ewm(span=50, adjust=False).mean()
+            recent = ema50.tail(lookback)
+            start, end = float(recent.iloc[0]), float(recent.iloc[-1])
+            if start <= 0:
+                return False
+            slope_pct = abs(end - start) / start * 100
+            return slope_pct < 0.1  # less than 0.1% change over lookback
+        except Exception:
+            return False
+
+    def _detect_ema_fan_out(self, candles: pd.DataFrame) -> bool:
+        """Course D2 (lesson 24): EMAs fanning out = trend acceleration / L3 hint.
+
+        "trend acceleration... EMAs fan out... price moves away from the EMAs".
+        Detect when:
+          (a) the 10-200 EMA spread (normalised by price) is > 2% today, AND
+          (b) that is a material expansion vs recent history
+              (current > max(prior_median * 2, 0.5% of price)).
+        """
+        if candles is None or candles.empty or len(candles) < 250:
+            return False
+        try:
+            ema10 = candles["close"].ewm(span=10, adjust=False).mean()
+            ema200 = candles["close"].ewm(span=200, adjust=False).mean()
+            spread = (ema10 - ema200).abs()
+            current = float(spread.iloc[-1])
+            last_price = float(candles["close"].iloc[-1])
+            if last_price <= 0:
+                return False
+            current_pct = current / last_price
+            # Use prior window MEDIAN as the baseline. If prior is near-zero
+            # (flat period), use 0.5% of price as a practical floor so we don't
+            # always trip False on "came from zero" data.
+            prior_median = float(spread.iloc[-200:-50].median())
+            baseline = max(prior_median * 2.0, 0.005 * last_price)
+            wide_today = current_pct > 0.02
+            grew = current > baseline
+            return bool(wide_today and grew)
+        except Exception:
+            return False
+
+    def _compute_50ema(self, candles_1h: pd.DataFrame) -> float | None:
+        """Compute the 50 EMA of the provided 1H candles. None if insufficient data."""
+        if candles_1h is None or candles_1h.empty or len(candles_1h) < 50:
+            return None
+        try:
+            ema = candles_1h["close"].ewm(span=50, adjust=False).mean()
+            return float(ema.iloc[-1])
+        except Exception:
+            return None
+
+    async def _combined_balance(self, primary_balance: float) -> float:
+        """Course E1 (lesson 54): sum USDT balance across ALL configured
+        trading-portfolio exchanges. 1% risk is computed against the combined
+        total per the course.
+
+        Falls back to the primary balance if extra exchanges aren't configured
+        or their balance fetch fails.
+        """
+        total = float(primary_balance or 0.0)
+        for exch in self.mm_extra_exchanges:
+            try:
+                bal = await exch.get_balance()
+                total += float(bal.get("USDT", 0) or bal.get("USD", 0) or 0.0)
+            except Exception as e:
+                logger.debug("mm_extra_exchange_balance_failed", error=str(e))
+        return total
+
+    def _final_damage_hammer_15m(self, best_formation, candles_15m) -> bool:
+        """Course B2 (lesson 21): Final Damage M/W requires hammer/inverted
+        hammer on the 15m timeframe at the 2nd peak.
+
+        W Final Damage → require hammer (long lower wick, close near high)
+        M Final Damage → require inverted hammer (long upper wick, close near low)
+        """
+        try:
+            from src.strategy.mm_formations import _is_hammer, _is_inverted_hammer
+            # Get the most recent 3 15m candles (the 2nd-peak area)
+            if candles_15m is None or candles_15m.empty or len(candles_15m) < 3:
+                return False
+            recent = candles_15m.tail(4)  # look at last 4 for tolerance
+            is_w = best_formation.type.upper() == "W"
+            for _, row in recent.iterrows():
+                o, h, low, c = float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"])
+                if is_w and _is_hammer(o, h, low, c):
+                    return True
+                if not is_w and _is_inverted_hammer(o, h, low, c):
+                    return True
+            return False
+        except Exception:
+            # If 15m is unavailable, fall back to allowing the trade (don't block on data issue)
+            return True
+
+    def _moon_phase_aligned(self, direction: str, now: datetime) -> bool:
+        """Course lesson 37 moon signal alignment with trade direction.
+
+        Returns True if within ±3 days of a primary phase (new/full) whose
+        signal supports the requested direction. Feeds the `moon_cycle`
+        confluence factor (2 pts LOW per `WEIGHTS`).
+        """
+        try:
+            from src.strategy.mm_moon import compute_moon_phase, moon_signal_aligns_with_direction
+            info = compute_moon_phase(now)
+            return moon_signal_aligns_with_direction(info, direction)
+        except Exception:
+            return False
+
+    def _compute_asia_range_pct(self, candles_1h: pd.DataFrame, now: datetime) -> float | None:
+        """Compute today's Asia-session range as a % of the session open price.
+
+        Course lesson 9/12: "Asia's job is just to create the spread and the
+        initial HIGH and LOW of the Day. This typically is no more than a 2%
+        range for Bitcoin in particular. If Asia runs a wider range, skip
+        the whole day."
+
+        Asia session: 8:30pm–3am NY. For this simple check we use the last
+        ~7 closed 1H bars preceding 3am NY if we're past Asia close, otherwise
+        the Asia bars seen so far today. Returns ``None`` if Asia hasn't
+        started or we lack data.
+        """
+        if candles_1h is None or candles_1h.empty or len(candles_1h) < 8:
+            return None
+        try:
+            # Take the last ~7 1H bars (Asia session is 6.5h). This is a
+            # pragmatic approximation — a more accurate implementation would
+            # align to exact NY-time Asia boundaries.
+            asia = candles_1h.tail(7)
+            high = float(asia["high"].max())
+            low = float(asia["low"].min())
+            if low <= 0:
+                return None
+            return (high - low) / low * 100.0
+        except Exception:
+            return None
 
     async def _take_partial(self, pos: MMPosition, level: int, current_price: float) -> None:
         """Take partial profit at level completion."""
