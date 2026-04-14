@@ -508,16 +508,19 @@ class MMEngine:
         # Calculate entry, SL, and targets
         entry_price = current_price
 
-        # Stop loss placement per MM rules
+        # Stop loss placement per MM Method course rules:
+        # W-bottom (long): SL below the W's lowest low (min of peak1, peak2)
+        # M-top (short): SL above the M's highest high (max of peak1, peak2)
+        # No artificial cap — position sizing adjusts size for wider stops.
         if best_formation.type.upper() == "W":
-            # W = bullish: SL below the formation's low, capped at 1.5%
-            formation_low = float(candles_1h.iloc[-20:]["low"].min())
-            sl_price = max(formation_low, entry_price * 0.985)  # max() = tighter SL
+            # W: peak1_price & peak2_price are the two lows. SL below the lowest.
+            lowest_low = min(best_formation.peak1_price, best_formation.peak2_price)
+            sl_price = lowest_low * 0.998  # 0.2% buffer below invalidation
             trade_direction = "long"
         else:
-            # M = bearish: SL above the formation's high, capped at 1.5%
-            formation_high = float(candles_1h.iloc[-20:]["high"].max())
-            sl_price = min(formation_high, entry_price * 1.015)  # min() = tighter SL
+            # M: peak1_price & peak2_price are the two highs. SL above the highest.
+            highest_high = max(best_formation.peak1_price, best_formation.peak2_price)
+            sl_price = highest_high * 1.002  # 0.2% buffer above invalidation
             trade_direction = "short"
 
         # Targets from target analyzer
