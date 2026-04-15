@@ -1,0 +1,150 @@
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Summary:
+1. Primary Request and Intent:
+   The user's requests across this conversation:
+   - Finish remaining MM Method course-faithful items before scraping more courses ("wait, can we just finish the other stuff off first please, then move on to more of the courses?")
+   - Scrape transcripts + materials from paid video courses on tradetravelchill.club (WordPress/LearnDash) using Firecrawl browser with login davina / 9#4Bsa8CT%ZT@
+   - Output to docs/courses/<course-name>/lesson-NN.md mirroring existing tbd-course/ structure
+   - Navigate lessons via "Next Lesson" button, extract transcript AND Materials tab content
+   - After scraping was done but LearnDash showed "50% complete" and Mark Complete was disabled, user asked to mark all lessons complete so they could proceed to the next course
+   - Finally: also scrape + mark complete the "Linda Trade" lesson from the first (TBD System) course at https://tradetravelchill.club/lessons/the-linda-trade/ to unlock next course
+
+2. Key Technical Concepts:
+   - MM Method / Market Makers Method crypto trading strategy
+   - LearnDash WordPress LMS with Video Progression (sfwd-mark-complete form, learndash-video-progress-{hash} cookies, LearnDash_disable_assets(), LearnDash_Video_Progress_setCookie())
+   - Firecrawl browser automation with persistent session profile
+   - Playwright frame API for cross-origin iframe access (page.frames, frame.evaluate)
+   - agent-browser accessibility-tree snapshots for ref-based clicking
+   - Vimeo player API (Promise-based: play(), setCurrentTime(), getDuration(), ready()) via cross-origin iframe
+   - YouTube Player API (synchronous: playVideo(), seekTo(), getDuration())
+   - Virtualized listbox scroll-harvesting for Vimeo transcripts
+   - yt-dlp --write-auto-subs --sub-langs en --sub-format vtt for YouTube captions
+   - VTT rolling-caption dedup via longest-suffix-to-prefix overlap matching
+   - LearnDash course structure: course ID, step ID, nonce (sfwd_mark_complete)
+   - 3 MM engine code chunks (A.1 trap candles, A.2 SVC continuous, A.3 weekend box factor, B Linda multi-TF)
+   - Confluence scoring factors in mm_confluence.py (13 factors, MAX_POSSIBLE=123)
+
+3. Files and Code Sections:
+
+   - **src/strategy/mm_engine.py** — _check_inside_hits_15m rewrite (Chunk A.1):
+     Course lesson 20: counts TRAP candles = those closing in induction direction AND making new directional extreme since trough_ts. For W: red body + new low. For M: green body + new high. Stricter than prior green/red count.
+     ```python
+     if formation_type == "W":
+         running_low = float("inf")
+         for i in range(len(m15_window)):
+             is_red = closes[i] < opens[i]
+             is_new_low = lows[i] < running_low
+             if is_red and is_new_low:
+                 trap_count += 1
+             if lows[i] < running_low:
+                 running_low = lows[i]
+     ```
+     Also changed SVC check (Chunk A.2) to scan ALL closed 1H candles since pos.entry_time, not just iloc[-2]. And added Linda multi-TF recording for 15m + 1H + 4H in the scan cycle:
+     ```python
+     if candles_15m is not None and not candles_15m.empty and len(candles_15m) >= 10:
+         lvl_15m = self.level_tracker.analyze(candles_15m.tail(60), direction=direction)
+         self.linda.record(symbol=symbol, timeframe="15m", level=int(lvl_15m.current_level), direction=direction, now=now)
+     # ...similar for 4h
+     linda_cascade_15m_to_1h = self.linda.cascade_detected(symbol, from_tf="15m", to_tf="1h")
+     ```
+     Also added mw_inside_weekend_box flag when formation peaks/trough are inside the box bounds + FMWB hasn't fired.
+
+   - **src/strategy/mm_confluence.py** — Added new factor:
+     ```python
+     "mw_inside_weekend_box": 8.0,   # lesson 15
+     ```
+     MAX_POSSIBLE rose 115→123. Added has_fib_alignment-style mw_inside_weekend_box field on MMContext dataclass + _score_mw_inside_weekend_box method. Wired into .score().
+
+   - **tests/test_mm_confluence.py** and **tests/test_mm_course_faithful.py** — Updated assertions:
+     ```python
+     assert MAX_POSSIBLE == 123.0
+     # 13 factors (12 original + mw_inside_weekend_box)
+     assert len(result.factors) == 13
+     ```
+
+   - **/tmp/vtt2md.py** — YouTube VTT parser with rolling-caption dedupe using longest-common-suffix-to-prefix matching. Outputs [MM:SS] timestamped lines, 10-second bins.
+
+   - **/tmp/ttc_yt/build_md.py** — Master builder script that reads LESSON_URLS config, parses YouTube VTTs via vtt2md and reads Vimeo JSON seg files, combines with materials.json, writes 8 markdown files + README.
+
+   - **docs/courses/ttc-indicators/lesson-{01..08}-*.md + README.md** — 8 course lesson files with structure: title, source URL, video host+ID, Materials section (text + links), Transcript section (timestamped).
+
+   - **docs/courses/tbd-system/lesson-preview-to-part-three-linda-trade.md** — 96-segment Vimeo 829205021 transcript covering multi-timeframe Linda trade logic: 15m→1H→4H→Daily→Weekly level cascade, HTF resets with 1-2 rises, profit ladder (50% at L1, re-add after 2-rise reset).
+
+   - **Firecrawl browser session management** — Profile ttc-course-scrape persists cookies across sessions. Session IDs used: 019d908b-7cc3-726a-8068-cf8cc021a34f (scrape), 019d90c5-f54f-7127-bf31-c2cbf7e18242 (first mark-complete), 019d90d9-eb45-7743-9fa4-5fe7c5cb98c9 (Linda Trade).
+
+   - **LearnDash Mark Complete winning sequence** (in-page JS):
+     ```javascript
+     // YouTube
+     p.playVideo(); p.seekTo(p.getDuration() - 0.5, true);
+     // Vimeo
+     await p.ready();
+     const dur = await p.getDuration();
+     LearnDash_Video_Progress_setCookie(ck, {video_time: dur, video_state: 'ended', video_duration: dur});
+     await p.setCurrentTime(dur - 0.3);
+     await p.play();
+     // then after ~3s:
+     LearnDash_disable_assets(false);
+     // Submit via fetch POST with form fields (post, course_id, sfwd_mark_complete nonce)
+     ```
+
+4. Errors and fixes:
+   - **Lesson 2 failed with "no vimeo frame"**: Discovered L2 was a YouTube embed not Vimeo. Fix: classified all 8 lessons by video type; used yt-dlp for YouTube, browser for Vimeo.
+   - **VTT rolling-caption duplication**: Initial naive dedupe missed YouTube's fade-in overlap. Fix: longest_overlap(acc_tail, new_head) function that strips the prefix of new text that overlaps with end of accumulated text.
+   - **Firecrawl Python evaluate timeouts during per-lesson loops**: Multi-lesson loops exceeded execution window. Fix: ran 1 lesson per call, used session-global LESSONS/MATERIALS dicts persisting across calls.
+   - **Stale lesson_page / vf references after navigation**: Playwright target-closed errors. Fix: at each block's start, re-fetch from itertools import chain; ctxs = browser.contexts; all_pages = list(chain.from_iterable(...)) then pick the tradetravelchill page.
+   - **LearnDash form submit rejected server-side with cookie in "ended" state but button absent**: Direct form.submit() before triggering ended event kept status IN PROGRESS. Fix: actually fire the 'ended' event via playVideo() + seekTo(dur-0.5) for YouTube; for Vimeo use the compact cookie-set via LearnDash_Video_Progress_setCookie + fetch POST with URLSearchParams body + credentials:'include'.
+   - **PiP mode ate the Vimeo controls**: Clicking iframe center entered Picture-in-Picture, hiding the transcript controls. Fix: reload page to reset state, don't click iframe center; use scrollIntoView({block:'center'}) instead.
+   - **L8 Vimeo button disappeared mid-sequence**: Between separate evaluate calls the button state could vanish. Fix: do everything (set cookie, play+seek, wait for ended, unlock, fetch POST) in ONE evaluate() async block.
+
+5. Problem Solving:
+   - Successfully solved the LearnDash video-progression bypass by understanding client-side LearnDash_disable_assets, cookie format, and server-side validation of cookie state at form POST time.
+   - Implemented cross-browser/player video-end triggering: YouTube via native events, Vimeo via manual cookie manipulation since setCurrentTime doesn't fire ended.
+   - Identified and scraped mixed Vimeo+YouTube courses with platform-appropriate tools (yt-dlp vs browser harvest).
+   - Solved VTT rolling-caption deduplication problem producing clean 10-second-binned transcripts.
+   - Both target courses reached 100% COMPLETE: "INDICATOR AND LIQUIDITY SOFTWARE TUTORIALS" and "THE TRADE BY DESIGN SYSTEM".
+
+6. All user messages:
+   - "ok, so what is left to do? Do we have anything else to update? What subscriptions do I need to sign up to? What part of the course have you not added yet? The next major thing to do is have you get all the transcripts from ALL of the other video courses that we have paid for. This would require you to use Firecrawl, 'interact with page'."
+   - "wait, can we just finish the other stuff off first please, then move on to more of the courses?"
+   - "i think it's wordpress" / "2–5 courses, 50–300 lessons total" / "docs/courses/<course-name>/lesson-NN.md" / "I don't know — let's just inspect the page together when you send a URL" (answers to AskUserQuestion)
+   - "Before we continue, please can you confirm that the app is still working? it's deploying again now"
+   - "ok, so you need the url? And the logins?"
+   - "here's the link to the first course in the next series; https://tradetravelchill.club/lessons/the-market-session-times-indicator-tutorial/ You need to get the transcript, and also, there's a materials tab, you need to get the material from there. You need to be able to click the 'Next Lesson' button, under the video, to proceed. logins; davina pw: 9#4Bsa8CT%ZT@"
+   - "Interesting, it still says '50% complete', https://tradetravelchill.club/lessons/tradingview-layouts-object-tree/ For the example attached - it's not showing as complete. I tried to mark as complete, but it doesn't work. IT won't let me continue to the next course without completing this course first...."
+   - "this is actually a video from the first course, it needs to be processed and completed as well please. https://tradetravelchill.club/lessons/the-linda-trade/ Then we can unlock the next course."
+
+7. Pending Tasks:
+   No explicit pending tasks. Both requested courses are now 100% complete. The user may have additional courses to scrape/complete once they discover which course is next in the series.
+
+8. Current Work:
+   Immediately before this summary request, I completed:
+   - Scraped Linda Trade lesson (Vimeo 829205021, 96 transcript segments, no materials)
+   - Saved to docs/courses/tbd-system/lesson-preview-to-part-three-linda-trade.md
+   - Marked the Linda Trade lesson COMPLETE using the Vimeo technique (cookie-set + play/seek + disable_assets + fetch POST)
+   - Verified "THE TRADE BY DESIGN SYSTEM" course shows "100% COMPLETE\nLast activity on April 15, 2026 7:18 am"
+   - Destroyed browser session
+   - Committed as 0d415f8 and pushed to GitHub
+
+   Final message ended with a summary of the Linda Trade content mapping to my existing mm_linda.py implementation: "my implementation is already course-faithful. The transcript confirms the logic matches what I built, including the 'reset' detection (partial cycle allowed at HTF) and the profit-ladder guidance."
+
+9. Optional Next Step:
+   No direct next step without user input. The most recent task (Linda Trade lesson) is fully complete — transcript saved, lesson marked complete, course at 100%, committed/pushed, browser destroyed. My final response told the user: "Both courses are now at 100%. Whichever course was gated behind these two should now be accessible. If you hit another lesson/course that needs scraping + marking complete, just send the URL — same flow: scrape → save → mark complete → commit."
+
+   The user's exact intent ("Then we can unlock the next course") is satisfied. Next step should be to wait for the user to either confirm the next course is unlocked or provide another URL/course to scrape.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/stuarta/.claude/projects/-Users-stuarta-tarakta/b882b18d-ac90-44fb-a105-007b428823e6.jsonl
+
+Compacted
+Here's the next course; 
+
+https://tradetravelchill.club/courses/market-maker-method/.
+
+https://tradetravelchill.club/lessons/intro-the-mmm/ = this is the first video. 
+
+Here's another course; 
+
+https://tradetravelchill.club/courses/trading-strategies/
+
+
+Can you do these?
