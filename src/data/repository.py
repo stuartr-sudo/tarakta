@@ -46,6 +46,13 @@ class Repository:
         "last_agent3_sl",
         "instance_id",
         "strategy", "entry_reason", "mm_formation", "mm_cycle_phase", "mm_confluence_grade",
+        # Per-trade MM lifecycle state (migration 017) — must persist across
+        # restarts or SL tightening / SVC invalidation / Refund Zone / 200 EMA
+        # partial deduplication are all silently disabled.
+        "mm_entry_type", "mm_peak2_wick_price",
+        "mm_svc_high", "mm_svc_low",
+        "mm_sl_moved_to_breakeven", "mm_sl_moved_under_50ema",
+        "mm_took_200ema_partial",
         "created_at", "updated_at",
     }
 

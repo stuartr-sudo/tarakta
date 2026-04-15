@@ -403,6 +403,19 @@ class MMEngine:
             if distance_pct > 0.01:
                 return None
 
+            # Index convention: downstream code computes
+            # `peak_abs_idx = lookback_start + formation.peak_idx`
+            # where lookback_start = max(0, len(candles_1h) - 40). We must
+            # return peak indices RELATIVE to that slice, not absolute.
+            # Previously we returned `len(candles_1h) - 2` which created an
+            # out-of-bounds absolute index (peak_abs_idx = lookback_start +
+            # len(candles_1h) - 2) and the SL calculation then grabbed the
+            # WRONG candle — producing a nonsense SL on every
+            # 200-EMA-rejection entry.
+            slice_len = min(40, len(candles_1h))
+            p_prev_idx = max(0, slice_len - 2)
+            p_last_idx = max(0, slice_len - 1)
+
             # Check last 15m candle for hammer (price approached from above → bullish bounce)
             # or inverted hammer (price approached from below → bearish rejection)
             recent_15m = candles_15m.tail(4)
@@ -412,18 +425,18 @@ class MMEngine:
                 if _is_hammer(o, h, low, c) and last_price > ema200_now:
                     return Formation(
                         type="W", variant="200ema_rejection",
-                        peak1_idx=len(candles_1h) - 2, peak1_price=ema200_now,
-                        peak2_idx=len(candles_1h) - 1, peak2_price=ema200_now,
-                        trough_idx=len(candles_1h) - 1, trough_price=low,
+                        peak1_idx=p_prev_idx, peak1_price=ema200_now,
+                        peak2_idx=p_last_idx, peak2_price=ema200_now,
+                        trough_idx=p_last_idx, trough_price=low,
                         direction="bullish", quality_score=0.5, at_key_level=True,
                     )
                 # Inverted hammer = bearish reversal (M-style) — price rallied to 200 EMA and got rejected
                 if _is_inverted_hammer(o, h, low, c) and last_price < ema200_now:
                     return Formation(
                         type="M", variant="200ema_rejection",
-                        peak1_idx=len(candles_1h) - 2, peak1_price=ema200_now,
-                        peak2_idx=len(candles_1h) - 1, peak2_price=ema200_now,
-                        trough_idx=len(candles_1h) - 1, trough_price=h,
+                        peak1_idx=p_prev_idx, peak1_price=ema200_now,
+                        peak2_idx=p_last_idx, peak2_price=ema200_now,
+                        trough_idx=p_last_idx, trough_price=h,
                         direction="bearish", quality_score=0.5, at_key_level=True,
                     )
             return None
@@ -596,6 +609,18 @@ class MMEngine:
                     confluence_grade=t.get("mm_confluence_grade", ""),
                     cycle_phase=t.get("mm_cycle_phase", ""),
                     confluence_score=float(t.get("confluence_score") or 0),
+                    # Per-trade MM lifecycle state — MUST restore or SL
+                    # tightening / SVC invalidation / Refund Zone / 200 EMA
+                    # partial deduplication are all silently disabled on
+                    # restart. See migration 017.
+                    original_stop_loss=float(t.get("original_stop_loss") or t.get("stop_loss") or 0),
+                    entry_type=str(t.get("mm_entry_type") or "conservative"),
+                    peak2_wick_price=float(t.get("mm_peak2_wick_price") or 0),
+                    svc_high=float(t.get("mm_svc_high") or 0),
+                    svc_low=float(t.get("mm_svc_low") or 0),
+                    sl_moved_to_breakeven=bool(t.get("mm_sl_moved_to_breakeven") or False),
+                    sl_moved_under_50ema=bool(t.get("mm_sl_moved_under_50ema") or False),
+                    took_200ema_partial=bool(t.get("mm_took_200ema_partial") or False),
                 )
                 restored += 1
             if mm_trades:
@@ -1126,6 +1151,8 @@ class MMEngine:
         # Feed the Linda multi-TF level tracker (course G1, lesson 55).
         # We record the 1H level we're seeing — cascades automatically tick
         # higher TFs when a 3-level cycle completes.
+        linda_cascade_1h_to_4h = False
+        linda_cascade_4h_to_1d = False
         try:
             self.linda.record(
                 symbol=symbol,
@@ -1134,6 +1161,21 @@ class MMEngine:
                 direction=direction,
                 now=now,
             )
+            # Read current cascade state so downstream confluence / exit
+            # logic can actually use it. Lesson 55: a 1H→4H cascade means
+            # the move is 'bigger than it looks' and we want to hold the
+            # runner; a 4H→1d cascade is the multi-week Linda trade.
+            linda_cascade_1h_to_4h = self.linda.cascade_detected(
+                symbol, from_tf="1h", to_tf="4h"
+            )
+            linda_cascade_4h_to_1d = self.linda.cascade_detected(
+                symbol, from_tf="4h", to_tf="1d"
+            )
+            if linda_cascade_1h_to_4h or linda_cascade_4h_to_1d:
+                logger.info("mm_linda_cascade_active", symbol=symbol,
+                            one_to_four=linda_cascade_1h_to_4h,
+                            four_to_daily=linda_cascade_4h_to_1d,
+                            direction=direction)
         except Exception:
             pass  # Telemetry only — don't break scan on Linda errors
 
@@ -1243,6 +1285,23 @@ class MMEngine:
                 logger.info(log_event, symbol=symbol, level=cycle_state.low,
                             hits=three_hits_at_low.hit_count, outcome=three_hits_at_low.expected_outcome)
 
+        # Higher-TF EMAs for L3 targets (course lesson 12 — "200 or 800 EMA
+        # on a higher time frame as a Target"). Compute from 4H candles if
+        # we have them; otherwise pass None and the L3 falls back to the
+        # same-TF 800 (previous behaviour).
+        htf_ema_values: dict[int, float] | None = None
+        try:
+            if candles_4h is not None and not candles_4h.empty and len(candles_4h) >= 200:
+                htf_ema_values = {
+                    200: float(candles_4h["close"].ewm(span=200, adjust=False).mean().iloc[-1]),
+                }
+                if len(candles_4h) >= 800:
+                    htf_ema_values[800] = float(
+                        candles_4h["close"].ewm(span=800, adjust=False).mean().iloc[-1]
+                    )
+        except Exception:
+            htf_ema_values = None
+
         # Target identification
         target_analysis = self.target_analyzer.analyze(
             ohlc=candles_1h,
@@ -1253,6 +1312,7 @@ class MMEngine:
             ema_values=ema_values,
             how=cycle_state.how if cycle_state.how > 0 else None,
             low=cycle_state.low if cycle_state.low < float("inf") else None,
+            htf_ema_values=htf_ema_values,
         )
 
         # Calculate entry, SL, and targets
@@ -1749,6 +1809,16 @@ class MMEngine:
                 "mm_formation": signal.formation_type,
                 "mm_cycle_phase": signal.cycle_phase,
                 "mm_confluence_grade": signal.confluence_grade,
+                # Per-trade MM lifecycle state so restarts preserve the
+                # Refund Zone trigger (lesson 49), the SVC invalidation zone
+                # (lessons 20/23), and the SL progression flags (47/48).
+                "mm_entry_type": signal.entry_type,
+                "mm_peak2_wick_price": signal.peak2_wick_price,
+                "mm_svc_high": signal.svc_high,
+                "mm_svc_low": signal.svc_low,
+                "mm_sl_moved_to_breakeven": False,
+                "mm_sl_moved_under_50ema": False,
+                "mm_took_200ema_partial": False,
                 "mode": self.config.trading_mode if hasattr(self.config, 'trading_mode') else "paper",
                 "status": "open",
             })
@@ -1949,13 +2019,34 @@ class MMEngine:
             except Exception as e:
                 logger.debug("mm_level_db_update_failed", error=str(e))
 
-        # Check for Stopping Volume Candle at Level 3
+        # Linda cascade check — course lesson 55: when the 1H 3-level cycle
+        # completes and cascades up to 4H (or 4H → Daily), the move is
+        # multi-week. Don't close on L3 completion if the cascade is active
+        # in our direction; the runner is the whole point of a Linda Trade.
+        linda_same_dir = False
+        try:
+            cascade_1h = self.linda.cascade_detected(symbol, from_tf="1h", to_tf="4h")
+            cascade_4h = self.linda.cascade_detected(symbol, from_tf="4h", to_tf="1d")
+            if (cascade_1h or cascade_4h):
+                tf_state = self.linda.get(symbol, "4h")
+                expected_dir = "bullish" if pos.direction == "long" else "bearish"
+                if tf_state.direction == expected_dir:
+                    linda_same_dir = True
+        except Exception:
+            pass
+
+        # Check for Stopping Volume Candle at Level 3 (unless a Linda cascade
+        # is running in our direction — lesson 55 — in which case SVC in the
+        # OPPOSITE direction is the exit, but matching-direction SVCs are
+        # just a pause inside a bigger trend).
         if new_level >= 3 and level_analysis and level_analysis.svc and level_analysis.svc.detected:
-            logger.info("mm_svc_detected", symbol=symbol, level=new_level)
-            # Close remaining position
-            if pos.partial_closed_pct < 1.0:
-                await self._close_position(pos, current_price, "svc_level_3")
-                return
+            if linda_same_dir:
+                logger.info("mm_svc_ignored_linda_cascade", symbol=symbol, level=new_level)
+            else:
+                logger.info("mm_svc_detected", symbol=symbol, level=new_level)
+                if pos.partial_closed_pct < 1.0:
+                    await self._close_position(pos, current_price, "svc_level_3")
+                    return
 
         # Course C6 (lessons 10, 24, 48): 200 EMA rejection with hammer /
         # inverted hammer = partial TP trigger. "Usually it will then make a
@@ -1990,6 +2081,7 @@ class MMEngine:
                                         direction=pos.direction)
                             await self._take_partial(pos, level=max(pos.current_level, 1), current_price=current_price)
                             pos.took_200ema_partial = True
+                            self._persist_lifecycle_flags(pos)
             except Exception as e:
                 logger.debug("mm_200ema_partial_check_failed", symbol=symbol, error=str(e))
 
@@ -2005,8 +2097,20 @@ class MMEngine:
             await self._close_position(pos, current_price, "friday_uk_exit")
             return
 
-        # Volume degradation at Level 3 = exit
-        if new_level >= 3 and level_analysis and level_analysis.volume_degrading:
+        # Volume degradation at Level 3 = exit.
+        # Guards:
+        #   (a) Only fires after we've taken the L2 partial (>=50% closed).
+        #       Previously could dump a freshly-opened L3 entry whose first
+        #       candle just happened to show lower volume than the last one.
+        #   (b) Skipped when a Linda cascade is running in our direction
+        #       (course lesson 55 — the big multi-week trade).
+        if (
+            new_level >= 3
+            and level_analysis
+            and level_analysis.volume_degrading
+            and pos.partial_closed_pct >= 0.5
+            and not linda_same_dir
+        ):
             logger.info("mm_volume_degradation_exit", symbol=symbol)
             await self._close_position(pos, current_price, "volume_degradation")
             return
@@ -2084,6 +2188,9 @@ class MMEngine:
                     be_price = pos.entry_price * (1 - 2 * fee_rate)
                 if _apply(be_price, "breakeven_at_l2"):
                     pos.sl_moved_to_breakeven = True
+                    # Persist immediately — otherwise a restart between
+                    # breakeven-move and under-50ema-move would re-try both.
+                    self._persist_lifecycle_flags(pos)
 
             # (b) Once at breakeven, try to move SL just under the 50 EMA
             # Lesson 48: "Once Level 2 is running: can place SL just under 50 EMA"
@@ -2094,8 +2201,21 @@ class MMEngine:
                         candidate_sl = ema_50 * 0.998  # 0.2% buffer below
                     else:
                         candidate_sl = ema_50 * 1.002  # 0.2% buffer above
+                    # Wrong-side guard: if price has already moved past the
+                    # 50 EMA (e.g. a long where price is now BELOW the EMA),
+                    # skipping — otherwise candidate_sl lands above current
+                    # price and stops us out instantly.
+                    try:
+                        current_close = float(candles_1h.iloc[-1]["close"])
+                        if pos.direction == "long" and candidate_sl >= current_close:
+                            return
+                        if pos.direction == "short" and candidate_sl <= current_close:
+                            return
+                    except Exception:
+                        pass
                     if _apply(candidate_sl, "under_50ema_at_l2"):
                         pos.sl_moved_under_50ema = True
+                        self._persist_lifecycle_flags(pos)
 
         elif new_level >= 3:
             # Tighten under/above recent structure (last 10 candles)
@@ -2315,6 +2435,40 @@ class MMEngine:
             return (high - low) / low * 100.0
         except Exception:
             return None
+
+    def _persist_lifecycle_flags(self, pos: MMPosition) -> None:
+        """Fire-and-forget persistence of MMPosition lifecycle flags to the
+        trade row. Called immediately after any in-memory flag mutation so a
+        restart between cycles can't lose the progression state.
+
+        Per the course (lessons 47/48/49/C6), each flag represents a
+        one-shot gate that must not re-fire. Losing them on restart would
+        cause SL to be re-moved to breakeven, partials to be retaken, etc.
+        """
+        if not pos.trade_id:
+            return
+        updates = {
+            "stop_loss": pos.stop_loss,
+            "mm_entry_type": pos.entry_type,
+            "mm_peak2_wick_price": pos.peak2_wick_price,
+            "mm_svc_high": pos.svc_high,
+            "mm_svc_low": pos.svc_low,
+            "mm_sl_moved_to_breakeven": pos.sl_moved_to_breakeven,
+            "mm_sl_moved_under_50ema": pos.sl_moved_under_50ema,
+            "mm_took_200ema_partial": pos.took_200ema_partial,
+        }
+
+        async def _do() -> None:
+            try:
+                await self.repo.update_trade(pos.trade_id, updates)
+            except Exception as e:
+                logger.debug("mm_persist_lifecycle_failed",
+                             symbol=pos.symbol, error=str(e))
+
+        try:
+            asyncio.create_task(_do())
+        except Exception:
+            pass  # No running loop — ignore (rare; caller is always async).
 
     async def _take_partial(self, pos: MMPosition, level: int, current_price: float) -> None:
         """Take partial profit at level completion.

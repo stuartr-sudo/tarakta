@@ -266,6 +266,7 @@ class TargetAnalyzer:
         how: float | None = None,
         low: float | None = None,
         liquidation_levels: list[float] | None = None,
+        htf_ema_values: dict[int, float] | None = None,
     ) -> TargetAnalysis:
         """Run full target analysis for a trade setup.
 
@@ -293,7 +294,11 @@ class TargetAnalyzer:
         vectors = self.vector_scanner.scan(ohlc, entry_price)
         result.unrecovered_vectors = vectors
 
-        # 2. Build targets for each level
+        # 2. Build targets for each level.
+        # Level 3 is passed htf_ema_values (4H / daily 200 & 800) if available
+        # so course lesson 12's "higher-TF 200/800 EMA as L3 target" is
+        # actually honoured — previously L3 used same-TF 800, which is the
+        # same as L2 and collapses in range markets.
         result.level_1_targets = self._targets_for_level(
             1, direction, entry_price, ema_values, how, low,
             liquidation_levels, vectors,
@@ -305,6 +310,7 @@ class TargetAnalyzer:
         result.level_3_targets = self._targets_for_level(
             3, direction, entry_price, ema_values, how, low,
             liquidation_levels, vectors,
+            htf_ema_values=htf_ema_values,
         )
 
         # 3. Pick primary targets (closest valid target for each level)
@@ -346,9 +352,31 @@ class TargetAnalyzer:
         low: float | None,
         liquidation_levels: list[float] | None,
         vectors: list[VectorCandle],
+        htf_ema_values: dict[int, float] | None = None,
     ) -> list[TargetLevel]:
         """Build target list for a specific level."""
         targets: list[TargetLevel] = []
+
+        # --- Level 3 higher-TF EMA targets (course lesson 12) ---
+        # "a 200 or an 800 EMA on a higher time frame as a Target". When
+        # callers pass htf_ema_values ({200: 4H_200, 800: 4H_800, ...}), we
+        # treat those as the PRIMARY L3 targets, pushing the same-TF 800 to
+        # a secondary priority. This prevents L2 and L3 collapsing to the
+        # same price (the bug that stopped RENDER out prematurely).
+        if level == 3 and htf_ema_values:
+            for htf_period in (800, 200):  # 800 first — it's the "big" L3
+                if htf_period in htf_ema_values:
+                    htf_price = htf_ema_values[htf_period]
+                    if htf_price and self._is_valid_target(htf_price, direction, entry_price):
+                        dist = abs(htf_price - entry_price) / entry_price * 100 if entry_price > 0 else 0
+                        targets.append(TargetLevel(
+                            price=htf_price,
+                            source=f"htf_ema_{htf_period}",
+                            level_num=level,
+                            priority=1,  # top priority — beats same-TF 800
+                            description=f"Higher-TF {htf_period} EMA (course L3 target)",
+                            distance_pct=round(dist, 2),
+                        ))
 
         # EMA target for this level
         ema_period = LEVEL_EMA_TARGETS.get(level)
@@ -357,11 +385,14 @@ class TargetAnalyzer:
             # Only valid if in the right direction
             if self._is_valid_target(ema_price, direction, entry_price):
                 dist = abs(ema_price - entry_price) / entry_price * 100 if entry_price > 0 else 0
+                # Demote the same-TF 800 at L3 when an htf target already
+                # supplied a real higher-TF L3.
+                priority = 2 if (level == 3 and htf_ema_values and any(p in htf_ema_values for p in (200, 800))) else 1
                 targets.append(TargetLevel(
                     price=ema_price,
                     source=f"ema_{ema_period}",
                     level_num=level,
-                    priority=1,
+                    priority=priority,
                     description=f"{ema_period} EMA (Level {level} primary target)",
                     distance_pct=round(dist, 2),
                 ))
