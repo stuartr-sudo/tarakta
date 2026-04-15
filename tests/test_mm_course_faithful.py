@@ -60,8 +60,10 @@ def test_oi_weight_matches_other_medium_factors():
 
 
 def test_max_possible_reflects_oi_promotion():
-    """Total max must match the new weights: 20+15+15+15+8+8+8+8+6+6+4+2 = 115."""
-    assert MAX_POSSIBLE == 115.0
+    """Total max must match the weights.
+    20+15+15+15 (high) + 8+8+8+8+8 (medium, incl. mw_inside_weekend_box) + 6+6 + 4+2 = 123.
+    """
+    assert MAX_POSSIBLE == 123.0
 
 
 # ---------------------------------------------------------------------------

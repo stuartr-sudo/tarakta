@@ -59,6 +59,12 @@ WEIGHTS: dict[str, float] = {
     # traders are the setup — promoted from LOW(4) to MEDIUM(8) in 2026-04
     # course-faithful redesign.
     "oi_behavior": 8.0,
+    # Course lesson 15: "if you don't see the false breakout in your weekend
+    # box, also look for W's and M's." A formation entirely inside the
+    # weekend trap box is a SPECIFIC high-probability setup the course
+    # singles out — treat as MEDIUM confluence (not HIGH because it's
+    # conditional on the weekend cycle context).
+    "mw_inside_weekend_box": 8.0,
     "fib_alignment": 6.0,
     "news_event": 6.0,
     # LOW weight — bonus
@@ -66,7 +72,7 @@ WEIGHTS: dict[str, float] = {
     "moon_cycle": 2.0,
 }
 
-MAX_POSSIBLE: float = sum(WEIGHTS.values())  # 111.0
+MAX_POSSIBLE: float = sum(WEIGHTS.values())  # was 111.0; now 119.0 with weekend-box factor
 
 # Grade thresholds (percentage of max possible)
 GRADE_A_THRESHOLD: float = 70.0
@@ -119,6 +125,10 @@ class MMContext:
     has_liquidation_cluster: bool = False
     has_fib_alignment: bool = False
     has_news_event: bool = False
+    # Course lesson 15: M/W formation entirely inside the weekend trap box
+    # (no FMWB spike out of the box). Caller sets this when it has both a
+    # valid weekend box AND the formation's peaks are inside it.
+    mw_inside_weekend_box: bool = False
 
     # LOW weight factor flags (None = data not available)
     oi_increasing: bool | None = None
@@ -252,6 +262,7 @@ class MMConfluenceScorer:
         factors["unrecovered_vector"] = self._score_unrecovered_vector(context)
         factors["liquidation_cluster"] = self._score_liquidation_cluster(context)
         factors["ema_alignment"] = self._score_ema_alignment(context)
+        factors["mw_inside_weekend_box"] = self._score_mw_inside_weekend_box(context)
         factors["fib_alignment"] = self._score_fib_alignment(context)
         factors["news_event"] = self._score_news_event(context)
 
@@ -645,6 +656,20 @@ class MMConfluenceScorer:
 
         weight = self._weights["fib_alignment"]
         logger.debug("Fibonacci alignment — %s pts", weight)
+        return weight
+
+    def _score_mw_inside_weekend_box(self, ctx: MMContext) -> float:
+        """Course lesson 15: "if you don't see the false breakout in your
+        weekend box, also look for W's and M's." A formation entirely
+        inside the weekend trap box — when FMWB hasn't fired — is one of
+        the course's named high-probability setups. Scored on an
+        explicit flag supplied by the caller (engine looks at formation
+        peaks + weekend box bounds).
+        """
+        if not getattr(ctx, "mw_inside_weekend_box", False):
+            return 0.0
+        weight = self._weights["mw_inside_weekend_box"]
+        logger.debug("M/W inside weekend box — %s pts", weight)
         return weight
 
     def _score_news_event(self, ctx: MMContext) -> float:

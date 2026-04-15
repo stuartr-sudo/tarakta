@@ -1174,31 +1174,70 @@ class MMEngine:
         candles_post_formation = candles_1h.iloc[formation_abs_idx:]
         level_analysis = self.level_tracker.analyze(candles_post_formation, direction=direction)
 
-        # Feed the Linda multi-TF level tracker (course G1, lesson 55).
-        # We record the 1H level we're seeing — cascades automatically tick
-        # higher TFs when a 3-level cycle completes.
+        # Feed the Linda multi-TF level tracker on EVERY available TF
+        # (course G1 / lesson 55). Cascades start at the lowest available
+        # TF and tick upward as 3-level cycles complete. Previously we only
+        # recorded 1H — which meant cascades into 4H/Daily required 9
+        # full 1H cycles (~9 hours) before the first cascade fired. By
+        # also recording 15m, a 15m 3-level cycle (45 min) cascades to
+        # 1H L1 immediately. By recording 4H, completed 4H cycles cascade
+        # to Daily etc.
+        linda_cascade_15m_to_1h = False
         linda_cascade_1h_to_4h = False
         linda_cascade_4h_to_1d = False
         try:
+            # 15m level from the 15m candles we already have (B1 data)
+            if candles_15m is not None and not candles_15m.empty and len(candles_15m) >= 10:
+                try:
+                    lvl_15m = self.level_tracker.analyze(
+                        candles_15m.tail(60), direction=direction,
+                    )
+                    self.linda.record(
+                        symbol=symbol, timeframe="15m",
+                        level=int(lvl_15m.current_level),
+                        direction=direction, now=now,
+                    )
+                except Exception:
+                    pass
+
+            # 1H — same as before
             self.linda.record(
-                symbol=symbol,
-                timeframe="1h",
+                symbol=symbol, timeframe="1h",
                 level=int(level_analysis.current_level),
-                direction=direction,
-                now=now,
+                direction=direction, now=now,
             )
-            # Read current cascade state so downstream confluence / exit
-            # logic can actually use it. Lesson 55: a 1H→4H cascade means
-            # the move is 'bigger than it looks' and we want to hold the
-            # runner; a 4H→1d cascade is the multi-week Linda trade.
+
+            # 4H level from the 4H candles we already have (EMA fetch)
+            if candles_4h is not None and not candles_4h.empty and len(candles_4h) >= 10:
+                try:
+                    lvl_4h = self.level_tracker.analyze(
+                        candles_4h.tail(60), direction=direction,
+                    )
+                    self.linda.record(
+                        symbol=symbol, timeframe="4h",
+                        level=int(lvl_4h.current_level),
+                        direction=direction, now=now,
+                    )
+                except Exception:
+                    pass
+
+            # Read cascade state at all three boundaries so downstream
+            # confluence / exit logic can use it. Lesson 55:
+            #   15m→1H cascade  = move is starting to size up
+            #   1H→4H cascade   = "bigger than it looks", hold runner
+            #   4H→1d cascade   = multi-week Linda trade — full hold
+            linda_cascade_15m_to_1h = self.linda.cascade_detected(
+                symbol, from_tf="15m", to_tf="1h"
+            )
             linda_cascade_1h_to_4h = self.linda.cascade_detected(
                 symbol, from_tf="1h", to_tf="4h"
             )
             linda_cascade_4h_to_1d = self.linda.cascade_detected(
                 symbol, from_tf="4h", to_tf="1d"
             )
-            if linda_cascade_1h_to_4h or linda_cascade_4h_to_1d:
+            if linda_cascade_15m_to_1h or linda_cascade_1h_to_4h or linda_cascade_4h_to_1d:
                 logger.info("mm_linda_cascade_active", symbol=symbol,
+                            fifteen_to_one=linda_cascade_15m_to_1h,
                             one_to_four=linda_cascade_1h_to_4h,
                             four_to_daily=linda_cascade_4h_to_1d,
                             direction=direction)
@@ -1573,6 +1612,31 @@ class MMEngine:
         except Exception:
             at_liq_cluster = False
 
+        # Course lesson 15: M/W inside the weekend trap box is a named
+        # high-probability setup. True when (a) the analyzer detected a
+        # weekend box this week, (b) FMWB has NOT fired (we're in the
+        # "no spike out" branch of the lesson), and (c) the formation's
+        # peak/trough prices are all inside the box.
+        mw_inside_box = False
+        try:
+            tb = getattr(weekend, "trap_box", None)
+            if (
+                tb is not None
+                and getattr(tb, "detected", False)
+                and not weekend.fmwb.detected
+            ):
+                bh = float(getattr(tb, "box_high", 0.0))
+                bl = float(getattr(tb, "box_low", 0.0))
+                if bh > 0 and bl > 0:
+                    p1 = float(best_formation.peak1_price or 0)
+                    p2 = float(best_formation.peak2_price or 0)
+                    tp = float(best_formation.trough_price or 0)
+                    pts = [v for v in (p1, p2, tp) if v > 0]
+                    if pts and all(bl <= v <= bh for v in pts):
+                        mw_inside_box = True
+        except Exception:
+            mw_inside_box = False
+
         mm_ctx = MMContext(
             formation={
                 "type": best_formation.type,
@@ -1612,6 +1676,7 @@ class MMEngine:
             at_session_changeover=session.is_gap,
             at_how_low=at_how or at_low or three_hit_boost,
             has_unrecovered_vector=len(target_analysis.unrecovered_vectors) > 0,
+            mw_inside_weekend_box=mw_inside_box,
             moon_phase_aligned=self._moon_phase_aligned(trade_direction, now),
             oi_increasing=oi_increasing,
         )
@@ -1913,18 +1978,41 @@ class MMEngine:
             return
 
         # Course B4 (lessons 20, 23): SVC "Trapped Traders" zone invalidation.
-        # If a 1H candle CLOSES back inside the Stopping Volume Candle range,
-        # the formation thesis is invalidated — cut the trade before SL hits.
-        # Only enforced pre-L1 (once price has run past L1 the SVC check is
-        # no longer relevant; the move is in progress).
+        # Course verbatim: "We always want to see price fail to get back to
+        # the wick of a stopping volume candle." This is a CONTINUOUS
+        # guarantee over the life of the trade (until L1 is cleared), not
+        # a one-off check of the most recent bar. Earlier implementation
+        # only inspected `iloc[-2]` and could miss a return that happened
+        # between cycles (5-min scan interval on 1H bars = up to 55 min
+        # of blind spot). Now scans EVERY closed 1H candle since entry.
+        #
+        # Still only pre-L1: once the 50 EMA breaks with volume and price
+        # clears L1, the move is in progress and the SVC stops being the
+        # relevant invalidation zone.
         if pos.current_level == 0 and pos.svc_high > 0 and pos.svc_low > 0:
             try:
-                candles_short = await self.candle_manager.get_candles(symbol, "1h", limit=5)
+                candles_short = await self.candle_manager.get_candles(symbol, "1h", limit=50)
                 if candles_short is not None and not candles_short.empty and len(candles_short) >= 2:
-                    last_close = float(candles_short.iloc[-2]["close"])
-                    if pos.svc_low <= last_close <= pos.svc_high:
+                    # Trim the in-progress bar — only check fully closed candles.
+                    closed_only = candles_short.iloc[:-1]
+                    # Only look at bars closed AFTER we entered (can't invalidate
+                    # on bars older than the trade).
+                    if pos.entry_time and hasattr(closed_only.index, "tz"):
+                        closed_only = closed_only[closed_only.index >= pos.entry_time]
+                    returned = False
+                    return_close = None
+                    return_ts = None
+                    for ts, row in closed_only.iterrows():
+                        c = float(row["close"])
+                        if pos.svc_low <= c <= pos.svc_high:
+                            returned = True
+                            return_close = c
+                            return_ts = ts
+                            break
+                    if returned:
                         logger.info("mm_svc_wick_return_cut", symbol=symbol,
-                                    last_close=last_close,
+                                    return_close=return_close,
+                                    return_ts=str(return_ts),
                                     svc_high=pos.svc_high, svc_low=pos.svc_low)
                         await self._close_position(pos, current_price, "svc_wick_return")
                         return
@@ -2320,17 +2408,27 @@ class MMEngine:
         candles_15m: pd.DataFrame,
         lookback_start: int,
     ) -> bool:
-        """Course B1 (lesson 20): verify ≥3 inducement candles on the 15m
+        """Course B1 (lesson 20): verify ≥3 TRAP candles on the 15m
         timeframe between the pullback valley and the 2nd peak.
 
-        For M formations we count GREEN candles trying to push UP
-        (inducing longs into the 2nd peak). For W formations we count RED
-        candles trying to push DOWN (inducing shorts into the 2nd peak).
+        Course definition of a trap candle on the inside right side:
+          - W formation: a RED-bodied 15m candle that makes a NEW LOW
+            (since the 1H trough). Each such candle takes out resting
+            stops below the prior swing low — inducing shorts who get
+            trapped when the W reversal completes.
+          - M formation: a GREEN-bodied 15m candle that makes a NEW HIGH
+            (since the 1H trough). Mirror logic — induces longs.
+
+        Stricter than the previous green/red-count approximation, which
+        accepted any directional candle including non-trap ones. The
+        course is specific that each trap MUST sweep stops via a new
+        directional extreme.
 
         Returns False only when we have enough 15m data to decide AND the
-        count < 3. If 15m data is insufficient, return True (fail-open —
-        don't block on missing data, matching the course's "drop a timeframe"
-        is an inspection tool, not a disqualifier when the tool is missing).
+        trap count < 3. If 15m data is insufficient, return True
+        (fail-open — don't block on missing data; lesson 13 treats the
+        15m drop-down as an inspection tool, not a disqualifier when
+        the tool is missing).
         """
         try:
             if candles_15m is None or candles_15m.empty or len(candles_15m) < 4:
@@ -2363,18 +2461,41 @@ class MMEngine:
                 return True  # fail-open
 
             opens = m15_window["open"].values
+            highs = m15_window["high"].values
+            lows = m15_window["low"].values
             closes = m15_window["close"].values
 
-            if best_formation.type.upper() == "M":
-                # M = bearish formation. Looking for 3 GREEN (close > open)
-                # candles trying to induce longs before the reversal.
-                inducement = sum(1 for o, c in zip(opens, closes) if c > o)
-            else:
-                # W = bullish formation. Looking for 3 RED (close < open)
-                # candles trying to induce shorts before the reversal.
-                inducement = sum(1 for o, c in zip(opens, closes) if c < o)
+            trap_count = 0
+            formation_type = best_formation.type.upper()
 
-            return inducement >= 3
+            if formation_type == "W":
+                # W = bullish reversal. The inside right side is the second
+                # DOWN leg (trough → 2nd low). A trap candle here must:
+                #   (a) close red (close < open) — pushing down
+                #   (b) make a new low since trough_ts — sweeping stops
+                running_low = float("inf")
+                for i in range(len(m15_window)):
+                    is_red = closes[i] < opens[i]
+                    is_new_low = lows[i] < running_low
+                    if is_red and is_new_low:
+                        trap_count += 1
+                    if lows[i] < running_low:
+                        running_low = lows[i]
+            else:  # "M"
+                # M = bearish reversal. Inside right side = 2nd UP leg.
+                # Trap candle must:
+                #   (a) close green (close > open) — pushing up
+                #   (b) make a new high since trough_ts — sweeping stops
+                running_high = 0.0
+                for i in range(len(m15_window)):
+                    is_green = closes[i] > opens[i]
+                    is_new_high = highs[i] > running_high
+                    if is_green and is_new_high:
+                        trap_count += 1
+                    if highs[i] > running_high:
+                        running_high = highs[i]
+
+            return trap_count >= 3
         except Exception:
             return True  # fail-open on unexpected errors
 

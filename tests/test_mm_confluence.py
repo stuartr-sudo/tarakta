@@ -66,16 +66,19 @@ def _minimal_context(**overrides) -> MMContext:
 class TestConstants:
     def test_max_possible(self):
         assert MAX_POSSIBLE == sum(WEIGHTS.values())
-        # 2026-04 course-faithful change: OI promoted from LOW(4) to MEDIUM(8)
-        # per lesson 29 ("can also be used to identify trapped Traders").
-        # Total rose by 4 → 115.0. See docs/MM_COURSE_FAITHFUL_REDESIGN.md.
-        assert MAX_POSSIBLE == 115.0
+        # Evolution:
+        #   original: 111.0
+        #   +4 when OI promoted LOW(4) -> MEDIUM(8) (lesson 29)
+        #   +8 when mw_inside_weekend_box added (lesson 15)
+        #  => 123.0
+        assert MAX_POSSIBLE == 123.0
 
     def test_all_factors_have_weights(self):
         expected_factors = [
             "mw_session_changeover", "mw_key_level", "ema50_break_volume",
             "stopping_volume_candle", "unrecovered_vector", "liquidation_cluster",
-            "ema_alignment", "fib_alignment", "news_event",
+            "ema_alignment", "mw_inside_weekend_box",
+            "fib_alignment", "news_event",
             "oi_behavior", "correlation_confirmed", "moon_cycle",
         ]
         for f in expected_factors:
@@ -168,7 +171,8 @@ class TestScore:
     def test_all_factors_present(self, scorer: MMConfluenceScorer):
         ctx = _full_context()
         result = scorer.score(ctx)
-        assert len(result.factors) == 12
+        # 13 factors: 12 original + mw_inside_weekend_box (lesson 15)
+        assert len(result.factors) == 13
 
     def test_factors_sum_to_total(self, scorer: MMConfluenceScorer):
         ctx = _full_context()
