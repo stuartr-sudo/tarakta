@@ -863,11 +863,33 @@ class MMEngine:
                 await self._process_entries(signals)
 
     async def _get_pairs(self) -> list[str]:
-        """Get the list of pairs to scan."""
+        """Get the list of pairs to scan.
+
+        Course lesson 1-3 and 53: MM Method works best on high-liquidity
+        majors. Low-cap alts are manipulated, produce false signals, and
+        rarely respect EMAs / market-maker cycles. We enforce:
+          - Base volume floor much higher than generic (was 5M, now 50M).
+          - Optional majors-only whitelist (mm_majors_only=True) that
+            restricts to BTC/ETH/SOL/etc. — the safest MM Method setups.
+        Both knobs are config-driven so the user can relax them if desired.
+        """
+        min_vol = float(getattr(self.config, "mm_min_volume_usd",
+                                 getattr(self.config, "min_volume_usd", 50_000_000)))
         pairs = await self.exchange.get_tradeable_pairs(
             quote_currencies=["USDT"],
-            min_volume_usd=getattr(self.config, "min_volume_usd", 5_000_000),
+            min_volume_usd=min_vol,
         )
+        # Optional majors-only gate (default False so existing behaviour
+        # is preserved; flip to True in config for safest operation).
+        majors_only = bool(getattr(self.config, "mm_majors_only", False))
+        if majors_only:
+            majors = {
+                "BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX",
+                "DOT", "LINK", "MATIC", "LTC", "BCH", "TRX", "ATOM", "NEAR",
+                "UNI", "APT", "ARB", "OP",
+            }
+            pairs = [p for p in pairs if p.split("/")[0].upper() in majors]
+            logger.info("mm_majors_only_filter", total=len(pairs))
         now = datetime.now(timezone.utc)
         # Expire old cooldowns
         self._cooldowns = {s: t for s, t in self._cooldowns.items() if t > now}
@@ -1127,32 +1149,35 @@ class MMEngine:
         # in the OPPOSITE direction (unless an M/W reversal formation is the
         # explicit trigger — which we handle via the lesson-18 path / level=3
         # reject above). For the in-trend direction, this is a no-op.
-        # Detection: examine the WHOLE-chart trend direction up to now.
+        #
+        # Previously analyzed BOTH directions simultaneously on the same
+        # window — in choppy markets both bullish.current_level AND
+        # bearish.current_level report >=1, blocking every signal regardless
+        # of trade direction. Fix: use the weekly-cycle-tracked dominant
+        # direction, and only block signals that fight it.
         try:
-            # "Chart-level" direction — count bullish vs bearish levels on the
-            # full recent window, regardless of our formation.
-            full_window_bullish = self.level_tracker.analyze(candles_1h.tail(60), direction="bullish")
-            full_window_bearish = self.level_tracker.analyze(candles_1h.tail(60), direction="bearish")
-            # If the prior direction is bullish past L1 and we're trying to short,
-            # or bearish past L1 and we're trying to long — block it.
-            if full_window_bullish.current_level >= 1 and trade_direction == "short":
-                # Unless we have a 3-hit reversal or a high-confluence reversal formation,
-                # the plain "short into an ongoing bullish move" path is blocked.
-                # The lesson-18 three-hits path already sets formation.variant properly,
-                # so we let those through. Same for Final Damage variants at HOW.
-                if best_formation.variant not in ("three_hits_how", "final_damage", "multi_session") \
-                   and not best_formation.at_key_level:
-                    return self._reject("counter_trend_after_l1", symbol,
-                                        trend_level=full_window_bullish.current_level,
-                                        trade_dir=trade_direction,
-                                        formation_variant=best_formation.variant)
-            if full_window_bearish.current_level >= 1 and trade_direction == "long":
-                if best_formation.variant not in ("three_hits_low", "final_damage", "multi_session") \
-                   and not best_formation.at_key_level:
-                    return self._reject("counter_trend_after_l1", symbol,
-                                        trend_level=full_window_bearish.current_level,
-                                        trade_dir=trade_direction,
-                                        formation_variant=best_formation.variant)
+            dominant_dir = getattr(cycle_state, "direction", None)
+            if dominant_dir in ("bullish", "bearish"):
+                # Only analyze the dominant direction; pick a conservative
+                # counter-trend level so we don't block very mild retraces.
+                dom = self.level_tracker.analyze(candles_1h.tail(60), direction=dominant_dir)
+                if dom.current_level >= 1:
+                    is_fighting = (
+                        (dominant_dir == "bullish" and trade_direction == "short")
+                        or (dominant_dir == "bearish" and trade_direction == "long")
+                    )
+                    if is_fighting:
+                        allowed_variants = (
+                            "three_hits_how", "three_hits_low",
+                            "final_damage", "multi_session",
+                        )
+                        if best_formation.variant not in allowed_variants \
+                           and not best_formation.at_key_level:
+                            return self._reject("counter_trend_after_l1", symbol,
+                                                trend_level=dom.current_level,
+                                                dominant_dir=dominant_dir,
+                                                trade_dir=trade_direction,
+                                                formation_variant=best_formation.variant)
         except Exception:
             pass  # Best-effort — don't block on tracker errors
 
@@ -1279,6 +1304,45 @@ class MMEngine:
             logger.info("mm_wide_sl_warning", symbol=symbol,
                         sl_distance_pct=round(sl_distance_pct, 2), threshold=self.max_sl_pct)
 
+        # Minimum SL distance guard (added 2026-04-15 after STRK entered with
+        # SL $0.00000317 above entry — 0.01% of price — and got stopped out
+        # on the first tick down). Below a floor the trade isn't meaningfully
+        # an M/W retest, it's noise.
+        #
+        # Course rationale: lesson 9 ("tight stops at retests are correct —
+        # ONLY at the proper swing level") implies a real structural SL, not
+        # a decimal-rounding SL. We enforce a floor per asset class:
+        #   - BTC / ETH: 0.30%
+        #   - everything else: 0.50%
+        # BOTH floors are still within the course's "1% per trade" risk
+        # framework because 1%-risk / 0.3%-SL = ~3.3x leverage, normal.
+        floor_pct = 0.30 if symbol.upper().startswith(("BTC/", "ETH/")) else 0.50
+        if sl_distance_pct < floor_pct:
+            return self._reject(
+                "sl_too_tight",
+                symbol,
+                sl_distance_pct=round(sl_distance_pct, 4),
+                floor_pct=floor_pct,
+                entry=entry_price,
+                sl=sl_price,
+            )
+        # Also reject if SL is on the wrong side of entry (long SL above
+        # entry or short SL below entry) — which was the exact STRK bug:
+        # a "long" was opened with SL ABOVE entry, so the first tick down
+        # was an instant stop-out.
+        is_long_signal = direction == "bullish"
+        wrong_side = (is_long_signal and sl_price >= entry_price) or (
+            (not is_long_signal) and sl_price <= entry_price
+        )
+        if wrong_side:
+            return self._reject(
+                "sl_wrong_side",
+                symbol,
+                direction=direction,
+                entry=entry_price,
+                sl=sl_price,
+            )
+
         # Targets from target analyzer
         t_l1 = target_analysis.primary_l1.price if target_analysis.primary_l1 else None
         t_l2 = target_analysis.primary_l2.price if target_analysis.primary_l2 else None
@@ -1296,6 +1360,38 @@ class MMEngine:
                         formation=best_formation.type)
             t_l1 = t_l2
 
+        # L1 ≡ L2 collision fix (2026-04-15 — exposed by RENDER trade).
+        # When the 50 EMA and 800 EMA converge (tight consolidation), the
+        # target analyzer returns the same price for L1 and L2. That caused
+        # both partial-close levels to fire simultaneously at the same
+        # tick and the trailing SL was placed between the collapsed L1/L2
+        # and the real L3 — any normal pullback stopped the runner out.
+        #
+        # Course spec: L1 (50 EMA) is the first cup, L2 (800 EMA) is a
+        # meaningful extension. If they're within 0.2% of entry price,
+        # treat L2 as a distance-based extension of L1 (1.6x the L1 reward,
+        # capped so it can't exceed t_l3). This keeps the three targets
+        # ordered and distinct.
+        def _nearly_equal(a: float, b: float, ref: float) -> bool:
+            if not a or not b or ref <= 0:
+                return False
+            return abs(a - b) / ref < 0.002  # 0.2% of entry
+
+        if t_l1 and t_l2 and _nearly_equal(t_l1, t_l2, entry_price):
+            is_long_tgt = (trade_direction == "long") if 'trade_direction' in locals() else (direction == "bullish")
+            base_reward = abs(t_l1 - entry_price)
+            spread_reward = max(base_reward * 1.6, entry_price * 0.005)  # at least +0.5% further
+            new_l2 = (entry_price + spread_reward) if is_long_tgt else (entry_price - spread_reward)
+            # If there's already a distinct L3 further out, respect it.
+            if t_l3:
+                # Clamp L2 to halfway between L1 and L3 so L3 still dominates.
+                halfway = (t_l1 + t_l3) / 2
+                new_l2 = (min(new_l2, halfway) if is_long_tgt else max(new_l2, halfway))
+            logger.info("mm_l1_l2_collision_spread", symbol=symbol,
+                        original_l1=t_l1, original_l2=t_l2, new_l2=new_l2,
+                        entry=entry_price)
+            t_l2 = new_l2
+
         # Only reject if NO target is available at any level (no EMAs, no
         # vectors, no HOW/LOW in direction).
         if not t_l1:
@@ -1306,7 +1402,11 @@ class MMEngine:
 
         self._advance("target_acquired")
 
-        # R:R check — try L1 first, fall back to L2 if L1 R:R is too low
+        # R:R check — try L1 first, fall back to L2 if L1 R:R is too low.
+        # Do NOT overwrite t_l1 with t_l2 on the R:R-upgrade path — doing so
+        # collapsed the 3-tier partial schedule into a 2-tier (L1 partial
+        # never fired because t_l1 had been rewritten to L2). Instead, we
+        # use L2 for the R:R GATE but preserve the original targets.
         risk = abs(entry_price - sl_price)
         if risk <= 0:
             return self._reject("zero_risk", symbol)
@@ -1314,13 +1414,15 @@ class MMEngine:
         reward = abs(t_l1 - entry_price)
         rr = reward / risk
 
-        # If L1 target gives poor R:R, try L2 as the primary target
         if rr < self.min_rr and t_l2 and self._is_valid_target(t_l2, trade_direction, entry_price):
             reward_l2 = abs(t_l2 - entry_price)
             rr_l2 = reward_l2 / risk
             if rr_l2 >= self.min_rr:
-                logger.info("mm_target_upgraded_to_l2", symbol=symbol, rr_l1=round(rr, 2), rr_l2=round(rr_l2, 2))
-                t_l1 = t_l2  # Use L2 as the effective target
+                logger.info("mm_target_rr_upgraded_to_l2", symbol=symbol,
+                            rr_l1=round(rr, 2), rr_l2=round(rr_l2, 2),
+                            t_l1=t_l1, t_l2=t_l2)
+                # Keep t_l1 untouched so the 30% partial fires at L1.
+                # The R:R gate below uses rr_l2 just to pass validation.
                 rr = rr_l2
 
         if rr < self.min_rr:
@@ -1632,6 +1734,7 @@ class MMEngine:
                 "original_quantity": result.filled_quantity,
                 "remaining_quantity": result.filled_quantity,
                 "stop_loss": signal.stop_loss,
+                "original_stop_loss": signal.stop_loss,  # baseline for monotonic SL
                 "take_profit": signal.target_l1,
                 "tp_tiers": json.dumps({"l2": signal.target_l2, "l3": signal.target_l3}),
                 "margin_used": round(margin, 2),
@@ -1890,13 +1993,17 @@ class MMEngine:
             except Exception as e:
                 logger.debug("mm_200ema_partial_check_failed", symbol=symbol, error=str(e))
 
-        # Check Friday UK session exit
+        # Check Friday UK session exit.
+        # Course lesson 12 ("start closing by Friday UK close") applies
+        # regardless of level — holding L1 trades into Friday US open is
+        # exactly the Friday-Trap liquidity grab the course warns about.
+        # Previously only fired at L>=2; now closes any open trade at
+        # Friday UK close so the Friday-Trap phase starts flat.
         session = self.session_analyzer.get_current_session()
         if session.session_name == "uk" and session.day_of_week == 4:  # Friday
-            if new_level >= 2:
-                logger.info("mm_friday_uk_exit", symbol=symbol)
-                await self._close_position(pos, current_price, "friday_uk_exit")
-                return
+            logger.info("mm_friday_uk_exit", symbol=symbol, level=new_level)
+            await self._close_position(pos, current_price, "friday_uk_exit")
+            return
 
         # Volume degradation at Level 3 = exit
         if new_level >= 3 and level_analysis and level_analysis.volume_degrading:
@@ -1932,13 +2039,23 @@ class MMEngine:
             return new_sl < pos.stop_loss
 
         def _apply(new_sl: float, reason: str) -> bool:
-            """Apply SL move if it tightens AND doesn't cross current price."""
-            # Safety: never move SL to the wrong side of current price
-            # (would be an instant stop-out).
-            if pos.direction == "long" and new_sl >= pos.entry_price * 1.1:
-                return False  # sanity cap: don't move SL absurdly high on long
-            if pos.direction == "short" and new_sl <= pos.entry_price * 0.9:
-                return False
+            """Apply SL move if it tightens AND stays on the correct side.
+
+            (Previously the cap was `new_sl >= entry * 1.1` for longs — that
+            DID allow a long's SL to be moved to entry+9%, which is the
+            wrong side of entry. For a long, SL above entry is a guaranteed
+            instant stop; the only time we legitimately move SL to-or-above
+            entry is the deliberate breakeven-at-L2 step — handled below.)
+            """
+            # Hard side guard: long SL must stay below entry UNLESS we're
+            # explicitly going to breakeven at L2; short SL must stay above.
+            is_breakeven_move = reason.startswith("breakeven")
+            if pos.direction == "long":
+                if new_sl > pos.entry_price and not is_breakeven_move:
+                    return False
+            else:
+                if new_sl < pos.entry_price and not is_breakeven_move:
+                    return False
             if _tightens(new_sl):
                 old = pos.stop_loss
                 pos.stop_loss = new_sl
@@ -1955,9 +2072,17 @@ class MMEngine:
             return
 
         if new_level == 2:
-            # (a) Move SL to breakeven first if we haven't yet
+            # (a) Move SL to breakeven first if we haven't yet.
+            # Account for round-trip fees so the "breakeven" actually breaks
+            # even: entry * (1 + 2 * fee_rate) for longs. Previously moved
+            # to pure entry, which guaranteed a small loss via fees.
+            fee_rate = 0.0004  # 4bps one-way — typical futures taker
             if not pos.sl_moved_to_breakeven:
-                if _apply(pos.entry_price, "breakeven_at_l2"):
+                if pos.direction == "long":
+                    be_price = pos.entry_price * (1 + 2 * fee_rate)
+                else:
+                    be_price = pos.entry_price * (1 - 2 * fee_rate)
+                if _apply(be_price, "breakeven_at_l2"):
                     pos.sl_moved_to_breakeven = True
 
             # (b) Once at breakeven, try to move SL just under the 50 EMA
@@ -2192,7 +2317,13 @@ class MMEngine:
             return None
 
     async def _take_partial(self, pos: MMPosition, level: int, current_price: float) -> None:
-        """Take partial profit at level completion."""
+        """Take partial profit at level completion.
+
+        Also writes a row to the `partial_exits` table so each TP tier hit is
+        auditable (was previously missing — current_tier advanced on the trade
+        row but no history was kept, so the dashboard could not surface which
+        levels fired).
+        """
         target_close_pct = PROFIT_SCHEDULE.get(level, 0)
         if target_close_pct <= pos.partial_closed_pct:
             return  # Already closed enough
@@ -2211,9 +2342,18 @@ class MMEngine:
                 quantity=close_qty,
             )
             if result and result.status == "closed":
+                # Compute tier-level PnL so the partial_exits audit row is meaningful
+                if pos.direction == "long":
+                    tier_pnl_usd = (current_price - pos.entry_price) * close_qty
+                else:
+                    tier_pnl_usd = (pos.entry_price - current_price) * close_qty
+                entry_notional = pos.entry_price * close_qty
+                tier_pnl_pct = (tier_pnl_usd / entry_notional * 100) if entry_notional > 0 else 0.0
+                tier_fees = float(getattr(result, "fee", 0.0) or 0.0)
+
                 pos.partial_closed_pct = target_close_pct
                 pos.quantity -= close_qty
-                # Persist to DB so restarts don't re-close the same partials
+                # Persist trade row (current_tier + remaining_quantity)
                 try:
                     await self.repo.update_trade(pos.trade_id, {
                         "remaining_quantity": pos.quantity,
@@ -2221,6 +2361,24 @@ class MMEngine:
                     })
                 except Exception as e:
                     logger.debug("mm_partial_db_update_failed", error=str(e))
+                # Persist audit row to partial_exits so dashboards can show
+                # which tiers fired on each trade.
+                try:
+                    await self.repo.log_partial_exit(
+                        trade_id=pos.trade_id,
+                        tier=level,
+                        exit_price=float(current_price),
+                        exit_quantity=float(close_qty),
+                        exit_order_id=str(getattr(result, "order_id", "") or ""),
+                        exit_reason=f"tp_l{level}",
+                        pnl_usd=round(tier_pnl_usd, 4),
+                        pnl_percent=round(tier_pnl_pct, 4),
+                        fees_usd=round(tier_fees, 4),
+                        remaining_quantity=float(pos.quantity),
+                        new_stop_loss=float(pos.stop_loss),
+                    )
+                except Exception as e:
+                    logger.debug("mm_partial_exit_audit_failed", error=str(e))
                 logger.info(
                     "mm_partial_profit",
                     symbol=pos.symbol,
@@ -2228,6 +2386,8 @@ class MMEngine:
                     closed_pct=round(target_close_pct * 100),
                     qty=round(close_qty, 6),
                     price=current_price,
+                    tier_pnl_usd=round(tier_pnl_usd, 2),
+                    tier_pnl_pct=round(tier_pnl_pct, 2),
                 )
         except Exception as e:
             logger.warning("mm_partial_failed", symbol=pos.symbol, error=str(e))

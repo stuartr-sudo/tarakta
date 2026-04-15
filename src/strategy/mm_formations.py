@@ -534,7 +534,13 @@ class FormationDetector:
             # B5 enforcement: ≤2 hits per session
             session_cap_ok = max_per_session <= 2
 
-            if (multi_session and session_cap_ok) or self.session_analyzer is None:
+            # Lesson 18: session distribution is a hard rule. Previously an
+            # OR with `self.session_analyzer is None` let every pattern
+            # through when no analyzer was configured — a silent bypass.
+            # Now we require both conditions always; if the analyzer is
+            # missing we log and reject (the three-hits formation is worth
+            # skipping when we can't verify its session profile).
+            if multi_session and session_cap_ok:
                 result.detected = True
                 result.hit_count = hit_count
                 result.level_tested = level

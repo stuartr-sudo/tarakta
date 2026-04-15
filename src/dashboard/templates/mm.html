@@ -156,6 +156,7 @@
                         <th>Entry</th>
                         <th>Current</th>
                         <th>SL / TP</th>
+                        <th>Tier</th>
                         <th>Qty</th>
                         <th>Margin</th>
                         <th>Unrealized P&L</th>
@@ -174,12 +175,18 @@
                     {% set cost = (t.entry_cost_usd or 0) | float %}
                     {% set margin = (t.margin_used or (cost / (t.leverage or 10))) | float %}
                     {% set dp = 2 if entry > 10 else 4 if entry > 0.1 else 6 %}
+                    {% set tier = (t.current_tier or 0) | int %}
                     <tr data-symbol="{{ t.symbol }}">
                         <td><strong>{{ t.symbol.replace(':USDT','').replace('/USDT','') }}</strong></td>
                         <td><span class="dir-badge {{ 'long' if t.direction == 'long' else 'short' }}">{{ (t.direction or 'long')|upper }}</span></td>
                         <td class="mono">${{ '%.*f' % (dp, entry) }}</td>
                         <td class="mono" data-col="current">$<span class="px-current">{{ '%.*f' % (dp, entry) }}</span></td>
                         <td class="mono" style="font-size:0.75rem;">SL ${{ '%.*f' % (dp, sl) }}<br>TP ${{ '%.*f' % (dp, tp) }}</td>
+                        <td class="mono" style="font-size:0.75rem;" data-col="tier">
+                            <span style="color:{{ '#00e5d4' if tier >= 1 else 'var(--text-muted)' }};">TP1{{ ' ✓' if tier >= 1 else '' }}</span><br>
+                            <span style="color:{{ '#00e5d4' if tier >= 2 else 'var(--text-muted)' }};">TP2{{ ' ✓' if tier >= 2 else '' }}</span><br>
+                            <span style="color:{{ '#00e5d4' if tier >= 3 else 'var(--text-muted)' }};">TP3{{ ' ✓' if tier >= 3 else '' }}</span>
+                        </td>
                         <td class="mono" style="font-size:0.75rem;">{{ '%.2f' % qty }}<br><span style="color:var(--text-muted);">{{ t.leverage or 10 }}x lev</span></td>
                         <td class="mono">${{ '%.0f' % margin }}<br><span style="color:var(--text-muted);font-size:0.7rem;">of ${{ '%.0f' % cost }} notional</span></td>
                         <td class="mono" data-col="pnl" style="font-size:1.1rem;font-weight:bold;color:var(--text-muted);">—</td>
@@ -457,12 +464,20 @@ function updateMMPage(data) {
                 const tp = p.target_l1 || 0;
                 // Store position data for click handler
                 const pIdx = data.positions.indexOf(p);
+                const tier = Number(p.current_level || 0);
+                const tierCell = [1, 2, 3].map(n => {
+                    const on = tier >= n;
+                    const color = on ? '#00e5d4' : 'var(--text-muted)';
+                    const mark = on ? ' ✓' : '';
+                    return `<span style="color:${color};">TP${n}${mark}</span>`;
+                }).join('<br>');
                 return `<tr style="cursor:pointer;" onclick="showOpenPositionDetail(_mmPositions[${pIdx}])">
                     <td><strong>${p.symbol.replace(':USDT','').replace('/USDT','')}</strong></td>
                     <td><span class="dir-badge ${p.direction === 'long' ? 'long' : 'short'}">${p.direction.toUpperCase()}</span></td>
                     <td class="mono">$${p.entry_price.toFixed(priceDp)}</td>
                     <td class="mono">$${cur.toFixed(priceDp)}</td>
                     <td class="mono" style="font-size:0.75rem;">SL $${p.stop_loss.toFixed(priceDp)}<br>TP $${tp.toFixed(priceDp)}</td>
+                    <td class="mono" style="font-size:0.75rem;">${tierCell}</td>
                     <td class="mono" style="font-size:0.75rem;">${p.quantity ? p.quantity.toFixed(2) : '—'}<br><span style="color:var(--text-muted);">${p.leverage || 10}x lev</span></td>
                     <td class="mono">$${margin.toFixed(0)}<br><span style="color:var(--text-muted);font-size:0.7rem;">of $${(p.cost_usd || 0).toFixed(0)} notional</span></td>
                     <td class="mono ${pnlClass}" style="font-size:1.1rem;font-weight:bold;">${pnlSign}$${pnl.toFixed(2)}</td>
