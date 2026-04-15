@@ -61,7 +61,10 @@ class Settings(BaseSettings):
     # Pair selection — course says MM Method is a majors strategy. Separate
     # from the SMC engine's `min_volume_usd` so we don't disturb that.
     mm_min_volume_usd: float = 50_000_000  # 50M USD/24h — filters shitcoins
-    mm_majors_only: bool = False           # flip to True for BTC/ETH/top-20 only
+    # Majors-only is ON by default: course says MM Method is a majors
+    # strategy (lessons 1-3, 53). Restricts to BTC/ETH/SOL/BNB/top-20.
+    # Flip to False to loosen to the 50M-volume universe.
+    mm_majors_only: bool = True
 
     # Scanning defaults
     min_volume_usd: float = 5_000_000
