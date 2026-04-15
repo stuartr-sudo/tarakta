@@ -114,7 +114,7 @@
     <div class="panel-header">
         <h2>Open Positions <span id="mm-pos-badge" class="badge" style="background:var(--teal-dim);color:var(--teal);">{{ mm_open_trades|length if mm_open_trades else 0 }}</span></h2>
     </div>
-    <div id="mm-positions-body" class="panel-body no-pad" style="display:none;">
+    <div id="mm-positions-body" class="panel-body no-pad" style="display:{{ 'block' if mm_open_trades else 'none' }};">
         <div class="overflow-x">
             <style>
                 #mm-positions-table { width:100%; }
@@ -153,11 +153,35 @@
                         <th>Unrealized P&L</th>
                     </tr>
                 </thead>
-                <tbody id="mm-positions-tbody"></tbody>
+                <tbody id="mm-positions-tbody">
+                {# Server-side render so positions show instantly on page load,
+                   before the JS /api/mm/status call completes. Values like
+                   Current price / Unrealized P&L are replaced by JS once
+                   live data arrives. #}
+                {% for t in (mm_open_trades or []) %}
+                    {% set entry = (t.entry_price or 0) | float %}
+                    {% set sl = (t.stop_loss or 0) | float %}
+                    {% set tp = (t.take_profit or 0) | float %}
+                    {% set qty = (t.remaining_quantity or t.entry_quantity or 0) | float %}
+                    {% set cost = (t.entry_cost_usd or 0) | float %}
+                    {% set margin = (t.margin_used or (cost / (t.leverage or 10))) | float %}
+                    {% set dp = 2 if entry > 10 else 4 if entry > 0.1 else 6 %}
+                    <tr data-symbol="{{ t.symbol }}">
+                        <td><strong>{{ t.symbol.replace(':USDT','').replace('/USDT','') }}</strong></td>
+                        <td><span class="dir-badge {{ 'long' if t.direction == 'long' else 'short' }}">{{ (t.direction or 'long')|upper }}</span></td>
+                        <td class="mono">${{ '%.*f' % (dp, entry) }}</td>
+                        <td class="mono" data-col="current">$<span class="px-current">{{ '%.*f' % (dp, entry) }}</span></td>
+                        <td class="mono" style="font-size:0.75rem;">SL ${{ '%.*f' % (dp, sl) }}<br>TP ${{ '%.*f' % (dp, tp) }}</td>
+                        <td class="mono" style="font-size:0.75rem;">{{ '%.2f' % qty }}<br><span style="color:var(--text-muted);">{{ t.leverage or 10 }}x lev</span></td>
+                        <td class="mono">${{ '%.0f' % margin }}<br><span style="color:var(--text-muted);font-size:0.7rem;">of ${{ '%.0f' % cost }} notional</span></td>
+                        <td class="mono" data-col="pnl" style="font-size:1.1rem;font-weight:bold;color:var(--text-muted);">—</td>
+                    </tr>
+                {% endfor %}
+                </tbody>
             </table>
         </div>
     </div>
-    <div id="mm-positions-empty" class="empty-state">
+    <div id="mm-positions-empty" class="empty-state" style="display:{{ 'none' if mm_open_trades else 'block' }};">
         <p>No open MM positions. The engine will enter trades when confluence conditions are met.</p>
     </div>
 </div>
@@ -657,7 +681,9 @@ async function toggleMMEngine() {
 }
 
 loadMMStatus();
-setInterval(loadMMStatus, 15000);
+// 3-second poll for near-live price updates on open positions.
+// Was 15s — too slow when a trade is near SL/TP.
+setInterval(loadMMStatus, 3000);
 
 // --- Trade Detail Modal ---
 function showTradeDetail(trade) {
