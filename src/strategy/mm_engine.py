@@ -869,12 +869,15 @@ class MMEngine:
         self._advance("candles_ok")
 
         # Course A8 (lesson 20 "wait for candle CLOSE before entering"):
-        # Reject if the latest 1H bar hasn't closed yet. We use a 5-minute
-        # tolerance because exchange candle endpoints sometimes return the
-        # just-closed bar with a timestamp a few seconds before `now`.
+        # Exchange candle endpoints include the CURRENT in-progress bar.
+        # The course rule is "evaluate on the most recent CLOSED bar" — so if
+        # the last row of the dataframe is still forming, drop it and use the
+        # prior bar as the closed bar. Previously this gate rejected the pair
+        # outright, which meant the engine could only ever pass this check
+        # during the last 5 minutes of each hour (before the forming bar
+        # ticks over) — i.e. effectively never.
         try:
             last_bar_ts = candles_1h.index[-1]
-            # Convert to UTC aware datetime if needed
             if hasattr(last_bar_ts, "to_pydatetime"):
                 last_bar_dt = last_bar_ts.to_pydatetime()
             else:
@@ -883,13 +886,40 @@ class MMEngine:
                 last_bar_dt = last_bar_dt.replace(tzinfo=timezone.utc)
             # Bar close time = bar_start + 1h
             bar_close_dt = last_bar_dt + timedelta(hours=1)
-            if now < bar_close_dt - timedelta(minutes=5):
-                # Still inside the current 1H bar — don't score yet.
-                return self._reject("bar_not_closed", symbol,
-                                    bar_start=last_bar_dt.isoformat(),
-                                    bar_close_due=bar_close_dt.isoformat())
+            if now < bar_close_dt - timedelta(seconds=30):
+                # Current bar still forming — drop it and work off closed bars.
+                candles_1h = candles_1h.iloc[:-1]
+                if len(candles_1h) < 50:
+                    return self._reject(
+                        "insufficient_candles_after_trim",
+                        symbol,
+                        count=len(candles_1h),
+                    )
         except Exception:
             pass  # Best-effort only — don't block on timestamp parsing issues
+
+        # Also trim the in-progress bar from 4H and 15m so downstream analysis
+        # (formations, EMAs, inside-hits) operates on fully closed candles.
+        for _tf_name, _df in (("4h", candles_4h), ("15m", candles_15m)):
+            if _df is None or _df.empty:
+                continue
+            try:
+                _last_ts = _df.index[-1]
+                if hasattr(_last_ts, "to_pydatetime"):
+                    _last_dt = _last_ts.to_pydatetime()
+                else:
+                    _last_dt = _last_ts
+                if _last_dt.tzinfo is None:
+                    _last_dt = _last_dt.replace(tzinfo=timezone.utc)
+                _tf_secs = {"4h": 4 * 3600, "15m": 15 * 60}[_tf_name]
+                _close_dt = _last_dt + timedelta(seconds=_tf_secs)
+                if now < _close_dt - timedelta(seconds=30):
+                    if _tf_name == "4h":
+                        candles_4h = _df.iloc[:-1]
+                    else:
+                        candles_15m = _df.iloc[:-1]
+            except Exception:
+                pass
 
         current_price = float(candles_1h.iloc[-1]["close"])
 
