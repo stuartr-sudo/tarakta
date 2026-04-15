@@ -606,17 +606,61 @@ class MMEngine:
 
         logger.info("mm_engine_started", scanning_active=self._scanning_active)
 
+        # Start the dedicated price-refresh task in THIS event loop. The
+        # dashboard reads self._last_prices but must not call self.exchange
+        # directly because it runs in a different (uvicorn) thread/loop and
+        # the exchange's semaphore is bound to THIS loop.
+        price_task = asyncio.create_task(self._price_refresh_loop())
+
+        try:
+            while self._running:
+                try:
+                    await self._cycle()
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error("mm_engine_cycle_error", error=str(e), exc_info=True)
+
+                await asyncio.sleep(self.scan_interval)
+        finally:
+            price_task.cancel()
+            try:
+                await price_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        logger.info("mm_engine_stopped")
+
+    async def _price_refresh_loop(self) -> None:
+        """Refresh _last_prices for all open positions every few seconds.
+
+        Runs in the engine's main event loop so the exchange semaphore is
+        in the right place. The dashboard's /api/mm/status reads the
+        cached values — no cross-loop exchange calls.
+        """
+        interval_s = 5.0
         while self._running:
             try:
-                await self._cycle()
+                symbols = list(self.positions.keys())
+                if symbols:
+                    # Parallel ticker fetch, swallow individual failures.
+                    async def _one(sym: str) -> tuple[str, float | None]:
+                        try:
+                            t = await self.exchange.fetch_ticker(sym)
+                            return sym, float(t.get("last") or 0) or None
+                        except Exception:
+                            return sym, None
+                    results = await asyncio.gather(
+                        *[_one(s) for s in symbols], return_exceptions=True
+                    )
+                    for r in results:
+                        if isinstance(r, tuple) and r[1]:
+                            self._last_prices[r[0]] = r[1]
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("mm_engine_cycle_error", error=str(e), exc_info=True)
-
-            await asyncio.sleep(self.scan_interval)
-
-        logger.info("mm_engine_stopped")
+                logger.debug("mm_price_refresh_error", error=str(e))
+            await asyncio.sleep(interval_s)
 
     async def shutdown(self) -> None:
         """Graceful shutdown."""
@@ -625,25 +669,17 @@ class MMEngine:
     async def get_status(self) -> dict:
         """Return a status snapshot for the dashboard API.
 
-        Fetches live prices for all open positions in parallel, then
-        falls back to cached prices if any individual fetch fails.
+        IMPORTANT: This runs in the dashboard's uvicorn thread event loop.
+        We CANNOT call self.exchange.* here — the exchange client's
+        asyncio.Semaphore was created in the MAIN event loop (where the
+        engine cycle runs), so any call from this thread hangs forever
+        with "bound to a different event loop". Symptom: the semaphore
+        fills with waiters, eventually starving the engine's own scans
+        ("mm_engine_pairs_error" with pairs_scanned:0).
+
+        Instead: read from self._last_prices only. The engine loop's
+        dedicated _price_refresh_loop keeps those fresh every few seconds.
         """
-        # Refresh prices for all open positions in parallel
-        if self.positions:
-            async def _fetch_price(symbol: str) -> tuple[str, float | None]:
-                try:
-                    ticker = await self.exchange.fetch_ticker(symbol)
-                    return symbol, float(ticker["last"])
-                except Exception:
-                    return symbol, None
-
-            results = await asyncio.gather(
-                *[_fetch_price(s) for s in self.positions], return_exceptions=True
-            )
-            for r in results:
-                if isinstance(r, tuple) and r[1] is not None:
-                    self._last_prices[r[0]] = r[1]
-
         session = self.session_analyzer.get_current_session()
         positions_out = []
         total_unrealized = 0.0
