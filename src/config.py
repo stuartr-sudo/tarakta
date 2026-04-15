@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     mm_max_positions: int = 3
     mm_risk_per_trade_pct: float = 1.0
     mm_initial_balance: float = 10000.0
+    # Pair selection — course says MM Method is a majors strategy. Separate
+    # from the SMC engine's `min_volume_usd` so we don't disturb that.
+    mm_min_volume_usd: float = 50_000_000  # 50M USD/24h — filters shitcoins
+    mm_majors_only: bool = False           # flip to True for BTC/ETH/top-20 only
 
     # Scanning defaults
     min_volume_usd: float = 5_000_000
