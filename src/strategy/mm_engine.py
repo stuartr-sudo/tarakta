@@ -93,10 +93,36 @@ PROFIT_SCHEDULE = {
     3: 1.00,   # Close remaining at Level 3
 }
 
-# Valid phases for new entries (weekly cycle phase machine)
+# Valid phases for new entries (weekly cycle phase machine).
+#
+# All 11 phases defined in mm_weekly_cycle.py:
+#   WEEKEND_TRAP      — Sat/Sun consolidation before week open. No trading
+#                       window per lesson 2 ("MM are not around"). BLOCK.
+#   FMWB              — False Move Weekend Bait near Sun 5pm NY. Explicit
+#                       reject at a separate gate (fmwb_phase). BLOCK.
+#   FORMATION_PENDING — Between phases, formations forming. ALLOW.
+#   LEVEL_1/2/3       — Inside a level progression. ALLOW.
+#   BOARD_MEETING_1/2 — Retracement between levels (fib entries). ALLOW.
+#   MIDWEEK_REVERSAL  — Wed/Thu reversal window (lesson 9). The course is
+#                       explicit: "A new M or W formation confirms the
+#                       reversal." This IS an entry window. ALLOW.
+#   REVERSAL_LEVELS   — Repeats 3-level progression post-reversal. Same
+#                       entry rules as LEVEL_1/2/3. ALLOW.
+#   FRIDAY_TRAP       — Post Friday-UK-close. Terminal state for the week,
+#                       holding is the trap. Explicit reject at
+#                       friday_trap gate. BLOCK.
+#
+# Bug fixed 2026-04-15: MIDWEEK_REVERSAL and REVERSAL_LEVELS were missing
+# from this set. On midweek (Wed/Thu), 96.8% of all scanned pairs were
+# rejected by the wrong_phase gate — so the engine scanned for hours and
+# couldn't open a single trade. See dashboard funnel screenshot in
+# session history.
 VALID_ENTRY_PHASES = {
-    "FORMATION_PENDING", "LEVEL_1", "LEVEL_2", "LEVEL_3",
+    "FORMATION_PENDING",
+    "LEVEL_1", "LEVEL_2", "LEVEL_3",
     "BOARD_MEETING_1", "BOARD_MEETING_2",
+    "MIDWEEK_REVERSAL",
+    "REVERSAL_LEVELS",
 }
 
 # Strategy tag for database
