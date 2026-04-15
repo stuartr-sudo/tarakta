@@ -1,0 +1,162 @@
+<h2>What kind of vibe are you after?</h2>
+<p class="subtitle">Pick the design direction that resonates most. This sets the tone for everything.</p>
+
+<div class="cards">
+  <!-- Option A: Glassmorphic Fintech -->
+  <div class="card" data-choice="glassmorphic-fintech" onclick="toggleSelect(this)">
+    <div class="card-image" style="background: linear-gradient(135deg, #0f0f23 0%, #1a1a3e 50%, #0d1b2a 100%); padding: 28px; min-height: 320px; position: relative; overflow: hidden;">
+      <!-- Floating glass orbs -->
+      <div style="position:absolute;top:-40px;right:-20px;width:160px;height:160px;border-radius:50%;background:radial-gradient(circle,rgba(99,102,241,0.15),transparent);filter:blur(20px);"></div>
+      <div style="position:absolute;bottom:-30px;left:20px;width:120px;height:120px;border-radius:50%;background:radial-gradient(circle,rgba(16,185,129,0.12),transparent);filter:blur(16px);"></div>
+
+      <!-- Mock nav -->
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+        <div style="font-family:monospace;font-weight:700;color:#e2e8f0;font-size:14px;letter-spacing:-0.5px;">tarakta</div>
+        <div style="display:flex;gap:16px;">
+          <span style="color:rgba(255,255,255,0.3);font-size:11px;">Dashboard</span>
+          <span style="color:#818cf8;font-size:11px;border-bottom:1px solid #818cf8;padding-bottom:2px;">Trades</span>
+          <span style="color:rgba(255,255,255,0.3);font-size:11px;">Signals</span>
+        </div>
+      </div>
+
+      <!-- Glass cards row -->
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px;">
+        <div style="background:rgba(255,255,255,0.04);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.06);border-radius:14px;padding:14px 16px;">
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:rgba(255,255,255,0.35);margin-bottom:6px;">Equity</div>
+          <div style="font-family:monospace;font-size:20px;font-weight:700;color:#e2e8f0;">$10,420</div>
+          <div style="font-size:10px;color:#34d399;margin-top:3px;">+4.2%</div>
+        </div>
+        <div style="background:rgba(255,255,255,0.04);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.06);border-radius:14px;padding:14px 16px;">
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:rgba(255,255,255,0.35);margin-bottom:6px;">Daily P&L</div>
+          <div style="font-family:monospace;font-size:20px;font-weight:700;color:#34d399;">+$87.30</div>
+        </div>
+        <div style="background:rgba(255,255,255,0.04);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.06);border-radius:14px;padding:14px 16px;">
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:rgba(255,255,255,0.35);margin-bottom:6px;">Win Rate</div>
+          <div style="font-family:monospace;font-size:20px;font-weight:700;color:#818cf8;">64%</div>
+        </div>
+      </div>
+
+      <!-- Glass panel -->
+      <div style="background:rgba(255,255,255,0.03);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.05);border-radius:14px;padding:14px 16px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+          <span style="font-size:12px;font-weight:600;color:#e2e8f0;">Open Positions</span>
+          <span style="font-size:9px;background:rgba(99,102,241,0.15);color:#818cf8;padding:2px 8px;border-radius:8px;">3 active</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:11px;">
+          <span style="color:#e2e8f0;font-weight:500;">BTC/USDT</span>
+          <span style="color:#34d399;font-family:monospace;">+$42.18</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:8px 0;font-size:11px;">
+          <span style="color:#e2e8f0;font-weight:500;">ETH/USDT</span>
+          <span style="color:#f87171;font-family:monospace;">-$12.40</span>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Glassmorphic Fintech</h3>
+      <p>Frosted glass cards with soft depth. Floating ambient gradients. Indigo/violet accent palette. Feels like a premium wealth management app. Clean, spacious, luxurious.</p>
+    </div>
+  </div>
+
+  <!-- Option B: Minimal Swiss -->
+  <div class="card" data-choice="minimal-swiss" onclick="toggleSelect(this)">
+    <div class="card-image" style="background: #fafafa; padding: 28px; min-height: 320px;">
+      <!-- Mock nav -->
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;padding-bottom:12px;border-bottom:1px solid #e5e7eb;">
+        <div style="font-weight:800;color:#111;font-size:15px;letter-spacing:-0.5px;">TARAKTA</div>
+        <div style="display:flex;gap:20px;">
+          <span style="color:#111;font-size:11px;font-weight:600;">Dashboard</span>
+          <span style="color:#999;font-size:11px;">Trades</span>
+          <span style="color:#999;font-size:11px;">Signals</span>
+        </div>
+      </div>
+
+      <!-- Stat row -->
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px;margin-bottom:20px;">
+        <div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:1.5px;color:#999;margin-bottom:4px;">Equity</div>
+          <div style="font-family:monospace;font-size:22px;font-weight:700;color:#111;">$10,420</div>
+        </div>
+        <div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:1.5px;color:#999;margin-bottom:4px;">Daily P&L</div>
+          <div style="font-family:monospace;font-size:22px;font-weight:700;color:#16a34a;">+$87.30</div>
+        </div>
+        <div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:1.5px;color:#999;margin-bottom:4px;">Win Rate</div>
+          <div style="font-family:monospace;font-size:22px;font-weight:700;color:#111;">64%</div>
+        </div>
+      </div>
+
+      <!-- Clean table -->
+      <div style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
+        <div style="display:flex;justify-content:space-between;padding:10px 16px;background:#f9fafb;border-bottom:1px solid #e5e7eb;font-size:9px;text-transform:uppercase;letter-spacing:1px;color:#999;">
+          <span>Symbol</span>
+          <span>P&L</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:10px 16px;border-bottom:1px solid #f3f4f6;font-size:12px;">
+          <span style="color:#111;font-weight:500;">BTC/USDT</span>
+          <span style="color:#16a34a;font-family:monospace;font-weight:600;">+$42.18</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:10px 16px;font-size:12px;">
+          <span style="color:#111;font-weight:500;">ETH/USDT</span>
+          <span style="color:#dc2626;font-family:monospace;font-weight:600;">-$12.40</span>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Minimal Swiss</h3>
+      <p>Light mode. Ultra-clean, information-dense. Inspired by Swiss design and Bloomberg Terminal clarity. Black type on white, red/green only for P&L. Grid-precise. No decoration — just data.</p>
+    </div>
+  </div>
+
+  <!-- Option C: Neon Command Center -->
+  <div class="card" data-choice="neon-command" onclick="toggleSelect(this)">
+    <div class="card-image" style="background: linear-gradient(180deg, #050510 0%, #0a0a1a 100%); padding: 28px; min-height: 320px; position: relative; overflow: hidden;">
+      <!-- Scan lines -->
+      <div style="position:absolute;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,255,170,0.02) 2px,rgba(0,255,170,0.02) 4px);pointer-events:none;"></div>
+
+      <!-- Mock nav -->
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid rgba(0,255,170,0.1);">
+        <div style="font-family:monospace;font-weight:700;color:#00ffaa;font-size:13px;text-shadow:0 0 10px rgba(0,255,170,0.3);">TARAKTA</div>
+        <div style="display:flex;gap:14px;">
+          <span style="color:rgba(0,255,170,0.4);font-family:monospace;font-size:10px;">DASH</span>
+          <span style="color:#00ffaa;font-family:monospace;font-size:10px;">TRADE</span>
+          <span style="color:rgba(0,255,170,0.4);font-family:monospace;font-size:10px;">SIG</span>
+        </div>
+      </div>
+
+      <!-- Neon stat cards -->
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:14px;">
+        <div style="background:rgba(0,255,170,0.04);border:1px solid rgba(0,255,170,0.15);border-radius:6px;padding:12px;">
+          <div style="font-family:monospace;font-size:8px;text-transform:uppercase;letter-spacing:1.5px;color:rgba(0,255,170,0.5);margin-bottom:4px;">EQUITY</div>
+          <div style="font-family:monospace;font-size:18px;font-weight:700;color:#00ffaa;text-shadow:0 0 8px rgba(0,255,170,0.2);">$10,420</div>
+        </div>
+        <div style="background:rgba(0,255,170,0.04);border:1px solid rgba(0,255,170,0.15);border-radius:6px;padding:12px;">
+          <div style="font-family:monospace;font-size:8px;text-transform:uppercase;letter-spacing:1.5px;color:rgba(0,255,170,0.5);margin-bottom:4px;">P&L</div>
+          <div style="font-family:monospace;font-size:18px;font-weight:700;color:#00ff88;">+$87.30</div>
+        </div>
+        <div style="background:rgba(0,255,170,0.04);border:1px solid rgba(0,255,170,0.15);border-radius:6px;padding:12px;">
+          <div style="font-family:monospace;font-size:8px;text-transform:uppercase;letter-spacing:1.5px;color:rgba(0,255,170,0.5);margin-bottom:4px;">WIN%</div>
+          <div style="font-family:monospace;font-size:18px;font-weight:700;color:#00ffaa;">64%</div>
+        </div>
+      </div>
+
+      <!-- Terminal-style panel -->
+      <div style="background:rgba(0,255,170,0.02);border:1px solid rgba(0,255,170,0.1);border-radius:6px;padding:12px;font-family:monospace;">
+        <div style="color:rgba(0,255,170,0.6);font-size:9px;margin-bottom:8px;">> OPEN_POSITIONS [3]</div>
+        <div style="display:flex;justify-content:space-between;padding:4px 0;font-size:11px;color:rgba(0,255,170,0.8);">
+          <span>BTC/USDT LONG 10x</span>
+          <span style="color:#00ff88;">+$42.18</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:4px 0;font-size:11px;color:rgba(0,255,170,0.8);">
+          <span>ETH/USDT SHORT 5x</span>
+          <span style="color:#ff4444;">-$12.40</span>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Neon Command Center</h3>
+      <p>Hacker aesthetic. Green-on-black with scan lines. Everything monospace. Feels like piloting a spaceship. Bold and dramatic — every data point glows. Maximum personality.</p>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,148 @@
+<h2>Training Page Layout</h2>
+<p class="subtitle">Interactive accordion guide for your business partner</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Behind Login (Recommended)</h3>
+      <p>Training page requires login like the rest of the dashboard. Your partner needs credentials to access it.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Public / No Login</h3>
+      <p>Training page is publicly accessible at /training. Anyone with the URL can read it (no sensitive data shown).</p>
+    </div>
+  </div>
+</div>
+
+<h3 style="margin-top: 2rem;">Proposed Sections</h3>
+
+<div class="mockup">
+  <div class="mockup-header">Training Page — Accordion Preview</div>
+  <div class="mockup-body" style="padding: 1.5rem; background: #1a1a2e; color: #e0e0e0; font-family: system-ui;">
+
+    <h2 style="color: #fff; margin-bottom: 0.25rem;">Tarakta Training Guide</h2>
+    <p style="color: #888; margin-bottom: 1.5rem;">Everything you need to understand the automated trading system</p>
+
+    <!-- Section 1 - Expanded -->
+    <div style="border: 1px solid #333; border-radius: 8px; margin-bottom: 0.75rem; overflow: hidden;">
+      <div style="padding: 1rem; background: #252545; cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <span style="color: #6C63FF; font-weight: bold; margin-right: 0.75rem;">01</span>
+          <span style="color: #fff; font-weight: 600;">System Overview</span>
+        </div>
+        <span style="color: #6C63FF;">▼</span>
+      </div>
+      <div style="padding: 1rem 1rem 1rem 2.5rem; background: #1e1e36; border-top: 1px solid #333;">
+        <p style="color: #ccc; line-height: 1.6; margin-bottom: 1rem;">Tarakta is an automated crypto trading bot that uses Smart Money Concepts (SMC) combined with AI-powered analysis. It runs continuously, scanning markets for high-probability setups.</p>
+        <div style="background: #252545; border-radius: 6px; padding: 0.75rem; margin-bottom: 0.75rem;">
+          <strong style="color: #fff;">How it works:</strong>
+          <p style="color: #aaa; margin-top: 0.25rem;">Scanner → Agent 1 (Analyze) → Agent 2 (Decide) → Execute → Agent 3 (Manage)</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 2 - Collapsed -->
+    <div style="border: 1px solid #333; border-radius: 8px; margin-bottom: 0.75rem;">
+      <div style="padding: 1rem; background: #252545; cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <span style="color: #6C63FF; font-weight: bold; margin-right: 0.75rem;">02</span>
+          <span style="color: #fff; font-weight: 600;">The Three AI Agents</span>
+        </div>
+        <span style="color: #666;">▶</span>
+      </div>
+    </div>
+
+    <!-- Section 3 -->
+    <div style="border: 1px solid #333; border-radius: 8px; margin-bottom: 0.75rem;">
+      <div style="padding: 1rem; background: #252545; cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <span style="color: #6C63FF; font-weight: bold; margin-right: 0.75rem;">03</span>
+          <span style="color: #fff; font-weight: 600;">Signal Scanning & Smart Money Concepts</span>
+        </div>
+        <span style="color: #666;">▶</span>
+      </div>
+    </div>
+
+    <!-- Section 4 -->
+    <div style="border: 1px solid #333; border-radius: 8px; margin-bottom: 0.75rem;">
+      <div style="padding: 1rem; background: #252545; cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <span style="color: #6C63FF; font-weight: bold; margin-right: 0.75rem;">04</span>
+          <span style="color: #fff; font-weight: 600;">Risk Management & Safety</span>
+        </div>
+        <span style="color: #666;">▶</span>
+      </div>
+    </div>
+
+    <!-- Section 5 -->
+    <div style="border: 1px solid #333; border-radius: 8px; margin-bottom: 0.75rem;">
+      <div style="padding: 1rem; background: #252545; cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <span style="color: #6C63FF; font-weight: bold; margin-right: 0.75rem;">05</span>
+          <span style="color: #fff; font-weight: 600;">Position Management & Trade Lifecycle</span>
+        </div>
+        <span style="color: #666;">▶</span>
+      </div>
+    </div>
+
+    <!-- Section 6 -->
+    <div style="border: 1px solid #333; border-radius: 8px; margin-bottom: 0.75rem;">
+      <div style="padding: 1rem; background: #252545; cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <span style="color: #6C63FF; font-weight: bold; margin-right: 0.75rem;">06</span>
+          <span style="color: #fff; font-weight: 600;">Dashboard Guide</span>
+        </div>
+        <span style="color: #666;">▶</span>
+      </div>
+    </div>
+
+    <!-- Section 7 -->
+    <div style="border: 1px solid #333; border-radius: 8px; margin-bottom: 0.75rem;">
+      <div style="padding: 1rem; background: #252545; cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <span style="color: #6C63FF; font-weight: bold; margin-right: 0.75rem;">07</span>
+          <span style="color: #fff; font-weight: 600;">Paper vs Live Trading</span>
+        </div>
+        <span style="color: #666;">▶</span>
+      </div>
+    </div>
+
+    <!-- Section 8 -->
+    <div style="border: 1px solid #333; border-radius: 8px; margin-bottom: 0.75rem;">
+      <div style="padding: 1rem; background: #252545; cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <span style="color: #6C63FF; font-weight: bold; margin-right: 0.75rem;">08</span>
+          <span style="color: #fff; font-weight: 600;">Settings & Configuration</span>
+        </div>
+        <span style="color: #666;">▶</span>
+      </div>
+    </div>
+
+    <!-- Section 9 -->
+    <div style="border: 1px solid #333; border-radius: 8px; margin-bottom: 0.75rem;">
+      <div style="padding: 1rem; background: #252545; cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <span style="color: #6C63FF; font-weight: bold; margin-right: 0.75rem;">09</span>
+          <span style="color: #fff; font-weight: 600;">Understanding the Analytics</span>
+        </div>
+        <span style="color: #666;">▶</span>
+      </div>
+    </div>
+
+    <!-- Section 10 -->
+    <div style="border: 1px solid #333; border-radius: 8px;">
+      <div style="padding: 1rem; background: #252545; cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <span style="color: #6C63FF; font-weight: bold; margin-right: 0.75rem;">10</span>
+          <span style="color: #fff; font-weight: 600;">Glossary & Key Terms</span>
+        </div>
+        <span style="color: #666;">▶</span>
+      </div>
+    </div>
+
+  </div>
+</div>

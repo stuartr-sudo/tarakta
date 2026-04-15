@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tarakta v4</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0a0d13;
+    --bg-sb: #0e1119;
+    --bg-card: #111827;
+    --bg-card-inner: #141b2d;
+    --bg-input: #182032;
+    --border: rgba(255,255,255,0.04);
+
+    --teal: #2dd4bf;
+    --teal-dim: rgba(45,212,191,0.08);
+    --teal-mid: rgba(45,212,191,0.15);
+    --teal-glow: rgba(45,212,191,0.25);
+    --purple: #8b5cf6;
+    --purple-dim: rgba(139,92,246,0.10);
+    --green: #34d399;
+    --green-dim: rgba(52,211,153,0.10);
+    --red: #f87171;
+    --red-dim: rgba(248,113,113,0.10);
+    --orange: #fbbf24;
+    --orange-dim: rgba(251,191,36,0.08);
+    --cyan: #22d3ee;
+
+    --t1: #f1f5f9;
+    --t2: #94a3b8;
+    --t3: #64748b;
+    --t4: #475569;
+    --t5: #334155;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--t2);
+    font-family: 'Outfit', sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── Sidebar ── */
+  .sb {
+    width: 240px;
+    background: var(--bg-sb);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 28px 16px 20px;
+    flex-shrink: 0;
+  }
+
+  .sb-brand {
+    font-weight: 700;
+    font-size: 19px;
+    color: var(--t1);
+    letter-spacing: -0.5px;
+    padding-left: 14px;
+    margin-bottom: 3px;
+  }
+
+  .sb-sub {
+    font-size: 12px;
+    color: var(--t5);
+    padding-left: 14px;
+    margin-bottom: 36px;
+    font-weight: 400;
+  }
+
+  .sb-sec {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--t5);
+    padding-left: 14px;
+    margin: 24px 0 10px;
+  }
+  .sb-sec:first-of-type { margin-top: 0; }
+
+  .sb-link {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    border-radius: 12px;
+    color: var(--t3);
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 500;
+    transition: all 0.15s;
+    margin-bottom: 2px;
+    border: 1px solid transparent;
+  }
+
+  .sb-link:hover { color: var(--t2); background: rgba(255,255,255,0.02); }
+
+  .sb-link.on {
+    color: var(--teal);
+    background: var(--teal-dim);
+    border-color: rgba(45,212,191,0.12);
+  }
+
+  .sb-link .ic { width: 18px; text-align: center; font-size: 15px; opacity: 0.45; }
+  .sb-link.on .ic { opacity: 1; color: var(--teal); }
+
+  .spacer { flex: 1; }
+
+  .sb-box {
+    padding: 16px 18px;
+    background: var(--bg-card);
+    border-radius: 16px;
+    border: 1px solid var(--border);
+  }
+
+  .sb-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+    font-size: 13px;
+  }
+  .sb-row:last-child { margin-bottom: 0; }
+  .sb-row .lbl { color: var(--t4); font-weight: 400; }
+  .sb-row .val { color: var(--t1); font-weight: 600; }
+
+  .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; }
+  .dot-g { background: var(--green); box-shadow: 0 0 8px rgba(52,211,153,0.5); }
+  .dot-o { background: var(--orange); box-shadow: 0 0 8px rgba(251,191,36,0.4); }
+
+  /* ── Main ── */
+  .main { flex: 1; overflow-y: auto; padding: 28px 36px; }
+
+  .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+  .crumb { font-size: 14px; }
+  .crumb span { color: var(--t5); }
+  .crumb b { color: var(--t1); font-weight: 600; }
+
+  .top-r { display: flex; align-items: center; gap: 10px; }
+
+  .search {
+    padding: 9px 18px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    color: var(--t4);
+    font-size: 13px;
+    font-family: 'Outfit', sans-serif;
+    min-width: 190px;
+  }
+
+  .pill {
+    padding: 8px 18px;
+    background: var(--teal-dim);
+    border: 1px solid rgba(45,212,191,0.15);
+    border-radius: 12px;
+    font-size: 13px;
+    color: var(--teal);
+    font-weight: 600;
+  }
+
+  .ico-btn {
+    width: 40px; height: 40px;
+    border-radius: 12px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--t4); font-size: 16px;
+  }
+
+  /* ── Mode ── */
+  .mode {
+    padding: 10px 18px;
+    background: var(--orange-dim);
+    border: 1px solid rgba(251,191,36,0.1);
+    border-radius: 14px;
+    margin-bottom: 24px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--orange);
+  }
+
+  /* ── Gradient Card ── */
+  .gc-wrap {
+    border-radius: 20px;
+    padding: 1px;
+    background: linear-gradient(135deg, rgba(45,212,191,0.25), rgba(45,212,191,0.02) 40%, rgba(139,92,246,0.08) 80%, rgba(139,92,246,0.2));
+    transition: all 0.25s;
+  }
+
+  .gc-wrap:hover {
+    background: linear-gradient(135deg, rgba(45,212,191,0.35), rgba(45,212,191,0.05) 40%, rgba(139,92,246,0.12) 80%, rgba(139,92,246,0.3));
+  }
+
+  .gc {
+    background: var(--bg-card);
+    border-radius: 19px;
+    padding: 22px 24px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .gc::after {
+    content: '';
+    position: absolute;
+    top: 0; right: 0;
+    width: 120px; height: 80px;
+    background: radial-gradient(ellipse at top right, rgba(45,212,191,0.06), transparent 70%);
+    pointer-events: none;
+  }
+
+  .gc-lbl {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--t4);
+    margin-bottom: 12px;
+  }
+
+  .gc-val {
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--t1);
+    line-height: 1;
+    letter-spacing: -0.5px;
+  }
+
+  .gc-sub {
+    font-size: 12px;
+    color: var(--t5);
+    margin-top: 8px;
+    font-weight: 400;
+  }
+
+  .gc-spark {
+    position: absolute;
+    bottom: 12px;
+    right: 16px;
+    opacity: 0.5;
+  }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin-bottom: 18px;
+  }
+
+  .c-green { color: var(--green) !important; }
+  .c-red { color: var(--red) !important; }
+  .c-purple { color: var(--purple) !important; }
+  .c-teal { color: var(--teal) !important; }
+  .c-orange { color: var(--orange) !important; }
+
+  /* ── Grid ── */
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 310px;
+    gap: 18px;
+  }
+
+  /* ── Panel ── */
+  .pnl-wrap {
+    border-radius: 20px;
+    padding: 1px;
+    background: linear-gradient(160deg, rgba(45,212,191,0.12), transparent 50%, rgba(139,92,246,0.06));
+    margin-bottom: 18px;
+  }
+
+  .pnl {
+    background: var(--bg-card);
+    border-radius: 19px;
+    overflow: hidden;
+  }
+
+  .pnl-h {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .pnl-t { font-size: 15px; font-weight: 600; color: var(--t1); }
+
+  .tabs {
+    display: flex; gap: 2px;
+    background: rgba(255,255,255,0.03);
+    border-radius: 10px; padding: 3px;
+  }
+
+  .tab {
+    padding: 5px 14px; border-radius: 8px;
+    font-size: 12px; font-weight: 500;
+    color: var(--t4); background: transparent;
+    border: none; cursor: pointer;
+    font-family: 'Outfit', sans-serif;
+  }
+
+  .tab.on { color: var(--t1); background: var(--teal-dim); }
+
+  /* ── Chart ── */
+  .chart {
+    height: 180px;
+    display: flex; align-items: flex-end; gap: 5px;
+    padding: 20px 24px 24px;
+  }
+
+  .bar {
+    flex: 1;
+    border-radius: 6px 6px 0 0;
+    transition: filter 0.2s;
+    background: linear-gradient(to top, rgba(45,212,191,0.15), rgba(45,212,191,0.5));
+  }
+
+  .bar:hover { filter: brightness(1.4); }
+
+  /* ── Table ── */
+  .tbl { width: 100%; border-collapse: collapse; }
+
+  .tbl th {
+    text-align: left;
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.4px;
+    color: var(--t5);
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .tbl td {
+    padding: 14px 20px;
+    border-bottom: 1px solid rgba(255,255,255,0.02);
+    font-size: 14px;
+  }
+
+  .tbl tr:last-child td { border-bottom: none; }
+  .tbl tr:hover td { background: rgba(45,212,191,0.02); }
+  .tbl .num { font-weight: 600; font-variant-numeric: tabular-nums; font-size: 13px; }
+  .tbl td b { color: var(--t1); font-weight: 600; }
+
+  /* ── Badge ── */
+  .bg {
+    display: inline-flex; padding: 4px 12px;
+    border-radius: 10px; font-size: 12px; font-weight: 600;
+  }
+
+  .bg-l { background: var(--green-dim); color: var(--green); }
+  .bg-s { background: var(--red-dim); color: var(--red); }
+  .bg-p { background: var(--purple-dim); color: var(--purple); }
+  .bg-t { background: var(--teal-dim); color: var(--teal); }
+
+  /* ── Score ── */
+  .score { display: flex; align-items: center; gap: 7px; }
+  .s-track { width: 48px; height: 4px; background: rgba(255,255,255,0.04); border-radius: 2px; overflow: hidden; }
+  .s-fill { height: 100%; border-radius: 2px; }
+  .s-fill.hi { background: var(--green); }
+  .s-fill.md { background: var(--orange); }
+  .s-fill.lo { background: var(--red); }
+  .s-num { font-size: 13px; font-weight: 600; }
+
+  /* ── Right Cards ── */
+  .rc-wrap {
+    border-radius: 20px; padding: 1px;
+    background: linear-gradient(160deg, rgba(45,212,191,0.1), transparent 60%);
+    margin-bottom: 14px;
+  }
+
+  .rc {
+    background: var(--bg-card);
+    border-radius: 19px;
+    padding: 20px 22px;
+  }
+
+  .rc-lbl {
+    font-size: 11px; font-weight: 500;
+    text-transform: uppercase; letter-spacing: 0.4px;
+    color: var(--t5); margin-bottom: 6px;
+  }
+
+  .rc-val {
+    font-size: 20px; font-weight: 700;
+    color: var(--t1); margin-bottom: 12px;
+    letter-spacing: -0.3px;
+  }
+
+  .tags { display: flex; gap: 6px; flex-wrap: wrap; }
+
+  .tag {
+    padding: 6px 14px; border-radius: 10px;
+    font-size: 12px; font-weight: 500;
+    background: var(--bg-input); color: var(--t4);
+    border: 1px solid var(--border);
+    transition: all 0.15s;
+  }
+
+  .tag.on {
+    background: var(--teal-dim);
+    color: var(--teal);
+    border-color: rgba(45,212,191,0.15);
+  }
+
+  /* ── Bot ── */
+  .bot-wrap {
+    border-radius: 18px; padding: 1px;
+    background: linear-gradient(90deg, rgba(45,212,191,0.12), rgba(139,92,246,0.08));
+    margin-bottom: 18px;
+  }
+
+  .bot {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 22px;
+    background: var(--bg-card);
+    border-radius: 17px;
+  }
+
+  .bot-l { display: flex; align-items: center; gap: 12px; }
+  .bot-n { font-weight: 600; color: var(--t1); font-size: 15px; }
+
+  .btn-go {
+    padding: 9px 24px; border-radius: 12px;
+    background: linear-gradient(135deg, var(--teal), #14b8a6);
+    color: #0a0d13; border: none;
+    font-weight: 700; font-size: 13px;
+    cursor: pointer; font-family: 'Outfit', sans-serif;
+    box-shadow: 0 2px 12px rgba(45,212,191,0.2);
+    transition: box-shadow 0.2s;
+  }
+
+  .btn-go:hover { box-shadow: 0 4px 20px rgba(45,212,191,0.35); }
+
+  /* ── Mini Grid ── */
+  .mini-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
+  .mi-lbl { font-size: 11px; color: var(--t5); font-weight: 400; margin-bottom: 3px; }
+  .mi-val { font-size: 18px; font-weight: 700; color: var(--t1); letter-spacing: -0.3px; }
+
+  .btn-outline {
+    width: 100%; padding: 10px; border-radius: 12px;
+    background: rgba(6,182,212,0.06); color: var(--cyan);
+    border: 1px solid rgba(6,182,212,0.12);
+    font-size: 13px; font-weight: 600;
+    cursor: pointer; font-family: 'Outfit', sans-serif;
+    transition: all 0.15s;
+  }
+
+  .btn-outline:hover { background: rgba(6,182,212,0.1); border-color: rgba(6,182,212,0.2); }
+
+  /* ── SVG sparklines ── */
+  .sparkline { display: block; }
+</style>
+</head>
+<body>
+
+<aside class="sb">
+  <div class="sb-brand">Tarakta</div>
+  <div class="sb-sub">Trading Terminal</div>
+
+  <div class="sb-sec">Overview</div>
+  <a class="sb-link on" href="#"><span class="ic">&#9678;</span> Dashboard</a>
+  <a class="sb-link" href="#"><span class="ic">&#8644;</span> Trades</a>
+  <a class="sb-link" href="#"><span class="ic">&#9733;</span> Signals</a>
+  <a class="sb-link" href="#"><span class="ic">&#9650;</span> Analytics</a>
+
+  <div class="sb-sec">Tools</div>
+  <a class="sb-link" href="#"><span class="ic">$</span> Usage</a>
+  <a class="sb-link" href="#"><span class="ic">&#9636;</span> Chart</a>
+  <a class="sb-link" href="#"><span class="ic">&#9881;</span> Settings</a>
+  <a class="sb-link" href="#"><span class="ic">&#9734;</span> Training</a>
+
+  <div class="spacer"></div>
+
+  <div class="sb-box">
+    <div class="sb-row"><span class="lbl">Engine</span><span class="val"><span class="dot dot-g"></span>Running</span></div>
+    <div class="sb-row"><span class="lbl">Mode</span><span class="val"><span class="dot dot-o"></span>Paper</span></div>
+    <div class="sb-row"><span class="lbl">Cycle</span><span class="val">#142</span></div>
+  </div>
+</aside>
+
+<div class="main">
+  <div class="top">
+    <div class="crumb"><span>Home &rsaquo; </span><b>Dashboard</b></div>
+    <div class="top-r">
+      <div class="search">&#128269;&ensp;Search...</div>
+      <div class="pill">Next Scan 04:32</div>
+      <div class="ico-btn">&#128276;</div>
+    </div>
+  </div>
+
+  <div class="mode">&#9888;&ensp;Paper Trading &mdash; All trades are simulated</div>
+
+  <!-- Stats Row 1 -->
+  <div class="stats">
+    <div class="gc-wrap">
+      <div class="gc">
+        <div class="gc-lbl">Equity</div>
+        <div class="gc-val">$10,420</div>
+        <div class="gc-sub">of $10,000 initial</div>
+        <svg class="gc-spark sparkline" width="60" height="28" viewBox="0 0 60 28">
+          <polyline fill="none" stroke="rgba(45,212,191,0.4)" stroke-width="1.5" points="0,22 8,18 16,20 24,14 32,16 40,10 48,8 56,4 60,6"/>
+        </svg>
+      </div>
+    </div>
+    <div class="gc-wrap">
+      <div class="gc">
+        <div class="gc-lbl">Available</div>
+        <div class="gc-val">$8,920</div>
+        <div class="gc-sub">free to trade</div>
+        <svg class="gc-spark sparkline" width="60" height="28" viewBox="0 0 60 28">
+          <polyline fill="none" stroke="rgba(139,92,246,0.35)" stroke-width="1.5" points="0,8 10,10 20,6 30,12 40,8 50,14 60,10"/>
+        </svg>
+      </div>
+    </div>
+    <div class="gc-wrap">
+      <div class="gc">
+        <div class="gc-lbl">Daily P&L</div>
+        <div class="gc-val c-green">+$87.30</div>
+        <div class="gc-sub">+0.84% today</div>
+        <svg class="gc-spark sparkline" width="60" height="28" viewBox="0 0 60 28">
+          <polyline fill="none" stroke="rgba(52,211,153,0.4)" stroke-width="1.5" points="0,20 10,16 20,18 30,12 40,10 50,6 60,4"/>
+        </svg>
+      </div>
+    </div>
+    <div class="gc-wrap">
+      <div class="gc">
+        <div class="gc-lbl">Total P&L</div>
+        <div class="gc-val c-green">+$420</div>
+        <div class="gc-sub">+4.2% all time</div>
+        <svg class="gc-spark sparkline" width="60" height="28" viewBox="0 0 60 28">
+          <polyline fill="none" stroke="rgba(52,211,153,0.4)" stroke-width="1.5" points="0,24 8,22 16,18 24,16 32,12 40,10 48,6 56,4 60,2"/>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stats Row 2 -->
+  <div class="stats">
+    <div class="gc-wrap">
+      <div class="gc">
+        <div class="gc-lbl">Drawdown</div>
+        <div class="gc-val">2.1%</div>
+        <div class="gc-sub">circuit break 15%</div>
+      </div>
+    </div>
+    <div class="gc-wrap">
+      <div class="gc">
+        <div class="gc-lbl">Win Rate</div>
+        <div class="gc-val c-teal">64%</div>
+        <div class="gc-sub">7W / 4L (11 trades)</div>
+      </div>
+    </div>
+    <div class="gc-wrap">
+      <div class="gc">
+        <div class="gc-lbl">Unrealized</div>
+        <div class="gc-val c-green">+$34.18</div>
+        <div class="gc-sub">2 open positions</div>
+      </div>
+    </div>
+    <div class="gc-wrap">
+      <div class="gc">
+        <div class="gc-lbl">Avg P&L</div>
+        <div class="gc-val c-green">+$38.18</div>
+        <div class="gc-sub">per trade</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div>
+      <!-- Bot Control -->
+      <div class="bot-wrap">
+        <div class="bot">
+          <div class="bot-l">
+            <span class="bot-n">Main Bot</span>
+            <span class="bg bg-t">10x</span>
+            <span class="bg bg-t">5%</span>
+          </div>
+          <button class="btn-go">&#9654; Start</button>
+        </div>
+      </div>
+
+      <!-- Equity Chart -->
+      <div class="pnl-wrap">
+        <div class="pnl">
+          <div class="pnl-h">
+            <span class="pnl-t">Equity History</span>
+            <div class="tabs">
+              <button class="tab">1W</button>
+              <button class="tab on">1M</button>
+              <button class="tab">6M</button>
+              <button class="tab">1Y</button>
+            </div>
+          </div>
+          <div class="chart">
+            <div class="bar" style="height:30%"></div>
+            <div class="bar" style="height:38%"></div>
+            <div class="bar" style="height:34%"></div>
+            <div class="bar" style="height:50%"></div>
+            <div class="bar" style="height:44%"></div>
+            <div class="bar" style="height:58%"></div>
+            <div class="bar" style="height:53%"></div>
+            <div class="bar" style="height:66%"></div>
+            <div class="bar" style="height:61%"></div>
+            <div class="bar" style="height:73%"></div>
+            <div class="bar" style="height:68%"></div>
+            <div class="bar" style="height:80%"></div>
+            <div class="bar" style="height:76%"></div>
+            <div class="bar" style="height:86%"></div>
+            <div class="bar" style="height:83%"></div>
+            <div class="bar" style="height:93%"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Open Positions -->
+      <div class="pnl-wrap">
+        <div class="pnl">
+          <div class="pnl-h">
+            <span class="pnl-t">Open Positions</span>
+            <span class="bg bg-t">2 active</span>
+          </div>
+          <table class="tbl">
+            <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>Current</th><th>P&L</th><th>Score</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><b>BTC/USDT</b> &#9889;</td>
+                <td><span class="bg bg-l">Long 10x</span></td>
+                <td class="num">$68,420</td>
+                <td class="num">$68,892</td>
+                <td class="num c-green">+$42.18</td>
+                <td><div class="score"><span class="s-num c-green">78</span><div class="s-track"><div class="s-fill hi" style="width:78%"></div></div></div></td>
+              </tr>
+              <tr>
+                <td><b>ETH/USDT</b> &#9889;</td>
+                <td><span class="bg bg-s">Short 5x</span></td>
+                <td class="num">$3,842</td>
+                <td class="num">$3,854</td>
+                <td class="num c-red">-$12.40</td>
+                <td><div class="score"><span class="s-num c-orange">62</span><div class="s-track"><div class="s-fill md" style="width:62%"></div></div></div></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Recent Signals -->
+      <div class="pnl-wrap">
+        <div class="pnl">
+          <div class="pnl-h">
+            <span class="pnl-t">Recent Signals</span>
+            <span style="font-size:13px;color:var(--t4);font-weight:500;cursor:pointer;">View All &rarr;</span>
+          </div>
+          <table class="tbl">
+            <thead><tr><th>Symbol</th><th>Direction</th><th>Score</th><th>Acted</th><th>Time</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><b>SOL/USDT</b></td>
+                <td><span class="bg bg-l">Long</span></td>
+                <td><div class="score"><span class="s-num c-green">82</span><div class="s-track"><div class="s-fill hi" style="width:82%"></div></div></div></td>
+                <td class="c-green" style="font-weight:500;">Yes</td>
+                <td style="color:var(--t5)">14:32</td>
+              </tr>
+              <tr>
+                <td><b>DOGE/USDT</b></td>
+                <td><span class="bg bg-s">Short</span></td>
+                <td><div class="score"><span class="s-num" style="color:var(--t5)">48</span><div class="s-track"><div class="s-fill lo" style="width:48%"></div></div></div></td>
+                <td style="color:var(--t5);font-weight:500;">No</td>
+                <td style="color:var(--t5)">13:17</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Column -->
+    <div>
+      <div class="rc-wrap">
+        <div class="rc">
+          <div class="rc-lbl">Status</div>
+          <div class="rc-val c-green">Running</div>
+          <div class="tags">
+            <span class="tag on">Active</span>
+            <span class="tag">Completed</span>
+            <span class="tag">Archived</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="rc-wrap">
+        <div class="rc">
+          <div class="rc-lbl">Instance</div>
+          <div class="rc-val">tarakta-stream</div>
+          <div class="tags">
+            <span class="tag on">tarakta-stream</span>
+            <span class="tag">footprint</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="rc-wrap">
+        <div class="rc">
+          <div class="rc-lbl">AI Entry Agent</div>
+          <div class="rc-val" style="font-size:15px;">gpt-4.1</div>
+          <div class="mini-grid">
+            <div><div class="mi-lbl">Requests</div><div class="mi-val">24</div></div>
+            <div><div class="mi-lbl">Cost</div><div class="mi-val c-orange">$1.84</div></div>
+            <div><div class="mi-lbl">Enter</div><div class="mi-val c-green">7</div></div>
+            <div><div class="mi-lbl">Skip</div><div class="mi-val c-red">17</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="rc-wrap">
+        <div class="rc">
+          <div class="rc-lbl">Trade Advisor</div>
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;">
+            <span class="bg" style="background:rgba(34,211,238,0.08);color:var(--cyan);">Claude</span>
+            <select style="padding:6px 12px;border-radius:10px;background:var(--bg-input);color:var(--t2);border:1px solid var(--border);font-size:12px;font-family:'Outfit',sans-serif;">
+              <option>Last 7 days</option>
+            </select>
+          </div>
+          <button class="btn-outline">Analyze Missed Signals</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

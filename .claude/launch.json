@@ -18,6 +18,12 @@
       "runtimeExecutable": "bash",
       "runtimeArgs": ["-c", "cd /Users/stuarta/stitch && /opt/homebrew/bin/node node_modules/.bin/vite --port 4390"],
       "port": 4390
+    },
+    {
+      "name": "rat-damage-dev",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd /Users/stuarta/rat-damage && .venv/bin/uvicorn src.main:app --port 8081"],
+      "port": 8081
     }
   ]
 }

@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tarakta — Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      /* Backgrounds */
+      --bg:        #040812;
+      --sidebar:   #060a14;
+      --card:      #080f1e;
+      --card-alt:  #0c1428;
+
+      /* Two accent colors only */
+      --teal:      #00e5d4;
+      --teal-dim:  rgba(0,229,212,0.18);
+      --teal-faint:rgba(0,229,212,0.06);
+      --teal-glow: rgba(0,229,212,0.4);
+
+      --magenta:      #e040fb;
+      --magenta-dim:  rgba(224,64,251,0.16);
+      --magenta-faint:rgba(224,64,251,0.06);
+      --magenta-glow: rgba(224,64,251,0.4);
+
+      /* Text */
+      --t1: #c8daea;
+      --t2: #4d6a87;
+      --t3: #243347;
+
+      /* Borders */
+      --b1: rgba(255,255,255,0.04);
+      --b2: rgba(0,229,212,0.1);
+    }
+
+    html, body {
+      height: 100%; overflow: hidden;
+      background: var(--bg);
+      color: var(--t1);
+      font-family: 'Outfit', sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* ambient glow — subtle, single source */
+    body::after {
+      content: '';
+      position: fixed; inset: 0; pointer-events: none; z-index: 0;
+      background:
+        radial-gradient(ellipse 55% 38% at 18% 6%, rgba(0,229,212,0.05) 0%, transparent 65%),
+        radial-gradient(ellipse 35% 25% at 80% 85%, rgba(224,64,251,0.04) 0%, transparent 60%);
+    }
+
+    .shell { position: relative; z-index: 1; display: flex; height: 100vh; }
+
+    /* ── Sidebar ──────────────────────────────────────── */
+    .sidebar {
+      width: 216px; flex-shrink: 0;
+      background: var(--sidebar);
+      border-right: 1px solid var(--b1);
+      display: flex; flex-direction: column;
+    }
+
+    .logo {
+      padding: 26px 22px 22px;
+      border-bottom: 1px solid var(--b1);
+    }
+    .logo-mark {
+      font-size: 17px; font-weight: 700;
+      letter-spacing: 0.06em;
+      color: var(--teal);
+      text-shadow: 0 0 16px var(--teal-glow);
+    }
+    .logo-sub {
+      font-size: 10px; font-weight: 400;
+      letter-spacing: 0.14em; text-transform: uppercase;
+      color: var(--t2); margin-top: 3px;
+    }
+
+    .nav { flex: 1; padding: 10px 10px; overflow-y: auto; }
+    .nav::-webkit-scrollbar { display: none; }
+
+    .nav-group-label {
+      padding: 14px 12px 5px;
+      font-size: 9px; font-weight: 600;
+      letter-spacing: 0.18em; text-transform: uppercase;
+      color: var(--t3);
+    }
+
+    .nav-link {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 12px; border-radius: 7px;
+      font-size: 13px; font-weight: 400;
+      color: var(--t2); cursor: pointer;
+      transition: color 0.12s, background 0.12s;
+      position: relative;
+    }
+    .nav-link:hover { color: var(--t1); background: rgba(255,255,255,0.03); }
+    .nav-link.on {
+      color: var(--teal); font-weight: 500;
+      background: var(--teal-faint);
+    }
+    .nav-link.on::before {
+      content: '';
+      position: absolute; left: 0; top: 20%; bottom: 20%;
+      width: 2px; border-radius: 0 2px 2px 0;
+      background: var(--teal);
+      box-shadow: 0 0 8px var(--teal-glow);
+    }
+    .ni { width: 15px; height: 15px; flex-shrink: 0; }
+
+    .sidebar-footer {
+      padding: 14px 12px;
+      border-top: 1px solid var(--b1);
+    }
+    .footer-label {
+      font-size: 9px; font-weight: 600;
+      letter-spacing: 0.16em; text-transform: uppercase;
+      color: var(--t3); margin-bottom: 9px;
+    }
+    .instance-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 7px 9px; border-radius: 7px;
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--b1);
+      margin-bottom: 5px; cursor: pointer;
+    }
+    .instance-row.on { border-color: var(--b2); background: var(--teal-faint); }
+    .pulse {
+      width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+      background: var(--teal); box-shadow: 0 0 6px var(--teal-glow);
+    }
+    .inst-name { font-size: 12px; font-weight: 500; color: var(--t1); flex: 1; }
+    .inst-tag  { font-size: 10px; color: var(--t2); }
+
+    /* ── Main ─────────────────────────────────────────── */
+    .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+    .topbar {
+      height: 58px; flex-shrink: 0;
+      display: flex; align-items: center;
+      padding: 0 26px; gap: 14px;
+      border-bottom: 1px solid var(--b1);
+    }
+    .page-title { font-size: 15px; font-weight: 600; flex: 1; }
+    .instance-tabs { display: flex; gap: 4px; }
+    .itab {
+      padding: 4px 13px; border-radius: 6px;
+      font-size: 12px; font-weight: 500; border: none; cursor: pointer;
+      color: var(--t2); background: transparent;
+      border: 1px solid transparent;
+      transition: all 0.12s;
+    }
+    .itab:hover { color: var(--t1); border-color: var(--b1); }
+    .itab.on {
+      color: var(--teal); background: var(--teal-dim);
+      border-color: rgba(0,229,212,0.3);
+    }
+    .status-pill {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 11px; border-radius: 20px;
+      font-size: 11px; font-weight: 500;
+      color: var(--teal); background: var(--teal-faint);
+      border: 1px solid rgba(0,229,212,0.2);
+    }
+    .clock {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px; color: var(--t2);
+    }
+
+    /* ── Scroll content ───────────────────────────────── */
+    .content { flex: 1; overflow-y: auto; padding: 24px 26px; }
+    .content::-webkit-scrollbar { width: 3px; }
+    .content::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.05); border-radius: 2px; }
+
+    /* ── Card base ────────────────────────────────────── */
+    .card {
+      background: var(--card);
+      border-radius: 12px;
+      border: 1px solid var(--b2);
+      position: relative; overflow: hidden;
+    }
+    /* very subtle top-edge gradient — teal only */
+    .card::after {
+      content: '';
+      position: absolute; top: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, rgba(0,229,212,0.3), transparent 60%);
+      pointer-events: none;
+    }
+
+    /* ── Stat cards ───────────────────────────────────── */
+    .stats { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; margin-bottom: 18px; }
+    .stat { padding: 20px 20px 18px; }
+
+    .stat-lbl {
+      font-size: 10px; font-weight: 600;
+      letter-spacing: 0.1em; text-transform: uppercase;
+      color: var(--t2); margin-bottom: 10px;
+    }
+    .stat-val {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 26px; font-weight: 500;
+      line-height: 1; margin-bottom: 9px;
+      letter-spacing: -0.02em;
+    }
+    .c-teal    { color: var(--teal);    text-shadow: 0 0 22px var(--teal-glow); }
+    .c-magenta { color: var(--magenta); text-shadow: 0 0 22px var(--magenta-glow); }
+    .c-white   { color: #e8f4ff; }
+
+    .stat-sub {
+      font-size: 11px; color: var(--t2);
+      display: flex; align-items: center; gap: 5px;
+    }
+    .arrow-up   { color: var(--teal);    font-size: 10px; }
+    .arrow-down { color: var(--magenta); font-size: 10px; }
+
+    /* sparkline */
+    .spark { position: absolute; right: 14px; bottom: 14px; opacity: 0.3; }
+
+    /* ── Mid grid ─────────────────────────────────────── */
+    .mid { display: grid; grid-template-columns: 1fr 320px; gap: 14px; margin-bottom: 18px; }
+
+    /* Chart card */
+    .chart-card { padding: 20px 22px; }
+    .card-hdr {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 18px;
+    }
+    .card-title { font-size: 13px; font-weight: 600; }
+    .range-group { display: flex; gap: 2px; }
+    .rbtn {
+      padding: 3px 8px; border-radius: 5px;
+      font-size: 11px; font-weight: 500;
+      color: var(--t2); background: transparent; border: none; cursor: pointer;
+    }
+    .rbtn.on { background: var(--teal-dim); color: var(--teal); }
+    .chart-wrap { height: 210px; }
+    .chart-wrap svg { width: 100%; height: 100%; }
+    .gl { stroke: rgba(255,255,255,0.03); stroke-width: 1; }
+    .cl { fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+    .cl-t { stroke: var(--teal);   filter: drop-shadow(0 0 3px rgba(0,229,212,0.6)); }
+    .cl-d { stroke: rgba(0,229,212,0.22); }
+    .al { font-family:'JetBrains Mono',monospace; font-size:9px; fill: rgba(77,106,135,0.7); }
+
+    /* Positions card */
+    .pos-card { padding: 18px 18px; display: flex; flex-direction: column; gap: 0; }
+    .card-hdr-sm {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .pill {
+      padding: 2px 8px; border-radius: 20px;
+      font-size: 10px; font-weight: 600;
+    }
+    .pill-t { background: rgba(0,229,212,0.1); color: var(--teal); }
+    .pill-m { background: rgba(224,64,251,0.1); color: var(--magenta); }
+    .pill-g { background: rgba(255,255,255,0.06); color: var(--t2); }
+
+    .pos-item {
+      padding: 11px 12px;
+      border-radius: 9px;
+      background: rgba(255,255,255,0.015);
+      border: 1px solid var(--b1);
+      margin-bottom: 8px;
+    }
+    .pos-r1 { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }
+    .pos-sym { font-size: 13px; font-weight: 600; }
+    .pos-dir {
+      font-size: 9px; font-weight: 700; letter-spacing: 0.06em;
+      padding: 2px 6px; border-radius: 3px; margin-left: 7px;
+    }
+    .dir-long  { background: rgba(0,229,212,0.1); color: var(--teal); }
+    .dir-short { background: rgba(224,64,251,0.1); color: var(--magenta); }
+    .pos-pnl {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px; font-weight: 500;
+    }
+    .pnl-pos { color: var(--teal);    text-shadow: 0 0 10px var(--teal-glow); }
+    .pnl-neg { color: var(--magenta); text-shadow: 0 0 10px var(--magenta-glow); }
+    .pos-r2 { display: flex; margin-bottom: 8px; }
+    .pos-d { flex: 1; }
+    .pos-dlbl { font-size: 9px; color: var(--t3); margin-bottom: 1px; }
+    .pos-dval { font-family:'JetBrains Mono',monospace; font-size: 11px; color: var(--t2); }
+    .prog-bg { height: 2px; background: rgba(255,255,255,0.04); border-radius: 1px; }
+    .prog-fill { height: 2px; border-radius: 1px; }
+    .pf-t { background: var(--teal); box-shadow: 0 0 5px var(--teal-glow); }
+    .pf-m { background: var(--magenta); box-shadow: 0 0 5px var(--magenta-glow); }
+
+    .pos-footer {
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 10px; padding-top: 12px;
+      border-top: 1px solid var(--b1);
+      margin-top: 4px;
+    }
+    .pf-lbl { font-size: 9px; color: var(--t3); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 3px; }
+    .pf-val { font-family:'JetBrains Mono',monospace; font-size: 14px; font-weight: 500; }
+
+    /* ── Bottom ───────────────────────────────────────── */
+    .bottom { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .tbl-card { padding: 18px 18px; }
+
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+      font-size: 9px; font-weight: 600;
+      letter-spacing: 0.12em; text-transform: uppercase;
+      color: var(--t3); padding-bottom: 10px; text-align: left;
+    }
+    thead th:last-child { text-align: right; }
+    tbody tr { border-top: 1px solid var(--b1); }
+    tbody td { padding: 9px 0; font-size: 12px; color: var(--t2); }
+    tbody td:last-child { text-align: right; }
+    tbody tr:hover td { color: var(--t1); }
+    .td-sym { font-size: 12.5px; font-weight: 600; color: var(--t1); }
+    .td-mono { font-family:'JetBrains Mono',monospace; font-size: 11px; }
+
+    .score-wrap { display: inline-flex; align-items: center; gap: 5px; }
+    .score-bg { width: 44px; height: 3px; background: rgba(255,255,255,0.05); border-radius: 2px; overflow: hidden; }
+    .score-fill { height: 3px; border-radius: 2px; }
+    .sf-hi  { background: var(--teal); box-shadow: 0 0 5px var(--teal-glow); }
+    .sf-mid { background: rgba(0,229,212,0.4); }
+    .sf-lo  { background: var(--t3); }
+    .score-num { font-family:'JetBrains Mono',monospace; font-size: 10px; }
+    .sn-hi  { color: var(--teal); }
+    .sn-mid { color: rgba(0,229,212,0.6); }
+    .sn-lo  { color: var(--t3); }
+
+    /* ── Agent feed ───────────────────────────────────── */
+    .feed { display: flex; flex-direction: column; gap: 0; }
+    .feed-item { display: flex; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--b1); }
+    .feed-item:last-child { border-bottom: none; }
+    .av {
+      width: 27px; height: 27px; border-radius: 7px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 10px; font-weight: 700; flex-shrink: 0; margin-top: 1px;
+    }
+    .av1 { background: rgba(0,229,212,0.08); color: var(--teal); border: 1px solid rgba(0,229,212,0.15); }
+    .av2 { background: rgba(0,229,212,0.05); color: rgba(0,229,212,0.7); border: 1px solid rgba(0,229,212,0.1); }
+    .av3 { background: rgba(224,64,251,0.07); color: var(--magenta); border: 1px solid rgba(224,64,251,0.15); }
+    .fb { flex: 1; min-width: 0; }
+    .fr1 { display: flex; align-items: baseline; gap: 6px; margin-bottom: 2px; }
+    .fn { font-size: 12px; font-weight: 600; }
+    .fa { font-size: 11px; color: var(--t2); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .ft { font-size: 10px; color: var(--t3); }
+    .fd { font-size: 11px; color: var(--t2); line-height: 1.45; }
+    .ht { color: var(--teal); font-weight: 500; }
+    .hm { color: var(--magenta); font-weight: 500; }
+  </style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-mark">TARAKTA</div>
+      <div class="logo-sub">Smart Money Bot</div>
+    </div>
+
+    <nav class="nav">
+      <div class="nav-group-label">Monitor</div>
+      <div class="nav-link on">
+        <svg class="ni" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1.2"/>
+          <rect x="9" y="1.5" width="5.5" height="5.5" rx="1.2"/>
+          <rect x="1.5" y="9" width="5.5" height="5.5" rx="1.2"/>
+          <rect x="9" y="9" width="5.5" height="5.5" rx="1.2"/>
+        </svg>
+        Dashboard
+      </div>
+      <div class="nav-link">
+        <svg class="ni" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <path d="M2 11.5 5.5 8l3 1.5 3-5.5 2.5 2.5"/>
+          <path d="M2 14.5h12"/>
+        </svg>
+        Positions
+      </div>
+      <div class="nav-link">
+        <svg class="ni" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <circle cx="8" cy="8" r="5.5"/>
+          <path d="M8 5.5V8l1.5 1.5"/>
+        </svg>
+        Signals
+      </div>
+      <div class="nav-link">
+        <svg class="ni" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <path d="M2 12.5 5 8.5l3 2 3-6.5 3 3"/>
+        </svg>
+        Trades
+      </div>
+      <div class="nav-link">
+        <svg class="ni" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <rect x="2" y="10" width="3" height="4.5" rx="0.5"/>
+          <rect x="6.5" y="6.5" width="3" height="8" rx="0.5"/>
+          <rect x="11" y="3.5" width="3" height="11" rx="0.5"/>
+        </svg>
+        Analytics
+      </div>
+      <div class="nav-link">
+        <svg class="ni" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <rect x="2" y="2" width="12" height="12" rx="2"/>
+          <path d="M5 8l2.5 2.5 4-5"/>
+        </svg>
+        Chart
+      </div>
+
+      <div class="nav-group-label">Manage</div>
+      <div class="nav-link">
+        <svg class="ni" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <circle cx="8" cy="8" r="2.2"/>
+          <path d="M8 1.5v1.3M8 13.2v1.3M1.5 8h1.3M13.2 8h1.3M3.4 3.4l.9.9M11.7 11.7l.9.9M12.6 3.4l-.9.9M4.3 11.7l-.9.9"/>
+        </svg>
+        Usage
+      </div>
+      <div class="nav-link">
+        <svg class="ni" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <path d="M8 2a6 6 0 100 12A6 6 0 008 2zm0 0v2m0 8v2M2 8h2m8 0h2"/>
+          <circle cx="8" cy="8" r="2"/>
+        </svg>
+        Settings
+      </div>
+      <div class="nav-link">
+        <svg class="ni" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <path d="M3 4.5l5-3 5 3v7l-5 3-5-3z"/>
+          <path d="M8 1.5v14M3 4.5l5 3 5-3"/>
+        </svg>
+        Training
+      </div>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="footer-label">Instances</div>
+      <div class="instance-row on">
+        <div class="pulse"></div>
+        <div class="inst-name">tarakta-stream</div>
+        <div class="inst-tag">paper</div>
+      </div>
+      <div class="instance-row">
+        <div class="pulse"></div>
+        <div class="inst-name">tarakta-expanded</div>
+        <div class="inst-tag">live</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <div class="main">
+    <div class="topbar">
+      <div class="page-title">Dashboard</div>
+      <div class="instance-tabs">
+        <button class="itab on">tarakta-stream</button>
+        <button class="itab">tarakta-expanded</button>
+      </div>
+      <div class="status-pill"><div class="pulse"></div>Running</div>
+      <div class="clock">04 Apr 2026 · 21:34 UTC</div>
+    </div>
+
+    <div class="content">
+
+      <!-- Stats row -->
+      <div class="stats">
+        <div class="card stat">
+          <div class="stat-lbl">Portfolio Value</div>
+          <div class="stat-val c-teal">$24,817</div>
+          <div class="stat-sub"><span class="arrow-up">▲</span> 2.4% since open</div>
+          <svg class="spark" width="56" height="24" viewBox="0 0 56 24">
+            <polyline points="0,20 10,16 20,18 30,10 40,12 50,6 56,4" fill="none" stroke="var(--teal)" stroke-width="1.5"/>
+          </svg>
+        </div>
+        <div class="card stat">
+          <div class="stat-lbl">Today's P&L</div>
+          <div class="stat-val c-teal">+$412.30</div>
+          <div class="stat-sub"><span class="arrow-up">▲</span> 3 wins · 1 loss</div>
+          <svg class="spark" width="56" height="24" viewBox="0 0 56 24">
+            <polyline points="0,18 10,20 20,12 30,14 40,6 50,8 56,3" fill="none" stroke="var(--teal)" stroke-width="1.5"/>
+          </svg>
+        </div>
+        <div class="card stat">
+          <div class="stat-lbl">Win Rate · 7d</div>
+          <div class="stat-val c-white">68.4%</div>
+          <div class="stat-sub">13 of 19 trades</div>
+          <svg class="spark" width="56" height="24" viewBox="0 0 56 24">
+            <polyline points="0,18 10,20 20,14 30,16 40,10 50,8 56,7" fill="none" stroke="rgba(200,218,234,0.35)" stroke-width="1.5"/>
+          </svg>
+        </div>
+        <div class="card stat">
+          <div class="stat-lbl">Active Signals</div>
+          <div class="stat-val c-white">7</div>
+          <div class="stat-sub">2 watching · 5 queued</div>
+        </div>
+      </div>
+
+      <!-- Mid row -->
+      <div class="mid">
+
+        <!-- Chart -->
+        <div class="card chart-card">
+          <div class="card-hdr">
+            <div class="card-title">Portfolio Performance</div>
+            <div style="display:flex;align-items:center;gap:14px">
+              <div style="display:flex;align-items:center;gap:10px;font-size:11px;color:var(--t2)">
+                <span style="display:inline-flex;align-items:center;gap:5px">
+                  <span style="width:14px;height:1.5px;background:var(--teal);box-shadow:0 0 4px var(--teal-glow);display:inline-block"></span>P&L
+                </span>
+                <span style="display:inline-flex;align-items:center;gap:5px">
+                  <span style="width:14px;height:1.5px;background:rgba(0,229,212,0.25);display:inline-block"></span>Equity
+                </span>
+              </div>
+              <div class="range-group">
+                <button class="rbtn">1D</button>
+                <button class="rbtn on">7D</button>
+                <button class="rbtn">30D</button>
+              </div>
+            </div>
+          </div>
+          <div class="chart-wrap">
+            <svg viewBox="0 0 640 196" preserveAspectRatio="none">
+              <defs>
+                <linearGradient id="ag" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#00e5d4" stop-opacity="0.1"/>
+                  <stop offset="100%" stop-color="#00e5d4" stop-opacity="0"/>
+                </linearGradient>
+              </defs>
+              <line class="gl" x1="0" y1="49"  x2="640" y2="49"/>
+              <line class="gl" x1="0" y1="98"  x2="640" y2="98"/>
+              <line class="gl" x1="0" y1="147" x2="640" y2="147"/>
+              <line class="gl" x1="0" y1="191" x2="640" y2="191"/>
+              <line class="gl" x1="91"  y1="0" x2="91"  y2="191"/>
+              <line class="gl" x1="182" y1="0" x2="182" y2="191"/>
+              <line class="gl" x1="273" y1="0" x2="273" y2="191"/>
+              <line class="gl" x1="364" y1="0" x2="364" y2="191"/>
+              <line class="gl" x1="455" y1="0" x2="455" y2="191"/>
+              <line class="gl" x1="546" y1="0" x2="546" y2="191"/>
+
+              <!-- equity (dim) -->
+              <polyline class="cl cl-d" points="0,145 91,138 182,130 273,122 364,115 455,105 546,95 640,80"/>
+
+              <!-- P&L area + line -->
+              <polygon style="fill:url(#ag)"
+                points="0,158 91,148 182,154 273,128 364,118 455,99 546,87 640,58 640,191 0,191"/>
+              <polyline class="cl cl-t"
+                points="0,158 91,148 182,154 273,128 364,118 455,99 546,87 640,58"/>
+              <circle cx="640" cy="58" r="3" fill="var(--teal)" filter="drop-shadow(0 0 5px rgba(0,229,212,0.9))"/>
+
+              <text class="al" x="6" y="52">+5%</text>
+              <text class="al" x="6" y="101">+2.5%</text>
+              <text class="al" x="6" y="150">0%</text>
+              <text class="al" text-anchor="middle" x="91"  y="206">Mon</text>
+              <text class="al" text-anchor="middle" x="182" y="206">Tue</text>
+              <text class="al" text-anchor="middle" x="273" y="206">Wed</text>
+              <text class="al" text-anchor="middle" x="364" y="206">Thu</text>
+              <text class="al" text-anchor="middle" x="455" y="206">Fri</text>
+              <text class="al" text-anchor="middle" x="546" y="206">Sat</text>
+              <text class="al" text-anchor="middle" x="626" y="206">Today</text>
+            </svg>
+          </div>
+        </div>
+
+        <!-- Positions -->
+        <div class="card pos-card">
+          <div class="card-hdr-sm">
+            <div class="card-title">Open Positions</div>
+            <span class="pill pill-t">2 active</span>
+          </div>
+
+          <div class="pos-item">
+            <div class="pos-r1">
+              <div>
+                <span class="pos-sym">BTC/USDT</span>
+                <span class="pos-dir dir-long">LONG</span>
+              </div>
+              <div class="pos-pnl pnl-pos">+$214.50</div>
+            </div>
+            <div class="pos-r2">
+              <div class="pos-d"><div class="pos-dlbl">Entry</div><div class="pos-dval">83,241.00</div></div>
+              <div class="pos-d"><div class="pos-dlbl">Mark</div><div class="pos-dval">84,108.50</div></div>
+              <div class="pos-d"><div class="pos-dlbl">Size</div><div class="pos-dval">0.003</div></div>
+            </div>
+            <div class="prog-bg"><div class="prog-fill pf-t" style="width:64%"></div></div>
+          </div>
+
+          <div class="pos-item">
+            <div class="pos-r1">
+              <div>
+                <span class="pos-sym">ETH/USDT</span>
+                <span class="pos-dir dir-short">SHORT</span>
+              </div>
+              <div class="pos-pnl pnl-neg">−$38.20</div>
+            </div>
+            <div class="pos-r2">
+              <div class="pos-d"><div class="pos-dlbl">Entry</div><div class="pos-dval">1,892.30</div></div>
+              <div class="pos-d"><div class="pos-dlbl">Mark</div><div class="pos-dval">1,907.65</div></div>
+              <div class="pos-d"><div class="pos-dlbl">Size</div><div class="pos-dval">0.025</div></div>
+            </div>
+            <div class="prog-bg"><div class="prog-fill pf-m" style="width:28%"></div></div>
+          </div>
+
+          <div class="pos-footer">
+            <div>
+              <div class="pf-lbl">Unrealised</div>
+              <div class="pf-val pnl-pos">+$176.30</div>
+            </div>
+            <div>
+              <div class="pf-lbl">Exposure</div>
+              <div class="pf-val" style="color:var(--t1)">$294.50</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom row -->
+      <div class="bottom">
+
+        <!-- Signals table -->
+        <div class="card tbl-card">
+          <div class="card-hdr-sm">
+            <div class="card-title">Recent Signals</div>
+            <span class="pill pill-t">Live</span>
+          </div>
+          <table>
+            <thead><tr>
+              <th>Pair</th><th>Setup</th><th>Score</th><th>Time</th><th>Status</th>
+            </tr></thead>
+            <tbody>
+              <tr>
+                <td class="td-sym">BTC/USDT</td>
+                <td class="td-mono" style="color:var(--t1)">OB + FVG</td>
+                <td><div class="score-wrap"><div class="score-bg"><div class="score-fill sf-hi" style="width:88%"></div></div><span class="score-num sn-hi">8.8</span></div></td>
+                <td class="td-mono">21:31</td>
+                <td><span class="pill pill-t">Entered</span></td>
+              </tr>
+              <tr>
+                <td class="td-sym">ETH/USDT</td>
+                <td class="td-mono" style="color:var(--t1)">Sweep+MSB</td>
+                <td><div class="score-wrap"><div class="score-bg"><div class="score-fill sf-hi" style="width:74%"></div></div><span class="score-num sn-hi">7.4</span></div></td>
+                <td class="td-mono">21:18</td>
+                <td><span class="pill pill-g">Watching</span></td>
+              </tr>
+              <tr>
+                <td class="td-sym">SOL/USDT</td>
+                <td class="td-mono" style="color:var(--t1)">FVG fill</td>
+                <td><div class="score-wrap"><div class="score-bg"><div class="score-fill sf-mid" style="width:61%"></div></div><span class="score-num sn-mid">6.1</span></div></td>
+                <td class="td-mono">21:04</td>
+                <td><span class="pill pill-g">Queued</span></td>
+              </tr>
+              <tr>
+                <td class="td-sym">LINK/USDT</td>
+                <td class="td-mono" style="color:var(--t1)">OB retest</td>
+                <td><div class="score-wrap"><div class="score-bg"><div class="score-fill sf-lo" style="width:45%"></div></div><span class="score-num sn-lo">4.5</span></div></td>
+                <td class="td-mono">20:52</td>
+                <td><span class="pill pill-g">Skipped</span></td>
+              </tr>
+              <tr>
+                <td class="td-sym">BNB/USDT</td>
+                <td class="td-mono" style="color:var(--t1)">Liquidity</td>
+                <td><div class="score-wrap"><div class="score-bg"><div class="score-fill sf-hi" style="width:81%"></div></div><span class="score-num sn-hi">8.1</span></div></td>
+                <td class="td-mono">20:41</td>
+                <td><span class="pill pill-m">Closed</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Agent feed -->
+        <div class="card tbl-card">
+          <div class="card-hdr-sm">
+            <div class="card-title">Agent Activity</div>
+            <span class="pill pill-t">Live</span>
+          </div>
+          <div class="feed">
+            <div class="feed-item">
+              <div class="av av1">A1</div>
+              <div class="fb">
+                <div class="fr1"><span class="fn">Analyst</span><span class="fa">Analyzed BTC/USDT · OB confluence</span><span class="ft">21:31</span></div>
+                <div class="fd">Score <span class="ht">8.8</span> — OB at 83,100 + FVG fill. HTF bullish. <span class="ht">ENTER</span></div>
+              </div>
+            </div>
+            <div class="feed-item">
+              <div class="av av2">A2</div>
+              <div class="fb">
+                <div class="fr1"><span class="fn">Refiner</span><span class="fa">Entry decision · BTC/USDT</span><span class="ft">21:31</span></div>
+                <div class="fd">SL <span class="hm">82,950</span> · TP1 <span class="ht">84,200</span> · TP2 <span class="ht">85,000</span></div>
+              </div>
+            </div>
+            <div class="feed-item">
+              <div class="av av3">A3</div>
+              <div class="fb">
+                <div class="fr1"><span class="fn">Manager</span><span class="fa">Position update · ETH/USDT</span><span class="ft">21:18</span></div>
+                <div class="fd">SL tightened <span class="hm">1,870</span> → <span class="ht">1,882</span>. TP2 → <span class="ht">1,945</span></div>
+              </div>
+            </div>
+            <div class="feed-item">
+              <div class="av av1">A1</div>
+              <div class="fb">
+                <div class="fr1"><span class="fn">Analyst</span><span class="fa">Analyzed SOL/USDT · FVG</span><span class="ft">21:04</span></div>
+                <div class="fd">Score <span style="color:rgba(0,229,212,0.5)">6.1</span> — Partial fill, low volume. Marginal.</div>
+              </div>
+            </div>
+            <div class="feed-item">
+              <div class="av av2">A2</div>
+              <div class="fb">
+                <div class="fr1"><span class="fn">Refiner</span><span class="fa">Skip · LINK/USDT</span><span class="ft">20:52</span></div>
+                <div class="fd">Score <span style="color:var(--t2)">4.5</span> below threshold. Weak ADX.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
