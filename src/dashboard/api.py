@@ -31,6 +31,26 @@ def create_router(repo: Repository) -> APIRouter:
 
     # --- MM Start/Stop ---
 
+    async def _persist_scanning_active(active: bool) -> None:
+        """Persist scanning_active flag to engine_state, creating the row if
+        it doesn't exist. Previously this was a no-op when the row was
+        missing, which meant user-toggled state was silently dropped and the
+        engine always defaulted to True after a restart."""
+        try:
+            state = await repo.get_engine_state() or {}
+            overrides = state.get("config_overrides") or {}
+            if not isinstance(overrides, dict):
+                overrides = {}
+            mm_settings = overrides.get("mm_engine_settings") or {}
+            if not isinstance(mm_settings, dict):
+                mm_settings = {}
+            mm_settings["scanning_active"] = active
+            overrides["mm_engine_settings"] = mm_settings
+            state["config_overrides"] = overrides
+            await repo.upsert_engine_state(state)
+        except Exception as e:
+            logger.warning("mm_scanning_persist_failed", active=active, error=str(e))
+
     @router.post("/mm/begin")
     @admin_required
     async def begin_mm_scanning(request: Request):
@@ -38,21 +58,7 @@ def create_router(repo: Repository) -> APIRouter:
         if not mm:
             return JSONResponse({"success": False, "error": "MM Engine not available"}, status_code=503)
         mm.begin_scanning()
-        try:
-            state = await repo.get_engine_state()
-            if state:
-                overrides = state.get("config_overrides", {}) or {}
-                if not isinstance(overrides, dict):
-                    overrides = {}
-                mm_settings = overrides.get("mm_engine_settings", {})
-                if not isinstance(mm_settings, dict):
-                    mm_settings = {}
-                mm_settings["scanning_active"] = True
-                overrides["mm_engine_settings"] = mm_settings
-                state["config_overrides"] = overrides
-                await repo.upsert_engine_state(state)
-        except Exception as e:
-            logger.warning("begin_mm_persist_failed", error=str(e))
+        await _persist_scanning_active(True)
         return {"success": True, "message": "MM Engine scanning started"}
 
     @router.post("/mm/stop")
@@ -62,21 +68,7 @@ def create_router(repo: Repository) -> APIRouter:
         if not mm:
             return JSONResponse({"success": False, "error": "MM Engine not available"}, status_code=503)
         mm.stop_scanning()
-        try:
-            state = await repo.get_engine_state()
-            if state:
-                overrides = state.get("config_overrides", {}) or {}
-                if not isinstance(overrides, dict):
-                    overrides = {}
-                mm_settings = overrides.get("mm_engine_settings", {})
-                if not isinstance(mm_settings, dict):
-                    mm_settings = {}
-                mm_settings["scanning_active"] = False
-                overrides["mm_engine_settings"] = mm_settings
-                state["config_overrides"] = overrides
-                await repo.upsert_engine_state(state)
-        except Exception as e:
-            logger.warning("stop_mm_persist_failed", error=str(e))
+        await _persist_scanning_active(False)
         return {"success": True, "message": "MM Engine scanning paused"}
 
     # --- MM Settings ---

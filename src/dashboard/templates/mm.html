@@ -30,9 +30,17 @@
     <div style="display: flex; align-items: center; gap: 8px;">
         <a href="/mm/settings" class="account-badge" style="background:rgba(0,229,212,0.12); color:#00e5d4; text-decoration:none; cursor:pointer;" title="MM Settings">&#9881; Settings</a>
         <span class="account-badge" style="background:rgba(0,229,212,0.12); color:#00e5d4;">Algorithmic</span>
-        <span id="mm-status-badge" class="status-badge closed-loss">LOADING</span>
+        {% if mm_scanning_active %}
+        <span id="mm-status-badge" class="status-badge" style="background:#00e5d4;color:#040812;">SCANNING</span>
+        {% else %}
+        <span id="mm-status-badge" class="status-badge" style="background:rgba(224,64,251,0.12);color:#e040fb;">PAUSED</span>
+        {% endif %}
         {% if role == 'admin' %}
-        <button id="mm-start-btn" class="btn primary" onclick="toggleMMEngine()" disabled style="font-size:11px; padding:5px 14px;">&#9654; Start</button>
+        {% if mm_scanning_active %}
+        <button id="mm-start-btn" class="btn primary" onclick="toggleMMEngine()" style="font-size:11px; padding:5px 14px; background:#e040fb;">&#9632; Stop</button>
+        {% else %}
+        <button id="mm-start-btn" class="btn primary" onclick="toggleMMEngine()" style="font-size:11px; padding:5px 14px; background:#e040fb;">&#9654; Start</button>
+        {% endif %}
         {% endif %}
     </div>
 </div>
@@ -373,7 +381,9 @@
 
 {% block scripts %}
 <script>
-let _mmScanning = false;
+// Seed from server-rendered scanning state so a click before the first
+// /api/mm/status response doesn't accidentally flip the engine off.
+let _mmScanning = {{ 'true' if mm_scanning_active else 'false' }};
 let _mmAvailable = false;
 let _mmPositions = [];
 const _closedTrades = {{ mm_trades | tojson }};

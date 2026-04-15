@@ -114,6 +114,20 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             "total_pnl_usd": mm_stats["total_pnl"],
             "drawdown_pct": mm_drawdown,
         }
+        # Resolve current scanning state so the button/badge render correctly
+        # on first paint (no "Start" flicker while JS fetches /api/mm/status).
+        mm_engine_inst = getattr(request.app.state, "mm_engine", None)
+        if mm_engine_inst is not None:
+            ctx["mm_scanning_active"] = bool(getattr(mm_engine_inst, "_scanning_active", True))
+        else:
+            # Fall back to whatever the DB last persisted; default True.
+            try:
+                state = ctx.get("state") or {}
+                overrides = (state or {}).get("config_overrides") or {}
+                mm_settings = (overrides or {}).get("mm_engine_settings") or {}
+                ctx["mm_scanning_active"] = bool(mm_settings.get("scanning_active", True))
+            except Exception:
+                ctx["mm_scanning_active"] = True
         return templates.TemplateResponse(request, "mm.html", context=ctx)
 
     # --- MM Settings ---
