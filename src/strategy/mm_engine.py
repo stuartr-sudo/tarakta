@@ -2149,6 +2149,10 @@ class MMEngine:
         except Exception:
             pass
 
+        # B3 (lessons 12, 18): EMA fan-out at L3 = imminent reversal warning.
+        # Informational only — SVC / vol-degradation checks below own the close.
+        self._maybe_log_ema_fan_out_warning(pos, candles_1h)
+
         # Check for Stopping Volume Candle at Level 3 (unless a Linda cascade
         # is running in our direction — lesson 55 — in which case SVC in the
         # OPPOSITE direction is the exit, but matching-direction SVCs are
@@ -2359,6 +2363,23 @@ class MMEngine:
             return slope_pct < 0.1  # less than 0.1% change over lookback
         except Exception:
             return False
+
+    def _maybe_log_ema_fan_out_warning(self, pos: "MMPosition", candles_1h: pd.DataFrame) -> None:
+        """Course B3 (lessons 12, 18): log EMA_FAN_OUT_L3_WARNING when a position
+        reaches Level 3 and the EMAs are visibly fanning out.
+
+        "EMA fan-out at Level 3 = imminent reversal" — the warning is informational
+        only; the actual close decision is left to the existing SVC / vol-degradation
+        checks that follow in _manage_position().
+        """
+        if pos.current_level < 3:
+            return
+        if self._detect_ema_fan_out(candles_1h):
+            logger.info(
+                "EMA_FAN_OUT_L3_WARNING",
+                symbol=pos.symbol,
+                level=pos.current_level,
+            )
 
     def _detect_ema_fan_out(self, candles: pd.DataFrame) -> bool:
         """Course D2 (lesson 24): EMAs fanning out = trend acceleration / L3 hint.
