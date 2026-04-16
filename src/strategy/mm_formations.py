@@ -1455,7 +1455,7 @@ def detect_nyc_reversal(
     """Detect NYC Reversal trade setup (Lesson 10 — A2).
 
     Conditions:
-    1. Session must be US open (session_name == "us_open")
+    1. Session must be US open (session_name == "us")
     2. Time must be within first 3 hours (9:30am-12:30pm NY)
     3. Level must be >= 3
     4. Price must be near HOD (for bearish) or LOD (for bullish)
@@ -1473,7 +1473,7 @@ def detect_nyc_reversal(
         NYCReversalResult if detected, else None.
     """
     # Gate 1: must be US open session
-    if session_name != "us_open":
+    if session_name != "us":
         return None
 
     # Gate 2: within first 3 hours (9:30am-12:30pm NY)

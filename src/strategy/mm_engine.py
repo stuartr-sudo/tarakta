@@ -486,7 +486,7 @@ class MMEngine:
         from src.strategy.mm_formations import Formation
         from zoneinfo import ZoneInfo
 
-        if session is None or session.session_name != "us_open":
+        if session is None or session.session_name != "us":
             return None
 
         # Compute level analysis inline (like three_hits does)

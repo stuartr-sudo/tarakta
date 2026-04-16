@@ -192,7 +192,7 @@ def _percentile_rank(arr: "object") -> float:
     Used as the rolling apply function. For a window of N values,
     returns: 100 * (count of values < last) / (N - 1).
 
-    Edge case: if all values are equal, returns 50.0.
+    Edge case: if all values are equal, returns 0.0 (current is not wider than any).
     """
     import numpy as np  # local to avoid heavy import at module level
     a = arr  # arr is already a numpy array when raw=True

@@ -571,7 +571,7 @@ class TestNYCReversal:
 
         result = detect_nyc_reversal(
             candles_1h=candles,
-            session_name="us_open",
+            session_name="us",
             current_level=3,
             hod=110.0,
             lod=95.0,
@@ -590,7 +590,7 @@ class TestNYCReversal:
 
         result = detect_nyc_reversal(
             candles_1h=candles,
-            session_name="uk_open",  # wrong session
+            session_name="uk",  # wrong session
             current_level=3,
             hod=110.0,
             lod=95.0,
@@ -605,7 +605,7 @@ class TestNYCReversal:
 
         result = detect_nyc_reversal(
             candles_1h=candles,
-            session_name="us_open",
+            session_name="us",
             current_level=2,  # too low
             hod=110.0,
             lod=95.0,
@@ -620,7 +620,7 @@ class TestNYCReversal:
 
         result = detect_nyc_reversal(
             candles_1h=candles,
-            session_name="us_open",
+            session_name="us",
             current_level=3,
             hod=110.0,
             lod=95.0,
