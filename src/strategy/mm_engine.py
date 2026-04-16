@@ -33,7 +33,12 @@ from src.strategy.mm_board_meetings import BoardMeetingDetector
 from src.strategy.mm_brinks import BrinksDetector
 from src.strategy.mm_confluence import MMConfluenceScorer, MMContext
 from src.strategy.mm_ema_framework import EMAFramework
-from src.strategy.mm_formations import FormationDetector, classify_london_pattern
+from src.strategy.mm_formations import (
+    FormationDetector,
+    classify_london_pattern,
+    detect_nyc_reversal,
+    detect_stophunt_entry,
+)
 from src.strategy.mm_levels import LevelTracker
 from src.strategy.mm_risk import MMRiskCalculator
 from src.strategy.mm_adr import ADRAnalyzer
@@ -446,6 +451,135 @@ class MMEngine:
             trough_price=result.entry_price,
             direction=direction,
             quality_score=result.quality,
+            at_key_level=True,
+            confirmed=True,
+        )
+
+    def _try_nyc_reversal_formation(self, candles_1h, session, level_analysis, cycle_state, now):
+        """Course lesson 10 (A2): NYC Reversal trade.
+
+        Within the first 3 hours of the US session (9:30am-12:30pm NY),
+        if price is at Level 3 with HOD/LOD formed and shows a reversal
+        candlestick pattern (hammer, inverted hammer, railroad tracks),
+        enter a reversal trade targeting the 50 EMA or range recovery.
+
+        This is the L3 reversal — it NEEDS the L3 gate to be bypassed.
+        """
+        from src.strategy.mm_formations import Formation
+        from zoneinfo import ZoneInfo
+
+        if session is None or session.session_name != "us_open":
+            return None
+
+        if level_analysis is None or level_analysis.current_level < 3:
+            return None
+
+        ny_tz = ZoneInfo("America/New_York")
+        now_ny = now.astimezone(ny_tz) if now.tzinfo else now.replace(tzinfo=ny_tz)
+
+        hod = getattr(cycle_state, "hod", 0) or 0
+        lod = getattr(cycle_state, "lod", 0) or 0
+
+        result = detect_nyc_reversal(
+            candles_1h=candles_1h,
+            session_name=session.session_name,
+            current_level=level_analysis.current_level,
+            hod=hod, lod=lod, now_ny=now_ny,
+        )
+
+        if result is None:
+            return None
+
+        ftype = "W" if result.direction == "bullish" else "M"
+        slice_len = min(40, len(candles_1h))
+        p_last_idx = max(0, slice_len - 1)
+        p_prev_idx = max(0, slice_len - 2)
+
+        logger.info(
+            "mm_nyc_reversal_detected",
+            direction=result.direction,
+            pattern=result.pattern,
+            entry_price=result.entry_price,
+            level=result.level,
+        )
+
+        return Formation(
+            type=ftype,
+            variant="nyc_reversal",
+            peak1_idx=p_prev_idx,
+            peak1_price=hod if result.direction == "bearish" else lod,
+            peak2_idx=p_last_idx,
+            peak2_price=result.entry_price,
+            trough_idx=p_last_idx,
+            trough_price=result.entry_price,
+            direction=result.direction,
+            quality_score=0.6,
+            at_key_level=True,
+            confirmed=True,
+        )
+
+    def _try_stophunt_formation(self, candles_1h, level_analysis):
+        """Course lesson 15 (A4): Stop hunt entry at Level 3.
+
+        At Level 3 in a board meeting, a vector candle (stop hunt) fires
+        with high volume and big wick. Entry is 1-2 candles AFTER the hunt,
+        once we verify the wick is "left alone".
+        """
+        from src.strategy.mm_formations import Formation
+
+        if level_analysis is None or level_analysis.current_level < 3:
+            return None
+
+        # Check if a board meeting is currently active
+        board_meeting_active = False
+        try:
+            bm_detection = self.board_meeting_detector.detect(
+                candles_1h, level_direction="bullish"
+            )
+            if bm_detection is not None and getattr(bm_detection, "detected", False):
+                board_meeting_active = True
+            if not board_meeting_active:
+                bm_detection = self.board_meeting_detector.detect(
+                    candles_1h, level_direction="bearish"
+                )
+                if bm_detection is not None and getattr(bm_detection, "detected", False):
+                    board_meeting_active = True
+        except Exception:
+            pass
+
+        result = detect_stophunt_entry(
+            candles_1h=candles_1h,
+            current_level=level_analysis.current_level,
+            board_meeting_active=board_meeting_active,
+        )
+
+        if result is None:
+            return None
+
+        ftype = "W" if result.direction == "bullish" else "M"
+        slice_len = min(40, len(candles_1h))
+        p_last_idx = max(0, slice_len - 1)
+        hunt_rel_idx = max(0, slice_len - (len(candles_1h) - result.hunt_candle_idx))
+
+        logger.info(
+            "mm_stophunt_entry_detected",
+            direction=result.direction,
+            entry_price=result.entry_price,
+            stop_loss=result.stop_loss,
+            hunt_candle_idx=result.hunt_candle_idx,
+        )
+
+        return Formation(
+            type=ftype,
+            variant="stophunt_l3",
+            peak1_idx=hunt_rel_idx,
+            peak1_price=result.stop_loss,
+            peak2_idx=p_last_idx,
+            peak2_price=result.entry_price,
+            trough_idx=p_last_idx,
+            trough_price=result.entry_price,
+            direction=result.direction,
+            quality_score=0.6,
             at_key_level=True,
             confirmed=True,
         )
@@ -1211,6 +1345,28 @@ class MMEngine:
                                 symbol=symbol, type=best_formation.type,
                                 variant=best_formation.variant)
 
+            # Course lesson 10 alternative #6: NYC Reversal (A2).
+            # US open first 3 hours, Level 3+, reversal pattern at HOD/LOD.
+            if best_formation is None:
+                best_formation = self._try_nyc_reversal_formation(
+                    candles_1h, session, level_analysis, cycle_state, now,
+                )
+                if best_formation is not None:
+                    logger.info("mm_nyc_reversal_formation_synthesized",
+                                symbol=symbol, type=best_formation.type,
+                                variant=best_formation.variant)
+
+            # Course lesson 15 alternative #7: Stop Hunt at Level 3 (A4).
+            # Vector candle (stop hunt) in a board meeting at Level 3.
+            if best_formation is None:
+                best_formation = self._try_stophunt_formation(
+                    candles_1h, level_analysis,
+                )
+                if best_formation is not None:
+                    logger.info("mm_stophunt_formation_synthesized",
+                                symbol=symbol, type=best_formation.type,
+                                variant=best_formation.variant)
+
             if best_formation is None:
                 return self._reject("no_formation", symbol)
 
@@ -1404,7 +1560,13 @@ class MMEngine:
             pass  # Best-effort telemetry — never block a trade on this
 
         # Don't enter if Level 3+ already reached (expect reversal)
-        if level_analysis.current_level >= 3:
+        # Exception: NYC Reversal (A2) and Stop Hunt (A4) ARE the L3 reversal
+        # trades — they explicitly require Level 3+ to fire.
+        _l3_bypass_variants = (
+            "three_hits_how", "three_hits_low",
+            "nyc_reversal", "stophunt_l3",
+        )
+        if level_analysis.current_level >= 3 and best_formation.variant not in _l3_bypass_variants:
             return self._reject("level_too_advanced", symbol, level=level_analysis.current_level, post_formation_candles=len(candles_post_formation))
 
         self._advance("level_ok")

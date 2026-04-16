@@ -1,6 +1,9 @@
 """Tests for MM M/W formation detection (src.strategy.mm_formations)."""
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -10,8 +13,12 @@ from src.strategy.mm_formations import (
     Formation,
     FormationDetector,
     FormationValidation,
+    NYCReversalResult,
+    StopHuntEntryResult,
     ThreeHitsResult,
     classify_london_pattern,
+    detect_nyc_reversal,
+    detect_stophunt_entry,
     _find_swing_highs,
     _find_swing_lows,
     _is_hammer,
@@ -516,3 +523,212 @@ class TestClassifyLondonPattern:
         result = classify_london_pattern(f, _MockSessionInfo("uk"), hod=0.0, lod=0.0)
         # HOD/LOD both zero → squeeze check skipped → same_session → Type 2
         assert result == "type_2"
+
+
+# ------------------------------------------------------------------
+# NYC Reversal (Lesson 10 — A2)
+# ------------------------------------------------------------------
+
+NY_TZ = ZoneInfo("America/New_York")
+
+
+def _make_hammer_candles_at_lod(lod: float = 95.0, hod: float = 110.0, n: int = 50) -> pd.DataFrame:
+    """Create 1H candles where the last candle is a hammer near LOD."""
+    rng = np.random.RandomState(42)
+    closes = np.full(n, 102.0) + rng.normal(0, 0.3, n)
+    opens = closes + rng.normal(0, 0.2, n)
+    highs = np.maximum(opens, closes) + np.abs(rng.normal(0.3, 0.2, n))
+    lows = np.minimum(opens, closes) - np.abs(rng.normal(0.3, 0.2, n))
+    volumes = rng.uniform(1000, 5000, n)
+
+    # Last candle: hammer near LOD
+    # o=95.5, h=95.5, l=93.0, c=95.8
+    # body=0.3, range=2.5, lower=95.5-93=2.5, upper=95.8-95.8=0  (wait max(o,c)=95.8)
+    # Actually: upper = h - max(o,c) = 95.5 - 95.8 = negative → 0 (h must be >= max(o,c))
+    # Fix: h must be at least max(o,c)
+    # o=95.5, h=95.9, l=93.0, c=95.8
+    # body=0.3, range=2.9, lower=min(95.5,95.8)-93=2.5, upper=95.9-95.8=0.1
+    # lower>=2*body: 2.5>=0.6 True; upper<=body*0.5: 0.1<=0.15 True; body/range=0.103<0.4 True
+    opens[-1] = 95.5
+    highs[-1] = 95.9
+    lows[-1] = 93.0
+    closes[-1] = 95.8
+
+    idx = pd.date_range("2025-01-06 14:00", periods=n, freq="1h", tz="UTC")
+    return pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+        index=idx,
+    )
+
+
+class TestNYCReversal:
+    """Tests for detect_nyc_reversal() — Lesson 10 (A2)."""
+
+    def test_nyc_reversal_hammer_at_lod_us_session(self):
+        """Hammer at LOD during US open first 3 hours at Level 3+ → detected."""
+        candles = _make_hammer_candles_at_lod(lod=95.0, hod=110.0)
+        now_ny = datetime(2025, 1, 7, 10, 30, tzinfo=NY_TZ)  # 10:30am NY
+
+        result = detect_nyc_reversal(
+            candles_1h=candles,
+            session_name="us_open",
+            current_level=3,
+            hod=110.0,
+            lod=95.0,
+            now_ny=now_ny,
+        )
+        assert result is not None
+        assert result.detected is True
+        assert result.direction == "bullish"
+        assert result.pattern == "hammer"
+        assert result.level == 3
+
+    def test_nyc_reversal_not_us_session(self):
+        """Not US open session → not detected."""
+        candles = _make_hammer_candles_at_lod()
+        now_ny = datetime(2025, 1, 7, 10, 30, tzinfo=NY_TZ)
+
+        result = detect_nyc_reversal(
+            candles_1h=candles,
+            session_name="uk_open",  # wrong session
+            current_level=3,
+            hod=110.0,
+            lod=95.0,
+            now_ny=now_ny,
+        )
+        assert result is None
+
+    def test_nyc_reversal_not_level_3(self):
+        """Level < 3 → not detected."""
+        candles = _make_hammer_candles_at_lod()
+        now_ny = datetime(2025, 1, 7, 10, 30, tzinfo=NY_TZ)
+
+        result = detect_nyc_reversal(
+            candles_1h=candles,
+            session_name="us_open",
+            current_level=2,  # too low
+            hod=110.0,
+            lod=95.0,
+            now_ny=now_ny,
+        )
+        assert result is None
+
+    def test_nyc_reversal_outside_time_window(self):
+        """Outside 9:30am-12:30pm NY → not detected."""
+        candles = _make_hammer_candles_at_lod()
+        now_ny = datetime(2025, 1, 7, 14, 0, tzinfo=NY_TZ)  # 2:00pm NY
+
+        result = detect_nyc_reversal(
+            candles_1h=candles,
+            session_name="us_open",
+            current_level=3,
+            hod=110.0,
+            lod=95.0,
+            now_ny=now_ny,
+        )
+        assert result is None
+
+
+# ------------------------------------------------------------------
+# Stop Hunt Entry at Level 3 (Lesson 15 — A4)
+# ------------------------------------------------------------------
+
+
+def _make_stophunt_candles(
+    hunt_idx_from_end: int = 3,
+    wick_returned: bool = False,
+    n: int = 50,
+) -> pd.DataFrame:
+    """Create 1H candles with a stop hunt (SVC) candle at `hunt_idx_from_end`
+    positions back from the end.
+
+    The hunt candle has: body_ratio < 35%, vol > 2x avg, dominant wick > 40%.
+    """
+    rng = np.random.RandomState(42)
+    closes = np.full(n, 100.0) + rng.normal(0, 0.2, n)
+    opens = closes + rng.normal(0, 0.15, n)
+    highs = np.maximum(opens, closes) + np.abs(rng.normal(0.2, 0.1, n))
+    lows = np.minimum(opens, closes) - np.abs(rng.normal(0.2, 0.1, n))
+    volumes = rng.uniform(1000, 2000, n)
+
+    # Place stop hunt candle: big lower wick, small body, huge volume
+    hi = n - hunt_idx_from_end
+    # Stop hunt down (lower wick dominant) → bullish signal
+    # o=100.0, h=100.2, l=96.0, c=100.1 → body=0.1, range=4.2, lower_wick=4.0, upper=0.1
+    # body_ratio = 0.1/4.2 = 0.024 < 0.35 ✓
+    # lower_wick/range = 4.0/4.2 = 0.95 > 0.40 ✓
+    opens[hi] = 100.0
+    highs[hi] = 100.2
+    lows[hi] = 96.0
+    closes[hi] = 100.1
+    volumes[hi] = 8000.0  # >2x avg of ~1500
+
+    if wick_returned:
+        # After the hunt candle, price returns to the wick zone (below min(o,c)=100.0)
+        for j in range(hi + 1, min(hi + 3, n)):
+            lows[j] = 97.0  # returns into the wick zone
+    else:
+        # After the hunt candle, price stays ABOVE the wick zone
+        for j in range(hi + 1, min(hi + 3, n)):
+            opens[j] = 100.5
+            closes[j] = 101.0
+            highs[j] = 101.5
+            lows[j] = 100.2  # stays above min(o,c)=100.0 of hunt candle
+
+    idx = pd.date_range("2025-01-01", periods=n, freq="1h", tz="UTC")
+    return pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+        index=idx,
+    )
+
+
+class TestStopHuntEntry:
+    """Tests for detect_stophunt_entry() — Lesson 15 (A4)."""
+
+    def test_stophunt_entry_at_l3_with_svc(self):
+        """Stop hunt with SVC criteria at L3 in board meeting → detected."""
+        candles = _make_stophunt_candles(hunt_idx_from_end=3, wick_returned=False)
+
+        result = detect_stophunt_entry(
+            candles_1h=candles,
+            current_level=3,
+            board_meeting_active=True,
+        )
+        assert result is not None
+        assert result.detected is True
+        assert result.direction == "bullish"  # lower wick = stop hunt down
+        assert result.wick_left_alone is True
+        assert result.stop_loss < result.entry_price
+
+    def test_stophunt_not_at_l3(self):
+        """Level < 3 → not detected."""
+        candles = _make_stophunt_candles(hunt_idx_from_end=3, wick_returned=False)
+
+        result = detect_stophunt_entry(
+            candles_1h=candles,
+            current_level=2,  # too low
+            board_meeting_active=True,
+        )
+        assert result is None
+
+    def test_stophunt_wick_returned(self):
+        """Price returned to wick zone → not detected (SVC invalidated)."""
+        candles = _make_stophunt_candles(hunt_idx_from_end=3, wick_returned=True)
+
+        result = detect_stophunt_entry(
+            candles_1h=candles,
+            current_level=3,
+            board_meeting_active=True,
+        )
+        assert result is None
+
+    def test_stophunt_no_board_meeting(self):
+        """No board meeting active → not detected."""
+        candles = _make_stophunt_candles(hunt_idx_from_end=3, wick_returned=False)
+
+        result = detect_stophunt_entry(
+            candles_1h=candles,
+            current_level=3,
+            board_meeting_active=False,  # no board meeting
+        )
+        assert result is None

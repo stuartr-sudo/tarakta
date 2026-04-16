@@ -33,8 +33,9 @@ Formation types:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -1380,3 +1381,334 @@ class FormationDetector:
             return min(candidates, key=lambda i: prices[i])
         else:
             return max(candidates, key=lambda i: prices[i])
+
+
+# ---------------------------------------------------------------------------
+# NYC Reversal Trade (Lesson 10 — A2)
+# ---------------------------------------------------------------------------
+
+NY_TZ = ZoneInfo("America/New_York")
+
+# US open first-3-hours window (9:30am - 12:30pm NY)
+_NYC_REVERSAL_START = dt_time(9, 30)
+_NYC_REVERSAL_END = dt_time(12, 30)
+
+
+@dataclass
+class NYCReversalResult:
+    """Result of the NYC Reversal trade detection.
+
+    Lesson 10: Within the first 3 hours of the US session, price is at
+    Level 3 with HOD/LOD formed. A candlestick reversal pattern (hammer,
+    inverted hammer, railroad tracks) fires at the extreme, targeting
+    the 50 EMA or recovery back into range.
+    """
+
+    detected: bool
+    direction: str  # "bullish" or "bearish"
+    entry_price: float
+    pattern: str  # "hammer", "inverted_hammer", "railroad"
+    level: int  # should be >= 3
+
+
+def _is_railroad_tracks(
+    prev_o: float, prev_h: float, prev_l: float, prev_c: float,
+    cur_o: float, cur_h: float, cur_l: float, cur_c: float,
+) -> str | None:
+    """Detect railroad tracks (two adjacent candles with similar range but
+    opposite direction).
+
+    Returns "bullish" or "bearish" if detected, else None.
+    """
+    prev_range = prev_h - prev_l
+    cur_range = cur_h - cur_l
+    if prev_range <= 0 or cur_range <= 0:
+        return None
+
+    # Ranges should be similar (within 30%)
+    ratio = min(prev_range, cur_range) / max(prev_range, cur_range)
+    if ratio < 0.7:
+        return None
+
+    prev_body = prev_c - prev_o
+    cur_body = cur_c - cur_o
+
+    # Bodies must be substantial (>40% of range) and opposite direction
+    if abs(prev_body) / prev_range < 0.4 or abs(cur_body) / cur_range < 0.4:
+        return None
+
+    if prev_body < 0 and cur_body > 0:
+        return "bullish"  # red then green
+    if prev_body > 0 and cur_body < 0:
+        return "bearish"  # green then red
+    return None
+
+
+def detect_nyc_reversal(
+    candles_1h: pd.DataFrame,
+    session_name: str,
+    current_level: int,
+    hod: float,
+    lod: float,
+    now_ny: datetime,
+) -> NYCReversalResult | None:
+    """Detect NYC Reversal trade setup (Lesson 10 — A2).
+
+    Conditions:
+    1. Session must be US open (session_name == "us_open")
+    2. Time must be within first 3 hours (9:30am-12:30pm NY)
+    3. Level must be >= 3
+    4. Price must be near HOD (for bearish) or LOD (for bullish)
+    5. Last candle must be a reversal pattern (hammer/inverted hammer/railroad)
+
+    Args:
+        candles_1h: OHLCV DataFrame with at least 2 candles.
+        session_name: Current MM session name.
+        current_level: Current MM level from LevelTracker.
+        hod: High of Day.
+        lod: Low of Day.
+        now_ny: Current time in NY timezone.
+
+    Returns:
+        NYCReversalResult if detected, else None.
+    """
+    # Gate 1: must be US open session
+    if session_name != "us_open":
+        return None
+
+    # Gate 2: within first 3 hours (9:30am-12:30pm NY)
+    ny_time = now_ny.time() if hasattr(now_ny, "time") else now_ny
+    if not (_NYC_REVERSAL_START <= ny_time <= _NYC_REVERSAL_END):
+        return None
+
+    # Gate 3: level must be >= 3
+    if current_level < 3:
+        return None
+
+    # Gate 4: HOD/LOD must be formed (nonzero)
+    if hod <= 0 or lod <= 0 or lod >= float("inf"):
+        return None
+
+    if candles_1h is None or len(candles_1h) < 2:
+        return None
+
+    day_range = hod - lod
+    if day_range <= 0:
+        return None
+
+    # Tolerance for "near HOD/LOD" — within 15% of day range
+    near_tol = day_range * 0.15
+
+    last = candles_1h.iloc[-1]
+    prev = candles_1h.iloc[-2]
+
+    o = float(last["open"])
+    h = float(last["high"])
+    l = float(last["low"])
+    c = float(last["close"])
+
+    po = float(prev["open"])
+    ph = float(prev["high"])
+    pl = float(prev["low"])
+    pc = float(prev["close"])
+
+    close_price = c
+
+    # Determine if near HOD or LOD
+    near_hod = h >= hod - near_tol
+    near_lod = l <= lod + near_tol
+
+    if not (near_hod or near_lod):
+        return None
+
+    # Gate 5: check for reversal pattern on last candle(s)
+    if near_lod:
+        # Near LOD → bullish reversal
+        if _is_hammer(o, h, l, c):
+            return NYCReversalResult(
+                detected=True, direction="bullish",
+                entry_price=close_price, pattern="hammer", level=current_level,
+            )
+        if _is_inverted_hammer(o, h, l, c):
+            return NYCReversalResult(
+                detected=True, direction="bullish",
+                entry_price=close_price, pattern="inverted_hammer", level=current_level,
+            )
+        rr = _is_railroad_tracks(po, ph, pl, pc, o, h, l, c)
+        if rr == "bullish":
+            return NYCReversalResult(
+                detected=True, direction="bullish",
+                entry_price=close_price, pattern="railroad", level=current_level,
+            )
+
+    if near_hod:
+        # Near HOD → bearish reversal
+        if _is_inverted_hammer(o, h, l, c):
+            return NYCReversalResult(
+                detected=True, direction="bearish",
+                entry_price=close_price, pattern="inverted_hammer", level=current_level,
+            )
+        if _is_hammer(o, h, l, c):
+            # Shooting star variant (hammer at top = bearish)
+            return NYCReversalResult(
+                detected=True, direction="bearish",
+                entry_price=close_price, pattern="hammer", level=current_level,
+            )
+        rr = _is_railroad_tracks(po, ph, pl, pc, o, h, l, c)
+        if rr == "bearish":
+            return NYCReversalResult(
+                detected=True, direction="bearish",
+                entry_price=close_price, pattern="railroad", level=current_level,
+            )
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Stop Hunt Entry at Level 3 (Lesson 15 — A4)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class StopHuntEntryResult:
+    """Result of the stop hunt entry detection at Level 3.
+
+    Lesson 15: At Level 3 in a board meeting, a vector candle (stop hunt)
+    fires with high volume and big wick. Entry is 1-2 candles AFTER the
+    hunt candle, once we verify the wick is "left alone" (price doesn't
+    return to the wick zone).
+    """
+
+    detected: bool
+    direction: str  # "bullish" or "bearish"
+    entry_price: float
+    stop_loss: float  # below/above the stop hunt wick
+    hunt_candle_idx: int
+    wick_left_alone: bool
+
+
+# Reuse SVC criteria thresholds from mm_levels
+_SH_BODY_RATIO_MAX = 0.35  # body <= 35% of total range
+_SH_VOLUME_MULT = 2.0  # volume >= 2x average
+_SH_DOMINANT_WICK_MIN = 0.40  # dominant wick >= 40% of total range
+
+
+def detect_stophunt_entry(
+    candles_1h: pd.DataFrame,
+    current_level: int,
+    board_meeting_active: bool,
+) -> StopHuntEntryResult | None:
+    """Detect stop hunt entry at Level 3 (Lesson 15 — A4).
+
+    Conditions:
+    1. current_level >= 3
+    2. In or near a board meeting
+    3. Recent candle has: body_ratio < 35%, volume > 2x avg, dominant wick > 40%
+       (same criteria as SVC detection in mm_levels.py)
+    4. 1-2 candles after the hunt candle, price has NOT returned to the wick zone
+
+    Args:
+        candles_1h: OHLCV DataFrame (needs at least ~25 candles for volume avg).
+        current_level: Current MM level from LevelTracker.
+        board_meeting_active: Whether a board meeting is currently active.
+
+    Returns:
+        StopHuntEntryResult if detected, else None.
+    """
+    # Gate 1: level >= 3
+    if current_level < 3:
+        return None
+
+    # Gate 2: board meeting active
+    if not board_meeting_active:
+        return None
+
+    if candles_1h is None or len(candles_1h) < 25:
+        return None
+
+    volumes = candles_1h["volume"].values.astype(float)
+
+    # Look for a stop hunt candle in the recent 5 candles (not the very last —
+    # we need 1-2 candles after it to verify "wick left alone").
+    scan_end = len(candles_1h) - 1  # need at least 1 candle after
+    scan_start = max(20, scan_end - 5)  # scan window of up to 5 candles
+
+    for hunt_idx in range(scan_end - 1, scan_start - 1, -1):
+        row = candles_1h.iloc[hunt_idx]
+        o = float(row["open"])
+        h = float(row["high"])
+        l = float(row["low"])
+        c = float(row["close"])
+
+        total_range = h - l
+        if total_range <= 0:
+            continue
+
+        body = abs(c - o)
+        body_ratio = body / total_range
+
+        # SVC criterion 1: small body
+        if body_ratio > _SH_BODY_RATIO_MAX:
+            continue
+
+        # SVC criterion 2: high volume (>= 2x 20-period average)
+        avg_start = max(0, hunt_idx - 20)
+        avg_vol = np.mean(volumes[avg_start:hunt_idx]) if hunt_idx > avg_start else np.mean(volumes[:20])
+        if avg_vol <= 0:
+            continue
+
+        vol = volumes[hunt_idx]
+        vol_ratio = vol / avg_vol
+        if vol_ratio < _SH_VOLUME_MULT:
+            continue
+
+        # SVC criterion 3: dominant wick >= 40% of range
+        upper_wick = h - max(o, c)
+        lower_wick = min(o, c) - l
+        dominant_wick = max(upper_wick, lower_wick)
+        if dominant_wick / total_range < _SH_DOMINANT_WICK_MIN:
+            continue
+
+        wick_direction = "up" if upper_wick > lower_wick else "down"
+
+        # Check "wick left alone": 1-2 candles after must NOT return to wick zone
+        wick_returned = False
+        check_end = min(hunt_idx + 3, len(candles_1h))  # check 1-2 candles after
+        for j in range(hunt_idx + 1, check_end):
+            after = candles_1h.iloc[j]
+            if wick_direction == "up":
+                # Upper wick zone: from max(o,c) to h
+                wick_bottom = max(o, c)
+                if float(after["high"]) > wick_bottom:
+                    wick_returned = True
+                    break
+            else:
+                # Lower wick zone: from l to min(o,c)
+                wick_top = min(o, c)
+                if float(after["low"]) < wick_top:
+                    wick_returned = True
+                    break
+
+        if wick_returned:
+            continue  # SVC invalidated — try next candle
+
+        # Determine direction from wick: wick down = stop hunt below = bullish
+        if wick_direction == "down":
+            direction = "bullish"
+            entry_price = float(candles_1h.iloc[min(hunt_idx + 1, len(candles_1h) - 1)]["close"])
+            stop_loss = l  # below the stop hunt wick
+        else:
+            direction = "bearish"
+            entry_price = float(candles_1h.iloc[min(hunt_idx + 1, len(candles_1h) - 1)]["close"])
+            stop_loss = h  # above the stop hunt wick
+
+        return StopHuntEntryResult(
+            detected=True,
+            direction=direction,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            hunt_candle_idx=hunt_idx,
+            wick_left_alone=True,
+        )
+
+    return None
