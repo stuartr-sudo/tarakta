@@ -35,6 +35,7 @@ from src.strategy.mm_ema_framework import EMAFramework
 from src.strategy.mm_formations import FormationDetector
 from src.strategy.mm_levels import LevelTracker
 from src.strategy.mm_risk import MMRiskCalculator
+from src.strategy.mm_rsi import RSIAnalyzer
 from src.strategy.mm_sessions import MMSessionAnalyzer
 from src.strategy.mm_targets import TargetAnalyzer
 from src.strategy.mm_weekly_cycle import WeeklyCycleTracker
@@ -255,6 +256,7 @@ class MMEngine:
         # MM Method modules
         self.session_analyzer = MMSessionAnalyzer()
         self.ema_framework = EMAFramework()
+        self.rsi_analyzer = RSIAnalyzer()
         self.formation_detector = FormationDetector(session_analyzer=self.session_analyzer)
         self.level_tracker = LevelTracker(ema_framework=self.ema_framework)
         self.weekly_cycle_tracker = WeeklyCycleTracker()
@@ -1062,6 +1064,14 @@ class MMEngine:
         else:
             ema_break = None
 
+        # C2: RSI state (1H candles) — best-effort; None if insufficient data.
+        rsi_state = None
+        try:
+            if candles_1h is not None and not candles_1h.empty:
+                rsi_state = self.rsi_analyzer.calculate(candles_1h)
+        except Exception:
+            pass  # RSI not critical; confluence factor defaults to 0
+
         # Weekly cycle — computed up front so both the formation path and the
         # lesson-18 three-hits alternative can use HOW/LOW and phase data.
         cycle_state = self.weekly_cycle_tracker.update(candles_1h, now)
@@ -1675,6 +1685,23 @@ class MMEngine:
         except Exception:
             has_fib_alignment = False
 
+        # C2: RSI confirmation — True if RSI divergence aligns with trade OR
+        # RSI trend_bias aligns with trade direction (course confirming factor).
+        rsi_confirmed: bool | None = None
+        if rsi_state is not None:
+            bias_match = (
+                (trade_direction == "long" and rsi_state.trend_bias == "bullish")
+                or (trade_direction == "short" and rsi_state.trend_bias == "bearish")
+            )
+            divergence_match = (
+                rsi_state.divergence_detected
+                and (
+                    (trade_direction == "long" and rsi_state.divergence_type == "bullish")
+                    or (trade_direction == "short" and rsi_state.divergence_type == "bearish")
+                )
+            )
+            rsi_confirmed = bias_match or divergence_match
+
         mm_ctx = MMContext(
             formation={
                 "type": best_formation.type,
@@ -1718,6 +1745,7 @@ class MMEngine:
             moon_phase_aligned=self._moon_phase_aligned(trade_direction, now),
             oi_increasing=oi_increasing,
             has_fib_alignment=has_fib_alignment,
+            rsi_confirmed=rsi_confirmed,
         )
 
         confluence_result = self.confluence_scorer.score(mm_ctx)

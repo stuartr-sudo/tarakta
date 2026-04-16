@@ -67,12 +67,15 @@ WEIGHTS: dict[str, float] = {
     "mw_inside_weekend_box": 8.0,
     "fib_alignment": 6.0,
     "news_event": 6.0,
+    # C2: RSI confirmation — divergence at formation OR trend bias aligned
+    # with trade direction. 6 pts, same tier as fib and news.
+    "rsi_confirmation": 6.0,
     # LOW weight — bonus
     "correlation_confirmed": 4.0,
     "moon_cycle": 2.0,
 }
 
-MAX_POSSIBLE: float = sum(WEIGHTS.values())  # was 111.0; now 119.0 with weekend-box factor
+MAX_POSSIBLE: float = sum(WEIGHTS.values())  # 111 → 123 (weekend-box, OI promotion) → 129 (+rsi)
 
 # Grade thresholds (percentage of max possible)
 GRADE_A_THRESHOLD: float = 70.0
@@ -129,6 +132,9 @@ class MMContext:
     # (no FMWB spike out of the box). Caller sets this when it has both a
     # valid weekend box AND the formation's peaks are inside it.
     mw_inside_weekend_box: bool = False
+
+    # C2: RSI confirmation (None = data not available)
+    rsi_confirmed: bool | None = None
 
     # LOW weight factor flags (None = data not available)
     oi_increasing: bool | None = None
@@ -265,6 +271,9 @@ class MMConfluenceScorer:
         factors["mw_inside_weekend_box"] = self._score_mw_inside_weekend_box(context)
         factors["fib_alignment"] = self._score_fib_alignment(context)
         factors["news_event"] = self._score_news_event(context)
+
+        # --- MEDIUM weight factors (continued) ---
+        factors["rsi_confirmation"] = self._score_rsi_confirmation(context)
 
         # --- LOW weight factors ---
         factors["oi_behavior"] = self._score_oi_behavior(context)
@@ -684,6 +693,21 @@ class MMConfluenceScorer:
 
         weight = self._weights["news_event"]
         logger.debug("News event timing — %s pts", weight)
+        return weight
+
+    def _score_rsi_confirmation(self, ctx: MMContext) -> float:
+        """RSI confirmation (C2) — divergence at formation OR trend bias aligned.
+
+        Scores 6.0 when rsi_confirmed is True, 0.0 when False or None.
+        Caller sets rsi_confirmed=True if:
+          - RSI divergence is detected at the M/W formation, OR
+          - RSI trend_bias aligns with the trade direction.
+        """
+        if ctx.rsi_confirmed is None or not ctx.rsi_confirmed:
+            return 0.0
+
+        weight = self._weights["rsi_confirmation"]
+        logger.debug("RSI confirmation — %s pts", weight)
         return weight
 
     def _score_oi_behavior(self, ctx: MMContext) -> float:
