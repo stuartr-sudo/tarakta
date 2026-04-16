@@ -25,7 +25,7 @@ import pandas as pd
 import pytest
 
 from src.strategy.mm_engine import MMEngine, MMPosition, MIN_RR_COURSE_FLOOR
-from src.strategy.mm_linda import LindaTracker, TFLevelState
+from src.strategy.mm_linda import LindaTracker
 
 
 @pytest.fixture
