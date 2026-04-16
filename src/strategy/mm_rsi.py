@@ -105,7 +105,7 @@ class RSIAnalyzer:
             return None
 
         close = ohlc["close"].astype(float)
-        rsi_series = self._compute_rsi_series(close)
+        rsi_series = self.compute_rsi_series(close)
 
         if rsi_series is None or rsi_series.empty:
             return None
@@ -137,7 +137,7 @@ class RSIAnalyzer:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _compute_rsi_series(self, close: pd.Series) -> pd.Series | None:
+    def compute_rsi_series(self, close: pd.Series) -> pd.Series | None:
         """Compute the full RSI series using Wilder smoothing.
 
         Wilder smoothing: alpha = 1/period (equivalent to EWM with

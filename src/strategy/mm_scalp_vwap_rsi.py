@@ -198,7 +198,7 @@ class ScalpRSI:
         Returns:
             RSI series (NaNs dropped from initial warmup), or None.
         """
-        return self._analyzer._compute_rsi_series(closes)
+        return self._analyzer.compute_rsi_series(closes)
 
     def current_value(self, closes: pd.Series) -> float | None:
         """Get the most recent RSI value."""
