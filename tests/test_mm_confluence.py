@@ -315,6 +315,24 @@ class TestFactorScoring:
         result = scorer.score(ctx)
         assert result.factors["ema_alignment"] == 0.0
 
+    def test_fib_alignment_true_scores_full_weight(self, scorer: MMConfluenceScorer):
+        """B2: has_fib_alignment=True should contribute 6.0 pts to fib_alignment factor."""
+        ctx = _minimal_context(has_fib_alignment=True)
+        result = scorer.score(ctx)
+        assert result.factors["fib_alignment"] == WEIGHTS["fib_alignment"]
+        assert result.factors["fib_alignment"] == 6.0
+
+    def test_fib_alignment_false_scores_zero(self, scorer: MMConfluenceScorer):
+        """B2: has_fib_alignment=False (default) should score 0 for fib_alignment."""
+        ctx = _minimal_context(has_fib_alignment=False)
+        result = scorer.score(ctx)
+        assert result.factors["fib_alignment"] == 0.0
+
+    def test_fib_alignment_included_in_max_possible(self):
+        """B2: fib_alignment weight is included in MAX_POSSIBLE (already in WEIGHTS)."""
+        assert "fib_alignment" in WEIGHTS
+        assert MAX_POSSIBLE == 123.0
+
 
 # ------------------------------------------------------------------
 # check_retest_conditions

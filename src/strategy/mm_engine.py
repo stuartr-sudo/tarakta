@@ -1637,6 +1637,23 @@ class MMEngine:
         except Exception:
             mw_inside_box = False
 
+        # B2: Fibonacci alignment — check if entry_price is within 0.3% of any
+        # Fibonacci retracement level from the board meeting detector.
+        # BoardMeetingDetector is already instantiated as self.board_meeting_detector.
+        has_fib_alignment = False
+        try:
+            bm_detection = self.board_meeting_detector.detect(
+                candles_1h, level_direction=direction
+            )
+            if bm_detection.fib is not None and bm_detection.fib.levels:
+                for fib_level in bm_detection.fib.levels:
+                    if fib_level.price > 0:
+                        if abs(entry_price - fib_level.price) / fib_level.price < 0.003:
+                            has_fib_alignment = True
+                            break
+        except Exception:
+            has_fib_alignment = False
+
         mm_ctx = MMContext(
             formation={
                 "type": best_formation.type,
@@ -1679,6 +1696,7 @@ class MMEngine:
             mw_inside_weekend_box=mw_inside_box,
             moon_phase_aligned=self._moon_phase_aligned(trade_direction, now),
             oi_increasing=oi_increasing,
+            has_fib_alignment=has_fib_alignment,
         )
 
         confluence_result = self.confluence_scorer.score(mm_ctx)
