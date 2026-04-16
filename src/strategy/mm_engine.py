@@ -32,7 +32,7 @@ import pandas as pd
 from src.strategy.mm_board_meetings import BoardMeetingDetector
 from src.strategy.mm_confluence import MMConfluenceScorer, MMContext
 from src.strategy.mm_ema_framework import EMAFramework
-from src.strategy.mm_formations import FormationDetector
+from src.strategy.mm_formations import FormationDetector, classify_london_pattern
 from src.strategy.mm_levels import LevelTracker
 from src.strategy.mm_risk import MMRiskCalculator
 from src.strategy.mm_adr import ADRAnalyzer
@@ -163,6 +163,9 @@ class MMSignal:
     # Metadata
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     reason: str = ""
+
+    # D3: London pattern classification (Lesson 09)
+    london_pattern_type: str | None = None   # "type_1" | "type_2" | "type_3" | None
 
     # Course-faithful lifecycle carriers (2026-04 audit)
     # Course lesson 49 Refund Zone — only 2nd-peak aggressive entries use it
@@ -1180,6 +1183,29 @@ class MMEngine:
         except Exception:
             pass  # Best-effort telemetry — never block a trade on this
 
+        # D3: London pattern classification (Lesson 09).
+        # Classify the formation as Type 1/2/3 for telemetry and signal metadata.
+        # Type 1 (multi-session) is the highest-probability setup.
+        london_pattern_type: str | None = None
+        try:
+            hod_val = float(cycle_state.how) if cycle_state.how and cycle_state.how > 0 else 0.0
+            lod_val = float(cycle_state.low) if cycle_state.low and cycle_state.low < float("inf") else 0.0
+            london_pattern_type = classify_london_pattern(
+                formation=best_formation,
+                session_info=session,
+                hod=hod_val,
+                lod=lod_val,
+            )
+            logger.info(
+                "mm_london_pattern_classified",
+                symbol=symbol,
+                pattern_type=london_pattern_type,
+                formation_variant=best_formation.variant,
+                session=session.session_name,
+            )
+        except Exception:
+            pass  # Telemetry only — classification failure never blocks a trade
+
         # Course B2 (lesson 21): Final Damage M/W must be a hammer (W) or
         # inverted hammer (M) on the 15m timeframe at the 2nd peak, otherwise
         # it's not a valid Final Damage signal.
@@ -1883,6 +1909,7 @@ class MMEngine:
             peak2_wick_price=peak2_wick_price,
             svc_high=svc_high,
             svc_low=svc_low,
+            london_pattern_type=london_pattern_type,
             reason=f"{best_formation.type} formation ({best_formation.variant}) "
                    f"grade={confluence_result.grade} R:R={rr:.1f} "
                    f"phase={cycle_state.phase} entry={entry_type}",

@@ -263,6 +263,73 @@ def _calc_ema(series: pd.Series, period: int) -> pd.Series:
 # ---------------------------------------------------------------------------
 
 
+def classify_london_pattern(
+    formation: "Formation",
+    session_info: object,
+    hod: float,
+    lod: float,
+) -> str:
+    """Classify an M/W formation as a London Type 1, 2, or 3 pattern.
+
+    Lesson 09 distinguishes three London pattern qualities:
+
+    - **Type 1** (highest probability): Peaks span *different* MM sessions
+      — e.g., peak1 in Asia, peak2 in UK. Two separate groups of market
+      makers set the trap, almost guaranteeing a 3-level follow-through.
+      Identified by ``formation.variant == "multi_session"``.
+
+    - **Type 2** (moderate probability): Single-session M/W formed entirely
+      within the UK session, but peaks respect the Asia session high/low
+      levels. The formation doesn't cross a session boundary.
+
+    - **Type 3** (trickiest): Both peaks are squeezed *between* the intraday
+      HOD and LOD without touching either extreme. The squeeze pattern is
+      harder to confirm because it has no clean structural anchor.
+
+    Args:
+        formation: The detected :class:`Formation` to classify.
+        session_info: :class:`~src.strategy.mm_sessions.SessionInfo` for
+            the current moment (used to check session context).  Any object
+            with a ``session_name`` attribute is accepted.
+        hod: High of the (trading) day — used for Type 3 squeeze check.
+        lod: Low of the (trading) day — used for Type 3 squeeze check.
+
+    Returns:
+        ``"type_1"``, ``"type_2"``, ``"type_3"``, or ``"unknown"``.
+    """
+    # --- Type 1: multi-session formation (peaks in different sessions) ---
+    if formation.variant == "multi_session":
+        return "type_1"
+
+    # --- Determine if both peaks are within one session ---
+    sess1 = getattr(formation, "session_peak1", None)
+    sess2 = getattr(formation, "session_peak2", None)
+
+    # If session tags are available and both peaks are in the same session,
+    # we can do finer classification.
+    same_session = (sess1 is not None and sess2 is not None and sess1 == sess2)
+
+    # --- Type 3: squeeze between HOD and LOD without touching either ---
+    # Both peaks must be strictly between LOD and HOD.
+    if hod > 0 and lod > 0 and hod > lod:
+        p1 = formation.peak1_price
+        p2 = formation.peak2_price
+        tol = (hod - lod) * 0.01  # 1% of day range as tolerance
+        if (
+            lod + tol < p1 < hod - tol
+            and lod + tol < p2 < hod - tol
+        ):
+            return "type_3"
+
+    # --- Type 2: single-session (UK open), peaks within one session ---
+    # When peaks are tagged and in the same session, classify as Type 2.
+    if same_session:
+        return "type_2"
+
+    # --- Fallback: no session tags, can't determine type precisely ---
+    return "unknown"
+
+
 class FormationDetector:
     """Detects M-top and W-bottom formations used in the Market Makers Method.
 
