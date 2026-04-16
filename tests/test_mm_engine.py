@@ -1149,3 +1149,52 @@ class TestMMCandleReframe:
         """Empty DataFrame → no reframe signal."""
         result = engine._detect_mm_candle_reframe(pd.DataFrame(), "bullish", current_level=3)
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# D9: Correlation Pre-Positioning Interface (Task 7.4)
+# ---------------------------------------------------------------------------
+
+from src.strategy.mm_data_feeds import CorrelationSignal, StubCorrelationProvider
+
+
+class TestCorrelationSignalInterface:
+
+    @pytest.mark.asyncio
+    async def test_stub_provider_returns_unavailable(self):
+        """StubCorrelationProvider.fetch_correlation_signal returns zero confidence."""
+        stub = StubCorrelationProvider()
+        result = await stub.fetch_correlation_signal()
+        assert isinstance(result, CorrelationSignal)
+        assert result.confidence == 0.0
+        assert result.dxy_divergence is False
+
+    def test_correlation_signal_dataclass_fields(self):
+        """CorrelationSignal has all required fields with correct defaults."""
+        sig = CorrelationSignal()
+        assert hasattr(sig, "dxy_divergence")
+        assert hasattr(sig, "dxy_direction")
+        assert hasattr(sig, "implied_btc_direction")
+        assert hasattr(sig, "sp500_aligned")
+        assert hasattr(sig, "confidence")
+        assert sig.confidence == 0.0
+
+    def test_correlation_signal_implied_direction_logic(self):
+        """DXY up implies BTC down (inverse relationship)."""
+        sig = CorrelationSignal(
+            dxy_divergence=True,
+            dxy_direction="up",
+            implied_btc_direction="down",  # inverse of DXY
+            sp500_aligned=False,
+            confidence=0.7,
+        )
+        assert sig.implied_btc_direction == "down"
+        assert sig.dxy_divergence is True
+        assert sig.confidence == 0.7
+
+    @pytest.mark.asyncio
+    async def test_check_correlation_signal_stub_returns_none(self, engine: MMEngine):
+        """With stub provider (available=False), _check_correlation_signal returns None."""
+        # Stub provider returns confidence=0 → _check_correlation_signal returns None
+        result = await engine._check_correlation_signal()
+        assert result is None

@@ -2210,6 +2210,31 @@ class MMEngine:
             )
             rsi_confirmed = bias_match or divergence_match
 
+        # D9: Correlation pre-positioning check (Lesson 19).
+        # DXY moves before BTC — if DXY diverges from BTC, log the implied
+        # direction. When provider is available, pass result to MMContext.
+        correlation_confirmed_flag: bool | None = None
+        try:
+            corr_signal = await self._check_correlation_signal()
+            if corr_signal is not None:
+                # Align: if implied BTC direction matches trade direction, confirmed
+                if corr_signal.dxy_divergence and corr_signal.confidence > 0:
+                    implied_long = corr_signal.implied_btc_direction == "up"
+                    trade_is_long = trade_direction == "long"
+                    correlation_confirmed_flag = implied_long == trade_is_long
+                    logger.info(
+                        "mm_correlation_signal",
+                        symbol=symbol,
+                        dxy_direction=corr_signal.dxy_direction,
+                        implied_btc=corr_signal.implied_btc_direction,
+                        sp500_aligned=corr_signal.sp500_aligned,
+                        confidence=round(corr_signal.confidence, 3),
+                        trade_direction=trade_direction,
+                        correlation_confirmed=correlation_confirmed_flag,
+                    )
+        except Exception:
+            pass  # Provider unavailable — leave as None
+
         mm_ctx = MMContext(
             formation={
                 "type": best_formation.type,
@@ -2255,6 +2280,7 @@ class MMEngine:
             has_fib_alignment=has_fib_alignment,
             rsi_confirmed=rsi_confirmed,
             adr_at_fifty_pct=adr_state.at_fifty_pct if adr_state is not None else None,
+            correlation_confirmed=correlation_confirmed_flag,
         )
 
         confluence_result = self.confluence_scorer.score(mm_ctx)
@@ -3433,6 +3459,37 @@ class MMEngine:
         except Exception:
             # If 15m is unavailable, fall back to allowing the trade (don't block on data issue)
             return True
+
+    async def _check_correlation_signal(self) -> "CorrelationSignal | None":
+        """D9: Check for DXY/NASDAQ correlation pre-positioning signal (Lesson 19).
+
+        Course teaches: DXY moves before BTC (inverse). If DXY diverges from BTC
+        (DXY moved but BTC hasn't reacted yet) → pre-position before BTC catches up.
+        S&P/NASDAQ confirmation adds confidence.
+
+        When the CorrelationProvider is still stubbed (available=False), logs and
+        returns None so callers leave `correlation_confirmed` as None (neutral score).
+
+        Returns:
+            CorrelationSignal if the provider is available and a divergence exists,
+            else None.
+        """
+        try:
+            from src.strategy.mm_data_feeds import CorrelationSignal
+            provider = self.data_feeds.correlation
+            if hasattr(provider, "fetch_correlation_signal"):
+                signal = await provider.fetch_correlation_signal()
+                if signal.confidence <= 0:
+                    # Provider available but no active signal
+                    return None
+                return signal
+            else:
+                # Old-style provider without the new method — skip
+                logger.debug("mm_correlation_provider_no_signal_method")
+                return None
+        except Exception as e:
+            logger.debug("mm_correlation_signal_failed", error=str(e))
+            return None
 
     def _moon_phase_aligned(self, direction: str, now: datetime) -> bool:
         """Course lesson 37 moon signal alignment with trade direction.

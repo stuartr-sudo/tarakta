@@ -181,13 +181,44 @@ class CorrelationData:
     aligns_with_trade_direction: bool = False
 
 
+@dataclass
+class CorrelationSignal:
+    """Pre-positioning signal from macro correlation divergence (Lesson D9 / 19).
+
+    Course teaches (Lesson 19):
+      - DXY up = BTC down (inverse correlation).
+      - S&P / NASDAQ correlated with BTC (positive).
+      - When DXY moves but BTC hasn't reacted yet → position before BTC catches up.
+
+    Fields:
+        dxy_divergence: True when DXY has moved significantly but BTC hasn't
+            reacted yet (divergence = pre-positioning opportunity).
+        dxy_direction: Direction DXY has moved: "up" or "down".
+        implied_btc_direction: Expected BTC direction = opposite of DXY direction.
+            ("up" if DXY went down; "down" if DXY went up)
+        sp500_aligned: True when S&P 500 / NASDAQ move confirms the implied BTC
+            direction (additional confluence).
+        confidence: 0.0-1.0 signal confidence. 0.0 = no signal / not available.
+    """
+    dxy_divergence: bool = False
+    dxy_direction: str = ""          # "up" or "down"
+    implied_btc_direction: str = ""  # "up" (BTC) or "down" (BTC) — opposite of DXY
+    sp500_aligned: bool = False
+    confidence: float = 0.0
+
+
 class CorrelationProvider(Protocol):
     async def fetch_correlations(self, direction: str) -> CorrelationData: ...
+    async def fetch_correlation_signal(self) -> "CorrelationSignal": ...
 
 
 class StubCorrelationProvider:
     async def fetch_correlations(self, direction: str) -> CorrelationData:
         return CorrelationData(available=False)
+
+    async def fetch_correlation_signal(self) -> CorrelationSignal:
+        """Returns a zero-confidence signal when no real provider is wired."""
+        return CorrelationSignal(dxy_divergence=False, confidence=0.0)
 
 
 # ---------------------------------------------------------------------------
