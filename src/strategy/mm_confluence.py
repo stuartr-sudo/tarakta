@@ -72,10 +72,14 @@ WEIGHTS: dict[str, float] = {
     "rsi_confirmation": 6.0,
     # LOW weight — bonus
     "correlation_confirmed": 4.0,
+    # C3: ADR (Average Daily Range) 50% line confluence. Low weight because
+    # the course instructor notes ADR is "more of a Forex tool" and she
+    # doesn't use it much personally. 4 pts when price is at the 50% ADR line.
+    "adr_confluence": 4.0,
     "moon_cycle": 2.0,
 }
 
-MAX_POSSIBLE: float = sum(WEIGHTS.values())  # 111 → 123 (weekend-box, OI promotion) → 129 (+rsi)
+MAX_POSSIBLE: float = sum(WEIGHTS.values())  # 111 → 123 (weekend-box, OI promotion) → 129 (+rsi) → 133 (+adr)
 
 # Grade thresholds (percentage of max possible)
 GRADE_A_THRESHOLD: float = 70.0
@@ -135,6 +139,9 @@ class MMContext:
 
     # C2: RSI confirmation (None = data not available)
     rsi_confirmed: bool | None = None
+
+    # C3: ADR 50% line confluence (None = data not available)
+    adr_at_fifty_pct: bool | None = None
 
     # LOW weight factor flags (None = data not available)
     oi_increasing: bool | None = None
@@ -278,6 +285,7 @@ class MMConfluenceScorer:
         # --- LOW weight factors ---
         factors["oi_behavior"] = self._score_oi_behavior(context)
         factors["correlation_confirmed"] = self._score_correlation(context)
+        factors["adr_confluence"] = self._score_adr_confluence(context)
         factors["moon_cycle"] = self._score_moon_cycle(context)
 
         total = sum(factors.values())
@@ -745,6 +753,21 @@ class MMConfluenceScorer:
             return weight
 
         return 0.0
+
+    def _score_adr_confluence(self, ctx: MMContext) -> float:
+        """ADR 50% line confluence (C3) — price near the midpoint of the day's range.
+
+        Scores 4.0 when adr_at_fifty_pct is True, 0.0 when False or None.
+        The 50% ADR line = current day's low + 0.5 * ADR14. Price at this
+        level is considered "cheap" for longs and "expensive" for shorts.
+        None means ADR data was unavailable.
+        """
+        if ctx.adr_at_fifty_pct is None or not ctx.adr_at_fifty_pct:
+            return 0.0
+
+        weight = self._weights["adr_confluence"]
+        logger.debug("ADR 50%% line confluence — %s pts", weight)
+        return weight
 
     def _score_moon_cycle(self, ctx: MMContext) -> float:
         """Moon cycle alignment (full moon = bottom, new moon = top, +/-3 days).

@@ -35,6 +35,7 @@ from src.strategy.mm_ema_framework import EMAFramework
 from src.strategy.mm_formations import FormationDetector
 from src.strategy.mm_levels import LevelTracker
 from src.strategy.mm_risk import MMRiskCalculator
+from src.strategy.mm_adr import ADRAnalyzer
 from src.strategy.mm_rsi import RSIAnalyzer
 from src.strategy.mm_sessions import MMSessionAnalyzer
 from src.strategy.mm_targets import TargetAnalyzer
@@ -257,6 +258,7 @@ class MMEngine:
         self.session_analyzer = MMSessionAnalyzer()
         self.ema_framework = EMAFramework()
         self.rsi_analyzer = RSIAnalyzer()
+        self.adr_analyzer = ADRAnalyzer()
         self.formation_detector = FormationDetector(session_analyzer=self.session_analyzer)
         self.level_tracker = LevelTracker(ema_framework=self.ema_framework)
         self.weekly_cycle_tracker = WeeklyCycleTracker()
@@ -1072,6 +1074,14 @@ class MMEngine:
         except Exception:
             pass  # RSI not critical; confluence factor defaults to 0
 
+        # C3: ADR state (1H candles resampled to daily) — best-effort; None if insufficient data.
+        adr_state = None
+        try:
+            if candles_1h is not None and not candles_1h.empty:
+                adr_state = self.adr_analyzer.calculate(candles_1h, entry_price)
+        except Exception:
+            pass  # ADR not critical; confluence factor defaults to 0
+
         # Weekly cycle — computed up front so both the formation path and the
         # lesson-18 three-hits alternative can use HOW/LOW and phase data.
         cycle_state = self.weekly_cycle_tracker.update(candles_1h, now)
@@ -1746,6 +1756,7 @@ class MMEngine:
             oi_increasing=oi_increasing,
             has_fib_alignment=has_fib_alignment,
             rsi_confirmed=rsi_confirmed,
+            adr_at_fifty_pct=adr_state.at_fifty_pct if adr_state is not None else None,
         )
 
         confluence_result = self.confluence_scorer.score(mm_ctx)

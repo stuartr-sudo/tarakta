@@ -37,6 +37,7 @@ def _full_context(**overrides) -> MMContext:
         has_fib_alignment=True,
         has_news_event=True,
         rsi_confirmed=True,
+        adr_at_fifty_pct=True,
         oi_increasing=True,
         correlation_confirmed=True,
         moon_phase_aligned=True,
@@ -72,8 +73,9 @@ class TestConstants:
         #   +4 when OI promoted LOW(4) -> MEDIUM(8) (lesson 29)
         #   +8 when mw_inside_weekend_box added (lesson 15)
         #   +6 when rsi_confirmation added (Task 5.1, C2)
-        #  => 129.0
-        assert MAX_POSSIBLE == 129.0
+        #   +4 when adr_confluence added (Task 5.2, C3)
+        #  => 133.0
+        assert MAX_POSSIBLE == 133.0
 
     def test_all_factors_have_weights(self):
         expected_factors = [
@@ -81,7 +83,7 @@ class TestConstants:
             "stopping_volume_candle", "unrecovered_vector", "liquidation_cluster",
             "ema_alignment", "mw_inside_weekend_box",
             "fib_alignment", "news_event", "rsi_confirmation",
-            "oi_behavior", "correlation_confirmed", "moon_cycle",
+            "oi_behavior", "correlation_confirmed", "adr_confluence", "moon_cycle",
         ]
         for f in expected_factors:
             assert f in WEIGHTS
@@ -173,8 +175,8 @@ class TestScore:
     def test_all_factors_present(self, scorer: MMConfluenceScorer):
         ctx = _full_context()
         result = scorer.score(ctx)
-        # 14 factors: 12 original + mw_inside_weekend_box (lesson 15) + rsi_confirmation (C2)
-        assert len(result.factors) == 14
+        # 15 factors: 12 original + mw_inside_weekend_box (lesson 15) + rsi_confirmation (C2) + adr_confluence (C3)
+        assert len(result.factors) == 15
 
     def test_factors_sum_to_total(self, scorer: MMConfluenceScorer):
         ctx = _full_context()
@@ -333,7 +335,7 @@ class TestFactorScoring:
     def test_fib_alignment_included_in_max_possible(self):
         """B2: fib_alignment weight is included in MAX_POSSIBLE (already in WEIGHTS)."""
         assert "fib_alignment" in WEIGHTS
-        assert MAX_POSSIBLE == 129.0
+        assert MAX_POSSIBLE == 133.0
 
     def test_rsi_confirmed_true_scores_full_weight(self, scorer: MMConfluenceScorer):
         """C2: rsi_confirmed=True should contribute 6.0 pts to rsi_confirmation factor."""
@@ -358,7 +360,32 @@ class TestFactorScoring:
         """C2: rsi_confirmation weight is included in MAX_POSSIBLE."""
         assert "rsi_confirmation" in WEIGHTS
         assert WEIGHTS["rsi_confirmation"] == 6.0
-        assert MAX_POSSIBLE == 129.0
+        assert MAX_POSSIBLE == 133.0
+
+    def test_adr_at_fifty_pct_true_scores_full_weight(self, scorer: MMConfluenceScorer):
+        """C3: adr_at_fifty_pct=True should contribute 4.0 pts to adr_confluence factor."""
+        ctx = _minimal_context(adr_at_fifty_pct=True)
+        result = scorer.score(ctx)
+        assert result.factors["adr_confluence"] == WEIGHTS["adr_confluence"]
+        assert result.factors["adr_confluence"] == 4.0
+
+    def test_adr_at_fifty_pct_false_scores_zero(self, scorer: MMConfluenceScorer):
+        """C3: adr_at_fifty_pct=False should score 0.0."""
+        ctx = _minimal_context(adr_at_fifty_pct=False)
+        result = scorer.score(ctx)
+        assert result.factors["adr_confluence"] == 0.0
+
+    def test_adr_at_fifty_pct_none_scores_zero(self, scorer: MMConfluenceScorer):
+        """C3: adr_at_fifty_pct=None (data unavailable) should score 0.0."""
+        ctx = _minimal_context(adr_at_fifty_pct=None)
+        result = scorer.score(ctx)
+        assert result.factors["adr_confluence"] == 0.0
+
+    def test_adr_confluence_in_max_possible(self):
+        """C3: adr_confluence weight is included in MAX_POSSIBLE."""
+        assert "adr_confluence" in WEIGHTS
+        assert WEIGHTS["adr_confluence"] == 4.0
+        assert MAX_POSSIBLE == 133.0
 
 
 # ------------------------------------------------------------------
