@@ -732,3 +732,155 @@ class TestStopHuntEntry:
             board_meeting_active=False,  # no board meeting
         )
         assert result is None
+
+
+# ==================================================================
+# Half Batman Pattern (Lesson 15 — A3)
+# ==================================================================
+
+from src.strategy.mm_formations import HalfBatmanResult, detect_half_batman
+
+
+def _make_half_batman_candles_bearish(n: int = 20) -> pd.DataFrame:
+    """Build candles with a bearish Half Batman: sharp peak high then tight consolidation."""
+    base = 100.0
+    opens_list = []
+    highs_list = []
+    lows_list = []
+    closes_list = []
+    volumes_list = []
+
+    for i in range(n):
+        if i < 10:
+            # flat lead-in
+            o = base
+            h = base + 0.2
+            lo = base - 0.2
+            c = base
+        elif i == 10:
+            # Sharp peak candle: big upper wick, small body
+            o = base + 0.1
+            h = base + 3.0   # sharp rejection wick
+            lo = base - 0.1
+            c = base + 0.2   # close near open (small body, big upper wick)
+        else:
+            # Tight consolidation: tiny body, minimal wicks (NOT a peak candle)
+            o = base + 0.10
+            h = base + 0.15  # very small upper wick
+            lo = base + 0.05  # very small lower wick
+            c = base + 0.12  # close near open
+
+        opens_list.append(o)
+        highs_list.append(h)
+        lows_list.append(lo)
+        closes_list.append(c)
+        volumes_list.append(1000.0)
+
+    idx = pd.date_range("2025-01-01", periods=n, freq="1h", tz="UTC")
+    return pd.DataFrame(
+        {"open": opens_list, "high": highs_list, "low": lows_list,
+         "close": closes_list, "volume": volumes_list},
+        index=idx,
+    )
+
+
+def _make_half_batman_candles_bullish(n: int = 20) -> pd.DataFrame:
+    """Build candles with a bullish Half Batman: sharp peak low then tight consolidation."""
+    base = 100.0
+    opens_list = []
+    highs_list = []
+    lows_list = []
+    closes_list = []
+    volumes_list = []
+
+    for i in range(n):
+        if i < 10:
+            o = base
+            h = base + 0.2
+            lo = base - 0.2
+            c = base
+        elif i == 10:
+            # Sharp peak candle: big lower wick, small body
+            o = base - 0.1
+            h = base + 0.1
+            lo = base - 3.0  # sharp rejection wick
+            c = base - 0.2   # close near open
+        else:
+            # Tight consolidation: tiny body, minimal wicks
+            o = base - 0.12
+            h = base - 0.05  # very small wicks
+            lo = base - 0.15
+            c = base - 0.10
+
+        opens_list.append(o)
+        highs_list.append(h)
+        lows_list.append(lo)
+        closes_list.append(c)
+        volumes_list.append(1000.0)
+
+    idx = pd.date_range("2025-01-01", periods=n, freq="1h", tz="UTC")
+    return pd.DataFrame(
+        {"open": opens_list, "high": highs_list, "low": lows_list,
+         "close": closes_list, "volume": volumes_list},
+        index=idx,
+    )
+
+
+class TestHalfBatman:
+    """Tests for Half Batman pattern detection (Lesson 15 — A3)."""
+
+    def test_bearish_half_batman_detected(self):
+        """Bearish Half Batman: peak high + tight consolidation at level 3."""
+        candles = _make_half_batman_candles_bearish()
+        result = detect_half_batman(candles, current_level=3)
+
+        assert result is not None
+        assert result.detected is True
+        assert result.direction == "bearish"
+        assert result.peak_price > result.consolidation_high
+        assert result.entry_price == result.consolidation_low
+        assert result.stop_loss == result.peak_price
+
+    def test_bullish_half_batman_detected(self):
+        """Bullish Half Batman: peak low + tight consolidation at level 3."""
+        candles = _make_half_batman_candles_bullish()
+        result = detect_half_batman(candles, current_level=3)
+
+        assert result is not None
+        assert result.detected is True
+        assert result.direction == "bullish"
+        assert result.peak_price < result.consolidation_low
+        assert result.entry_price == result.consolidation_high
+        assert result.stop_loss == result.peak_price
+
+    def test_half_batman_rejected_below_level_3(self):
+        """Level < 3 → not detected."""
+        candles = _make_half_batman_candles_bearish()
+        result = detect_half_batman(candles, current_level=2)
+        assert result is None
+
+    def test_half_batman_rejected_insufficient_data(self):
+        """Too few candles → not detected."""
+        candles = _make_half_batman_candles_bearish().head(5)
+        result = detect_half_batman(candles, current_level=3)
+        assert result is None
+
+    def test_half_batman_rejected_wide_consolidation(self):
+        """Consolidation range too wide → not detected."""
+        candles = _make_half_batman_candles_bearish()
+        # Make consolidation wide (>1% of price)
+        candles.iloc[12:, candles.columns.get_loc("high")] = 105.0
+        candles.iloc[12:, candles.columns.get_loc("low")] = 93.0
+        result = detect_half_batman(candles, current_level=3)
+        assert result is None
+
+    def test_half_batman_rejected_with_stop_hunt(self):
+        """Stop hunt wicks in consolidation → not detected for the real peak."""
+        candles = _make_half_batman_candles_bearish()
+        # Add stop hunt wicks across multiple consolidation candles — this
+        # makes the consolidation range too wide for every possible peak
+        for j in range(11, 20):
+            candles.iloc[j, candles.columns.get_loc("high")] = 105.0 + (j % 3)
+            candles.iloc[j, candles.columns.get_loc("low")] = 93.0 - (j % 2)
+        result = detect_half_batman(candles, current_level=3)
+        assert result is None

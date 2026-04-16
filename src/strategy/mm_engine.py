@@ -36,6 +36,7 @@ from src.strategy.mm_ema_framework import EMAFramework
 from src.strategy.mm_formations import (
     FormationDetector,
     classify_london_pattern,
+    detect_half_batman,
     detect_nyc_reversal,
     detect_stophunt_entry,
 )
@@ -589,6 +590,57 @@ class MMEngine:
             trough_price=result.entry_price,
             direction=result.direction,
             quality_score=0.6,
+            at_key_level=True,
+            confirmed=True,
+        )
+
+    def _try_half_batman_formation(self, candles_1h):
+        """Course lesson 15 (A3): Half Batman pattern.
+
+        After a 3-level move, only ONE peak forms (no second peak for M/W).
+        Very tight sideways consolidation follows — no stop hunts, equal
+        highs/lows. Entry on break of the consolidation range.
+        """
+        from src.strategy.mm_formations import Formation
+
+        # Compute level analysis inline
+        level_bull = self.level_tracker.analyze(candles_1h, direction="bullish")
+        level_bear = self.level_tracker.analyze(candles_1h, direction="bearish")
+        current_level = max(level_bull.current_level, level_bear.current_level)
+
+        result = detect_half_batman(
+            candles_1h=candles_1h,
+            current_level=current_level,
+        )
+
+        if result is None:
+            return None
+
+        ftype = "M" if result.direction == "bearish" else "W"
+        slice_len = min(40, len(candles_1h))
+        p_prev_idx = max(0, slice_len - 2)
+        p_last_idx = max(0, slice_len - 1)
+
+        logger.info(
+            "mm_half_batman_detected",
+            direction=result.direction,
+            peak_price=result.peak_price,
+            consol_high=result.consolidation_high,
+            consol_low=result.consolidation_low,
+            entry_price=result.entry_price,
+        )
+
+        return Formation(
+            type=ftype,
+            variant="half_batman",
+            peak1_idx=p_prev_idx,
+            peak1_price=result.peak_price,
+            peak2_idx=p_last_idx,
+            peak2_price=result.entry_price,
+            trough_idx=p_last_idx,
+            trough_price=result.entry_price,
+            direction="bullish" if result.direction == "bullish" else "bearish",
+            quality_score=0.55,
             at_key_level=True,
             confirmed=True,
         )
@@ -1376,6 +1428,15 @@ class MMEngine:
                                 symbol=symbol, type=best_formation.type,
                                 variant=best_formation.variant)
 
+            # Course lesson 15 alternative #8: Half Batman (A3).
+            # Single peak + tight consolidation after 3-level move.
+            if best_formation is None:
+                best_formation = self._try_half_batman_formation(candles_1h)
+                if best_formation is not None:
+                    logger.info("mm_half_batman_formation_synthesized",
+                                symbol=symbol, type=best_formation.type,
+                                variant=best_formation.variant)
+
             if best_formation is None:
                 return self._reject("no_formation", symbol)
 
@@ -1574,6 +1635,7 @@ class MMEngine:
         _l3_bypass_variants = (
             "three_hits_how", "three_hits_low",
             "nyc_reversal", "stophunt_l3",
+            "half_batman", "33_trade",
         )
         if level_analysis.current_level >= 3 and best_formation.variant not in _l3_bypass_variants:
             return self._reject("level_too_advanced", symbol, level=level_analysis.current_level, post_formation_candles=len(candles_post_formation))

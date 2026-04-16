@@ -1712,3 +1712,190 @@ def detect_stophunt_entry(
         )
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Half Batman Pattern (Lesson 15 — A3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class HalfBatmanResult:
+    """Result of the Half Batman pattern detection.
+
+    Lesson 15: After a 3-level rise/drop, only ONE peak forms (no second
+    peak for M/W). Very tight sideways consolidation follows — no stop
+    hunts, equal highs/lows. MM already has all contracts (no need for a
+    2nd peak trap). Very small range candles. Entry on break of the
+    consolidation range. Stop loss above/below the single peak.
+
+    Different from Trapping Volume Formation: Half Batman has SMALLER
+    range and NO stop hunts.
+    """
+
+    detected: bool
+    direction: str  # "bearish" (single peak high -> short) or "bullish" (single peak low -> long)
+    peak_price: float
+    consolidation_high: float
+    consolidation_low: float
+    entry_price: float  # Break of consolidation range
+    stop_loss: float  # Above/below the peak
+
+
+# Half Batman tuning constants
+_HB_MIN_CONSOL_CANDLES = 4      # Minimum consolidation candles after peak
+_HB_MAX_CONSOL_RANGE_PCT = 0.01  # Consolidation range < 1% of price
+_HB_MAX_WICK_OVERSHOOT_PCT = 0.003  # No wicks extending beyond range by >0.3%
+_HB_PEAK_WICK_MIN_RATIO = 0.5  # Peak candle wick must be >= 50% of range (sharp rejection)
+
+
+def detect_half_batman(
+    candles_1h: pd.DataFrame,
+    current_level: int,
+) -> HalfBatmanResult | None:
+    """Detect Half Batman pattern (Lesson 15 — A3).
+
+    After a 3-level move, only ONE peak forms (no second peak for M/W),
+    followed by tight sideways consolidation with no stop hunts.
+
+    Conditions:
+    1. current_level >= 3 (after 3-level move)
+    2. A single sharp peak exists (high wick candle)
+    3. Followed by 4+ candles of tight sideways consolidation
+    4. Consolidation range < 1% of price (tight)
+    5. No stop hunts (no wicks extending beyond range by >0.3%)
+    6. Entry = break below consolidation low (bearish) or above high (bullish)
+
+    Args:
+        candles_1h: OHLCV DataFrame with at least 10 candles.
+        current_level: Current MM level from LevelTracker.
+
+    Returns:
+        HalfBatmanResult if detected, else None.
+    """
+    # Gate 1: level >= 3
+    if current_level < 3:
+        return None
+
+    if candles_1h is None or len(candles_1h) < 10:
+        return None
+
+    # Look at the last 20 candles for the pattern
+    lookback = min(20, len(candles_1h))
+    recent = candles_1h.iloc[-lookback:]
+    highs = recent["high"].values.astype(float)
+    lows = recent["low"].values.astype(float)
+    opens = recent["open"].values.astype(float)
+    closes = recent["close"].values.astype(float)
+
+    n = len(recent)
+
+    # --- Try bearish Half Batman: single peak HIGH then tight consolidation ---
+    result = _try_half_batman_direction(highs, lows, opens, closes, n, "bearish")
+    if result is not None:
+        return result
+
+    # --- Try bullish Half Batman: single peak LOW then tight consolidation ---
+    result = _try_half_batman_direction(highs, lows, opens, closes, n, "bullish")
+    if result is not None:
+        return result
+
+    return None
+
+
+def _try_half_batman_direction(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    opens: np.ndarray,
+    closes: np.ndarray,
+    n: int,
+    direction: str,
+) -> HalfBatmanResult | None:
+    """Try to detect Half Batman in one direction.
+
+    Args:
+        direction: "bearish" = look for peak high then consolidation (short setup).
+                   "bullish" = look for peak low then consolidation (long setup).
+    """
+    # Scan for a sharp peak in positions [0, n - _HB_MIN_CONSOL_CANDLES - 1]
+    # so that there are at least _HB_MIN_CONSOL_CANDLES candles after it.
+    max_peak_pos = n - _HB_MIN_CONSOL_CANDLES - 1
+    if max_peak_pos < 1:
+        return None
+
+    for peak_idx in range(max_peak_pos, 0, -1):
+        # Check for sharp peak candle
+        total_range = highs[peak_idx] - lows[peak_idx]
+        if total_range <= 0:
+            continue
+
+        if direction == "bearish":
+            # Peak HIGH: upper wick should be dominant (sharp rejection up)
+            upper_wick = highs[peak_idx] - max(opens[peak_idx], closes[peak_idx])
+            if upper_wick / total_range < _HB_PEAK_WICK_MIN_RATIO:
+                continue
+            peak_price = highs[peak_idx]
+        else:
+            # Peak LOW: lower wick should be dominant (sharp rejection down)
+            lower_wick = min(opens[peak_idx], closes[peak_idx]) - lows[peak_idx]
+            if lower_wick / total_range < _HB_PEAK_WICK_MIN_RATIO:
+                continue
+            peak_price = lows[peak_idx]
+
+        if peak_price <= 0:
+            continue
+
+        # Check consolidation candles after the peak
+        consol_start = peak_idx + 1
+        consol_end = n  # all remaining candles after peak
+        consol_count = consol_end - consol_start
+
+        if consol_count < _HB_MIN_CONSOL_CANDLES:
+            continue
+
+        consol_highs = highs[consol_start:consol_end]
+        consol_lows = lows[consol_start:consol_end]
+
+        consol_high = float(np.max(consol_highs))
+        consol_low = float(np.min(consol_lows))
+        consol_range = consol_high - consol_low
+
+        # Condition: consolidation range < 1% of price
+        if consol_range / peak_price > _HB_MAX_CONSOL_RANGE_PCT:
+            continue
+
+        # Condition: no stop hunts — no wicks extending beyond range by >0.3%
+        overshoot_threshold = peak_price * _HB_MAX_WICK_OVERSHOOT_PCT
+        has_stop_hunt = False
+        for j in range(consol_start, consol_end):
+            if highs[j] > consol_high + overshoot_threshold:
+                has_stop_hunt = True
+                break
+            if lows[j] < consol_low - overshoot_threshold:
+                has_stop_hunt = True
+                break
+
+        if has_stop_hunt:
+            continue
+
+        # Pattern detected
+        if direction == "bearish":
+            # Single peak high -> expect short
+            entry_price = consol_low  # break below consolidation
+            stop_loss = peak_price  # above the peak wick
+        else:
+            # Single peak low -> expect long
+            entry_price = consol_high  # break above consolidation
+            stop_loss = peak_price  # below the peak wick
+
+        return HalfBatmanResult(
+            detected=True,
+            direction=direction,
+            peak_price=peak_price,
+            consolidation_high=consol_high,
+            consolidation_low=consol_low,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+        )
+
+    return None
