@@ -17,7 +17,9 @@ from __future__ import annotations
 import asyncio
 from dataclasses import fields
 from datetime import datetime, timezone
+from unittest.mock import patch, MagicMock
 
+import pandas as pd
 import pytest
 
 from src.strategy.mm_data_feeds import (
@@ -41,6 +43,8 @@ from src.strategy.mm_data_feeds import (
     StubDominanceProvider,
     StubCorrelationProvider,
     StubSentimentProvider,
+    # Real providers
+    YFinanceCorrelationProvider,
     # Registry
     DataFeedRegistry,
 )
@@ -384,6 +388,7 @@ class TestSentimentDataFields:
 
 class TestDataFeedRegistryStatus:
     def test_all_stubs_return_false_status(self):
+        """All stubs except correlation (auto-upgraded to YFinance if available) should be False."""
         registry = DataFeedRegistry()
         status = registry.get_status()
 
@@ -394,10 +399,14 @@ class TestDataFeedRegistryStatus:
         }
         assert set(status.keys()) == expected_keys
 
-        for provider_name, is_available in status.items():
-            assert is_available is False, (
+        # These are always stubs — must be False
+        always_stub_keys = ("hyblock", "tradinglite", "news", "options", "dominance", "sentiment")
+        for provider_name in always_stub_keys:
+            assert status[provider_name] is False, (
                 f"Provider '{provider_name}' should be False (stub) but got True"
             )
+        # correlation is either YFinance (True) or Stub (False) depending on yfinance install
+        assert isinstance(status["correlation"], bool)
 
     def test_status_has_all_seven_providers(self):
         registry = DataFeedRegistry()
@@ -422,8 +431,8 @@ class TestDataFeedRegistryStatus:
         status = registry.get_status()
 
         assert status["hyblock"] is True
-        # All others still False (stubbed)
-        for key in ("tradinglite", "news", "options", "dominance", "correlation", "sentiment"):
+        # These are always stubs regardless of yfinance availability
+        for key in ("tradinglite", "news", "options", "dominance", "sentiment"):
             assert status[key] is False
 
     def test_stub_default_registry_instantiation(self):
@@ -432,3 +441,211 @@ class TestDataFeedRegistryStatus:
         assert registry.hyblock is not None
         assert registry.news is not None
         assert registry.sentiment is not None
+
+    def test_yfinance_provider_is_default_when_installed(self):
+        """Default registry uses YFinanceCorrelationProvider when yfinance is importable."""
+        try:
+            import yfinance  # noqa: F401
+            yfinance_available = True
+        except ImportError:
+            yfinance_available = False
+
+        registry = DataFeedRegistry()
+        if yfinance_available:
+            assert isinstance(registry.correlation, YFinanceCorrelationProvider)
+        else:
+            assert isinstance(registry.correlation, StubCorrelationProvider)
+
+
+# ---------------------------------------------------------------------------
+# YFinanceCorrelationProvider tests (mocked — no real network calls)
+# ---------------------------------------------------------------------------
+
+
+def _make_yf_data(dxy_start: float, dxy_end: float, sp500_start: float, sp500_end: float) -> MagicMock:
+    """Build a minimal fake yfinance download result with 14 rows.
+
+    Returns a MagicMock that behaves like yfinance's multi-ticker DataFrame:
+    ``data["Close"]`` returns a DataFrame keyed by ticker symbol.
+    """
+    import numpy as np
+
+    n = 14
+    dxy_prices = np.linspace(dxy_start, dxy_end, n)
+    sp500_prices = np.linspace(sp500_start, sp500_end, n)
+    idx = pd.date_range("2026-04-17 08:00", periods=n, freq="5min", tz="UTC")
+
+    close_df = pd.DataFrame(
+        {
+            "DX-Y.NYB": dxy_prices,
+            "^GSPC": sp500_prices,
+            "^IXIC": sp500_prices,  # NASDAQ mirrors S&P in test data
+        },
+        index=idx,
+    )
+
+    # Mock the outer DataFrame: data["Close"] → close_df; data.empty → False; len(data) → n
+    mock_data = MagicMock()
+    mock_data.empty = False
+    mock_data.__len__ = lambda self: n
+    mock_data.__getitem__ = lambda self, key: close_df if key == "Close" else pd.DataFrame()
+    return mock_data
+
+
+class TestYFinanceCorrelationProvider:
+    """Tests for YFinanceCorrelationProvider using mocked yfinance.download."""
+
+    def _make_provider(self):
+        return YFinanceCorrelationProvider()
+
+    def test_dxy_up_implies_btc_down(self):
+        """When DXY rises, implied BTC direction should be 'down'."""
+        provider = self._make_provider()
+        # DXY rises 0.5% (> threshold 0.3%), S&P also falls (aligned with BTC down)
+        fake_data = _make_yf_data(
+            dxy_start=104.0, dxy_end=104.52,       # +0.5%
+            sp500_start=5200.0, sp500_end=5174.0,  # falling (aligned: BTC down)
+        )
+        with patch("yfinance.download", return_value=fake_data):
+            sig = run(provider.fetch_correlation_signal(btc_price_change_pct=0.0))
+
+        assert sig.available is True
+        assert sig.dxy_direction == "up"
+        assert sig.implied_btc_direction == "down"
+        assert sig.sp500_aligned is True
+
+    def test_dxy_down_implies_btc_up(self):
+        """When DXY falls, implied BTC direction should be 'up'."""
+        provider = self._make_provider()
+        fake_data = _make_yf_data(
+            dxy_start=104.0, dxy_end=103.48,       # -0.5%
+            sp500_start=5200.0, sp500_end=5226.0,  # rising (aligned: BTC up)
+        )
+        with patch("yfinance.download", return_value=fake_data):
+            sig = run(provider.fetch_correlation_signal(btc_price_change_pct=0.0))
+
+        assert sig.dxy_direction == "down"
+        assert sig.implied_btc_direction == "up"
+        assert sig.sp500_aligned is True
+
+    def test_divergence_detected_when_dxy_moves_and_btc_flat(self):
+        """Divergence flag is True when DXY moved >0.3% but BTC barely moved."""
+        provider = self._make_provider()
+        fake_data = _make_yf_data(
+            dxy_start=104.0, dxy_end=104.52,  # +0.5%
+            sp500_start=5200.0, sp500_end=5200.0,
+        )
+        with patch("yfinance.download", return_value=fake_data):
+            sig = run(provider.fetch_correlation_signal(btc_price_change_pct=0.05))
+
+        assert sig.dxy_divergence is True
+
+    def test_no_divergence_when_btc_already_moved(self):
+        """No divergence when BTC has already caught up (>= 0.1% move)."""
+        provider = self._make_provider()
+        fake_data = _make_yf_data(
+            dxy_start=104.0, dxy_end=104.52,
+            sp500_start=5200.0, sp500_end=5200.0,
+        )
+        with patch("yfinance.download", return_value=fake_data):
+            sig = run(provider.fetch_correlation_signal(btc_price_change_pct=0.5))
+
+        assert sig.dxy_divergence is False
+
+    def test_no_divergence_when_dxy_move_below_threshold(self):
+        """No divergence flag when DXY move is below 0.3% threshold."""
+        provider = self._make_provider()
+        fake_data = _make_yf_data(
+            dxy_start=104.0, dxy_end=104.1,  # only +0.096%
+            sp500_start=5200.0, sp500_end=5200.0,
+        )
+        with patch("yfinance.download", return_value=fake_data):
+            sig = run(provider.fetch_correlation_signal(btc_price_change_pct=0.0))
+
+        assert not sig.dxy_divergence
+
+    def test_confidence_scales_with_dxy_move(self):
+        """Confidence increases with DXY move magnitude."""
+        provider = self._make_provider()
+        # ~1% DXY move → full confidence
+        fake_data = _make_yf_data(
+            dxy_start=104.0, dxy_end=105.04,
+            sp500_start=5200.0, sp500_end=5200.0,
+        )
+        with patch("yfinance.download", return_value=fake_data):
+            sig = run(provider.fetch_correlation_signal())
+
+        assert sig.confidence > 0.5
+
+    def test_sp500_aligned_bonus_raises_confidence(self):
+        """sp500_aligned adds 0.2 to confidence (capped at 1.0)."""
+        provider = self._make_provider()
+        # Without sp500 alignment (flat S&P, not aligned with DXY up → BTC down)
+        fake_data_no_align = _make_yf_data(
+            dxy_start=104.0, dxy_end=104.52,
+            sp500_start=5200.0, sp500_end=5226.0,  # rising = NOT aligned with BTC down
+        )
+        fake_data_aligned = _make_yf_data(
+            dxy_start=104.0, dxy_end=104.52,
+            sp500_start=5200.0, sp500_end=5174.0,  # falling = aligned with BTC down
+        )
+        with patch("yfinance.download", return_value=fake_data_no_align):
+            sig_no = run(provider.fetch_correlation_signal())
+        provider._cache_time = None  # bust cache for second call
+        with patch("yfinance.download", return_value=fake_data_aligned):
+            sig_yes = run(provider.fetch_correlation_signal())
+
+        assert sig_yes.sp500_aligned is True
+        assert not sig_no.sp500_aligned
+        # Aligned confidence should be higher than non-aligned
+        assert sig_yes.confidence > sig_no.confidence
+
+    def test_returns_unavailable_on_empty_data(self):
+        """Returns CorrelationSignal(available=False) when yfinance returns empty."""
+        provider = self._make_provider()
+        empty = MagicMock()
+        empty.empty = True
+        empty.__len__ = lambda self: 0
+        with patch("yfinance.download", return_value=empty):
+            sig = run(provider.fetch_correlation_signal())
+
+        assert sig.available is False
+
+    def test_returns_unavailable_on_exception(self):
+        """Returns CorrelationSignal(available=False) when yfinance raises."""
+        provider = self._make_provider()
+        with patch("yfinance.download", side_effect=RuntimeError("network error")):
+            sig = run(provider.fetch_correlation_signal())
+
+        assert sig.available is False
+
+    def test_cache_is_used_on_second_call(self):
+        """Second call within TTL returns cached result without re-calling yfinance."""
+        provider = self._make_provider()
+        fake_data = _make_yf_data(104.0, 104.52, 5200.0, 5174.0)
+        with patch("yfinance.download", return_value=fake_data) as mock_dl:
+            run(provider.fetch_correlation_signal())
+            run(provider.fetch_correlation_signal())
+
+        # Should only be called once — second call hits cache
+        assert mock_dl.call_count == 1
+
+    def test_fetch_correlations_returns_correlation_data(self):
+        """fetch_correlations returns CorrelationData with correct alignment."""
+        provider = self._make_provider()
+        fake_data = _make_yf_data(104.0, 104.52, 5200.0, 5174.0)  # DXY up → BTC down
+        with patch("yfinance.download", return_value=fake_data):
+            corr = run(provider.fetch_correlations("short"))  # short = aligned with BTC down
+
+        assert corr.available is True
+        assert corr.aligns_with_trade_direction is True
+
+    def test_fetch_correlations_misaligned(self):
+        """fetch_correlations returns misaligned when direction contradicts DXY signal."""
+        provider = self._make_provider()
+        fake_data = _make_yf_data(104.0, 104.52, 5200.0, 5174.0)  # DXY up → BTC down
+        with patch("yfinance.download", return_value=fake_data):
+            corr = run(provider.fetch_correlations("long"))  # long contradicts BTC down
+
+        assert corr.available is True
+        assert corr.aligns_with_trade_direction is False

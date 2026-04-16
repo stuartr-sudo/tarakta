@@ -30,9 +30,12 @@ Call ``registry.get_status()`` to see which providers are live at runtime.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +372,7 @@ class CorrelationSignal:
             direction (additional confluence).
         confidence: 0.0-1.0 signal confidence. 0.0 = no signal / not available.
     """
+    available: bool = True             # False when data fetch failed
     dxy_divergence: bool = False
     dxy_direction: str = ""           # "up" or "down"
     implied_btc_direction: str = ""   # "up" (BTC) or "down" (BTC) — opposite of DXY
@@ -393,7 +397,130 @@ class StubCorrelationProvider:
         return CorrelationData(available=False)
 
     async def fetch_correlation_signal(self) -> CorrelationSignal:
-        return CorrelationSignal(dxy_divergence=False, confidence=0.0)
+        return CorrelationSignal(available=False, dxy_divergence=False, confidence=0.0)
+
+
+class YFinanceCorrelationProvider:
+    """Real correlation provider using free yfinance data.
+
+    Course Lesson 19: DXY (US Dollar Index) inverse-correlates with BTC.
+    S&P 500 and NASDAQ generally correlate WITH BTC. When DXY moves but
+    BTC hasn't yet → position before BTC catches up.
+
+    Uses yfinance (no API key required — free Yahoo Finance data).
+    5-minute bars over the last trading day, cached for 5 minutes to
+    avoid hammering the upstream service.
+    """
+
+    SYMBOLS = {"dxy": "DX-Y.NYB", "sp500": "^GSPC", "nasdaq": "^IXIC"}
+    DIVERGENCE_THRESHOLD_PCT = 0.3  # 0.3% move in DXY without BTC reaction
+    CACHE_TTL_SECONDS = 300  # 5-min cache to avoid hammering yfinance
+
+    def __init__(self) -> None:
+        self._cache: dict = {}
+        self._cache_time: datetime | None = None
+
+    async def fetch_correlations(self, direction: str) -> CorrelationData:
+        """Return basic correlation data (direction alignment).
+
+        For full pre-positioning signal use ``fetch_correlation_signal``.
+        """
+        signal = await self.fetch_correlation_signal()
+        if not signal.confidence:
+            return CorrelationData(available=False)
+        aligned = (
+            (direction == "long" and signal.implied_btc_direction == "up")
+            or (direction == "short" and signal.implied_btc_direction == "down")
+        )
+        return CorrelationData(
+            available=True,
+            aligns_with_trade_direction=aligned,
+        )
+
+    async def fetch_correlation_signal(self, btc_price_change_pct: float = 0.0) -> CorrelationSignal:
+        """Fetch DXY/SPX/NDX recent moves and detect divergence from BTC.
+
+        Returns a CorrelationSignal with:
+        - dxy_divergence: True if DXY moved >0.3% but BTC moved <0.1%
+        - dxy_direction: "up" or "down"
+        - implied_btc_direction: opposite of dxy
+        - sp500_aligned: True if S&P moved same direction as implied BTC
+        - confidence: 0-1
+        """
+        from datetime import timezone
+
+        # Use cache if fresh
+        if self._cache_time and (
+            datetime.now(timezone.utc) - self._cache_time
+        ).total_seconds() < self.CACHE_TTL_SECONDS:
+            return self._cache.get("signal", CorrelationSignal(available=False))
+
+        try:
+            import yfinance as yf
+
+            # Fetch last trading day of 5-min bars (free, no key needed)
+            tickers = list(self.SYMBOLS.values())
+            data = yf.download(
+                tickers,
+                period="1d",
+                interval="5m",
+                progress=False,
+                auto_adjust=True,
+            )
+
+            if data.empty or len(data) < 2:
+                return CorrelationSignal(available=False)
+
+            # Compute % change over last hour (12 × 5-min bars)
+            close = data["Close"]
+            recent = close.iloc[-12:]
+            if len(recent) < 2:
+                return CorrelationSignal(available=False)
+
+            dxy_col = self.SYMBOLS["dxy"]
+            sp500_col = self.SYMBOLS["sp500"]
+
+            dxy_start = recent[dxy_col].iloc[0]
+            dxy_end = recent[dxy_col].iloc[-1]
+            sp500_start = recent[sp500_col].iloc[0]
+            sp500_end = recent[sp500_col].iloc[-1]
+
+            if not dxy_start or not sp500_start:
+                return CorrelationSignal(available=False)
+
+            dxy_change = (dxy_end - dxy_start) / dxy_start * 100
+            sp500_change = (sp500_end - sp500_start) / sp500_start * 100
+
+            dxy_direction = "up" if dxy_change > 0 else "down"
+            implied_btc = "down" if dxy_direction == "up" else "up"
+            sp500_aligned = (sp500_change > 0 and implied_btc == "up") or (
+                sp500_change < 0 and implied_btc == "down"
+            )
+
+            # Divergence: DXY moved significantly but BTC barely budged
+            divergence = (
+                abs(dxy_change) > self.DIVERGENCE_THRESHOLD_PCT
+                and abs(btc_price_change_pct) < 0.1
+            )
+
+            confidence = min(1.0, abs(dxy_change) / 1.0)  # 1% DXY move = full confidence
+            if sp500_aligned:
+                confidence = min(1.0, confidence + 0.2)
+
+            signal = CorrelationSignal(
+                available=True,
+                dxy_divergence=divergence,
+                dxy_direction=dxy_direction,
+                implied_btc_direction=implied_btc,
+                sp500_aligned=sp500_aligned,
+                confidence=confidence,
+            )
+            self._cache["signal"] = signal
+            self._cache_time = datetime.now(timezone.utc)
+            return signal
+        except Exception as e:
+            logger.warning("yfinance_correlation_failed: %s", e)
+            return CorrelationSignal(available=False)
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +573,15 @@ class StubSentimentProvider:
 # ---------------------------------------------------------------------------
 
 
+def _default_correlation_provider():
+    """Return YFinanceCorrelationProvider if yfinance is installed, else Stub."""
+    try:
+        import yfinance  # noqa: F401 — availability check only
+        return YFinanceCorrelationProvider()
+    except ImportError:
+        return StubCorrelationProvider()
+
+
 @dataclass
 class DataFeedRegistry:
     """One-stop registry the MMEngine can call. Defaults to stubs.
@@ -465,8 +601,9 @@ class DataFeedRegistry:
     news: NewsProvider = field(default_factory=StubNewsProvider)
     options: OptionsProvider = field(default_factory=StubOptionsProvider)
     dominance: DominanceProvider = field(default_factory=StubDominanceProvider)
-    correlation: CorrelationProvider = field(default_factory=StubCorrelationProvider)
+    correlation: CorrelationProvider = field(default_factory=_default_correlation_provider)
     sentiment: SentimentProvider = field(default_factory=StubSentimentProvider)
+
 
     def get_status(self) -> dict[str, bool]:
         """Return availability status of all registered providers.
