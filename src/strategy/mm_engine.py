@@ -1539,10 +1539,27 @@ class MMEngine:
         reward = abs(t_l1 - entry_price)
         rr = reward / risk
 
-        if rr < self.min_rr and t_l2 and self._is_valid_target(t_l2, trade_direction, entry_price):
+        # B4 course-faithful: Linda cascade lowers the min R:R threshold (Lesson 55).
+        # When the 1H→4H or 4H→Daily cascade is active AND in our trade direction,
+        # the move is "bigger than it looks" — accept the course floor (1.4) instead
+        # of the normal aggressive threshold.
+        linda_cascade_same_dir = False
+        try:
+            if linda_cascade_1h_to_4h or linda_cascade_4h_to_1d:
+                higher_tf = "4h" if linda_cascade_1h_to_4h else "1d"
+                tf_state = self.linda.get(symbol, higher_tf)
+                expected_dir = "bullish" if trade_direction == "long" else "bearish"
+                if tf_state.direction == expected_dir:
+                    linda_cascade_same_dir = True
+        except Exception:
+            pass
+
+        effective_min_rr = MIN_RR_COURSE_FLOOR if linda_cascade_same_dir else self.min_rr
+
+        if rr < effective_min_rr and t_l2 and self._is_valid_target(t_l2, trade_direction, entry_price):
             reward_l2 = abs(t_l2 - entry_price)
             rr_l2 = reward_l2 / risk
-            if rr_l2 >= self.min_rr:
+            if rr_l2 >= effective_min_rr:
                 logger.info("mm_target_rr_upgraded_to_l2", symbol=symbol,
                             rr_l1=round(rr, 2), rr_l2=round(rr_l2, 2),
                             t_l1=t_l1, t_l2=t_l2)
@@ -1550,8 +1567,11 @@ class MMEngine:
                 # The R:R gate below uses rr_l2 just to pass validation.
                 rr = rr_l2
 
-        if rr < self.min_rr:
-            return self._reject("low_rr", symbol, rr=round(rr, 2), min_required=self.min_rr, entry=entry_price, sl=sl_price, t1=t_l1)
+        if rr < effective_min_rr:
+            if linda_cascade_same_dir:
+                logger.info("mm_linda_cascade_rr_threshold", symbol=symbol,
+                            effective_min_rr=effective_min_rr, rr=round(rr, 2))
+            return self._reject("low_rr", symbol, rr=round(rr, 2), min_required=effective_min_rr, entry=entry_price, sl=sl_price, t1=t_l1)
 
         self._advance("rr_passed")
 
