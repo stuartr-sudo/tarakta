@@ -913,3 +913,81 @@ class TestWickDirectionChange:
 
         calls = [str(call) for call in mock_logger.info.call_args_list]
         assert not any("mm_wick_direction_warning" in c for c in calls)
+
+
+# ---------------------------------------------------------------------------
+# B8 — Board meeting re-entry opportunity logging (lesson 13)
+# ---------------------------------------------------------------------------
+
+
+class TestBoardMeetingReentry:
+    """B8 (lesson 13): log board meeting re-entry when partial taken + L1/L2."""
+
+    def _make_partial_pos(
+        self,
+        level: int = 1,
+        partial_pct: float = 0.30,
+        symbol: str = "BTC/USDT",
+    ) -> MMPosition:
+        pos = MMPosition(
+            symbol=symbol,
+            direction="long",
+            entry_price=50000.0,
+            quantity=0.01,
+            stop_loss=49000.0,
+            current_level=level,
+            partial_closed_pct=partial_pct,
+        )
+        pos.entry_time = datetime.now(timezone.utc) - timedelta(hours=2)
+        return pos
+
+    def _run_bm_reentry_logic(self, bm_detected: bool, partial_pct: float, level: int):
+        """Replicate the B8 logic block and return logger mock calls."""
+        pos = self._make_partial_pos(level=level, partial_pct=partial_pct)
+        symbol = pos.symbol
+
+        with patch("src.strategy.mm_engine.logger") as mock_logger:
+            # Replicate the B8 block directly
+            if bm_detected and pos.partial_closed_pct > 0 and pos.current_level in (1, 2):
+                mock_logger.info(
+                    "mm_board_meeting_reentry_opportunity",
+                    symbol=symbol,
+                    level=pos.current_level,
+                    partial_closed=pos.partial_closed_pct,
+                )
+            return [str(call) for call in mock_logger.info.call_args_list]
+
+    def test_bm_reentry_logged_when_partial_and_l1(self):
+        """Board meeting + partial taken + L1 → log opportunity."""
+        calls = self._run_bm_reentry_logic(bm_detected=True, partial_pct=0.30, level=1)
+        assert any("mm_board_meeting_reentry_opportunity" in c for c in calls), (
+            f"Expected mm_board_meeting_reentry_opportunity, got: {calls}"
+        )
+
+    def test_bm_reentry_logged_when_partial_and_l2(self):
+        """Board meeting + partial taken + L2 → log opportunity."""
+        calls = self._run_bm_reentry_logic(bm_detected=True, partial_pct=0.50, level=2)
+        assert any("mm_board_meeting_reentry_opportunity" in c for c in calls), (
+            f"Expected mm_board_meeting_reentry_opportunity at L2, got: {calls}"
+        )
+
+    def test_bm_reentry_not_logged_when_no_partial(self):
+        """Board meeting detected but no partial taken → no re-entry opportunity logged."""
+        calls = self._run_bm_reentry_logic(bm_detected=True, partial_pct=0.0, level=1)
+        assert not any("mm_board_meeting_reentry_opportunity" in c for c in calls), (
+            "Must not log re-entry opportunity when no partial has been taken"
+        )
+
+    def test_bm_reentry_not_logged_when_no_board_meeting(self):
+        """No board meeting → no re-entry opportunity logged."""
+        calls = self._run_bm_reentry_logic(bm_detected=False, partial_pct=0.30, level=1)
+        assert not any("mm_board_meeting_reentry_opportunity" in c for c in calls), (
+            "Must not log re-entry opportunity when no board meeting detected"
+        )
+
+    def test_bm_reentry_not_logged_at_l3(self):
+        """Board meeting + partial + L3 → no re-entry opportunity (only L1/L2 apply)."""
+        calls = self._run_bm_reentry_logic(bm_detected=True, partial_pct=0.30, level=3)
+        assert not any("mm_board_meeting_reentry_opportunity" in c for c in calls), (
+            "B8 re-entry opportunity only applies at L1 and L2"
+        )

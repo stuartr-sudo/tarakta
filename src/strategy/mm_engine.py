@@ -2685,6 +2685,21 @@ class MMEngine:
                                 fib_sl=bm_detection.entry.stop_loss if bm_detection.entry else None,
                                 fib_rr=bm_detection.entry.risk_reward if bm_detection.entry else None)
 
+                    # B8 (lesson 13): Board meeting re-entry opportunity.
+                    # Course: "Beginners should take profit at board meetings, then
+                    # re-enter after." When a board meeting is detected between levels
+                    # and we have already taken a partial profit, log the re-entry
+                    # opportunity. The log enables manual monitoring and future
+                    # automation — we do not auto-execute re-entry here because that
+                    # requires additional exchange logic (limit orders, sizing).
+                    if pos.partial_closed_pct > 0 and new_level in (1, 2):
+                        logger.info(
+                            "mm_board_meeting_reentry_opportunity",
+                            symbol=symbol,
+                            level=new_level,
+                            partial_closed=pos.partial_closed_pct,
+                        )
+
             pos.current_level = new_level
 
             # Persist level advance + SL change to DB
