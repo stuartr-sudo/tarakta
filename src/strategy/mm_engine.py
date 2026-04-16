@@ -1545,7 +1545,8 @@ class MMEngine:
         adr_state = None
         try:
             if candles_1h is not None and not candles_1h.empty:
-                adr_state = self.adr_analyzer.calculate(candles_1h, entry_price)
+                current_close = float(candles_1h["close"].iloc[-1])
+                adr_state = self.adr_analyzer.calculate(candles_1h, current_close)
         except Exception:
             pass  # ADR not critical; confluence factor defaults to 0
 
@@ -3637,7 +3638,6 @@ class MMEngine:
             else None.
         """
         try:
-            from src.strategy.mm_data_feeds import CorrelationSignal
             provider = self.data_feeds.correlation
             if hasattr(provider, "fetch_correlation_signal"):
                 signal = await provider.fetch_correlation_signal()
