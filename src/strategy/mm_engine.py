@@ -2575,9 +2575,79 @@ class MMEngine:
 
         return signal
 
+    def _calculate_signal_density(self, signals: list[MMSignal]) -> dict:
+        """Detect market-wide noise vs isolated premium signals.
+
+        The course teaches humans to judge "is this clean?" — a setup where
+        only ONE or TWO pairs signal out of the full universe is premium
+        (isolated, probably real MM activity). When MANY pairs signal the
+        same direction simultaneously it is likely a broad market move or
+        manipulation: market-wide noise.
+
+        Rules:
+          - noise:   >50% of scanned pairs have signals AND >70% same direction
+          - premium: <20% of scanned pairs signal AND top signal has score >60
+        """
+        if not signals:
+            return {"density_pct": 0.0, "is_noise": False, "is_premium": False}
+
+        pairs_scanned = (self.last_funnel or {}).get("pairs_scanned", 0)
+        if not pairs_scanned:
+            # Fallback: estimate from open positions + signals + rejections
+            rejected_total = (self.last_funnel or {}).get("rejected_total", 0)
+            pairs_scanned = len(self.positions) + len(signals) + rejected_total
+
+        if pairs_scanned == 0:
+            return {"density_pct": 0.0, "is_noise": False, "is_premium": False}
+
+        density_pct = (len(signals) / pairs_scanned) * 100
+
+        long_count = sum(1 for s in signals if s.direction == "long")
+        short_count = len(signals) - long_count
+        direction_alignment = max(long_count, short_count) / len(signals) if signals else 0
+
+        is_noise = density_pct > 50 and direction_alignment > 0.7
+        is_premium = (
+            density_pct < 20
+            and len(signals) >= 1
+            and signals[0].confluence_score > 60
+        )
+
+        return {
+            "density_pct": round(density_pct, 1),
+            "long_count": long_count,
+            "short_count": short_count,
+            "direction_alignment": round(direction_alignment, 2),
+            "is_noise": is_noise,
+            "is_premium": is_premium,
+        }
+
     async def _process_entries(self, signals: list[MMSignal]) -> None:
         """Process entry signals — execute the best ones."""
         open_count = len(self.positions)
+
+        # --- Signal density edge (course: clean vs noisy market) ---
+        density = self._calculate_signal_density(signals)
+        effective_min_confluence = self.min_confluence
+        effective_min_rr = self.min_rr
+
+        if density["is_noise"]:
+            effective_min_confluence = self.min_confluence + 10
+            logger.warning(
+                "mm_density_noise",
+                density_pct=density["density_pct"],
+                direction_alignment=density["direction_alignment"],
+                raising_confluence_by=10,
+                effective_min_confluence=effective_min_confluence,
+            )
+        elif density["is_premium"]:
+            effective_min_rr = max(MIN_RR_COURSE_FLOOR, self.min_rr - 0.1)
+            logger.info(
+                "mm_density_premium",
+                density_pct=density["density_pct"],
+                top_score=signals[0].confluence_score if signals else 0,
+                effective_min_rr=effective_min_rr,
+            )
 
         # Get balance for margin utilization check
         try:
@@ -2590,6 +2660,26 @@ class MMEngine:
         for signal in signals:
             if open_count >= self.max_positions:
                 break
+
+            # Density-adjusted confluence filter
+            if signal.confluence_score < effective_min_confluence:
+                logger.info(
+                    "mm_reject_density_confluence",
+                    symbol=signal.symbol,
+                    score=signal.confluence_score,
+                    required=effective_min_confluence,
+                )
+                continue
+
+            # Density-adjusted R:R filter
+            if signal.risk_reward < effective_min_rr:
+                logger.info(
+                    "mm_reject_density_rr",
+                    symbol=signal.symbol,
+                    rr=signal.risk_reward,
+                    required=effective_min_rr,
+                )
+                continue
 
             # Check in-memory positions AND cooldowns
             if signal.symbol in self.positions:
