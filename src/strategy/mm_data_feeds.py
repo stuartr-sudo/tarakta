@@ -2,20 +2,31 @@
 
 Every factor the course teaches is represented here as an interface. When
 credentials / subscriptions exist, drop in a real implementation of the
-relevant `Provider`. Until then each provider returns the neutral/empty
+relevant ``Provider``. Until then each provider returns the neutral/empty
 value and the confluence scorer naturally scores that factor as 0.
 
 Providers covered (all currently UNWIRED — awaiting API access):
-  - `HyblockProvider`       — liquidation-level clusters (lesson 25, 27)
-  - `TradingLiteProvider`   — limit-order heat map (lesson 25, 26)
-  - `NewsProvider`          — Forex Factory calendar (lesson 32)
-  - `OptionsProvider`       — options expiry / Max Pain / P-C ratio (lesson 33)
-  - `DominanceProvider`     — BTC.D / ETH.D / USDT.D (lesson 31)
-  - `CorrelationProvider`   — BTC vs DXY / NASDAQ (lesson 30)
-  - `SentimentProvider`     — Fear & Greed / augmento.ai (lesson 32)
+  - ``HyblockProvider``       — liquidation-level clusters + delta (lesson 25, 27)
+  - ``TradingLiteProvider``   — limit-order heat map (lesson 25, 26)
+  - ``NewsProvider``          — Forex Factory calendar (lesson 32)
+  - ``OptionsProvider``       — options expiry / Max Pain / P-C ratio (lesson 33)
+  - ``DominanceProvider``     — BTC.D / ETH.D / USDT.D (lesson 31)
+  - ``CorrelationProvider``   — BTC vs DXY / NASDAQ (lesson 30)
+  - ``SentimentProvider``     — Fear & Greed / augmento.ai (lesson 32)
 
-Each returns a dataclass with `.available: bool` so callers can cheaply
+Each returns a dataclass with ``.available: bool`` so callers can cheaply
 detect "no data yet" and leave the corresponding context flag False.
+
+Real implementations should be registered in ``DataFeedRegistry``::
+
+    from my_providers import HyblockClient, ForexFactoryScraper
+
+    registry = DataFeedRegistry(
+        hyblock=HyblockClient(api_key="..."),
+        news=ForexFactoryScraper(),
+    )
+
+Call ``registry.get_status()`` to see which providers are live at runtime.
 """
 from __future__ import annotations
 
@@ -25,36 +36,68 @@ from typing import Protocol
 
 
 # ---------------------------------------------------------------------------
-# Hyblock (liquidation levels)
+# Hyblock (liquidation levels + delta)
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class LiquidationCluster:
-    """A single liquidation cluster (price level + estimated leverage)."""
+    """A single liquidation cluster at a specific price level.
+
+    Course lesson 27 teaches that clusters at 25×, 50×, and 100× leverage
+    act as magnet levels — price is drawn toward them before reversing.
+    """
     price: float
-    size_usd: float
-    leverage_bucket: str  # "25x", "50x", "100x" per course lesson 27
-    direction: str        # "long_liq" or "short_liq"
+    amount: float           # Estimated USD notional of liquidations
+    leverage: str           # "25x" | "50x" | "100x" per course lesson 27
+    direction: str          # "long_liq" | "short_liq"
 
 
 @dataclass
-class LiquidationData:
+class HyblockData:
+    """Hyblock liquidation and delta data.
+
+    API required: Hyblock Capital (hyblock.capital) — paid subscription.
+    Endpoint: ``/api/v2/public/liquidation-levels`` (symbol, timeframe).
+
+    Fields:
+        available: False until real credentials are wired.
+        delta: Long-vs-short exposure (positive = more longs exposed to
+            liquidation; negative = more shorts exposed).
+        delta_level: Qualitative delta reading: "low" | "medium" | "high"
+            | "extreme". "Extreme" suggests a likely squeeze reversal.
+        liquidation_clusters: Ordered list of price clusters where mass
+            liquidations would occur. Each has a price, USD amount, and
+            leverage bucket. None when not available.
+        timestamp: When the data was fetched (for staleness checks).
+    """
     available: bool = False
-    delta_usd: float = 0.0             # Long - Short liquidation totals ($)
-    total_positions: float = 0.0       # Raw total (want >1000 per lesson 27)
-    nearest_cluster_above: LiquidationCluster | None = None
-    nearest_cluster_below: LiquidationCluster | None = None
+    delta: float | None = None          # Positive = more longs exposed
+    delta_level: str | None = None      # "low" | "medium" | "high" | "extreme"
+    liquidation_clusters: list[LiquidationCluster] | None = None
+    timestamp: datetime | None = None
 
 
 class HyblockProvider(Protocol):
-    async def fetch_liquidations(self, symbol: str) -> LiquidationData: ...
+    """Protocol for Hyblock liquidation data providers.
+
+    Real implementations must:
+      1. Authenticate via Hyblock Capital API (hyblock.capital).
+      2. Fetch ``/api/v2/public/liquidation-levels`` for the given symbol.
+      3. Compute delta from long_liq vs short_liq totals.
+      4. Map delta magnitude to delta_level thresholds.
+    """
+    async def fetch_liquidations(self, symbol: str) -> HyblockData: ...
 
 
 class StubHyblockProvider:
-    """Returns `available=False` until real credentials are provided."""
-    async def fetch_liquidations(self, symbol: str) -> LiquidationData:
-        return LiquidationData(available=False)
+    """Returns ``available=False`` until real Hyblock credentials are provided.
+
+    To use real data: implement ``HyblockProvider`` and register it in
+    ``DataFeedRegistry(hyblock=YourRealProvider())``.
+    """
+    async def fetch_liquidations(self, symbol: str) -> HyblockData:
+        return HyblockData(available=False)
 
 
 # ---------------------------------------------------------------------------
@@ -64,66 +107,151 @@ class StubHyblockProvider:
 
 @dataclass
 class LimitOrderCluster:
+    """A cluster of large limit orders at a specific price level.
+
+    Course lesson 26 teaches that large visible limit orders on the heat map
+    act as support/resistance — price tends to react at these levels.
+    """
     price: float
-    size_usd: float
-    side: str  # "bid" or "ask"
+    size_usd: float     # Estimated USD notional of the clustered orders
+    side: str           # "bid" (buy-side) or "ask" (sell-side)
 
 
 @dataclass
 class HeatMapData:
+    """TradingLite order-flow heat-map data.
+
+    API required: TradingLite (tradinglite.com) — paid subscription.
+    Provides real-time large limit-order cluster visibility.
+
+    Fields:
+        available: False until real credentials are wired.
+        largest_bid_cluster: Strongest buy-side limit cluster detected.
+        largest_ask_cluster: Strongest sell-side limit cluster detected.
+    """
     available: bool = False
     largest_bid_cluster: LimitOrderCluster | None = None
     largest_ask_cluster: LimitOrderCluster | None = None
 
 
 class TradingLiteProvider(Protocol):
+    """Protocol for TradingLite heat-map providers.
+
+    Real implementations must connect to TradingLite's WebSocket stream or
+    REST API and parse the limit-order cluster data.
+    """
     async def fetch_heatmap(self, symbol: str) -> HeatMapData: ...
 
 
 class StubTradingLiteProvider:
+    """Returns ``available=False`` until real TradingLite credentials are provided."""
     async def fetch_heatmap(self, symbol: str) -> HeatMapData:
         return HeatMapData(available=False)
 
 
 # ---------------------------------------------------------------------------
-# News (Forex Factory style calendar)
+# News Calendar (Forex Factory style)
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class NewsEvent:
-    timestamp: datetime
-    currency: str          # "USD", "EUR", "GBP" etc
-    impact: str            # "red", "orange", "yellow"
+    """A single economic calendar event.
+
+    Course lesson 32 teaches that red/orange events are "no-trade" windows —
+    avoid entering within 15 minutes either side of them.
+
+    Fields:
+        title: Event description (e.g. "Non-Farm Payrolls", "CPI", "FOMC").
+        currency: Affected currency code (e.g. "USD", "EUR", "GBP").
+        impact: Forex Factory colour coding:
+            - "red"    → high impact (must avoid)
+            - "orange" → medium impact (caution)
+            - "yellow" → low impact (informational)
+        forecast: Analyst consensus estimate, or None if not published.
+        previous: Previous reading, or None if unavailable.
+        time: UTC datetime of the event.
+    """
     title: str
+    currency: str
+    impact: str          # "red" | "orange" | "yellow"
+    forecast: str | None
+    previous: str | None
+    time: datetime
 
 
 @dataclass
-class NewsData:
+class NewsCalendarData:
+    """Forex Factory (or equivalent) news calendar data.
+
+    API required: Forex Factory (forexfactory.com) web scrape or a paid
+    calendar API (e.g. Tradays, MyfxBook economic calendar API).
+
+    Fields:
+        available: False until real data source is wired.
+        upcoming_events: All events in the next N hours, sorted ascending
+            by time.
+        next_high_impact: The soonest red-impact event, or None if none
+            scheduled in the look-ahead window.
+        minutes_to_next: Minutes until ``next_high_impact``, or None.
+    """
     available: bool = False
-    upcoming: list[NewsEvent] = field(default_factory=list)
-    next_red_within_hours: float | None = None  # Hours until next red event
+    upcoming_events: list[NewsEvent] = field(default_factory=list)
+    next_high_impact: NewsEvent | None = None
+    minutes_to_next: float | None = None
 
 
 class NewsProvider(Protocol):
-    async def fetch_upcoming(self, hours_ahead: float = 72) -> NewsData: ...
+    """Protocol for economic calendar providers.
+
+    Real implementations must:
+      1. Fetch upcoming events for the next ``hours_ahead`` hours.
+      2. Filter and sort by time.
+      3. Identify the soonest red/high-impact event.
+      4. Compute ``minutes_to_next`` from ``datetime.utcnow()``.
+
+    Recommended sources: forexfactory.com scrape, Tradays API, or MyfxBook.
+    """
+    async def fetch_upcoming(self, hours_ahead: float = 72) -> NewsCalendarData: ...
 
 
 class StubNewsProvider:
-    async def fetch_upcoming(self, hours_ahead: float = 72) -> NewsData:
-        return NewsData(available=False)
+    """Returns ``available=False`` until a real calendar provider is wired."""
+    async def fetch_upcoming(self, hours_ahead: float = 72) -> NewsCalendarData:
+        return NewsCalendarData(available=False)
 
 
 # ---------------------------------------------------------------------------
-# Options expiry (basedmoney.io style)
+# Options expiry (basedmoney.io / Deribit style)
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class OptionsExpiryData:
+    """Options market data for expiry-driven price targets.
+
+    API required: Deribit public API (deribit.com/api/v2) — free for BTC/ETH.
+    For altcoins: basedmoney.io or similar options analytics.
+
+    Course lesson 33 teaches:
+      - Max Pain price = where options sellers (MMs) profit most → price magnet.
+      - Quad-witching Fridays (3rd Friday of Mar/Jun/Sep/Dec) = high volatility.
+      - High put-call ratio → bearish sentiment (many puts purchased).
+
+    Fields:
+        available: False until real data source is wired.
+        next_expiry_date: Next options expiry datetime (UTC).
+        is_quad_witching: True on the 3rd Friday of Mar/Jun/Sep/Dec.
+        max_pain_price: Price level where most options expire worthless
+            (combined P&L minimised for option holders).
+        total_notional_usd: Total open interest in USD.
+        calls_notional: USD value of open call options.
+        puts_notional: USD value of open put options.
+        put_call_ratio: puts / calls ratio. > 1.0 = more puts (bearish).
+    """
     available: bool = False
     next_expiry_date: datetime | None = None
-    is_quad_witching: bool = False  # 3rd Friday of Mar/Jun/Sep/Dec
+    is_quad_witching: bool = False
     max_pain_price: float | None = None
     total_notional_usd: float = 0.0
     calls_notional: float = 0.0
@@ -132,10 +260,12 @@ class OptionsExpiryData:
 
 
 class OptionsProvider(Protocol):
+    """Protocol for options data providers."""
     async def fetch_next_expiry(self, symbol: str) -> OptionsExpiryData: ...
 
 
 class StubOptionsProvider:
+    """Returns ``available=False`` until a real options provider is wired."""
     async def fetch_next_expiry(self, symbol: str) -> OptionsExpiryData:
         return OptionsExpiryData(available=False)
 
@@ -147,6 +277,28 @@ class StubOptionsProvider:
 
 @dataclass
 class DominanceData:
+    """Crypto market dominance data.
+
+    API required: CoinMarketCap or CoinGecko global market data endpoint.
+    Free tiers available for both.
+
+    Course lesson 31 teaches:
+      - BTC.D rising → capital flowing into BTC, away from alts (risk-off alts).
+      - BTC.D falling + USDT.D falling + ETH.D rising → alt season.
+      - USDT.D rising → market selling into stables (risk-off entire market).
+      - TOTAL3 (all ex-BTC+ETH) rising → "degen season" for small caps.
+
+    Fields:
+        available: False until real data source is wired.
+        btc_dominance_pct: BTC market cap as % of total crypto market cap.
+        btc_dominance_trend: "rising" | "falling" | "flat"
+        eth_dominance_pct: ETH market cap as % of total.
+        eth_dominance_trend: "rising" | "falling" | "flat"
+        usdt_dominance_pct: USDT market cap as % of total (stablecoin dominance).
+        usdt_dominance_trend: "rising" | "falling" | "flat"
+        is_alt_season: True when BTC.D falling + USDT.D falling + ETH.D rising.
+        is_degen_season: True when TOTAL3 (small-cap alts) is rising.
+    """
     available: bool = False
     btc_dominance_pct: float = 0.0
     btc_dominance_trend: str = ""  # "rising" | "falling" | "flat"
@@ -154,15 +306,17 @@ class DominanceData:
     eth_dominance_trend: str = ""
     usdt_dominance_pct: float = 0.0
     usdt_dominance_trend: str = ""
-    is_alt_season: bool = False  # BTC.D falling + USDT.D falling + ETH.D rising
-    is_degen_season: bool = False  # TOTAL3 rising
+    is_alt_season: bool = False
+    is_degen_season: bool = False
 
 
 class DominanceProvider(Protocol):
+    """Protocol for crypto dominance data providers."""
     async def fetch_dominances(self) -> DominanceData: ...
 
 
 class StubDominanceProvider:
+    """Returns ``available=False`` until a real dominance provider is wired."""
     async def fetch_dominances(self) -> DominanceData:
         return DominanceData(available=False)
 
@@ -174,10 +328,25 @@ class StubDominanceProvider:
 
 @dataclass
 class CorrelationData:
+    """BTC macro correlation data (DXY and NASDAQ/S&P 500).
+
+    API required: Any financial data API with DXY and SPX/NASDAQ tickers
+    (e.g. Alpha Vantage, Yahoo Finance unofficial API, TradingEconomics).
+
+    Fields:
+        available: False until real data source is wired.
+        btc_dxy_correlation: Pearson correlation coefficient BTC vs DXY
+            over last N days. Expected range: -1 to +1. Typically negative
+            (DXY rises → BTC falls).
+        btc_nasdaq_correlation: Pearson correlation BTC vs NASDAQ.
+            Typically positive (risk-on assets move together).
+        aligns_with_trade_direction: Pre-computed alignment flag for the
+            confluence scorer. True when macro correlation confirms the
+            intended trade direction.
+    """
     available: bool = False
-    btc_dxy_correlation: float = 0.0  # -1..+1 (negative expected)
-    btc_nasdaq_correlation: float = 0.0  # -1..+1 (positive expected)
-    # For confluence: alignment flag used by the scorer
+    btc_dxy_correlation: float = 0.0      # -1..+1 (negative expected)
+    btc_nasdaq_correlation: float = 0.0   # -1..+1 (positive expected)
     aligns_with_trade_direction: bool = False
 
 
@@ -194,30 +363,36 @@ class CorrelationSignal:
         dxy_divergence: True when DXY has moved significantly but BTC hasn't
             reacted yet (divergence = pre-positioning opportunity).
         dxy_direction: Direction DXY has moved: "up" or "down".
-        implied_btc_direction: Expected BTC direction = opposite of DXY direction.
+        implied_btc_direction: Expected BTC direction — opposite of DXY direction.
             ("up" if DXY went down; "down" if DXY went up)
         sp500_aligned: True when S&P 500 / NASDAQ move confirms the implied BTC
             direction (additional confluence).
         confidence: 0.0-1.0 signal confidence. 0.0 = no signal / not available.
     """
     dxy_divergence: bool = False
-    dxy_direction: str = ""          # "up" or "down"
-    implied_btc_direction: str = ""  # "up" (BTC) or "down" (BTC) — opposite of DXY
+    dxy_direction: str = ""           # "up" or "down"
+    implied_btc_direction: str = ""   # "up" (BTC) or "down" (BTC) — opposite of DXY
     sp500_aligned: bool = False
     confidence: float = 0.0
 
 
 class CorrelationProvider(Protocol):
+    """Protocol for macro correlation data providers."""
     async def fetch_correlations(self, direction: str) -> CorrelationData: ...
     async def fetch_correlation_signal(self) -> "CorrelationSignal": ...
 
 
 class StubCorrelationProvider:
+    """Returns ``available=False`` and zero-confidence signals until a real
+    correlation provider is wired.
+
+    API required: DXY and SPX/NASDAQ price history (e.g. Alpha Vantage free
+    tier, Yahoo Finance, or TradingEconomics paid API).
+    """
     async def fetch_correlations(self, direction: str) -> CorrelationData:
         return CorrelationData(available=False)
 
     async def fetch_correlation_signal(self) -> CorrelationSignal:
-        """Returns a zero-confidence signal when no real provider is wired."""
         return CorrelationSignal(dxy_divergence=False, confidence=0.0)
 
 
@@ -228,16 +403,40 @@ class StubCorrelationProvider:
 
 @dataclass
 class SentimentData:
+    """Crypto market sentiment data.
+
+    API required:
+      - Fear & Greed Index: alternative.me/crypto/fear-and-greed-index/api/
+        (free, no key required).
+      - Augmento: augmento.ai API (paid, NLP-based bull/bear scoring from
+        social media).
+
+    Course lesson 32 teaches:
+      - Extreme Fear (0-25) → contrarian buy signal.
+      - Extreme Greed (75-100) → contrarian sell signal.
+      - Augmento bull/bear score confirms short-term sentiment bias.
+
+    Fields:
+        available: False until at least one data source is wired.
+        fear_greed_index: 0..100. 0 = extreme fear, 100 = extreme greed.
+        augmento_score: 0.0..1.0. > 0.5 = bullish social sentiment.
+    """
     available: bool = False
-    fear_greed_index: int | None = None  # 0..100
-    augmento_score: float | None = None  # 0..1 bull/bear
+    fear_greed_index: int | None = None   # 0..100
+    augmento_score: float | None = None   # 0..1 (bull/bear from social media)
 
 
 class SentimentProvider(Protocol):
+    """Protocol for sentiment data providers."""
     async def fetch_sentiment(self) -> SentimentData: ...
 
 
 class StubSentimentProvider:
+    """Returns ``available=False`` until a real sentiment provider is wired.
+
+    Fear & Greed is free (alternative.me/crypto/fear-and-greed-index/api/)
+    and is the lowest-effort provider to implement first.
+    """
     async def fetch_sentiment(self) -> SentimentData:
         return SentimentData(available=False)
 
@@ -251,13 +450,15 @@ class StubSentimentProvider:
 class DataFeedRegistry:
     """One-stop registry the MMEngine can call. Defaults to stubs.
 
-    To wire a real provider, instantiate this with your implementation:
+    To wire a real provider, instantiate with your implementation::
 
         registry = DataFeedRegistry(
-            hyblock=MyRealHyblockProvider(api_key=...),
+            hyblock=MyRealHyblockProvider(api_key="..."),
             news=MyForexFactoryScraper(),
             # others still stubbed
         )
+
+    Call ``get_status()`` to inspect which providers are currently live.
     """
     hyblock: HyblockProvider = field(default_factory=StubHyblockProvider)
     tradinglite: TradingLiteProvider = field(default_factory=StubTradingLiteProvider)
@@ -266,3 +467,34 @@ class DataFeedRegistry:
     dominance: DominanceProvider = field(default_factory=StubDominanceProvider)
     correlation: CorrelationProvider = field(default_factory=StubCorrelationProvider)
     sentiment: SentimentProvider = field(default_factory=StubSentimentProvider)
+
+    def get_status(self) -> dict[str, bool]:
+        """Return availability status of all registered providers.
+
+        A provider is considered "available" if it is NOT a stub (i.e. its
+        class name does not start with "Stub"). This gives a quick runtime
+        overview of which external feeds are wired.
+
+        Returns:
+            Dict mapping provider name to True (real) or False (stubbed).
+
+        Example::
+
+            registry.get_status()
+            # {"hyblock": False, "tradinglite": False, "news": False,
+            #  "options": False, "dominance": False, "correlation": False,
+            #  "sentiment": False}
+        """
+        providers = {
+            "hyblock": self.hyblock,
+            "tradinglite": self.tradinglite,
+            "news": self.news,
+            "options": self.options,
+            "dominance": self.dominance,
+            "correlation": self.correlation,
+            "sentiment": self.sentiment,
+        }
+        return {
+            name: not type(provider).__name__.startswith("Stub")
+            for name, provider in providers.items()
+        }
