@@ -2716,6 +2716,22 @@ class MMEngine:
         # Informational only — SVC / vol-degradation checks below own the close.
         self._maybe_log_ema_fan_out_warning(pos, candles_1h)
 
+        # B5 (lessons 08, 18): Wick direction change at L3 = exhaustion warning.
+        # During a 3-level rise, wicks should be at the BOTTOM of candles (stop
+        # hunting longs). When wicks turn to the TOP at L3, it signals exhaustion
+        # and an imminent reversal. Informational only — existing SVC / vol-degradation
+        # checks handle actual exits.
+        if pos.current_level >= 3 and candles_1h is not None:
+            pos_direction = "bullish" if pos.direction == "long" else "bearish"
+            wick_reversal = self._detect_wick_direction_change(candles_1h, pos_direction)
+            if wick_reversal:
+                logger.info(
+                    "mm_wick_direction_warning",
+                    symbol=symbol,
+                    level=pos.current_level,
+                    direction=pos.direction,
+                )
+
         # Check for Stopping Volume Candle at Level 3 (unless a Linda cascade
         # is running in our direction — lesson 55 — in which case SVC in the
         # OPPOSITE direction is the exit, but matching-direction SVCs are
@@ -2981,6 +2997,53 @@ class MMEngine:
                 symbol=pos.symbol,
                 level=pos.current_level,
             )
+
+    def _detect_wick_direction_change(self, candles: pd.DataFrame, direction: str) -> bool:
+        """Course B5 (lessons 08, 18): detect wick direction change at Level 3.
+
+        During a 3-level rise (bullish), wicks should be at the BOTTOM of candles
+        (market makers stop-hunting longs beneath). At Level 3 top, wicks turn to
+        the TOP of candles — this is exhaustion and signals a reversal.
+
+        Two wicks together after an aggressive move = MM stopping momentum.
+
+        Args:
+            candles: 1H OHLCV DataFrame.
+            direction: "bullish" (long) or "bearish" (short).
+
+        Returns:
+            True if wicks have turned in the reversal direction (warning signal).
+        """
+        if candles is None or candles.empty or len(candles) < 5:
+            return False
+        try:
+            last5 = candles.iloc[-5:]
+            top_wick_ratios: list[float] = []
+            for _, row in last5.iterrows():
+                h = float(row["high"])
+                low = float(row["low"])
+                o = float(row["open"])
+                c = float(row["close"])
+                candle_range = h - low
+                if candle_range <= 0:
+                    top_wick_ratios.append(0.0)
+                    continue
+                top_wick = h - max(o, c)
+                ratio = top_wick / candle_range
+                top_wick_ratios.append(ratio)
+
+            avg_top_wick = sum(top_wick_ratios) / len(top_wick_ratios) if top_wick_ratios else 0.0
+
+            if direction == "bullish":
+                # During bullish rise wicks should be at bottom; if avg top wick
+                # ratio > 0.5, wicks have turned to the top → exhaustion warning
+                return avg_top_wick > 0.5
+            else:
+                # For short: wicks should be at top during descent; if top wick
+                # ratio < 0.5 (wicks shifted to bottom), reversal warning
+                return avg_top_wick < 0.5
+        except Exception:
+            return False
 
     def _detect_ema_fan_out(self, candles: pd.DataFrame) -> bool:
         """Course D2 (lesson 24): EMAs fanning out = trend acceleration / L3 hint.

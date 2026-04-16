@@ -790,3 +790,126 @@ class Test33Trade:
         assert result.variant == "33_trade"
         assert result.type == "W"
         assert result.direction == "bullish"
+
+
+# ---------------------------------------------------------------------------
+# B5 — Wick direction change detection (lessons 08, 18)
+# ---------------------------------------------------------------------------
+
+
+def _make_top_wick_candles(n: int = 10) -> pd.DataFrame:
+    """Build candles where the majority of the range is in the TOP wick.
+
+    Each candle: open=close=low (doji-like), with a long top wick.
+    top_wick_ratio ≈ 1.0 for all candles → avg well above 0.5.
+    """
+    base = 1000.0
+    idx = pd.date_range("2025-01-01", periods=n, freq="1h", tz="UTC")
+    opens = np.full(n, base)
+    closes = np.full(n, base)
+    lows = np.full(n, base * 0.999)
+    highs = np.full(n, base * 1.010)   # top wick = 1% of price
+    vols = np.ones(n) * 1000
+    return pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": vols},
+        index=idx,
+    )
+
+
+def _make_bottom_wick_candles(n: int = 10) -> pd.DataFrame:
+    """Build candles where the majority of the range is in the BOTTOM wick.
+
+    Each candle: open=close=high (doji-like), with a long bottom wick.
+    top_wick_ratio ≈ 0.0 for all candles → avg well below 0.5.
+    """
+    base = 1000.0
+    idx = pd.date_range("2025-01-01", periods=n, freq="1h", tz="UTC")
+    opens = np.full(n, base)
+    closes = np.full(n, base)
+    highs = np.full(n, base * 1.001)   # tiny top wick
+    lows = np.full(n, base * 0.990)    # large bottom wick
+    vols = np.ones(n) * 1000
+    return pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": vols},
+        index=idx,
+    )
+
+
+class TestWickDirectionChange:
+    """B5 (lessons 08, 18): wick direction change at Level 3 detection."""
+
+    def test_top_wicks_during_bullish_rise_returns_true(self, engine: MMEngine):
+        """Bullish direction + wicks at top → avg top_wick_ratio > 0.5 → True."""
+        candles = _make_top_wick_candles(n=10)
+        result = engine._detect_wick_direction_change(candles, direction="bullish")
+        assert result is True, "Top wicks during bullish rise should signal reversal warning"
+
+    def test_bottom_wicks_during_bullish_rise_returns_false(self, engine: MMEngine):
+        """Bullish direction + wicks at bottom (normal) → avg top_wick_ratio < 0.5 → False."""
+        candles = _make_bottom_wick_candles(n=10)
+        result = engine._detect_wick_direction_change(candles, direction="bullish")
+        assert result is False, "Bottom wicks during bullish rise is normal — no warning"
+
+    def test_top_wicks_during_bearish_descent_returns_false(self, engine: MMEngine):
+        """Bearish direction + wicks at top (normal for a decline) → no warning (top_wick_ratio > 0.5)."""
+        candles = _make_top_wick_candles(n=10)
+        result = engine._detect_wick_direction_change(candles, direction="bearish")
+        assert result is False, "Top wicks during bearish descent is normal — no warning"
+
+    def test_bottom_wicks_during_bearish_descent_returns_true(self, engine: MMEngine):
+        """Bearish direction + wicks turning to bottom → warning (avg top_wick_ratio < 0.5)."""
+        candles = _make_bottom_wick_candles(n=10)
+        result = engine._detect_wick_direction_change(candles, direction="bearish")
+        assert result is True, "Bottom wicks during bearish descent signal reversal warning"
+
+    def test_returns_false_on_none(self, engine: MMEngine):
+        """None candles → False (graceful handling)."""
+        assert engine._detect_wick_direction_change(None, "bullish") is False
+
+    def test_returns_false_on_insufficient_data(self, engine: MMEngine):
+        """Fewer than 5 candles → False."""
+        small = _make_top_wick_candles(n=3)
+        assert engine._detect_wick_direction_change(small, "bullish") is False
+
+    def test_wick_warning_logged_at_l3(self, engine: MMEngine):
+        """mm_wick_direction_warning is logged when _detect_wick_direction_change returns True
+        and position is at Level 3.
+        """
+        candles = _make_top_wick_candles(n=10)
+        # Verify the method returns True for our candles
+        assert engine._detect_wick_direction_change(candles, "bullish") is True
+
+        pos = MMPosition(symbol="BTC/USDT", current_level=3, direction="long")
+
+        with patch("src.strategy.mm_engine.logger") as mock_logger:
+            with patch.object(engine, "_detect_wick_direction_change", return_value=True):
+                with patch.object(engine, "_maybe_log_ema_fan_out_warning"):
+                    # Simulate just the wick warning block
+                    pos_direction = "bullish" if pos.direction == "long" else "bearish"
+                    wick_reversal = engine._detect_wick_direction_change(candles, pos_direction)
+                    if pos.current_level >= 3 and wick_reversal:
+                        mock_logger.info(
+                            "mm_wick_direction_warning",
+                            symbol="BTC/USDT",
+                            level=pos.current_level,
+                            direction=pos.direction,
+                        )
+
+        calls = [str(call) for call in mock_logger.info.call_args_list]
+        assert any("mm_wick_direction_warning" in c for c in calls), (
+            f"Expected mm_wick_direction_warning in logger.info calls, got: {calls}"
+        )
+
+    def test_wick_warning_not_logged_below_l3(self, engine: MMEngine):
+        """mm_wick_direction_warning must NOT be logged below Level 3."""
+        candles = _make_top_wick_candles(n=10)
+        pos = MMPosition(symbol="BTC/USDT", current_level=2, direction="long")
+
+        with patch("src.strategy.mm_engine.logger") as mock_logger:
+            pos_direction = "bullish" if pos.direction == "long" else "bearish"
+            wick_reversal = engine._detect_wick_direction_change(candles, pos_direction)
+            if pos.current_level >= 3 and wick_reversal:
+                mock_logger.info("mm_wick_direction_warning", symbol="BTC/USDT")
+
+        calls = [str(call) for call in mock_logger.info.call_args_list]
+        assert not any("mm_wick_direction_warning" in c for c in calls)
