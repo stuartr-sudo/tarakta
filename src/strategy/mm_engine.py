@@ -2794,6 +2794,22 @@ class MMEngine:
                     direction=pos.direction,
                 )
 
+        # D6: MM Candle Reframing at Level 3.
+        # Course teaches: a big green candle at L3 during a rise = BEARISH
+        # (Market Maker distributing / selling into retail buying). The large
+        # body candle is the MM reframe signal — informational warning here.
+        if pos.current_level >= 3 and candles_1h is not None:
+            pos_direction = "bullish" if pos.direction == "long" else "bearish"
+            reframe = self._detect_mm_candle_reframe(candles_1h, pos_direction, pos.current_level)
+            if reframe:
+                logger.info(
+                    "mm_candle_reframe_warning",
+                    symbol=symbol,
+                    level=pos.current_level,
+                    direction=pos.direction,
+                    msg="Large-body candle at L3 = MM distribution/absorption. Imminent reversal likely.",
+                )
+
         # Check for Stopping Volume Candle at Level 3 (unless a Linda cascade
         # is running in our direction — lesson 55 — in which case SVC in the
         # OPPOSITE direction is the exit, but matching-direction SVCs are
@@ -3104,6 +3120,67 @@ class MMEngine:
                 # For short: wicks should be at top during descent; if top wick
                 # ratio < 0.5 (wicks shifted to bottom), reversal warning
                 return avg_top_wick < 0.5
+        except Exception:
+            return False
+
+    def _detect_mm_candle_reframe(
+        self,
+        candles_1h: pd.DataFrame,
+        direction: str,
+        current_level: int,
+    ) -> bool:
+        """D6: MM Candle Reframing at Level 3.
+
+        Course teaches: a big green candle at Level 3 during a rise is BEARISH
+        — the Market Maker is distributing / selling into retail's bullish
+        enthusiasm. Conversely a big red candle at L3 during a drop is
+        BULLISH (MM absorbing into fear). Treat large-body candles as the
+        OPPOSITE of what they look like.
+
+        Conditions:
+          - At Level 3 (current_level >= 3).
+          - Check last 3 closed candles for a large-body candle:
+              body > 70% of full range AND body > 2x average body size.
+          - During a rise (long): bullish large candle → bearish reframe.
+          - During a drop (short): bearish large candle → bullish reframe.
+
+        Returns:
+            True if a MM reframe signal is detected (warning, not hard exit).
+        """
+        if current_level < 3:
+            return False
+        if candles_1h is None or candles_1h.empty or len(candles_1h) < 10:
+            return False
+        try:
+            recent = candles_1h.iloc[-4:-1]  # last 3 closed candles
+            if len(recent) < 3:
+                return False
+
+            # Average body size over last 10 candles (normalised base)
+            last10 = candles_1h.tail(10)
+            avg_body = float((abs(last10["close"] - last10["open"])).mean())
+
+            for _, row in recent.iterrows():
+                o = float(row["open"])
+                h = float(row["high"])
+                lo = float(row["low"])
+                c = float(row["close"])
+                full_range = h - lo
+                body = abs(c - o)
+                if full_range <= 0 or avg_body <= 0:
+                    continue
+                # Large body: body > 70% of range AND > 2x average body
+                is_large = (body / full_range) > 0.70 and body > (2.0 * avg_body)
+                if not is_large:
+                    continue
+                is_bullish_candle = c > o
+                # Reframe signal: large bullish candle during a rise (long) → bearish warning
+                if direction == "bullish" and is_bullish_candle:
+                    return True
+                # Reframe signal: large bearish candle during a drop (short) → bullish warning
+                if direction == "bearish" and not is_bullish_candle:
+                    return True
+            return False
         except Exception:
             return False
 

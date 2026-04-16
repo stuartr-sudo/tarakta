@@ -1060,3 +1060,92 @@ class TestStaggerEntries:
         for entry in result:
             assert "price" in entry
             assert "weight" in entry
+
+
+# ---------------------------------------------------------------------------
+# D6: MM Candle Reframing (Task 7.2)
+# ---------------------------------------------------------------------------
+
+def _make_reframe_candles(
+    large_body_direction: str = "bullish",
+    large_body_at_end: bool = True,
+    num_candles: int = 15,
+) -> pd.DataFrame:
+    """Build 1H candles with a large-body candle at the end."""
+    base = 1000.0
+    idx = pd.date_range("2026-04-14", periods=num_candles, freq="1h", tz="UTC")
+    closes = np.full(num_candles, base)
+    opens = np.full(num_candles, base)
+    highs = np.full(num_candles, base * 1.002)
+    lows = np.full(num_candles, base * 0.998)
+    volumes = np.ones(num_candles) * 500
+
+    # Build normal candles with small bodies (avg_body ~ base * 0.001)
+    for i in range(num_candles - 3):
+        closes[i] = base * (1 + 0.0005 * (i % 2 - 0.5))
+        opens[i] = base * (1 - 0.0005 * (i % 2 - 0.5))
+        highs[i] = max(opens[i], closes[i]) * 1.001
+        lows[i] = min(opens[i], closes[i]) * 0.999
+
+    if large_body_at_end:
+        # Candles -3 to -2 (will be checked as "last 3 closed"):
+        # Make one of them a large-body candle
+        i = num_candles - 2  # second to last = in the [-4:-1] slice
+        if large_body_direction == "bullish":
+            opens[i] = base * 0.990    # open well below
+            closes[i] = base * 1.010   # close well above (big green candle)
+            highs[i] = closes[i] * 1.001
+            lows[i] = opens[i] * 0.999
+        else:
+            opens[i] = base * 1.010
+            closes[i] = base * 0.990
+            highs[i] = opens[i] * 1.001
+            lows[i] = closes[i] * 0.999
+
+    return pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+        index=idx,
+    )
+
+
+class TestMMCandleReframe:
+
+    def test_large_green_at_l3_rise_returns_warning(self, engine: MMEngine):
+        """Large green candle during long (rise) at L3 → reframe signal True."""
+        candles = _make_reframe_candles(large_body_direction="bullish")
+        result = engine._detect_mm_candle_reframe(candles, "bullish", current_level=3)
+        assert result is True
+
+    def test_large_red_at_l3_drop_returns_warning(self, engine: MMEngine):
+        """Large red candle during short (drop) at L3 → reframe signal True."""
+        candles = _make_reframe_candles(large_body_direction="bearish")
+        result = engine._detect_mm_candle_reframe(candles, "bearish", current_level=3)
+        assert result is True
+
+    def test_normal_candle_no_warning(self, engine: MMEngine):
+        """Normal-size candles → no reframe signal."""
+        # Build candles with uniformly small bodies
+        idx = pd.date_range("2026-04-14", periods=15, freq="1h", tz="UTC")
+        base = 1000.0
+        closes = np.full(15, base)
+        opens = np.full(15, base * 0.9995)  # tiny body
+        highs = closes * 1.002
+        lows = opens * 0.998
+        volumes = np.ones(15) * 500
+        candles = pd.DataFrame(
+            {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+            index=idx,
+        )
+        result = engine._detect_mm_candle_reframe(candles, "bullish", current_level=3)
+        assert result is False
+
+    def test_below_level_3_no_warning(self, engine: MMEngine):
+        """Below Level 3 → no reframe signal regardless of candle size."""
+        candles = _make_reframe_candles(large_body_direction="bullish")
+        result = engine._detect_mm_candle_reframe(candles, "bullish", current_level=2)
+        assert result is False
+
+    def test_empty_candles_no_warning(self, engine: MMEngine):
+        """Empty DataFrame → no reframe signal."""
+        result = engine._detect_mm_candle_reframe(pd.DataFrame(), "bullish", current_level=3)
+        assert result is False
