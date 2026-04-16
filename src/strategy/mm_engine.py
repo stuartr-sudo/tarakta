@@ -49,6 +49,7 @@ from src.strategy.mm_targets import TargetAnalyzer
 from src.strategy.mm_weekly_cycle import WeeklyCycleTracker
 from src.strategy.mm_weekend_trap import WeekendTrapAnalyzer
 from src.strategy.mm_scalp_vwap_rsi import VWAPRSIScalper, ScalpSignal
+from src.strategy.mm_scalp_ribbon import RibbonAnalyzer, RibbonSignal
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -310,6 +311,11 @@ class MMEngine:
         # MM formation is found. Fires on 15m chart with VWAP + RSI(2)
         # extreme + reversal candlestick at pullback.
         self.scalper = VWAPRSIScalper()
+
+        # A8: Ribbon (Multi-EMA) Scalp Strategy — second fallback entry path
+        # when neither MM formation nor VWAP+RSI scalp is found. Uses a
+        # 9-EMA ribbon (periods 2-100) with trend-flip + yellow-EMA pullback.
+        self.ribbon_analyzer = RibbonAnalyzer()
 
         # Course E1 (lesson 54): "if you have $10K OKX and $10K Binance,
         # 1% of $20K" — multi-exchange combined balance for 1% risk.
@@ -789,6 +795,62 @@ class MMEngine:
             peak2_price=scalp.entry_price,
             trough_idx=peak2_idx,
             trough_price=scalp.entry_price,
+            direction=direction,
+            quality_score=0.5,
+            at_key_level=False,
+            confirmed=True,
+        )
+
+    def _try_ribbon_signal(self, candles_15m, cycle_state):
+        """A8: Ribbon Scalp — scan for a ribbon setup on the 15m chart.
+
+        Gets targets from the weekly cycle (HOW, LOW, HOD, LOD) and calls
+        the RibbonAnalyzer. Returns a RibbonSignal or None.
+        """
+        targets = []
+        for attr in ("how", "low", "hod", "lod"):
+            val = getattr(cycle_state, attr, None)
+            if val and val > 0 and val != float("inf"):
+                targets.append(float(val))
+
+        ribbon = self.ribbon_analyzer.scan(candles_15m, targets or None)
+        if ribbon is not None and ribbon.detected:
+            logger.info(
+                "mm_ribbon_signal_detected",
+                direction=ribbon.direction,
+                entry=ribbon.entry_price,
+                sl=ribbon.stop_loss,
+                tp=ribbon.target,
+                rr=ribbon.risk_reward,
+                trend=ribbon.trend,
+                squeezed=ribbon.squeezed,
+            )
+        return ribbon
+
+    def _formation_from_ribbon(self, ribbon: "RibbonSignal", candles_15m) -> "Formation":
+        """Synthesize a Formation from a RibbonSignal for pipeline compatibility.
+
+        Tags the formation with variant='scalp_ribbon' so it's
+        distinguishable in the trade log.
+        """
+        from src.strategy.mm_formations import Formation
+
+        ftype = "W" if ribbon.direction == "long" else "M"
+        direction = "bullish" if ribbon.direction == "long" else "bearish"
+
+        n = len(candles_15m)
+        peak2_idx = max(0, n - 1)
+        peak1_idx = max(0, n - 3)  # ~30 min prior
+
+        return Formation(
+            type=ftype,
+            variant="scalp_ribbon",
+            peak1_idx=peak1_idx,
+            peak1_price=ribbon.stop_loss,
+            peak2_idx=peak2_idx,
+            peak2_price=ribbon.entry_price,
+            trough_idx=peak2_idx,
+            trough_price=ribbon.entry_price,
             direction=direction,
             quality_score=0.5,
             at_key_level=False,
@@ -1624,6 +1686,13 @@ class MMEngine:
                 scalp = self._try_scalp_signal(candles_15m, candles_1h, cycle_state)
                 if scalp is not None and scalp.detected:
                     best_formation = self._formation_from_scalp(scalp, candles_15m)
+
+            # A8: Ribbon Scalp — second fallback after VWAP+RSI scalp.
+            # Requires 150+ candles (slowest EMA period 100 * 1.5).
+            if best_formation is None and candles_15m is not None and len(candles_15m) >= 150:
+                ribbon = self._try_ribbon_signal(candles_15m, cycle_state)
+                if ribbon is not None and ribbon.detected:
+                    best_formation = self._formation_from_ribbon(ribbon, candles_15m)
 
             if best_formation is None:
                 return self._reject("no_formation", symbol)
