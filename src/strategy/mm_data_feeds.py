@@ -103,6 +103,120 @@ class StubHyblockProvider:
         return HyblockData(available=False)
 
 
+class BinanceLiquidationProvider:
+    """Free liquidation/delta data via Binance public futures API.
+
+    Course Lessons 02, 11: 'Delta = imbalance between long and short
+    positions exposed.' When most accounts are long, that's the liquidity
+    the MM will hunt. Binance's global long/short ratio gives us this
+    data for free.
+
+    No API key required — all endpoints are public.
+    """
+
+    BASE_URL = "https://fapi.binance.com/futures/data"
+    OI_URL = "https://fapi.binance.com/fapi/v1/openInterest"
+    CACHE_TTL_SECONDS = 60  # Binance updates every minute
+
+    # Course thresholds (Lesson 11)
+    EXTREME_RATIO_THRESHOLD = 0.65  # 65%+ on one side = extreme positioning
+    DELTA_LEVEL_LOW = 0.05     # <5% imbalance
+    DELTA_LEVEL_MEDIUM = 0.10
+    DELTA_LEVEL_HIGH = 0.20
+    DELTA_LEVEL_EXTREME = 0.30  # >30% imbalance = top reversal warning
+
+    def __init__(self) -> None:
+        self._cache: dict = {}
+        self._cache_time: dict[str, datetime] = {}
+
+    async def fetch_liquidation_data(self, symbol: str = "BTCUSDT") -> HyblockData:
+        """Fetch long/short ratio, top trader positions, and OI for a symbol.
+
+        Args:
+            symbol: Binance perpetual symbol (e.g., 'BTCUSDT', 'ETHUSDT').
+                    Also accepts CCXT-style 'BTC/USDT:USDT' — normalised internally.
+
+        Returns:
+            HyblockData with delta, delta_level, and approximate liquidation clusters.
+        """
+        from datetime import timezone
+
+        # Strip suffix - Binance uses "BTCUSDT" not "BTC/USDT:USDT"
+        normalized = symbol.replace("/", "").replace(":USDT", "").replace(":USD", "")
+
+        # Cache check
+        cache_key = normalized
+        if cache_key in self._cache_time:
+            age = (datetime.now(timezone.utc) - self._cache_time[cache_key]).total_seconds()
+            if age < self.CACHE_TTL_SECONDS:
+                return self._cache.get(cache_key, HyblockData(available=False))
+
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                # Top trader position ratio (closer to "delta" than account ratio)
+                top_pos_resp = await client.get(
+                    f"{self.BASE_URL}/topLongShortPositionRatio",
+                    params={"symbol": normalized, "period": "1h", "limit": 1},
+                )
+
+                if top_pos_resp.status_code != 200:
+                    return HyblockData(available=False)
+
+                top_pos = top_pos_resp.json()
+                if not top_pos:
+                    return HyblockData(available=False)
+
+                latest = top_pos[-1]
+                long_pct = float(latest["longAccount"])
+                short_pct = float(latest["shortAccount"])
+                # Delta = imbalance, positive = more longs (longs exposed)
+                delta = long_pct - short_pct
+
+                # Classify delta level (course Lesson 11)
+                abs_delta = abs(delta)
+                if abs_delta < self.DELTA_LEVEL_LOW:
+                    delta_level = "low"
+                elif abs_delta < self.DELTA_LEVEL_MEDIUM:
+                    delta_level = "medium"
+                elif abs_delta < self.DELTA_LEVEL_HIGH:
+                    delta_level = "high"
+                else:
+                    delta_level = "extreme"
+
+                # Approximate liquidation clusters: when delta is extreme,
+                # the over-positioned side has stops that will be hunted.
+                # We don't have exact prices, but we can flag the direction.
+                clusters: list[dict] = []
+                if abs_delta >= self.DELTA_LEVEL_HIGH:
+                    direction = "longs_exposed" if delta > 0 else "shorts_exposed"
+                    clusters.append({
+                        "direction": direction,
+                        "imbalance_pct": round(abs_delta * 100, 1),
+                        "interpretation": (
+                            f"{long_pct * 100:.1f}% long / {short_pct * 100:.1f}% short"
+                        ),
+                    })
+
+                result = HyblockData(
+                    available=True,
+                    delta=round(delta, 4),
+                    delta_level=delta_level,
+                    liquidation_clusters=clusters,  # type: ignore[arg-type]
+                    timestamp=datetime.now(timezone.utc),
+                )
+                self._cache[cache_key] = result
+                self._cache_time[cache_key] = datetime.now(timezone.utc)
+                return result
+        except Exception as e:
+            logger.warning("binance_liq_fetch_failed symbol=%s error=%s", symbol, e)
+            return HyblockData(available=False)
+
+    # Keep protocol-compatible alias so callers using fetch_liquidations still work
+    async def fetch_liquidations(self, symbol: str) -> HyblockData:
+        return await self.fetch_liquidation_data(symbol)
+
+
 # ---------------------------------------------------------------------------
 # TradingLite (heat map / limit-order clusters)
 # ---------------------------------------------------------------------------
@@ -573,6 +687,11 @@ class StubSentimentProvider:
 # ---------------------------------------------------------------------------
 
 
+def _default_hyblock_provider():
+    """Return BinanceLiquidationProvider (free, no key) as the hyblock provider."""
+    return BinanceLiquidationProvider()
+
+
 def _default_correlation_provider():
     """Return YFinanceCorrelationProvider if yfinance is installed, else Stub."""
     try:
@@ -596,7 +715,7 @@ class DataFeedRegistry:
 
     Call ``get_status()`` to inspect which providers are currently live.
     """
-    hyblock: HyblockProvider = field(default_factory=StubHyblockProvider)
+    hyblock: HyblockProvider = field(default_factory=_default_hyblock_provider)
     tradinglite: TradingLiteProvider = field(default_factory=StubTradingLiteProvider)
     news: NewsProvider = field(default_factory=StubNewsProvider)
     options: OptionsProvider = field(default_factory=StubOptionsProvider)

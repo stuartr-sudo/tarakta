@@ -44,6 +44,7 @@ from src.strategy.mm_data_feeds import (
     StubCorrelationProvider,
     StubSentimentProvider,
     # Real providers
+    BinanceLiquidationProvider,
     YFinanceCorrelationProvider,
     # Registry
     DataFeedRegistry,
@@ -388,7 +389,8 @@ class TestSentimentDataFields:
 
 class TestDataFeedRegistryStatus:
     def test_all_stubs_return_false_status(self):
-        """All stubs except correlation (auto-upgraded to YFinance if available) should be False."""
+        """Default registry: hyblock=True (Binance), correlation=True/False (yfinance),
+        rest are False (still stubbed)."""
         registry = DataFeedRegistry()
         status = registry.get_status()
 
@@ -399,8 +401,13 @@ class TestDataFeedRegistryStatus:
         }
         assert set(status.keys()) == expected_keys
 
-        # These are always stubs — must be False
-        always_stub_keys = ("hyblock", "tradinglite", "news", "options", "dominance", "sentiment")
+        # hyblock is now live via BinanceLiquidationProvider — must be True
+        assert status["hyblock"] is True, (
+            "hyblock should be True (BinanceLiquidationProvider is the default)"
+        )
+
+        # These remain stubs — must be False
+        always_stub_keys = ("tradinglite", "news", "options", "dominance", "sentiment")
         for provider_name in always_stub_keys:
             assert status[provider_name] is False, (
                 f"Provider '{provider_name}' should be False (stub) but got True"
@@ -441,6 +448,11 @@ class TestDataFeedRegistryStatus:
         assert registry.hyblock is not None
         assert registry.news is not None
         assert registry.sentiment is not None
+
+    def test_hyblock_default_is_binance_provider(self):
+        """Default hyblock provider is BinanceLiquidationProvider (free, no key)."""
+        registry = DataFeedRegistry()
+        assert isinstance(registry.hyblock, BinanceLiquidationProvider)
 
     def test_yfinance_provider_is_default_when_installed(self):
         """Default registry uses YFinanceCorrelationProvider when yfinance is importable."""
@@ -649,3 +661,199 @@ class TestYFinanceCorrelationProvider:
 
         assert corr.available is True
         assert corr.aligns_with_trade_direction is False
+
+
+# ---------------------------------------------------------------------------
+# BinanceLiquidationProvider tests (mocked httpx — no real network calls)
+# ---------------------------------------------------------------------------
+
+
+def _binance_top_pos_response(long_pct: float, short_pct: float) -> list[dict]:
+    """Build a minimal Binance topLongShortPositionRatio response."""
+    return [
+        {
+            "symbol": "BTCUSDT",
+            "longAccount": str(long_pct),
+            "shortAccount": str(short_pct),
+            "longShortRatio": str(long_pct / short_pct) if short_pct else "1",
+            "timestamp": 1713340800000,
+        }
+    ]
+
+
+class TestBinanceLiquidationProvider:
+    """Tests for BinanceLiquidationProvider using mocked httpx."""
+
+    def _make_provider(self) -> BinanceLiquidationProvider:
+        return BinanceLiquidationProvider()
+
+    def _mock_client(self, long_pct: float, short_pct: float):
+        """Return a context-manager mock for httpx.AsyncClient that returns fake data."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = _binance_top_pos_response(long_pct, short_pct)
+
+        mock_client_instance = AsyncMock()
+        mock_client_instance.get = AsyncMock(return_value=mock_resp)
+
+        mock_cm = MagicMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_client_instance)
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+        return mock_cm
+
+    def test_delta_calculation(self):
+        """Delta = long_pct - short_pct. Use 0.70-0.30=0.40 for an unambiguous value."""
+        provider = self._make_provider()
+        with patch("httpx.AsyncClient", return_value=self._mock_client(0.70, 0.30)):
+            data = run(provider.fetch_liquidation_data("BTCUSDT"))
+
+        assert data.available is True
+        assert abs(data.delta - 0.40) < 0.001  # 0.70 - 0.30 = 0.40
+
+    def test_delta_level_low(self):
+        """Delta < 5% → level='low'."""
+        provider = self._make_provider()
+        with patch("httpx.AsyncClient", return_value=self._mock_client(0.52, 0.48)):
+            data = run(provider.fetch_liquidation_data("BTCUSDT"))
+
+        assert data.delta_level == "low"
+
+    def test_delta_level_medium(self):
+        """Delta 5-10% → level='medium' (e.g. 0.57 - 0.43 = 0.14? No — use 0.07 imbalance)."""
+        # 0.535 - 0.465 = 0.07 → strictly inside [0.05, 0.10) → medium
+        provider = self._make_provider()
+        with patch("httpx.AsyncClient", return_value=self._mock_client(0.535, 0.465)):
+            data = run(provider.fetch_liquidation_data("BTCUSDT"))
+
+        assert data.delta_level == "medium"
+
+    def test_delta_level_high(self):
+        """Delta 10-20% → level='high'. Use 0.57-0.43=0.14 (clearly inside [0.10, 0.20))."""
+        provider = self._make_provider()
+        # 0.57 - 0.43 = 0.14, which is in [0.10, 0.20) → high
+        with patch("httpx.AsyncClient", return_value=self._mock_client(0.57, 0.43)):
+            data = run(provider.fetch_liquidation_data("BTCUSDT"))
+
+        assert data.delta_level == "high"
+
+    def test_delta_level_extreme(self):
+        """Delta >= 30% → level='extreme'. Use 0.65-0.35=0.30 but via string to avoid FP."""
+        provider = self._make_provider()
+        # 0.66 - 0.34 = 0.32 (above 0.30 threshold)
+        with patch("httpx.AsyncClient", return_value=self._mock_client(0.66, 0.34)):
+            data = run(provider.fetch_liquidation_data("BTCUSDT"))
+
+        assert data.delta_level == "extreme"
+
+    def test_cluster_generated_when_high_delta(self):
+        """Cluster entry generated when delta >= HIGH threshold (0.20). Use 0.25 imbalance."""
+        provider = self._make_provider()
+        # 0.625 - 0.375 = 0.25, clearly above 0.20 threshold
+        with patch("httpx.AsyncClient", return_value=self._mock_client(0.625, 0.375)):
+            data = run(provider.fetch_liquidation_data("BTCUSDT"))
+
+        assert data.available is True
+        assert isinstance(data.liquidation_clusters, list)
+        assert len(data.liquidation_clusters) == 1
+        cluster = data.liquidation_clusters[0]
+        assert cluster["direction"] == "longs_exposed"
+        assert cluster["imbalance_pct"] == pytest.approx(25.0, abs=0.2)
+
+    def test_cluster_shorts_exposed_when_negative_delta(self):
+        """When more shorts than longs → cluster direction = 'shorts_exposed'."""
+        provider = self._make_provider()
+        # 0.375 - 0.625 = -0.25 (abs = 0.25 >= 0.20)
+        with patch("httpx.AsyncClient", return_value=self._mock_client(0.375, 0.625)):
+            data = run(provider.fetch_liquidation_data("BTCUSDT"))
+
+        assert data.available is True
+        cluster = data.liquidation_clusters[0]
+        assert cluster["direction"] == "shorts_exposed"
+
+    def test_no_cluster_when_low_delta(self):
+        """No cluster entry when delta is below HIGH threshold."""
+        provider = self._make_provider()
+        with patch("httpx.AsyncClient", return_value=self._mock_client(0.52, 0.48)):
+            data = run(provider.fetch_liquidation_data("BTCUSDT"))
+
+        assert data.available is True
+        assert data.liquidation_clusters == []
+
+    def test_symbol_normalisation(self):
+        """CCXT-style 'BTC/USDT:USDT' is normalised to 'BTCUSDT' for the API call."""
+        provider = self._make_provider()
+        mock_cm = self._mock_client(0.55, 0.45)
+        with patch("httpx.AsyncClient", return_value=mock_cm) as mock_cls:
+            run(provider.fetch_liquidation_data("BTC/USDT:USDT"))
+
+        # Inspect the params passed to .get()
+        client_instance = mock_cm.__aenter__.return_value
+        call_kwargs = client_instance.get.call_args
+        params = call_kwargs[1].get("params") or call_kwargs[0][1] if len(call_kwargs[0]) > 1 else {}
+        if not params and call_kwargs.kwargs:
+            params = call_kwargs.kwargs.get("params", {})
+        assert params.get("symbol") == "BTCUSDT"
+
+    def test_cache_returns_same_result_within_ttl(self):
+        """Second call within TTL returns cached result without calling httpx again."""
+        provider = self._make_provider()
+        mock_cm = self._mock_client(0.57, 0.43)
+        with patch("httpx.AsyncClient", return_value=mock_cm) as mock_cls:
+            result1 = run(provider.fetch_liquidation_data("BTCUSDT"))
+            result2 = run(provider.fetch_liquidation_data("BTCUSDT"))
+
+        # AsyncClient should only be instantiated once — cache hit on second call
+        assert mock_cls.call_count == 1
+        assert result1.delta == result2.delta
+
+    def test_returns_unavailable_on_non_200(self):
+        """Returns HyblockData(available=False) when Binance returns a non-200 status."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 429  # rate limit
+        mock_client_instance = AsyncMock()
+        mock_client_instance.get = AsyncMock(return_value=mock_resp)
+        mock_cm = MagicMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_client_instance)
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+        provider = self._make_provider()
+        with patch("httpx.AsyncClient", return_value=mock_cm):
+            data = run(provider.fetch_liquidation_data("BTCUSDT"))
+
+        assert data.available is False
+
+    def test_returns_unavailable_on_network_error(self):
+        """Returns HyblockData(available=False) gracefully when httpx raises."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock_cm = MagicMock()
+        mock_cm.__aenter__ = AsyncMock(side_effect=RuntimeError("network error"))
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+        provider = self._make_provider()
+        with patch("httpx.AsyncClient", return_value=mock_cm):
+            data = run(provider.fetch_liquidation_data("BTCUSDT"))
+
+        assert data.available is False
+
+    def test_fetch_liquidations_alias(self):
+        """fetch_liquidations() is an alias for fetch_liquidation_data()."""
+        provider = self._make_provider()
+        with patch("httpx.AsyncClient", return_value=self._mock_client(0.60, 0.40)):
+            data = run(provider.fetch_liquidations("BTCUSDT"))
+
+        assert data.available is True
+        assert data.delta is not None
+
+    def test_timestamp_is_set(self):
+        """Result includes a UTC timestamp."""
+        provider = self._make_provider()
+        with patch("httpx.AsyncClient", return_value=self._mock_client(0.55, 0.45)):
+            data = run(provider.fetch_liquidation_data("BTCUSDT"))
+
+        assert data.timestamp is not None
+        assert data.timestamp.tzinfo is not None

@@ -257,20 +257,26 @@ def test_engine_has_data_feeds_registry(engine: MMEngine):
 async def test_data_feed_stubs_return_unavailable():
     """Stub providers return available=False.
 
-    The correlation provider may be upgraded to YFinanceCorrelationProvider
-    automatically when yfinance is installed — skip corr in that case.
+    - hyblock uses BinanceLiquidationProvider (free, live) — may return available=True.
+    - correlation may be upgraded to YFinanceCorrelationProvider — also may be True.
+    - All others remain stubbed and must return available=False.
     """
-    from src.strategy.mm_data_feeds import DataFeedRegistry, StubCorrelationProvider
+    from src.strategy.mm_data_feeds import (
+        DataFeedRegistry,
+        BinanceLiquidationProvider,
+        StubCorrelationProvider,
+    )
     r = DataFeedRegistry()
-    liq = await r.hyblock.fetch_liquidations("BTC/USDT")
     heat = await r.tradinglite.fetch_heatmap("BTC/USDT")
     news = await r.news.fetch_upcoming()
     opts = await r.options.fetch_next_expiry("BTC/USDT")
     dom = await r.dominance.fetch_dominances()
     sent = await r.sentiment.fetch_sentiment()
-    # These must always be stubs (no real provider added yet)
-    for obj in (liq, heat, news, opts, dom, sent):
+    # These remain stubs — must always return available=False
+    for obj in (heat, news, opts, dom, sent):
         assert obj.available is False, f"stub {type(obj).__name__} should be unavailable"
+    # hyblock is now BinanceLiquidationProvider (live free API) — just check the type
+    assert isinstance(r.hyblock, BinanceLiquidationProvider)
     # Correlation may use YFinanceCorrelationProvider (real) — only check stub case
     if isinstance(r.correlation, StubCorrelationProvider):
         corr = await r.correlation.fetch_correlations("long")

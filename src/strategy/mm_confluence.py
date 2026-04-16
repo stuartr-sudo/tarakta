@@ -84,8 +84,10 @@ MAX_POSSIBLE: float = sum(WEIGHTS.values())  # 111 → 123 (weekend-box, OI prom
 # Factors that require external data feeds (currently stubbed).
 # When calculating grade thresholds, we use AVAILABLE_MAX instead of
 # MAX_POSSIBLE so the bot isn't penalized for missing data it can't get.
-STUBBED_FACTORS: set[str] = {"liquidation_cluster", "news_event", "correlation_confirmed"}
-AVAILABLE_MAX: float = MAX_POSSIBLE - sum(WEIGHTS[k] for k in STUBBED_FACTORS)  # 133 - 18 = 115
+# liquidation_cluster is now live via BinanceLiquidationProvider (free).
+# correlation_confirmed is now live via YFinanceCorrelationProvider (free).
+STUBBED_FACTORS: set[str] = {"news_event"}
+AVAILABLE_MAX: float = MAX_POSSIBLE - sum(WEIGHTS[k] for k in STUBBED_FACTORS)  # 133 - 6 = 127
 
 # Grade thresholds (percentage of max possible)
 GRADE_A_THRESHOLD: float = 70.0

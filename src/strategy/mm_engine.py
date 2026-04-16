@@ -2313,11 +2313,13 @@ class MMEngine:
         except Exception:
             hl_lh = False
 
-        # (4) at_liquidity_cluster: approximate from free signals we have
-        # — HOW/LOW proximity (within 0.5%) OR unrecovered-vector proximity.
-        # Course lesson 27 treats liquidation clusters as a Hyblock signal,
-        # but HOW/LOW and unrecovered vectors ARE where Market Makers go
-        # to pick up liquidity in the absence of Hyblock data.
+        # (4) at_liquidity_cluster: two sources:
+        #   (a) Price proximity — HOW/LOW or unrecovered-vector proximity
+        #       (within 0.5%). Course lesson 27 treats these as where MMs
+        #       pick up liquidity in the absence of Hyblock data.
+        #   (b) Binance Long/Short Ratio (free API, no key required).
+        #       Course Lesson 11: when delta is HIGH/EXTREME the over-positioned
+        #       side will get hunted. We trade contrarian (against the crowd).
         at_liq_cluster = False
         try:
             for lvl in (cycle_state.how, cycle_state.low):
@@ -2333,6 +2335,26 @@ class MMEngine:
                         break
         except Exception:
             at_liq_cluster = False
+
+        # Liquidation cluster check (Course Lesson 11) — Binance free API
+        if not at_liq_cluster:
+            try:
+                liq_data = await self.data_feeds.hyblock.fetch_liquidation_data(symbol)
+                if liq_data.available and liq_data.delta_level in ("high", "extreme"):
+                    # When delta is HIGH or EXTREME, the over-positioned side will
+                    # get hunted. Trade in the direction of the hunt (contrarian).
+                    delta_dir = "short" if (liq_data.delta or 0) > 0 else "long"
+                    if trade_direction == delta_dir:
+                        at_liq_cluster = True
+                        logger.info(
+                            "mm_liq_cluster_aligned",
+                            symbol=symbol,
+                            delta=liq_data.delta,
+                            level=liq_data.delta_level,
+                            trade_dir=trade_direction,
+                        )
+            except Exception:
+                pass  # Best-effort; falls back to proximity-based value above
 
         # Course lesson 15: M/W inside the weekend trap box is a named
         # high-probability setup. True when (a) the analyzer detected a
