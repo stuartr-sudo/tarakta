@@ -455,7 +455,7 @@ class MMEngine:
             confirmed=True,
         )
 
-    def _try_nyc_reversal_formation(self, candles_1h, session, level_analysis, cycle_state, now):
+    def _try_nyc_reversal_formation(self, candles_1h, session, cycle_state, now):
         """Course lesson 10 (A2): NYC Reversal trade.
 
         Within the first 3 hours of the US session (9:30am-12:30pm NY),
@@ -471,7 +471,12 @@ class MMEngine:
         if session is None or session.session_name != "us_open":
             return None
 
-        if level_analysis is None or level_analysis.current_level < 3:
+        # Compute level analysis inline (like three_hits does)
+        # Check both directions and pick the one with higher level
+        level_bull = self.level_tracker.analyze(candles_1h, direction="bullish")
+        level_bear = self.level_tracker.analyze(candles_1h, direction="bearish")
+        current_level = max(level_bull.current_level, level_bear.current_level)
+        if current_level < 3:
             return None
 
         ny_tz = ZoneInfo("America/New_York")
@@ -483,7 +488,7 @@ class MMEngine:
         result = detect_nyc_reversal(
             candles_1h=candles_1h,
             session_name=session.session_name,
-            current_level=level_analysis.current_level,
+            current_level=current_level,
             hod=hod, lod=lod, now_ny=now_ny,
         )
 
@@ -518,7 +523,7 @@ class MMEngine:
             confirmed=True,
         )
 
-    def _try_stophunt_formation(self, candles_1h, level_analysis):
+    def _try_stophunt_formation(self, candles_1h):
         """Course lesson 15 (A4): Stop hunt entry at Level 3.
 
         At Level 3 in a board meeting, a vector candle (stop hunt) fires
@@ -527,7 +532,11 @@ class MMEngine:
         """
         from src.strategy.mm_formations import Formation
 
-        if level_analysis is None or level_analysis.current_level < 3:
+        # Compute level analysis inline (like three_hits does)
+        level_bull = self.level_tracker.analyze(candles_1h, direction="bullish")
+        level_bear = self.level_tracker.analyze(candles_1h, direction="bearish")
+        current_level = max(level_bull.current_level, level_bear.current_level)
+        if current_level < 3:
             return None
 
         # Check if a board meeting is currently active
@@ -549,7 +558,7 @@ class MMEngine:
 
         result = detect_stophunt_entry(
             candles_1h=candles_1h,
-            current_level=level_analysis.current_level,
+            current_level=current_level,
             board_meeting_active=board_meeting_active,
         )
 
@@ -1349,7 +1358,7 @@ class MMEngine:
             # US open first 3 hours, Level 3+, reversal pattern at HOD/LOD.
             if best_formation is None:
                 best_formation = self._try_nyc_reversal_formation(
-                    candles_1h, session, level_analysis, cycle_state, now,
+                    candles_1h, session, cycle_state, now,
                 )
                 if best_formation is not None:
                     logger.info("mm_nyc_reversal_formation_synthesized",
@@ -1360,7 +1369,7 @@ class MMEngine:
             # Vector candle (stop hunt) in a board meeting at Level 3.
             if best_formation is None:
                 best_formation = self._try_stophunt_formation(
-                    candles_1h, level_analysis,
+                    candles_1h,
                 )
                 if best_formation is not None:
                     logger.info("mm_stophunt_formation_synthesized",

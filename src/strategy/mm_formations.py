@@ -1504,7 +1504,7 @@ def detect_nyc_reversal(
 
     o = float(last["open"])
     h = float(last["high"])
-    l = float(last["low"])
+    lo = float(last["low"])
     c = float(last["close"])
 
     po = float(prev["open"])
@@ -1516,7 +1516,7 @@ def detect_nyc_reversal(
 
     # Determine if near HOD or LOD
     near_hod = h >= hod - near_tol
-    near_lod = l <= lod + near_tol
+    near_lod = lo <= lod + near_tol
 
     if not (near_hod or near_lod):
         return None
@@ -1524,17 +1524,17 @@ def detect_nyc_reversal(
     # Gate 5: check for reversal pattern on last candle(s)
     if near_lod:
         # Near LOD → bullish reversal
-        if _is_hammer(o, h, l, c):
+        if _is_hammer(o, h, lo, c):
             return NYCReversalResult(
                 detected=True, direction="bullish",
                 entry_price=close_price, pattern="hammer", level=current_level,
             )
-        if _is_inverted_hammer(o, h, l, c):
+        if _is_inverted_hammer(o, h, lo, c):
             return NYCReversalResult(
                 detected=True, direction="bullish",
                 entry_price=close_price, pattern="inverted_hammer", level=current_level,
             )
-        rr = _is_railroad_tracks(po, ph, pl, pc, o, h, l, c)
+        rr = _is_railroad_tracks(po, ph, pl, pc, o, h, lo, c)
         if rr == "bullish":
             return NYCReversalResult(
                 detected=True, direction="bullish",
@@ -1543,18 +1543,18 @@ def detect_nyc_reversal(
 
     if near_hod:
         # Near HOD → bearish reversal
-        if _is_inverted_hammer(o, h, l, c):
+        if _is_inverted_hammer(o, h, lo, c):
             return NYCReversalResult(
                 detected=True, direction="bearish",
                 entry_price=close_price, pattern="inverted_hammer", level=current_level,
             )
-        if _is_hammer(o, h, l, c):
+        if _is_hammer(o, h, lo, c):
             # Shooting star variant (hammer at top = bearish)
             return NYCReversalResult(
                 detected=True, direction="bearish",
                 entry_price=close_price, pattern="hammer", level=current_level,
             )
-        rr = _is_railroad_tracks(po, ph, pl, pc, o, h, l, c)
+        rr = _is_railroad_tracks(po, ph, pl, pc, o, h, lo, c)
         if rr == "bearish":
             return NYCReversalResult(
                 detected=True, direction="bearish",
@@ -1637,10 +1637,10 @@ def detect_stophunt_entry(
         row = candles_1h.iloc[hunt_idx]
         o = float(row["open"])
         h = float(row["high"])
-        l = float(row["low"])
+        lo = float(row["low"])
         c = float(row["close"])
 
-        total_range = h - l
+        total_range = h - lo
         if total_range <= 0:
             continue
 
@@ -1664,7 +1664,7 @@ def detect_stophunt_entry(
 
         # SVC criterion 3: dominant wick >= 40% of range
         upper_wick = h - max(o, c)
-        lower_wick = min(o, c) - l
+        lower_wick = min(o, c) - lo
         dominant_wick = max(upper_wick, lower_wick)
         if dominant_wick / total_range < _SH_DOMINANT_WICK_MIN:
             continue
@@ -1696,7 +1696,7 @@ def detect_stophunt_entry(
         if wick_direction == "down":
             direction = "bullish"
             entry_price = float(candles_1h.iloc[min(hunt_idx + 1, len(candles_1h) - 1)]["close"])
-            stop_loss = l  # below the stop hunt wick
+            stop_loss = lo  # below the stop hunt wick
         else:
             direction = "bearish"
             entry_price = float(candles_1h.iloc[min(hunt_idx + 1, len(candles_1h) - 1)]["close"])
