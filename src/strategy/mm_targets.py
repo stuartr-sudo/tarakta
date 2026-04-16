@@ -397,23 +397,28 @@ class TargetAnalyzer:
                         ))
 
         # EMA target for this level
+        MIN_TARGET_DIST_PCT = 0.5  # Skip EMA targets closer than 0.5% — bad R:R
         ema_period = LEVEL_EMA_TARGETS.get(level)
         if ema_period and ema_values and ema_period in ema_values:
             ema_price = ema_values[ema_period]
-            # Only valid if in the right direction
+            # Only valid if in the right direction AND far enough for decent R:R
             if self._is_valid_target(ema_price, direction, entry_price):
                 dist = abs(ema_price - entry_price) / entry_price * 100 if entry_price > 0 else 0
-                # Demote the same-TF 800 at L3 when an htf target already
-                # supplied a real higher-TF L3.
-                priority = 2 if (level == 3 and htf_ema_values and any(p in htf_ema_values for p in (200, 800))) else 1
-                targets.append(TargetLevel(
-                    price=ema_price,
-                    source=f"ema_{ema_period}",
-                    level_num=level,
-                    priority=priority,
-                    description=f"{ema_period} EMA (Level {level} primary target)",
-                    distance_pct=round(dist, 2),
-                ))
+                if dist < MIN_TARGET_DIST_PCT:
+                    # EMA too close to entry — skip it, fallback targets will be used
+                    logger.debug("mm_target_ema_too_close", ema=ema_period, dist_pct=round(dist, 3))
+                else:
+                    # Demote the same-TF 800 at L3 when an htf target already
+                    # supplied a real higher-TF L3.
+                    priority = 2 if (level == 3 and htf_ema_values and any(p in htf_ema_values for p in (200, 800))) else 1
+                    targets.append(TargetLevel(
+                        price=ema_price,
+                        source=f"ema_{ema_period}",
+                        level_num=level,
+                        priority=priority,
+                        description=f"{ema_period} EMA (Level {level} primary target)",
+                        distance_pct=round(dist, 2),
+                    ))
 
         # Unrecovered vectors in the right direction
         for v in vectors:

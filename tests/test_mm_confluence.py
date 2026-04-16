@@ -169,7 +169,9 @@ class TestScore:
     def test_score_pct_calculation(self, scorer: MMConfluenceScorer):
         ctx = _full_context()
         result = scorer.score(ctx)
-        expected_pct = result.total_score / MAX_POSSIBLE * 100
+        # Uses AVAILABLE_MAX (excludes stubbed feeds) not MAX_POSSIBLE
+        from src.strategy.mm_confluence import AVAILABLE_MAX
+        expected_pct = result.total_score / AVAILABLE_MAX * 100
         assert result.score_pct == pytest.approx(expected_pct, abs=0.1)
 
     def test_all_factors_present(self, scorer: MMConfluenceScorer):

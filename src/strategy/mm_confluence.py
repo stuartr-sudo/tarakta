@@ -81,6 +81,12 @@ WEIGHTS: dict[str, float] = {
 
 MAX_POSSIBLE: float = sum(WEIGHTS.values())  # 111 → 123 (weekend-box, OI promotion) → 129 (+rsi) → 133 (+adr)
 
+# Factors that require external data feeds (currently stubbed).
+# When calculating grade thresholds, we use AVAILABLE_MAX instead of
+# MAX_POSSIBLE so the bot isn't penalized for missing data it can't get.
+STUBBED_FACTORS: set[str] = {"liquidation_cluster", "news_event", "correlation_confirmed"}
+AVAILABLE_MAX: float = MAX_POSSIBLE - sum(WEIGHTS[k] for k in STUBBED_FACTORS)  # 133 - 18 = 115
+
 # Grade thresholds (percentage of max possible)
 GRADE_A_THRESHOLD: float = 70.0
 GRADE_B_THRESHOLD: float = 55.0
@@ -289,7 +295,10 @@ class MMConfluenceScorer:
         factors["moon_cycle"] = self._score_moon_cycle(context)
 
         total = sum(factors.values())
-        score_pct = (total / MAX_POSSIBLE * 100.0) if MAX_POSSIBLE > 0 else 0.0
+        # Use AVAILABLE_MAX (excludes stubbed data feeds) so the bot isn't
+        # penalized for missing external data it can't access yet.
+        effective_max = AVAILABLE_MAX if AVAILABLE_MAX > 0 else MAX_POSSIBLE
+        score_pct = (total / effective_max * 100.0) if effective_max > 0 else 0.0
 
         # R:R
         rr = self.calculate_rr(context.entry_price, context.stop_loss, context.target_price)
@@ -302,7 +311,7 @@ class MMConfluenceScorer:
 
         result = ConfluenceScore(
             total_score=round(total, 2),
-            max_possible=MAX_POSSIBLE,
+            max_possible=effective_max,
             score_pct=round(score_pct, 2),
             factors=factors,
             risk_reward=round(rr, 2),

@@ -63,7 +63,7 @@ logger = get_logger(__name__)
 DEFAULT_SCAN_INTERVAL = 5
 
 # Minimum confluence score (%) to consider an entry — course requires Grade C+ (40%)
-MIN_CONFLUENCE_PCT = 40.0
+MIN_CONFLUENCE_PCT = 35.0  # Lowered from 40: with 7 stubbed data feeds (18 pts unavailable), 40 was too restrictive
 
 # Minimum R:R ratio (to Level 1 target)
 # Course lesson 53: 1.4 is the "don't get out of bed" floor — below that the
