@@ -586,3 +586,84 @@ async def test_b6_not_breakeven_closes_on_friday_uk(engine: MMEngine):
     assert len(friday_closes) == 1, (
         "B6: L2 position without breakeven must still close on Friday UK"
     )
+
+
+# ---------------------------------------------------------------------------
+# D7: Session-specific entry bias logging (Lessons 04, 05)
+# ---------------------------------------------------------------------------
+
+class TestSessionEntryBias:
+    """D7: _log_session_entry_bias() emits mm_uk_reversal_warning for UK L3+
+    standard formations, and is silent for US-session L3 or multi-session
+    formations.
+    """
+
+    def test_uk_l3_standard_logs_warning(self, engine: MMEngine):
+        """UK session + L3 + standard formation → mm_uk_reversal_warning logged."""
+        with patch("src.strategy.mm_engine.logger") as mock_logger:
+            engine._log_session_entry_bias(
+                symbol="BTC/USDT",
+                session_name="uk",
+                current_level=3,
+                formation_variant="standard",
+            )
+        calls = [str(call) for call in mock_logger.info.call_args_list]
+        assert any("mm_uk_reversal_warning" in c for c in calls), (
+            f"Expected mm_uk_reversal_warning in logger.info calls, got: {calls}"
+        )
+
+    def test_uk_l3_multi_session_no_warning(self, engine: MMEngine):
+        """UK session + L3 + multi_session formation → no warning (highest-prob setup)."""
+        with patch("src.strategy.mm_engine.logger") as mock_logger:
+            engine._log_session_entry_bias(
+                symbol="BTC/USDT",
+                session_name="uk",
+                current_level=3,
+                formation_variant="multi_session",
+            )
+        calls = [str(call) for call in mock_logger.info.call_args_list]
+        assert not any("mm_uk_reversal_warning" in c for c in calls), (
+            "mm_uk_reversal_warning must NOT fire for multi_session formations in UK"
+        )
+
+    def test_us_l3_standard_no_warning(self, engine: MMEngine):
+        """US session + L3 + standard formation → no UK warning (US is reversal session)."""
+        with patch("src.strategy.mm_engine.logger") as mock_logger:
+            engine._log_session_entry_bias(
+                symbol="BTC/USDT",
+                session_name="us",
+                current_level=3,
+                formation_variant="standard",
+            )
+        calls = [str(call) for call in mock_logger.info.call_args_list]
+        assert not any("mm_uk_reversal_warning" in c for c in calls), (
+            "mm_uk_reversal_warning must NOT fire during US session"
+        )
+
+    def test_uk_l2_no_warning(self, engine: MMEngine):
+        """UK session + L2 → no warning (only L3+ triggers the bias check)."""
+        with patch("src.strategy.mm_engine.logger") as mock_logger:
+            engine._log_session_entry_bias(
+                symbol="BTC/USDT",
+                session_name="uk",
+                current_level=2,
+                formation_variant="standard",
+            )
+        calls = [str(call) for call in mock_logger.info.call_args_list]
+        assert not any("mm_uk_reversal_warning" in c for c in calls), (
+            "mm_uk_reversal_warning must NOT fire at L2 during UK"
+        )
+
+    def test_uk_l3_final_damage_logs_warning(self, engine: MMEngine):
+        """UK session + L3 + final_damage → warning logged (not multi_session)."""
+        with patch("src.strategy.mm_engine.logger") as mock_logger:
+            engine._log_session_entry_bias(
+                symbol="ETH/USDT",
+                session_name="uk",
+                current_level=3,
+                formation_variant="final_damage",
+            )
+        calls = [str(call) for call in mock_logger.info.call_args_list]
+        assert any("mm_uk_reversal_warning" in c for c in calls), (
+            "mm_uk_reversal_warning should fire for final_damage at UK L3"
+        )

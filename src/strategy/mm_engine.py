@@ -1325,6 +1325,17 @@ class MMEngine:
         except Exception:
             pass  # Telemetry only — don't break scan on Linda errors
 
+        # D7: Session-specific entry biases (Lessons 04, 05).
+        try:
+            self._log_session_entry_bias(
+                symbol=symbol,
+                session_name=session.session_name,
+                current_level=level_analysis.current_level,
+                formation_variant=best_formation.variant,
+            )
+        except Exception:
+            pass  # Best-effort telemetry — never block a trade on this
+
         # Don't enter if Level 3+ already reached (expect reversal)
         if level_analysis.current_level >= 3:
             return self._reject("level_too_advanced", symbol, level=level_analysis.current_level, post_formation_candles=len(candles_post_formation))
@@ -2529,6 +2540,35 @@ class MMEngine:
             return slope_pct < 0.1  # less than 0.1% change over lookback
         except Exception:
             return False
+
+    def _log_session_entry_bias(
+        self,
+        symbol: str,
+        session_name: str,
+        current_level: int,
+        formation_variant: str,
+    ) -> None:
+        """D7: Log session-specific entry bias warnings (Lessons 04, 05).
+
+        UK session → trend-following bias. Counter-trend reversal entries at
+        L3 during UK open are the NYC Reversal pattern — a US-session setup,
+        not a UK setup. Multi-session formations are exempt (they bridge
+        sessions and are inherently high-probability).
+
+        US first 3 hours → reversal bias. No action here; that gate lives in
+        the Phase 2 NYC Reversal module.
+
+        This is a SOFT filter — never rejects a trade, only logs.
+        """
+        if session_name == "uk" and current_level >= 3:
+            if formation_variant not in ("multi_session",):
+                logger.info(
+                    "mm_uk_reversal_warning",
+                    symbol=symbol,
+                    level=current_level,
+                    formation_variant=formation_variant,
+                    note="L3_reversal_during_UK_is_typically_US_setup",
+                )
 
     def _maybe_log_ema_fan_out_warning(self, pos: "MMPosition", candles_1h: pd.DataFrame) -> None:
         """Course B3 (lessons 12, 18): log EMA_FAN_OUT_L3_WARNING when a position
