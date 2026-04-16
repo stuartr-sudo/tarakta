@@ -2508,6 +2508,21 @@ class MMEngine:
             cost=round(position.cost_usd, 2),
         )
 
+        # D5 (lessons 05, 16): log stagger entry prices for manual reference.
+        # In the current implementation we execute a single market order at
+        # fill_price. The stagger prices show where 2nd and 3rd limit orders
+        # would optimally sit. These can be placed manually or will be
+        # automated when the exchange interface adds limit order support.
+        stagger_prices = self._calculate_stagger_entries(fill_price, signal.stop_loss, signal.direction)
+        logger.info(
+            "mm_stagger_entry_prices",
+            symbol=signal.symbol,
+            direction=signal.direction,
+            stagger_1={"price": stagger_prices[0]["price"], "weight": stagger_prices[0]["weight"]},
+            stagger_2={"price": stagger_prices[1]["price"], "weight": stagger_prices[1]["weight"]},
+            stagger_3={"price": stagger_prices[2]["price"], "weight": stagger_prices[2]["weight"]},
+        )
+
     async def _manage_position(self, symbol: str) -> None:
         """Manage an existing MM position — SL, partials, exits."""
         pos = self.positions.get(symbol)
@@ -3090,6 +3105,53 @@ class MMEngine:
             return bool(wide_today and grew)
         except Exception:
             return False
+
+    def _calculate_stagger_entries(
+        self,
+        entry_price: float,
+        stop_loss: float,
+        direction: str,
+    ) -> list[dict]:
+        """Course D5 (lessons 05, 16): calculate 3 stagger prices across entry zone.
+
+        Instead of a single market order at entry, the course recommends 2-3 limit
+        orders spread across the entry zone toward the stop loss. This gets a better
+        average fill and increases the probability of being in the trade at the
+        optimal price.
+
+        For long:  stagger at entry, entry-0.3*(entry-sl), entry-0.5*(entry-sl)
+        For short: stagger at entry, entry+0.3*(entry-sl), entry+0.5*(entry-sl)
+        Weights: 50% at entry, 30% at mid-zone, 20% at deep-zone.
+
+        Note: This method calculates prices only. Actual limit order execution is
+        left for future implementation when exchange interface supports it.
+
+        Args:
+            entry_price: The primary entry price.
+            stop_loss: Stop loss price.
+            direction: "long" or "short".
+
+        Returns:
+            List of 3 dicts, each with 'price' (float) and 'weight' (float, 0-1).
+        """
+        distance = abs(entry_price - stop_loss)
+
+        if direction == "long":
+            prices = [
+                entry_price,
+                entry_price - 0.3 * distance,
+                entry_price - 0.5 * distance,
+            ]
+        else:
+            prices = [
+                entry_price,
+                entry_price + 0.3 * distance,
+                entry_price + 0.5 * distance,
+            ]
+
+        weights = [0.50, 0.30, 0.20]
+
+        return [{"price": p, "weight": w} for p, w in zip(prices, weights)]
 
     def _compute_50ema(self, candles_1h: pd.DataFrame) -> float | None:
         """Compute the 50 EMA of the provided 1H candles. None if insufficient data."""

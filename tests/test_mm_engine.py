@@ -991,3 +991,72 @@ class TestBoardMeetingReentry:
         assert not any("mm_board_meeting_reentry_opportunity" in c for c in calls), (
             "B8 re-entry opportunity only applies at L1 and L2"
         )
+
+
+# ---------------------------------------------------------------------------
+# D5 — Stagger entry calculation (lessons 05, 16)
+# ---------------------------------------------------------------------------
+
+
+class TestStaggerEntries:
+    """D5 (lessons 05, 16): stagger entry price calculation."""
+
+    def test_long_stagger_prices_correct(self, engine: MMEngine):
+        """Long: three stagger prices between entry and SL at 0%, 30%, 50% of distance."""
+        entry = 50000.0
+        sl = 49000.0   # 1000 below entry
+        result = engine._calculate_stagger_entries(entry, sl, "long")
+
+        assert len(result) == 3
+        prices = [r["price"] for r in result]
+        weights = [r["weight"] for r in result]
+
+        # Entry price (0% into zone)
+        assert prices[0] == pytest.approx(50000.0)
+        # 30% into zone below entry: 50000 - 0.3*1000 = 49700
+        assert prices[1] == pytest.approx(49700.0)
+        # 50% into zone below entry: 50000 - 0.5*1000 = 49500
+        assert prices[2] == pytest.approx(49500.0)
+
+        # Weights: 50%, 30%, 20%
+        assert weights[0] == pytest.approx(0.50)
+        assert weights[1] == pytest.approx(0.30)
+        assert weights[2] == pytest.approx(0.20)
+
+    def test_short_stagger_prices_correct(self, engine: MMEngine):
+        """Short: three stagger prices above entry (into SL direction)."""
+        entry = 50000.0
+        sl = 51000.0   # 1000 above entry
+        result = engine._calculate_stagger_entries(entry, sl, "short")
+
+        assert len(result) == 3
+        prices = [r["price"] for r in result]
+        weights = [r["weight"] for r in result]
+
+        # Entry price (0% into zone)
+        assert prices[0] == pytest.approx(50000.0)
+        # 30% above entry: 50000 + 0.3*1000 = 50300
+        assert prices[1] == pytest.approx(50300.0)
+        # 50% above entry: 50000 + 0.5*1000 = 50500
+        assert prices[2] == pytest.approx(50500.0)
+
+        # Weights sum to 1.0
+        assert sum(weights) == pytest.approx(1.0)
+
+    def test_weights_sum_to_one(self, engine: MMEngine):
+        """Weights must always sum to 1.0."""
+        result = engine._calculate_stagger_entries(100.0, 95.0, "long")
+        total = sum(r["weight"] for r in result)
+        assert total == pytest.approx(1.0)
+
+    def test_returns_three_entries(self, engine: MMEngine):
+        """Always returns exactly 3 stagger entries."""
+        result = engine._calculate_stagger_entries(100.0, 95.0, "long")
+        assert len(result) == 3
+
+    def test_each_entry_has_price_and_weight(self, engine: MMEngine):
+        """Each entry dict has 'price' and 'weight' keys."""
+        result = engine._calculate_stagger_entries(100.0, 95.0, "long")
+        for entry in result:
+            assert "price" in entry
+            assert "weight" in entry
