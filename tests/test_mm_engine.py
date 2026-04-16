@@ -1,10 +1,15 @@
-"""Tests for MM Engine core behaviour — B3: EMA fan-out detection at Level 3.
+"""Tests for MM Engine core behaviour.
 
-Course citation: lessons 12 and 18 — "EMA fan-out at Level 3 = imminent reversal."
+B3: EMA fan-out detection at Level 3.
+  Course citation: lessons 12 and 18 — "EMA fan-out at Level 3 = imminent reversal."
+
+B1: 2-hour scratch rule.
+  Course citation: "if you don't see movement within 2 hours, it's a scratch."
 """
 from __future__ import annotations
 
-from unittest.mock import patch
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -162,3 +167,99 @@ def test_ema_fan_out_warning_not_logged_when_no_fan_out(engine: MMEngine):
     assert not any("EMA_FAN_OUT_L3_WARNING" in c for c in calls), (
         "EMA_FAN_OUT_L3_WARNING must not fire when EMAs are flat"
     )
+
+
+# ---------------------------------------------------------------------------
+# B1 — 2-hour scratch rule
+# ---------------------------------------------------------------------------
+
+
+def _make_stale_position(symbol: str = "BTC/USDT", current_level: int = 0, hours_old: float = 3.0) -> MMPosition:
+    """Build an MMPosition that has been open for `hours_old` hours."""
+    pos = MMPosition(
+        symbol=symbol,
+        direction="long",
+        entry_price=50000.0,
+        quantity=0.01,
+        stop_loss=49000.0,
+        current_level=current_level,
+    )
+    pos.entry_time = datetime.now(timezone.utc) - timedelta(hours=hours_old)
+    return pos
+
+
+@pytest.mark.asyncio
+async def test_scratch_2h_triggers_close_when_no_level_hit(engine: MMEngine):
+    """B1: position open >2h with current_level=0 must close with reason scratch_2h."""
+    pos = _make_stale_position(current_level=0, hours_old=3.0)
+    engine.positions["BTC/USDT"] = pos
+
+    # Mock exchange.fetch_ticker so _manage_position can get a price
+    engine.exchange = MagicMock()
+    engine.exchange.fetch_ticker = AsyncMock(return_value={"last": 50100.0})
+
+    close_calls: list[tuple] = []
+
+    async def _fake_close(p, price, reason):
+        close_calls.append((p, price, reason))
+        engine.positions.pop(p.symbol, None)
+
+    # Patch early-exit checks that run before the scratch rule
+    with patch.object(engine, "_close_position", side_effect=_fake_close):
+        # Also stub the SVC check that would otherwise need candle data
+        engine.candle_manager = MagicMock()
+        engine.candle_manager.get_candles = AsyncMock(return_value=None)
+        await engine._manage_position("BTC/USDT")
+
+    assert len(close_calls) == 1, f"Expected exactly one close call, got {close_calls}"
+    _, _, reason = close_calls[0]
+    assert reason == "scratch_2h", f"Expected reason='scratch_2h', got '{reason}'"
+
+
+@pytest.mark.asyncio
+async def test_scratch_2h_does_not_trigger_when_level_hit(engine: MMEngine):
+    """B1: position open >2h but current_level >= 1 must NOT trigger the scratch rule."""
+    pos = _make_stale_position(current_level=1, hours_old=3.0)
+    engine.positions["BTC/USDT"] = pos
+
+    engine.exchange = MagicMock()
+    engine.exchange.fetch_ticker = AsyncMock(return_value={"last": 50100.0})
+
+    scratch_calls: list[str] = []
+
+    async def _spy_close(p, price, reason):
+        if reason == "scratch_2h":
+            scratch_calls.append(reason)
+
+    with patch.object(engine, "_close_position", side_effect=_spy_close):
+        engine.candle_manager = MagicMock()
+        engine.candle_manager.get_candles = AsyncMock(return_value=None)
+        # _is_stopped_out needs to return False so we don't close via stop_loss
+        with patch.object(engine, "_is_stopped_out", return_value=False):
+            await engine._manage_position("BTC/USDT")
+
+    assert len(scratch_calls) == 0, "scratch_2h must not fire when current_level >= 1"
+
+
+@pytest.mark.asyncio
+async def test_scratch_2h_does_not_trigger_when_under_2h(engine: MMEngine):
+    """B1: position open <2h with current_level=0 must NOT trigger the scratch rule."""
+    pos = _make_stale_position(current_level=0, hours_old=1.5)
+    engine.positions["BTC/USDT"] = pos
+
+    engine.exchange = MagicMock()
+    engine.exchange.fetch_ticker = AsyncMock(return_value={"last": 50100.0})
+
+    scratch_calls: list[str] = []
+
+    async def _spy_close(p, price, reason):
+        if reason == "scratch_2h":
+            scratch_calls.append(reason)
+
+    with patch.object(engine, "_close_position", side_effect=_spy_close):
+        engine.candle_manager = MagicMock()
+        engine.candle_manager.get_candles = AsyncMock(return_value=None)
+        with patch.object(engine, "_is_stopped_out", return_value=False):
+            await engine._manage_position("BTC/USDT")
+
+    assert len(scratch_calls) == 0, "scratch_2h must not fire when trade is under 2 hours old"

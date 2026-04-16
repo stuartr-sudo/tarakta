@@ -2064,6 +2064,24 @@ class MMEngine:
             except Exception as e:
                 logger.debug("mm_refund_zone_check_failed", symbol=symbol, error=str(e))
 
+        # B1: Scratch rule — if position has not reached L1 after 2 hours,
+        # cut for a small scratch rather than letting it drift to SL.
+        # Course citation: "if you don't see movement within 2 hours, it's
+        # a scratch — take your loss and move on."
+        # Only applies pre-L1 (current_level == 0). Once L1 is hit the
+        # trade is running and the scratch rule no longer applies.
+        now = datetime.now(timezone.utc)
+        if pos.current_level == 0 and (now - pos.entry_time).total_seconds() >= 7200:
+            logger.info(
+                "mm_scratch_2h",
+                symbol=symbol,
+                entry_time=pos.entry_time.isoformat(),
+                elapsed_seconds=int((now - pos.entry_time).total_seconds()),
+                current_price=current_price,
+            )
+            await self._close_position(pos, current_price, "scratch_2h")
+            return
+
         # Check stop loss hit
         if self._is_stopped_out(pos, current_price):
             await self._close_position(pos, current_price, "stop_loss")
