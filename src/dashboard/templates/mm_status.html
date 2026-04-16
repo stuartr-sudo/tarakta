@@ -1,0 +1,280 @@
+{% extends "base.html" %}
+{% block title %}Tarakta - MM Status{% endblock %}
+{% block topbar_title %}MM Status{% endblock %}
+
+{% block head %}
+<meta http-equiv="refresh" content="30">
+<style>
+    .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-bottom: 16px; }
+    .status-badge-lg { display: inline-block; padding: 4px 14px; border-radius: 20px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+    .status-running  { background: rgba(0,229,212,0.15); color: #00e5d4; }
+    .status-idle     { background: rgba(255,193,7,0.15);  color: #ffc107; }
+    .status-paused   { background: rgba(224,64,251,0.15); color: #e040fb; }
+    .status-dead_zone{ background: rgba(120,120,120,0.15);color: #888; }
+    .funnel-bar { display: flex; height: 18px; border-radius: 6px; overflow: hidden; gap: 2px; margin: 8px 0; }
+    .funnel-seg { display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 600; color: #fff; min-width: 1px; transition: width 0.3s; }
+    .seg-passed  { background: #00e5d4; }
+    .seg-rejected{ background: #e040fb; }
+    .seg-signal  { background: #4caf50; }
+    .rej-bar { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+    .rej-label { font-size: 11px; color: var(--text-muted); width: 160px; flex-shrink: 0; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+    .rej-track { flex: 1; height: 8px; background: var(--bg-elevated); border-radius: 4px; overflow: hidden; }
+    .rej-fill   { height: 100%; background: #e040fb; border-radius: 4px; }
+    .rej-count  { font-size: 11px; color: var(--text-muted); width: 28px; text-align: right; }
+    .ext-row { display: flex; align-items: center; gap: 10px; margin: 4px 0; }
+    .ext-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+    .ext-on  { background: #00e5d4; }
+    .ext-off { background: #555; }
+    .grade-A { color: #4caf50; font-weight: 700; }
+    .grade-B { color: #00e5d4; font-weight: 700; }
+    .grade-C { color: #ffc107; font-weight: 700; }
+    .grade-F { color: #e040fb; font-weight: 700; }
+    @media (max-width: 768px) {
+        .status-grid { grid-template-columns: 1fr 1fr; }
+        .rej-label { width: 100px; }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<!-- Header row -->
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; flex-wrap:wrap; gap:8px;">
+    <div style="display:flex; align-items:center; gap:10px;">
+        <span style="font-size:1.1rem; font-weight:600; color:var(--teal);">MM Status Monitor</span>
+        <span class="status-badge-lg status-{{ bot_status }}">{{ bot_status }}</span>
+    </div>
+    <div style="font-size:11px; color:var(--text-muted);">Auto-refresh every 30s</div>
+</div>
+
+<!-- Summary stat cards -->
+<div class="status-grid">
+    <div class="stat-card">
+        <div class="stat-label">Cycle</div>
+        <div class="stat-value">{{ cycle_count }}</div>
+        <div class="stat-sub">total scans run</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Pairs Scanned</div>
+        <div class="stat-value">{{ last_funnel.pairs_scanned if last_funnel else '—' }}</div>
+        <div class="stat-sub">last cycle</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Signals Found</div>
+        <div class="stat-value {{ 'positive' if last_funnel and last_funnel.signals_found > 0 else '' }}">
+            {{ last_funnel.signals_found if last_funnel else '—' }}
+        </div>
+        <div class="stat-sub">passed all gates</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Open Positions</div>
+        <div class="stat-value">{{ open_positions | length }}</div>
+        <div class="stat-sub">active trades</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Rejected</div>
+        <div class="stat-value">{{ last_funnel.rejected_total if last_funnel else '—' }}</div>
+        <div class="stat-sub">last cycle</div>
+    </div>
+    {% if last_funnel and last_funnel.score_stats %}
+    <div class="stat-card">
+        <div class="stat-label">Avg Score</div>
+        <div class="stat-value">{{ "%.0f"|format(last_funnel.score_stats.avg) if last_funnel.score_stats.avg is defined else '—' }}%</div>
+        <div class="stat-sub">confluence (pairs scored)</div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Last scan funnel visual -->
+{% if last_funnel %}
+<div class="panel" style="margin-bottom:14px;">
+    <div class="panel-header">
+        <h2>Last Scan Funnel
+            <span style="font-size:11px; color:var(--text-muted); font-weight:400; margin-left:8px;">
+                cycle #{{ last_funnel.cycle }} &mdash; {{ last_funnel.timestamp | replace('T', ' ') | truncate(19, True, '') }} UTC
+            </span>
+        </h2>
+    </div>
+    <div class="panel-body">
+        {% set total = last_funnel.pairs_scanned | int %}
+        {% set rejected = last_funnel.rejected_total | int %}
+        {% set signals = last_funnel.signals_found | int %}
+        {% set passed_scoring = total - rejected - signals %}
+        {% if total > 0 %}
+        <div class="funnel-bar">
+            {% if signals > 0 %}
+            <div class="funnel-seg seg-signal" style="width:{{ (signals / total * 100) | round(1) }}%;" title="{{ signals }} signals">
+                {% if signals / total > 0.05 %}{{ signals }}{% endif %}
+            </div>
+            {% endif %}
+            {% if rejected > 0 %}
+            <div class="funnel-seg seg-rejected" style="width:{{ (rejected / total * 100) | round(1) }}%;" title="{{ rejected }} rejected">
+                {% if rejected / total > 0.05 %}{{ rejected }}{% endif %}
+            </div>
+            {% endif %}
+        </div>
+        <div style="display:flex; gap:18px; font-size:11px; margin-top:4px;">
+            <span><span style="color:#4caf50;">&#9632;</span> {{ signals }} signals</span>
+            <span><span style="color:#e040fb;">&#9632;</span> {{ rejected }} rejected</span>
+            <span style="color:var(--text-muted);">of {{ total }} scanned</span>
+        </div>
+        {% endif %}
+
+        <!-- Grade distribution -->
+        {% if last_funnel.grades %}
+        <div style="margin-top:12px;">
+            <div style="font-size:11px; color:var(--text-muted); margin-bottom:6px;">Confluence Grade Distribution</div>
+            <div style="display:flex; gap:12px; flex-wrap:wrap;">
+                {% for grade, count in last_funnel.grades.items() %}
+                <span class="grade-{{ grade }}" style="font-size:13px;">{{ grade }}: {{ count }}</span>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Score stats -->
+        {% if last_funnel.score_stats %}
+        {% set ss = last_funnel.score_stats %}
+        <div style="margin-top:10px; font-size:11px; color:var(--text-muted);">
+            Confluence scores &mdash;
+            {% if ss.min is defined %}min: <b style="color:var(--text-primary);">{{ "%.0f"|format(ss.min) }}%</b>{% endif %}
+            {% if ss.avg is defined %} &nbsp; avg: <b style="color:var(--text-primary);">{{ "%.0f"|format(ss.avg) }}%</b>{% endif %}
+            {% if ss.max is defined %} &nbsp; max: <b style="color:var(--text-primary);">{{ "%.0f"|format(ss.max) }}%</b>{% endif %}
+            {% if ss.median is defined %} &nbsp; median: <b style="color:var(--text-primary);">{{ "%.0f"|format(ss.median) }}%</b>{% endif %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Top rejection reasons -->
+{% if top_rejections %}
+<div class="panel" style="margin-bottom:14px;">
+    <div class="panel-header"><h2>Top Rejection Reasons (last cycle)</h2></div>
+    <div class="panel-body">
+        {% set max_count = top_rejections[0][1] if top_rejections else 1 %}
+        {% for reason, count in top_rejections %}
+        <div class="rej-bar">
+            <div class="rej-label" title="{{ reason }}">{{ reason }}</div>
+            <div class="rej-track">
+                <div class="rej-fill" style="width:{{ (count / max_count * 100) | round(0) }}%;"></div>
+            </div>
+            <div class="rej-count">{{ count }}</div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+{% else %}
+<div class="panel" style="margin-bottom:14px;">
+    <div class="panel-body" style="text-align:center; color:var(--text-muted); padding:32px;">
+        No scan data yet — waiting for the first cycle to complete.
+    </div>
+</div>
+{% endif %}
+
+<!-- Open positions table -->
+<div class="panel" style="margin-bottom:14px;">
+    <div class="panel-header">
+        <h2>Open Positions <span class="badge" style="background:var(--teal-dim);color:var(--teal);">{{ open_positions | length }}</span></h2>
+    </div>
+    {% if open_positions %}
+    <div class="panel-body no-pad">
+        <div class="overflow-x">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Dir</th>
+                        <th>Entry</th>
+                        <th>SL</th>
+                        <th>TP1 / TP2 / TP3</th>
+                        <th>Level</th>
+                        <th>Partial%</th>
+                        <th>Formation</th>
+                        <th>Grade</th>
+                        <th>Open</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for pos in open_positions %}
+                    <tr>
+                        <td><strong>{{ pos.symbol }}</strong></td>
+                        <td>
+                            {% if pos.direction == 'long' %}
+                            <span style="color:#4caf50;">&#9650; LONG</span>
+                            {% else %}
+                            <span style="color:#e040fb;">&#9660; SHORT</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ "%.4f"|format(pos.entry_price) }}</td>
+                        <td style="color:#e040fb;">{{ "%.4f"|format(pos.stop_loss) }}</td>
+                        <td style="font-size:11px; color:var(--text-muted);">
+                            {{ "%.4f"|format(pos.target_l1) }} /
+                            {{ "%.4f"|format(pos.target_l2) }} /
+                            {{ "%.4f"|format(pos.target_l3) }}
+                        </td>
+                        <td>L{{ pos.current_level }}</td>
+                        <td>{{ pos.partial_closed_pct | int }}%</td>
+                        <td>{{ pos.formation_type or '—' }}</td>
+                        <td class="grade-{{ pos.confluence_grade }}">{{ pos.confluence_grade or '—' }}</td>
+                        <td>
+                            {% if pos.time_open_mins is not none %}
+                                {% if pos.time_open_mins >= 60 %}
+                                    {{ (pos.time_open_mins / 60) | int }}h {{ pos.time_open_mins % 60 }}m
+                                {% else %}
+                                    {{ pos.time_open_mins }}m
+                                {% endif %}
+                            {% else %}—{% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% else %}
+    <div class="panel-body" style="text-align:center; color:var(--text-muted); padding:20px;">
+        No open positions.
+    </div>
+    {% endif %}
+</div>
+
+<!-- External data status -->
+<div class="panel">
+    <div class="panel-header"><h2>External Data Feeds</h2></div>
+    <div class="panel-body">
+        <div class="ext-row">
+            <div class="ext-dot {{ 'ext-on' if corr_status.enabled else 'ext-off' }}"></div>
+            <div style="flex:1;">
+                <div style="font-size:13px; font-weight:600;">
+                    Correlation (DXY/SPX/NDX)
+                    {% if corr_status.enabled %}
+                    <span style="color:#00e5d4; font-size:11px; font-weight:400;">ON &mdash; {{ corr_status.provider_name }}</span>
+                    {% else %}
+                    <span style="color:#555; font-size:11px; font-weight:400;">OFF &mdash; stub</span>
+                    {% endif %}
+                </div>
+                <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">
+                    {% if corr_status.last_fetched %}
+                    Last fetched: {{ corr_status.last_fetched }}
+                    {% else %}
+                    Not yet fetched this session.
+                    {% endif %}
+                    {% if corr_status.dxy_direction %}
+                    &nbsp;&mdash;&nbsp;DXY: <b style="color:var(--text-primary);">{{ corr_status.dxy_direction }}</b>
+                    {% if corr_status.confidence is not none %}
+                    &nbsp; confidence: <b style="color:var(--text-primary);">{{ "%.0f"|format(corr_status.confidence * 100) }}%</b>
+                    {% endif %}
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        <div style="margin-top:10px; font-size:11px; color:var(--text-muted);">
+            Other feeds (Hyblock, TradingLite, News, Options, Dominance, Sentiment) require paid subscriptions — all currently stubbed.
+            See <code>src/strategy/mm_data_feeds.py</code> to wire real providers.
+        </div>
+    </div>
+</div>
+
+{% endblock %}

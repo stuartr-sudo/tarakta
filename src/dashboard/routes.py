@@ -130,6 +130,106 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
                 ctx["mm_scanning_active"] = True
         return templates.TemplateResponse(request, "mm.html", context=ctx)
 
+    # --- MM Status ---
+
+    @router.get("/mm-status", response_class=HTMLResponse)
+    @login_required
+    async def mm_status_page(request: Request):
+        ctx = await _base_context(request)
+
+        mm_engine_inst = getattr(request.app.state, "mm_engine", None)
+        last_funnel = None
+        positions = {}
+        cycle_count = 0
+        scanning_active = False
+        correlation_provider = None
+
+        if mm_engine_inst is not None:
+            last_funnel = getattr(mm_engine_inst, "last_funnel", None)
+            positions = getattr(mm_engine_inst, "positions", {})
+            cycle_count = getattr(mm_engine_inst, "cycle_count", 0)
+            scanning_active = bool(getattr(mm_engine_inst, "_scanning_active", False))
+            # Grab correlation provider info
+            data_feeds = getattr(mm_engine_inst, "data_feeds", None)
+            if data_feeds is not None:
+                correlation_provider = getattr(data_feeds, "correlation", None)
+
+        # Determine bot status label
+        if not scanning_active:
+            bot_status = "paused"
+        elif last_funnel is None:
+            bot_status = "idle"
+        else:
+            bot_status = "running"
+
+        # Build per-pair signal table from last_funnel if available
+        pair_rows = []
+        top_rejections = []
+        if last_funnel:
+            rejects = last_funnel.get("rejects") or {}
+            # Sort by count descending for top-5 rejection breakdown
+            top_rejections = sorted(rejects.items(), key=lambda x: x[1], reverse=True)[:5]
+
+        # Correlation provider status
+        corr_status = {
+            "enabled": False,
+            "provider_name": "Stub (unavailable)",
+            "last_fetched": None,
+            "dxy_direction": None,
+            "confidence": None,
+        }
+        if correlation_provider is not None:
+            provider_class = type(correlation_provider).__name__
+            corr_status["enabled"] = not provider_class.startswith("Stub")
+            corr_status["provider_name"] = provider_class
+            # YFinanceCorrelationProvider exposes _cache_time
+            cache_time = getattr(correlation_provider, "_cache_time", None)
+            if cache_time is not None:
+                corr_status["last_fetched"] = cache_time.strftime("%H:%M:%S UTC")
+            cached_signal = getattr(correlation_provider, "_cache", {}).get("signal")
+            if cached_signal is not None:
+                corr_status["dxy_direction"] = getattr(cached_signal, "dxy_direction", None)
+                corr_status["confidence"] = getattr(cached_signal, "confidence", None)
+
+        # Open positions list for template
+        open_positions = []
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        for sym, pos in positions.items():
+            entry_time = getattr(pos, "entry_time", None)
+            time_open_mins = None
+            if entry_time:
+                try:
+                    time_open_mins = int((now - entry_time).total_seconds() / 60)
+                except Exception:
+                    pass
+            open_positions.append({
+                "symbol": sym,
+                "direction": getattr(pos, "direction", ""),
+                "entry_price": getattr(pos, "entry_price", 0),
+                "stop_loss": getattr(pos, "stop_loss", 0),
+                "current_level": getattr(pos, "current_level", 0),
+                "partial_closed_pct": round(getattr(pos, "partial_closed_pct", 0) * 100, 0),
+                "time_open_mins": time_open_mins,
+                "formation_type": getattr(pos, "formation_type", ""),
+                "confluence_grade": getattr(pos, "confluence_grade", ""),
+                "target_l1": getattr(pos, "target_l1", 0),
+                "target_l2": getattr(pos, "target_l2", 0),
+                "target_l3": getattr(pos, "target_l3", 0),
+            })
+
+        ctx.update({
+            "bot_status": bot_status,
+            "cycle_count": cycle_count,
+            "scanning_active": scanning_active,
+            "last_funnel": last_funnel,
+            "pair_rows": pair_rows,
+            "open_positions": open_positions,
+            "top_rejections": top_rejections,
+            "corr_status": corr_status,
+        })
+        return templates.TemplateResponse(request, "mm_status.html", context=ctx)
+
     # --- MM Settings ---
 
     @router.get("/mm/settings", response_class=HTMLResponse)

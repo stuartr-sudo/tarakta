@@ -1195,7 +1195,9 @@ class TestCorrelationSignalInterface:
     @pytest.mark.asyncio
     async def test_check_correlation_signal_stub_returns_none(self, engine: MMEngine):
         """With stub provider (available=False), _check_correlation_signal returns None."""
-        # Stub provider returns confidence=0 → _check_correlation_signal returns None
+        # Force stub so the test is deterministic regardless of yfinance install
+        from src.strategy.mm_data_feeds import StubCorrelationProvider
+        engine.data_feeds.correlation = StubCorrelationProvider()
         result = await engine._check_correlation_signal()
         assert result is None
 

@@ -255,17 +255,26 @@ def test_engine_has_data_feeds_registry(engine: MMEngine):
 
 @pytest.mark.asyncio
 async def test_data_feed_stubs_return_unavailable():
-    from src.strategy.mm_data_feeds import DataFeedRegistry
+    """Stub providers return available=False.
+
+    The correlation provider may be upgraded to YFinanceCorrelationProvider
+    automatically when yfinance is installed — skip corr in that case.
+    """
+    from src.strategy.mm_data_feeds import DataFeedRegistry, StubCorrelationProvider
     r = DataFeedRegistry()
     liq = await r.hyblock.fetch_liquidations("BTC/USDT")
     heat = await r.tradinglite.fetch_heatmap("BTC/USDT")
     news = await r.news.fetch_upcoming()
     opts = await r.options.fetch_next_expiry("BTC/USDT")
     dom = await r.dominance.fetch_dominances()
-    corr = await r.correlation.fetch_correlations("long")
     sent = await r.sentiment.fetch_sentiment()
-    for obj in (liq, heat, news, opts, dom, corr, sent):
+    # These must always be stubs (no real provider added yet)
+    for obj in (liq, heat, news, opts, dom, sent):
         assert obj.available is False, f"stub {type(obj).__name__} should be unavailable"
+    # Correlation may use YFinanceCorrelationProvider (real) — only check stub case
+    if isinstance(r.correlation, StubCorrelationProvider):
+        corr = await r.correlation.fetch_correlations("long")
+        assert corr.available is False
 
 
 # ---------------------------------------------------------------------------
