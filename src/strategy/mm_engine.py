@@ -30,6 +30,7 @@ from uuid import uuid4
 
 import pandas as pd
 from src.strategy.mm_board_meetings import BoardMeetingDetector
+from src.strategy.mm_brinks import BrinksDetector
 from src.strategy.mm_confluence import MMConfluenceScorer, MMContext
 from src.strategy.mm_ema_framework import EMAFramework
 from src.strategy.mm_formations import FormationDetector, classify_london_pattern
@@ -268,6 +269,7 @@ class MMEngine:
         self.confluence_scorer = MMConfluenceScorer(min_rr=MIN_RR, min_score=MIN_CONFLUENCE_PCT)
         self.weekend_trap_analyzer = WeekendTrapAnalyzer()
         self.board_meeting_detector = BoardMeetingDetector()
+        self.brinks_detector = BrinksDetector()
         self.target_analyzer = TargetAnalyzer()
         self.risk_calculator = MMRiskCalculator(risk_per_trade=RISK_PER_TRADE_PCT / 100)
 
@@ -392,6 +394,61 @@ class MMEngine:
                 at_key_level=True,
             )
         return None
+
+    def _try_brinks_formation(self, candles_15m, now, cycle_state):
+        """Course lesson 06: Brinks Trade — highest R:R setup (6:1 to 18:1).
+
+        The Brinks Trade fires ONLY at two 15-min candle close times in NY:
+        3:30-3:45am (UK open) or 9:30-9:45am (US open). Requires a hammer/
+        inverted hammer at HOD/LOD with a prior peak 30-90 minutes back.
+        """
+        from src.strategy.mm_formations import Formation
+        from zoneinfo import ZoneInfo
+
+        if candles_15m is None or candles_15m.empty or len(candles_15m) < 3:
+            return None
+
+        ny_tz = ZoneInfo("America/New_York")
+        now_ny = now.astimezone(ny_tz) if now.tzinfo else now.replace(tzinfo=ny_tz)
+
+        hod = getattr(cycle_state, "hod", 0) or 0
+        lod = getattr(cycle_state, "lod", 0) or 0
+
+        if hod <= 0 and lod <= 0:
+            return None
+
+        result = self.brinks_detector.detect(candles_15m, hod, lod, now_ny)
+        if result is None:
+            return None
+
+        ftype = result.formation_type  # "W" or "M"
+        direction = "bullish" if result.direction == "long" else "bearish"
+
+        # Synthesize a Formation so the rest of the pipeline works uniformly.
+        peak2_idx = len(candles_15m) - 1
+        # Estimate peak1_idx from separation.
+        if result.peak1_time and result.peak2_time:
+            delta = result.peak2_time - result.peak1_time
+            bar_sep = max(1, int(delta.total_seconds() / 900))
+        else:
+            bar_sep = 3  # fallback ~45 min
+
+        peak1_idx = max(0, peak2_idx - bar_sep)
+
+        return Formation(
+            type=ftype,
+            variant="brinks",
+            peak1_idx=peak1_idx,
+            peak1_price=result.stop_loss,   # first leg extreme
+            peak2_idx=peak2_idx,
+            peak2_price=result.entry_price,
+            trough_idx=peak1_idx,
+            trough_price=result.entry_price,
+            direction=direction,
+            quality_score=result.quality,
+            at_key_level=True,
+            confirmed=True,
+        )
 
     def _try_200ema_rejection_formation(self, candles_1h, candles_4h, candles_15m):
         """Course lesson 18 alternative #2: 200 EMA rejection trade.
@@ -1141,6 +1198,16 @@ class MMEngine:
                 best_formation = self._try_board_meeting_formation(candles_1h)
                 if best_formation is not None:
                     logger.info("mm_board_meeting_formation_synthesized",
+                                symbol=symbol, type=best_formation.type,
+                                variant=best_formation.variant)
+
+            # Course lesson 06 alternative #5: Brinks Trade.
+            # Highest R:R (6:1 to 18:1) — fires only at 3:30-3:45am or
+            # 9:30-9:45am NY with hammer/inverted hammer at HOD/LOD.
+            if best_formation is None and candles_15m is not None:
+                best_formation = self._try_brinks_formation(candles_15m, now, cycle_state)
+                if best_formation is not None:
+                    logger.info("mm_brinks_formation_synthesized",
                                 symbol=symbol, type=best_formation.type,
                                 variant=best_formation.variant)
 
