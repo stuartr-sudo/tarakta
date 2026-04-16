@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
+import pandas as pd
+
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -67,6 +69,26 @@ _SESSIONS: list[tuple[str, time, time, bool, bool]] = [
     ("us_gap",     _US_GAP_START,     _US_GAP_END,      True,  False),
     ("us",         _US_OPEN_START,    _US_OPEN_END,      False, False),
 ]
+
+
+@dataclass
+class AsiaSpike:
+    """Result of the Asia closing spike (D2) detection.
+
+    Attributes:
+        detected: True if a spike was found in the 2:00-2:30am NY window.
+        direction: ``"up"`` if price moved up, ``"down"`` if down, ``"none"``
+            if no spike.
+        magnitude_pct: Move size as a percentage (absolute value).
+        bias: Predicted London direction. Asia spike DOWN → ``"bullish"``
+            (expect W / higher low in London). Asia spike UP → ``"bearish"``
+            (expect M / lower high in London). ``"none"`` when not detected.
+    """
+
+    detected: bool
+    direction: str   # "up" | "down" | "none"
+    magnitude_pct: float
+    bias: str        # "bullish" | "bearish" | "none"
 
 
 @dataclass
@@ -262,6 +284,89 @@ class MMSessionAnalyzer:
         """True if *dt* falls within the Dead Zone (5pm-8pm NY)."""
         ny = _to_ny(dt) if dt is not None else datetime.now(NY_TZ)
         return _in_range(ny.time(), _DEAD_ZONE_START, _DEAD_ZONE_END)
+
+    def detect_asia_closing_spike(
+        self,
+        candles_1h: pd.DataFrame,
+        now: datetime,
+    ) -> "AsiaSpike":
+        """Detect the Asia closing spike in the 2:00-2:30am NY window (D2).
+
+        Lesson 09 teaches that the move Asia makes in its final 30 minutes
+        (2:00-2:30am NY, one hour before the 3:00am session close) predicts
+        London's opening structure:
+
+        - Asia spike **down** → London likely creates a **higher low** (W
+          formation) → bullish bias for London.
+        - Asia spike **up** → London likely creates a **lower high** (M
+          formation) → bearish bias for London.
+
+        A spike requires at least 0.3% price move on the closing 1H candle
+        that covers the 2:00am NY open.
+
+        Args:
+            candles_1h: OHLCV DataFrame with a timezone-aware DatetimeIndex
+                (typically UTC from exchange).
+            now: Current time (used only for logging; detection is based on
+                candle timestamps).
+
+        Returns:
+            :class:`AsiaSpike` with ``detected=False`` when insufficient data
+            or no qualifying candle is found.
+        """
+        _NO_SPIKE = AsiaSpike(detected=False, direction="none", magnitude_pct=0.0, bias="none")
+
+        if candles_1h is None or candles_1h.empty or len(candles_1h) < 5:
+            return _NO_SPIKE
+
+        # Walk back through recent candles looking for one whose open time
+        # falls in the 2:00-2:30am NY window.
+        _SPIKE_WINDOW_START = time(2, 0)
+        _SPIKE_WINDOW_END = time(2, 30)
+        _SPIKE_THRESHOLD = 0.003  # 0.3%
+
+        # Only inspect candles from within the past two trading days to avoid
+        # stale signals.
+        for i in range(len(candles_1h) - 1, max(len(candles_1h) - 50, -1), -1):
+            try:
+                bar_time = candles_1h.index[i]
+                if hasattr(bar_time, "to_pydatetime"):
+                    bar_dt = bar_time.to_pydatetime()
+                else:
+                    bar_dt = bar_time
+                bar_ny = _to_ny(bar_dt)
+                if _in_range(bar_ny.time(), _SPIKE_WINDOW_START, _SPIKE_WINDOW_END):
+                    row = candles_1h.iloc[i]
+                    o = float(row["open"])
+                    c = float(row["close"])
+                    if o <= 0:
+                        return _NO_SPIKE
+                    move_pct = (c - o) / o
+                    magnitude = abs(move_pct)
+                    if magnitude < _SPIKE_THRESHOLD:
+                        # Candle found but move is too small — no spike.
+                        return _NO_SPIKE
+                    direction = "up" if move_pct > 0 else "down"
+                    # Asia spike down → bullish bias (expect W / higher low in London)
+                    # Asia spike up  → bearish bias (expect M / lower high in London)
+                    bias = "bullish" if direction == "down" else "bearish"
+                    logger.info(
+                        "mm_asia_closing_spike_detected",
+                        direction=direction,
+                        magnitude_pct=round(magnitude * 100, 3),
+                        bias=bias,
+                        bar_ny=str(bar_ny.time()),
+                    )
+                    return AsiaSpike(
+                        detected=True,
+                        direction=direction,
+                        magnitude_pct=round(magnitude * 100, 3),
+                        bias=bias,
+                    )
+            except Exception:
+                continue
+
+        return _NO_SPIKE
 
     # ------------------------------------------------------------------
     # Internal

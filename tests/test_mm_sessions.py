@@ -6,7 +6,11 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+import numpy as np
+import pandas as pd
+
 from src.strategy.mm_sessions import (
+    AsiaSpike,
     MMSessionAnalyzer,
     SessionInfo,
     _in_range,
@@ -277,3 +281,126 @@ class TestFullDayCoverage:
             assert info.session_name in {
                 "dead_zone", "asia_gap", "asia", "uk_gap", "uk", "us_gap", "us",
             }
+
+
+# ------------------------------------------------------------------
+# D2: AsiaSpike detection
+# ------------------------------------------------------------------
+
+def _make_candles_with_spike(
+    spike_open: float,
+    spike_close: float,
+    spike_ny_hour: int = 2,
+    spike_ny_minute: int = 0,
+    n_candles: int = 10,
+) -> pd.DataFrame:
+    """Build a minimal OHLCV DataFrame with one spike candle at the given NY time.
+
+    The spike candle is placed at 2:00am NY (UTC = 7:00am for EDT, UTC-4).
+    """
+    # 2026-03-10 is after DST spring-forward (EDT = UTC-4)
+    # 2:00am NY EDT = 6:00am UTC
+    spike_utc_hour = spike_ny_hour + 4  # EDT offset
+    spike_utc = datetime(2026, 3, 10, spike_utc_hour, spike_ny_minute, 0, tzinfo=UTC)
+
+    # Create n_candles with the spike at position n-2 (second-to-last)
+    base_utc = spike_utc - timedelta(hours=n_candles - 2)
+    times = [base_utc + timedelta(hours=i) for i in range(n_candles)]
+    idx = pd.DatetimeIndex(times)
+
+    opens = np.full(n_candles, 100.0)
+    closes = np.full(n_candles, 100.0)
+    highs = np.full(n_candles, 101.0)
+    lows = np.full(n_candles, 99.0)
+    volumes = np.full(n_candles, 1000.0)
+
+    # Insert the spike candle at the 2am NY position (index n-2)
+    spike_idx = n_candles - 2
+    opens[spike_idx] = spike_open
+    closes[spike_idx] = spike_close
+    highs[spike_idx] = max(spike_open, spike_close) + 0.1
+    lows[spike_idx] = min(spike_open, spike_close) - 0.1
+
+    return pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+        index=idx,
+    )
+
+
+class TestAsiaClosingSpike:
+    """Tests for MMSessionAnalyzer.detect_asia_closing_spike (D2)."""
+
+    def test_spike_down_gives_bullish_bias(self, analyzer: MMSessionAnalyzer):
+        """Asia spike down at 2am → bullish bias (expect W/higher low in London)."""
+        # 100 open, 96.5 close = -3.5% move → well above 0.3% threshold
+        candles = _make_candles_with_spike(spike_open=100.0, spike_close=96.5)
+        now = datetime(2026, 3, 10, 10, 0, 0, tzinfo=UTC)
+        result = analyzer.detect_asia_closing_spike(candles, now)
+        assert result.detected is True
+        assert result.direction == "down"
+        assert result.bias == "bullish"
+        assert result.magnitude_pct > 0.3
+
+    def test_spike_up_gives_bearish_bias(self, analyzer: MMSessionAnalyzer):
+        """Asia spike up at 2am → bearish bias (expect M/lower high in London)."""
+        # 100 open, 103.5 close = +3.5% move
+        candles = _make_candles_with_spike(spike_open=100.0, spike_close=103.5)
+        now = datetime(2026, 3, 10, 10, 0, 0, tzinfo=UTC)
+        result = analyzer.detect_asia_closing_spike(candles, now)
+        assert result.detected is True
+        assert result.direction == "up"
+        assert result.bias == "bearish"
+        assert result.magnitude_pct > 0.3
+
+    def test_no_spike_small_move(self, analyzer: MMSessionAnalyzer):
+        """Candle at 2am with move < 0.3% → no detection."""
+        # 100 open, 100.1 close = 0.1% — below threshold
+        candles = _make_candles_with_spike(spike_open=100.0, spike_close=100.1)
+        now = datetime(2026, 3, 10, 10, 0, 0, tzinfo=UTC)
+        result = analyzer.detect_asia_closing_spike(candles, now)
+        assert result.detected is False
+        assert result.direction == "none"
+        assert result.bias == "none"
+
+    def test_no_spike_candle_not_in_window(self, analyzer: MMSessionAnalyzer):
+        """Candle outside 2:00-2:30am window → no detection."""
+        # Build candles where only the 4am candle is large — not the 2am window
+        spike_utc = datetime(2026, 3, 10, 8, 0, 0, tzinfo=UTC)  # 4am NY EDT
+        n = 10
+        base_utc = spike_utc - timedelta(hours=n - 2)
+        times = [base_utc + timedelta(hours=i) for i in range(n)]
+        idx = pd.DatetimeIndex(times)
+        opens = np.full(n, 100.0)
+        closes = np.full(n, 100.0)
+        # Make the 4am candle large (index n-2) — but that maps to 4am NY not 2am
+        opens[-2] = 100.0
+        closes[-2] = 95.0  # big spike but wrong window
+        highs = np.maximum(opens, closes) + 0.1
+        lows = np.minimum(opens, closes) - 0.1
+        volumes = np.full(n, 1000.0)
+        candles = pd.DataFrame(
+            {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+            index=idx,
+        )
+        now = datetime(2026, 3, 10, 10, 0, 0, tzinfo=UTC)
+        result = analyzer.detect_asia_closing_spike(candles, now)
+        assert result.detected is False
+
+    def test_insufficient_data_returns_no_spike(self, analyzer: MMSessionAnalyzer):
+        """Empty DataFrame → no detection, no error."""
+        empty = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        now = datetime(2026, 3, 10, 10, 0, 0, tzinfo=UTC)
+        result = analyzer.detect_asia_closing_spike(empty, now)
+        assert result.detected is False
+        assert result.bias == "none"
+
+    def test_small_dataframe_returns_no_spike(self, analyzer: MMSessionAnalyzer):
+        """DataFrame with fewer than 5 rows → no detection."""
+        idx = pd.DatetimeIndex([datetime(2026, 3, 10, 6, 0, 0, tzinfo=UTC)])
+        candles = pd.DataFrame(
+            {"open": [100.0], "high": [101.0], "low": [99.0], "close": [97.0], "volume": [1000.0]},
+            index=idx,
+        )
+        now = datetime(2026, 3, 10, 10, 0, 0, tzinfo=UTC)
+        result = analyzer.detect_asia_closing_spike(candles, now)
+        assert result.detected is False

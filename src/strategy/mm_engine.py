@@ -1146,6 +1146,40 @@ class MMEngine:
 
         self._advance("formation_found")
 
+        # D2: Asia closing spike directional hint (Lesson 09).
+        # The spike that Asia makes in its final 30 minutes (2:00-2:30am NY)
+        # predicts the London opening structure. We apply this as a soft
+        # filter during the early UK session only — warn when the formation
+        # direction conflicts with the Asia spike bias, but never hard-reject.
+        try:
+            asia_spike = self.session_analyzer.detect_asia_closing_spike(candles_1h, now)
+            if (
+                asia_spike.detected
+                and session.session_name == "uk"
+                and session.minutes_remaining > 270  # early UK: first 60 min (90-min gap subtr.)
+            ):
+                formation_direction = best_formation.direction  # "bullish" | "bearish"
+                if asia_spike.bias and asia_spike.bias != "none" and asia_spike.bias != formation_direction:
+                    logger.info(
+                        "mm_asia_spike_bias_conflict",
+                        symbol=symbol,
+                        spike_direction=asia_spike.direction,
+                        spike_bias=asia_spike.bias,
+                        formation_direction=formation_direction,
+                        magnitude_pct=asia_spike.magnitude_pct,
+                        note="soft_filter_only",
+                    )
+                elif asia_spike.bias == formation_direction:
+                    logger.info(
+                        "mm_asia_spike_bias_aligned",
+                        symbol=symbol,
+                        spike_bias=asia_spike.bias,
+                        formation_direction=formation_direction,
+                        magnitude_pct=asia_spike.magnitude_pct,
+                    )
+        except Exception:
+            pass  # Best-effort telemetry — never block a trade on this
+
         # Course B2 (lesson 21): Final Damage M/W must be a hammer (W) or
         # inverted hammer (M) on the 15m timeframe at the 2nd peak, otherwise
         # it's not a valid Final Damage signal.
