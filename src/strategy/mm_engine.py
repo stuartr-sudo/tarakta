@@ -279,6 +279,11 @@ class MMEngine:
         self.target_analyzer = TargetAnalyzer()
         self.risk_calculator = MMRiskCalculator(risk_per_trade=RISK_PER_TRADE_PCT / 100)
 
+        # C4: BBWP volatility timing indicator (course Trading Strategies lesson 04).
+        # Timing-only — does not affect entry decisions. Used for logging/telemetry.
+        from src.strategy.mm_bbwp import BBWPAnalyzer
+        self.bbwp_analyzer = BBWPAnalyzer()
+
         # State
         self.positions: dict[str, MMPosition] = {}
         self._cooldowns: dict[str, datetime] = {}  # symbol -> earliest re-entry time
@@ -1418,6 +1423,23 @@ class MMEngine:
                 adr_state = self.adr_analyzer.calculate(candles_1h, entry_price)
         except Exception:
             pass  # ADR not critical; confluence factor defaults to 0
+
+        # C4: BBWP volatility timing (course Trading Strategies lesson 04).
+        # Timing-only: "breakout_imminent" (BBWP ≤5) means consolidation maturing,
+        # big move coming. "extreme_reached" (BBWP ≥95) means be careful.
+        # Does NOT affect entry decisions — logged for telemetry only.
+        try:
+            bbwp_state = self.bbwp_analyzer.calculate(candles_1h)
+            if bbwp_state is not None:
+                logger.info(
+                    "mm_bbwp",
+                    symbol=symbol,
+                    bbwp=round(bbwp_state.bbwp_value, 2),
+                    ma=round(bbwp_state.ma_value, 2),
+                    signal=bbwp_state.signal,
+                )
+        except Exception:
+            pass  # BBWP not critical — never block on this
 
         # Weekly cycle — computed up front so both the formation path and the
         # lesson-18 three-hits alternative can use HOW/LOW and phase data.
