@@ -11,6 +11,9 @@ B4: Linda cascade lowers min R:R threshold.
 
 D4: Closed-candle entry compliance (bar trimming).
   Course citation: lesson 13 — only analyze closed candles.
+
+B6: Conditional weekend hold for breakeven positions.
+  Course citation: lesson 12 — close by Friday UK close, but hold winners at BE.
 """
 from __future__ import annotations
 
@@ -436,3 +439,150 @@ def test_d4_no_trim_for_closed_bar():
     # now >= bar_close_dt - 30s → bar is closed
     should_trim = now < bar_close_dt - timedelta(seconds=30)
     assert should_trim is False, "Closed bar should NOT be trimmed"
+
+
+# ---------------------------------------------------------------------------
+# B6 — Conditional weekend hold for breakeven positions
+# ---------------------------------------------------------------------------
+
+
+def _make_position_for_weekend(
+    symbol: str = "BTC/USDT",
+    direction: str = "long",
+    current_level: int = 2,
+    sl_moved_to_breakeven: bool = True,
+    entry_price: float = 50000.0,
+    stop_loss: float = 50000.0,
+) -> MMPosition:
+    pos = MMPosition(
+        symbol=symbol,
+        direction=direction,
+        entry_price=entry_price,
+        quantity=0.01,
+        stop_loss=stop_loss,
+        current_level=current_level,
+        sl_moved_to_breakeven=sl_moved_to_breakeven,
+    )
+    pos.entry_time = datetime.now(timezone.utc) - timedelta(hours=24)
+    return pos
+
+
+@pytest.mark.asyncio
+async def test_b6_breakeven_position_not_closed_on_friday_uk(engine: MMEngine):
+    """B6: A position at L2+ with sl_moved_to_breakeven=True must NOT be
+    closed on Friday UK session.
+    """
+    symbol = "BTC/USDT"
+    pos = _make_position_for_weekend(
+        symbol=symbol, current_level=2, sl_moved_to_breakeven=True
+    )
+    engine.positions[symbol] = pos
+
+    engine.exchange = MagicMock()
+    engine.exchange.fetch_ticker = AsyncMock(return_value={"last": 51000.0})
+
+    # Build a Friday UK session mock
+    mock_session = MagicMock()
+    mock_session.session_name = "uk"
+    mock_session.day_of_week = 4  # Friday
+
+    close_calls: list[str] = []
+
+    async def _spy_close(p, price, reason):
+        close_calls.append(reason)
+
+    with patch.object(engine, "_close_position", side_effect=_spy_close):
+        with patch.object(engine.session_analyzer, "get_current_session", return_value=mock_session):
+            engine.candle_manager = MagicMock()
+            engine.candle_manager.get_candles = AsyncMock(return_value=None)
+            with patch.object(engine, "_is_stopped_out", return_value=False):
+                await engine._manage_position(symbol)
+
+    friday_closes = [r for r in close_calls if r == "friday_uk_exit"]
+    assert len(friday_closes) == 0, (
+        "B6: breakeven position at L2 must NOT be closed on Friday UK"
+    )
+
+
+@pytest.mark.asyncio
+async def test_b6_no_progress_position_closes_on_friday_uk(engine: MMEngine):
+    """B6: A position at L1 (has progress) but WITHOUT breakeven SL must
+    still close on Friday UK — breakeven is required for the hold exception.
+
+    Note: We use L1 (not L0) to avoid the B1 scratch-2h rule, which fires
+    for any L0 position older than 2 hours and would close before reaching
+    the Friday UK check.
+    """
+    symbol = "ETH/USDT"
+    pos = _make_position_for_weekend(
+        symbol=symbol,
+        current_level=1,
+        sl_moved_to_breakeven=False,  # No breakeven → must still close
+        entry_price=3000.0,
+        stop_loss=2900.0,
+    )
+    engine.positions[symbol] = pos
+
+    engine.exchange = MagicMock()
+    engine.exchange.fetch_ticker = AsyncMock(return_value={"last": 3050.0})
+
+    mock_session = MagicMock()
+    mock_session.session_name = "uk"
+    mock_session.day_of_week = 4
+
+    close_calls: list[str] = []
+
+    async def _spy_close(p, price, reason):
+        close_calls.append(reason)
+
+    with patch.object(engine, "_close_position", side_effect=_spy_close):
+        with patch.object(engine.session_analyzer, "get_current_session", return_value=mock_session):
+            engine.candle_manager = MagicMock()
+            engine.candle_manager.get_candles = AsyncMock(return_value=None)
+            with patch.object(engine, "_is_stopped_out", return_value=False):
+                await engine._manage_position(symbol)
+
+    friday_closes = [r for r in close_calls if r == "friday_uk_exit"]
+    assert len(friday_closes) == 1, (
+        "B6: L1 position without breakeven SL must close on Friday UK exit"
+    )
+
+
+@pytest.mark.asyncio
+async def test_b6_not_breakeven_closes_on_friday_uk(engine: MMEngine):
+    """B6: A position at L2 but sl_moved_to_breakeven=False must still close
+    on Friday UK — partial progress without breakeven is not enough to hold.
+    """
+    symbol = "SOL/USDT"
+    pos = _make_position_for_weekend(
+        symbol=symbol,
+        current_level=2,
+        sl_moved_to_breakeven=False,
+        entry_price=100.0,
+        stop_loss=95.0,
+    )
+    engine.positions[symbol] = pos
+
+    engine.exchange = MagicMock()
+    engine.exchange.fetch_ticker = AsyncMock(return_value={"last": 105.0})
+
+    mock_session = MagicMock()
+    mock_session.session_name = "uk"
+    mock_session.day_of_week = 4
+
+    close_calls: list[str] = []
+
+    async def _spy_close(p, price, reason):
+        close_calls.append(reason)
+
+    with patch.object(engine, "_close_position", side_effect=_spy_close):
+        with patch.object(engine.session_analyzer, "get_current_session", return_value=mock_session):
+            engine.candle_manager = MagicMock()
+            engine.candle_manager.get_candles = AsyncMock(return_value=None)
+            with patch.object(engine, "_is_stopped_out", return_value=False):
+                await engine._manage_position(symbol)
+
+    friday_closes = [r for r in close_calls if r == "friday_uk_exit"]
+    assert len(friday_closes) == 1, (
+        "B6: L2 position without breakeven must still close on Friday UK"
+    )

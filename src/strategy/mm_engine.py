@@ -2266,8 +2266,17 @@ class MMEngine:
         # exactly the Friday-Trap liquidity grab the course warns about.
         # Previously only fired at L>=2; now closes any open trade at
         # Friday UK close so the Friday-Trap phase starts flat.
+        #
+        # B6 course-faithful: conditional weekend hold (Lesson 12 nuance).
+        # Exception: if the position has made progress (current_level >= 1)
+        # AND the SL has been moved to breakeven, we are "playing with house
+        # money" — the course allows holding through the weekend in this case.
         session = self.session_analyzer.get_current_session()
         if session.session_name == "uk" and session.day_of_week == 4:  # Friday
+            if pos.current_level >= 1 and pos.sl_moved_to_breakeven:
+                logger.info("mm_weekend_hold_allowed", symbol=symbol,
+                            level=new_level, sl_at_breakeven=True)
+                return
             logger.info("mm_friday_uk_exit", symbol=symbol, level=new_level)
             await self._close_position(pos, current_price, "friday_uk_exit")
             return
