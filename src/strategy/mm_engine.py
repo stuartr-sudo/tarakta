@@ -977,6 +977,7 @@ class MMEngine:
 
         self._advance("candles_ok")
 
+        # D4 course-faithful: only analyze closed candles (Lesson 13)
         # Course A8 (lesson 20 "wait for candle CLOSE before entering"):
         # Exchange candle endpoints include the CURRENT in-progress bar.
         # The course rule is "evaluate on the most recent CLOSED bar" — so if
