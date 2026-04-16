@@ -2066,6 +2066,38 @@ class MMEngine:
         at_how = abs(current_price - cycle_state.how) / current_price < 0.005 if cycle_state.how > 0 else False
         at_low = abs(current_price - cycle_state.low) / current_price < 0.005 if cycle_state.low < float("inf") else False
 
+        # D1: iHOD/iLOD confirmation — when using HOD/LOD as key_level confluence,
+        # check that the level was confirmed by 30-90 min of sideways holding.
+        # This is logging/telemetry only; the `at_how_or_low` confluence flag
+        # is already populated above and is not gated on this check.
+        try:
+            if at_how and cycle_state.how > 0:
+                ihod_conf = self.weekly_cycle_tracker.confirm_ihod_ilod(
+                    candles_1h, cycle_state.how, "ihod"
+                )
+                logger.info(
+                    "mm_ihod_confirmation",
+                    symbol=symbol,
+                    level=round(cycle_state.how, 4),
+                    confirmed=ihod_conf["confirmed"],
+                    hold_minutes=ihod_conf["hold_minutes"],
+                    touch_count=ihod_conf["touch_count"],
+                )
+            if at_low and cycle_state.low < float("inf") and cycle_state.low > 0:
+                ilod_conf = self.weekly_cycle_tracker.confirm_ihod_ilod(
+                    candles_1h, cycle_state.low, "ilod"
+                )
+                logger.info(
+                    "mm_ilod_confirmation",
+                    symbol=symbol,
+                    level=round(cycle_state.low, 4),
+                    confirmed=ilod_conf["confirmed"],
+                    hold_minutes=ilod_conf["hold_minutes"],
+                    touch_count=ilod_conf["touch_count"],
+                )
+        except Exception:
+            pass  # Telemetry only — never block a trade on this
+
         # Bug 5: Three hits boosts at_key_level — 3-hit reversal at HOW/LOW strengthens confluence
         three_hit_boost = False
         if three_hits_at_how and three_hits_at_how.detected and three_hits_at_how.expected_outcome == "reversal":

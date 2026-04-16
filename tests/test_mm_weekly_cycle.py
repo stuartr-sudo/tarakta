@@ -601,3 +601,193 @@ class TestMarketResets:
         assert r.reset_type == 1
         assert r.direction == "bearish"
         assert r.confidence == 0.7
+
+
+# ------------------------------------------------------------------
+# iHOD/iLOD Confirmation (Task 7.1 — Lesson D1)
+# ------------------------------------------------------------------
+
+def _make_holding_candles(
+    level: float,
+    num_candles: int,
+    hold_pct: float = 0.003,  # within 0.3% of level (inside the 0.5% hold band)
+    broke_after: int | None = None,
+    broke_direction: str = "up",
+) -> pd.DataFrame:
+    """Build candles that hover near `level` for `num_candles`, optionally breaking."""
+    start = datetime(2026, 4, 14, 10, 0, 0, tzinfo=UTC)
+    idx = pd.date_range(start, periods=num_candles, freq="1h", tz="UTC")
+    closes = np.full(num_candles, level * (1 + hold_pct))
+    highs = closes * 1.001
+    lows = closes * 0.999
+    opens = closes * 1.0
+    if broke_after is not None and broke_after < num_candles:
+        for i in range(broke_after, num_candles):
+            if broke_direction == "up":
+                closes[i] = level * 1.008  # clearly outside 0.5% band
+                highs[i] = closes[i] * 1.001
+                lows[i] = closes[i] * 0.999
+            else:
+                closes[i] = level * 0.992
+                highs[i] = closes[i] * 1.001
+                lows[i] = closes[i] * 0.999
+    volumes = np.ones(num_candles) * 500
+    return pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+        index=idx,
+    )
+
+
+class TestIHODILODConfirmation:
+
+    def test_confirmed_level_held_60_min(self, tracker: WeeklyCycleTracker):
+        """Confirmed: price held within 0.5% of level for ~60 min (1 candle)."""
+        level = 95000.0
+        # 2 candles at level = 120 min hold (within 30-90 min / 1-3 candle window)
+        candles = _make_holding_candles(level, num_candles=2, hold_pct=0.003)
+        result = tracker.confirm_ihod_ilod(candles, level, "ihod")
+        assert result["confirmed"] is True
+        assert result["hold_minutes"] >= 60.0
+
+    def test_unconfirmed_broke_after_10_min(self, tracker: WeeklyCycleTracker):
+        """Unconfirmed: price broke above level within 1 candle (< 30 min hold)."""
+        level = 95000.0
+        # Break on the first candle → 0 hold candles before break
+        candles = _make_holding_candles(level, num_candles=4, hold_pct=0.003,
+                                        broke_after=0, broke_direction="up")
+        result = tracker.confirm_ihod_ilod(candles, level, "ihod")
+        assert result["confirmed"] is False
+
+    def test_triple_tested_level(self, tracker: WeeklyCycleTracker):
+        """Triple-tested: 3+ touches reported when price wicks within 0.2%."""
+        level = 50000.0
+        start = datetime(2026, 4, 14, 10, 0, 0, tzinfo=UTC)
+        idx = pd.date_range(start, periods=5, freq="1h", tz="UTC")
+        # Each candle wicks to within 0.1% of level (well inside the 0.2% touch band)
+        closes = np.full(5, level * 1.004)  # close in hold band (0.4%)
+        highs = np.full(5, level * 1.005)
+        lows = np.full(5, level * 0.9995)  # wick to within 0.05% = clear touch
+        opens = closes.copy()
+        volumes = np.ones(5) * 500
+        candles = pd.DataFrame(
+            {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+            index=idx,
+        )
+        result = tracker.confirm_ihod_ilod(candles, level, "ilod")
+        assert result["touch_count"] >= 3
+
+    def test_empty_candles_returns_unconfirmed(self, tracker: WeeklyCycleTracker):
+        """Empty DataFrame → unconfirmed gracefully."""
+        result = tracker.confirm_ihod_ilod(pd.DataFrame(), 95000.0, "ihod")
+        assert result["confirmed"] is False
+        assert result["hold_minutes"] == 0.0
+        assert result["touch_count"] == 0
+
+    def test_zero_level_returns_unconfirmed(self, tracker: WeeklyCycleTracker):
+        """Zero level → unconfirmed gracefully."""
+        candles = _make_holding_candles(95000.0, num_candles=4)
+        result = tracker.confirm_ihod_ilod(candles, 0.0, "ihod")
+        assert result["confirmed"] is False
+
+
+# ------------------------------------------------------------------
+# Friday Trap Pattern (Task 7.3 — Lesson D8)
+# ------------------------------------------------------------------
+
+def _make_friday_candles(
+    false_direction: str = "up",
+    include_trend: bool = True,
+    include_extension: bool = False,
+    include_us_reversal: bool = False,
+) -> tuple[pd.DataFrame, datetime]:
+    """Build Friday 1H candles simulating the trap pattern."""
+    # Friday 2026-04-17, UK session starts at 7am UTC (approx 3am NY)
+    # UK open NY = 3am → use 7am UTC as proxy
+    uk_open_utc = datetime(2026, 4, 17, 7, 0, 0, tzinfo=UTC)  # Friday
+    # Build 8 UK candles + 3 US candles
+    num_candles = 11
+    idx = pd.date_range(uk_open_utc, periods=num_candles, freq="1h", tz="UTC")
+
+    base = 95000.0
+    opens = np.full(num_candles, base)
+    closes = np.full(num_candles, base)
+    highs = np.full(num_candles, base * 1.002)
+    lows = np.full(num_candles, base * 0.998)
+    volumes = np.ones(num_candles) * 500
+
+    # Candle 0: false move spike (wide range, wick-dominant)
+    if false_direction == "up":
+        highs[0] = base * 1.015  # big upper wick
+        lows[0] = base * 0.999
+        opens[0] = base * 1.001
+        closes[0] = base * 1.002  # small body
+    else:
+        lows[0] = base * 0.985
+        highs[0] = base * 1.001
+        opens[0] = base * 0.999
+        closes[0] = base * 0.998
+
+    # UK candles 1-7: trend in opposite direction
+    real_dir = -1 if false_direction == "up" else 1
+    if include_trend:
+        for i in range(1, 8):
+            step = base * 0.002 * real_dir * i
+            opens[i] = base + step * 0.9
+            closes[i] = base + step
+            highs[i] = max(opens[i], closes[i]) * 1.001
+            lows[i] = min(opens[i], closes[i]) * 0.999
+
+        if include_extension:
+            # Last 2 UK candles are wider than average
+            highs[6] = closes[6] * 1.004
+            lows[6] = closes[6] * 0.996
+            highs[7] = closes[7] * 1.004
+            lows[7] = closes[7] * 0.996
+
+    # US candles 8-10: reversal
+    if include_us_reversal and include_trend:
+        # US reverses: goes back toward base
+        for i in range(8, 11):
+            opens[i] = closes[7] * (1 + real_dir * 0.001)
+            closes[i] = closes[7] * (1 + real_dir * 0.003 * (11 - i))
+            highs[i] = max(opens[i], closes[i]) * 1.001
+            lows[i] = min(opens[i], closes[i]) * 0.999
+
+    return pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+        index=idx,
+    ), uk_open_utc + timedelta(hours=5)  # "now" = mid-UK session
+
+
+class TestFridayTrapPattern:
+
+    def test_detects_false_move_on_friday(self, tracker: WeeklyCycleTracker):
+        """Detects at least false_move phase on a Friday with a spike candle."""
+        candles, now = _make_friday_candles(false_direction="up", include_trend=False)
+        result = tracker.detect_friday_trap_pattern(candles, now)
+        assert result is not None
+        assert result["phase"] in ("false_move", "trend", "extension", "us_reversal")
+        assert result["direction"] in ("up", "down")
+
+    def test_no_pattern_on_non_friday(self, tracker: WeeklyCycleTracker):
+        """Returns None when it's not Friday."""
+        candles, _ = _make_friday_candles()
+        # Use a Wednesday timestamp
+        wednesday_now = datetime(2026, 4, 15, 12, 0, 0, tzinfo=UTC)
+        result = tracker.detect_friday_trap_pattern(candles, wednesday_now)
+        assert result is None
+
+    def test_detects_trend_phase(self, tracker: WeeklyCycleTracker):
+        """Detects trend phase when UK session candles trend after false move."""
+        candles, now = _make_friday_candles(
+            false_direction="up", include_trend=True
+        )
+        result = tracker.detect_friday_trap_pattern(candles, now)
+        assert result is not None
+        assert result["phase"] in ("trend", "extension", "us_reversal")
+
+    def test_empty_candles_returns_none(self, tracker: WeeklyCycleTracker):
+        """Empty candles → None gracefully."""
+        friday_now = datetime(2026, 4, 17, 10, 0, 0, tzinfo=UTC)
+        result = tracker.detect_friday_trap_pattern(pd.DataFrame(), friday_now)
+        assert result is None

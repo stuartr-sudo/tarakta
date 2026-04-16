@@ -1148,6 +1148,220 @@ class WeeklyCycleTracker:
             self._level_swing_low = float("inf")
 
     # ------------------------------------------------------------------
+    # iHOD / iLOD Confirmation (Lesson D1)
+    # ------------------------------------------------------------------
+
+    def confirm_ihod_ilod(
+        self,
+        candles_1h: pd.DataFrame,
+        level: float,
+        level_type: str,
+    ) -> dict:
+        """Check if iHOD/iLOD has been confirmed by sideways holding.
+
+        Course teaches (D1): After a hammer/inverted hammer sets the initial
+        High/Low of Day, require 30-90 minutes of sideways holding to confirm.
+        If price hits the zone 3 times without breaking → money trapped there
+        (strong level).
+
+        Args:
+            candles_1h: 1H OHLCV DataFrame (recent candles).
+            level: The iHOD or iLOD price level to confirm.
+            level_type: "ihod" or "ilod".
+
+        Returns:
+            dict with keys:
+                confirmed (bool): True if holding criteria met.
+                hold_minutes (float): How long price held within 0.5%.
+                touch_count (int): Number of candles within 0.2% of level.
+        """
+        if candles_1h is None or candles_1h.empty or len(candles_1h) < 2 or level <= 0:
+            return {"confirmed": False, "hold_minutes": 0.0, "touch_count": 0}
+
+        # Tolerance bands
+        hold_band = level * 0.005   # 0.5% — within this = "holding"
+        touch_band = level * 0.002  # 0.2% — within this = "touch"
+
+        # Use last 6 candles (up to 6h of data for the post-level window)
+        recent = candles_1h.tail(6)
+
+        hold_candle_count = 0
+        touch_count = 0
+        broke_level = False
+
+        for _, row in recent.iterrows():
+            high = float(row["high"])
+            low = float(row["low"])
+            close = float(row["close"])
+
+            # Check touch: wick within 0.2% of level
+            if abs(high - level) <= touch_band or abs(low - level) <= touch_band:
+                touch_count += 1
+
+            # Check hold: close within 0.5% of level
+            if abs(close - level) <= hold_band:
+                hold_candle_count += 1
+
+            # Check break: did price cleanly breach the level (close beyond band)?
+            if level_type == "ihod":
+                # For iHOD (top level): a CLOSE above the band = break (bullish)
+                if close > level + hold_band:
+                    broke_level = True
+                    break
+            else:
+                # For iLOD (bottom level): a CLOSE below the band = break (bearish)
+                if close < level - hold_band:
+                    broke_level = True
+                    break
+
+        hold_minutes = hold_candle_count * 60.0  # 1H candles → minutes
+        # Confirmed: held 30-90 min (1-3 candles in band) without breaking
+        # AND 3+ touches (trapped money) OR held >= 1 candle without break
+        triple_tested = touch_count >= 3
+        held_enough = 1 <= hold_candle_count <= 3
+        confirmed = not broke_level and held_enough
+
+        logger.debug(
+            "mm_ihod_ilod_confirm",
+            level=round(level, 4),
+            level_type=level_type,
+            confirmed=confirmed,
+            hold_minutes=hold_minutes,
+            touch_count=touch_count,
+            triple_tested=triple_tested,
+            broke=broke_level,
+        )
+
+        return {
+            "confirmed": confirmed,
+            "hold_minutes": hold_minutes,
+            "touch_count": touch_count,
+        }
+
+    # ------------------------------------------------------------------
+    # Friday Trap Pattern (Lesson D8)
+    # ------------------------------------------------------------------
+
+    def detect_friday_trap_pattern(
+        self,
+        candles_1h: pd.DataFrame,
+        now: datetime,
+    ) -> "dict | None":
+        """Detect Friday trap pattern progression.
+
+        Course Lesson 15 / D8 teaches: Friday behavior has 4 phases:
+          1. false_move  — UK open: spike in one direction (stop hunt)
+          2. trend       — UK session: trend in the opposite direction
+          3. extension   — end of UK: trend extends to a high/low
+          4. us_reversal — US open: reversal back, trapping latecomers
+
+        Returns:
+            dict with keys {phase: str, direction: str} or None if not Friday.
+            Phases: "false_move" | "trend" | "extension" | "us_reversal"
+        """
+        ny_now = _to_ny(now)
+        if ny_now.weekday() != 4:  # Only on Friday
+            return None
+
+        if candles_1h is None or candles_1h.empty or len(candles_1h) < 8:
+            return None
+
+        # UK session hours in NY time: roughly 2am-12pm NY
+        # US open: ~9:30am NY (hour 9)
+        uk_open_ny_hour = 2
+        uk_end_ny_hour = 12
+        us_open_ny_hour = 9
+
+        # Filter to Friday candles only (last 24h to be safe)
+        recent = candles_1h.tail(24)
+
+        # Separate into UK and US session candles by NY hour
+        uk_candles = []
+        us_candles = []
+        for ts, row in recent.iterrows():
+            if hasattr(ts, "to_pydatetime"):
+                bar_dt = ts.to_pydatetime()
+            else:
+                bar_dt = ts
+            if bar_dt.tzinfo is None:
+                bar_dt = bar_dt.replace(tzinfo=ZoneInfo("UTC"))
+            bar_ny = _to_ny(bar_dt)
+            # Only Friday bars
+            if bar_ny.weekday() != 4:
+                continue
+            if uk_open_ny_hour <= bar_ny.hour < uk_end_ny_hour:
+                if bar_ny.hour < us_open_ny_hour:
+                    uk_candles.append(row)
+                else:
+                    us_candles.append(row)
+
+        if not uk_candles:
+            return None
+
+        uk_df = pd.DataFrame(uk_candles)
+
+        # --- Phase detection ---
+        # Phase 1: false_move — first 1-2 UK candles show a spike (wick > 2x body)
+        first = uk_df.iloc[0]
+        o = float(first["open"])
+        h = float(first["high"])
+        lo = float(first["low"])
+        c = float(first["close"])
+        full_range = h - lo
+        body = abs(c - o)
+        false_move_detected = full_range > 0 and body > 0 and (full_range / body) > 2.0
+
+        # Determine initial false direction
+        false_direction = "up" if h - max(o, c) > max(o, c) - lo else "down"
+
+        if not false_move_detected:
+            return None
+
+        phase = "false_move"
+        real_direction = "down" if false_direction == "up" else "up"
+
+        # Phase 2: trend — majority of UK candles move in real direction
+        if len(uk_df) >= 3:
+            closes = uk_df["close"].values.astype(float)
+            if real_direction == "up":
+                trending = closes[-1] > closes[0]
+            else:
+                trending = closes[-1] < closes[0]
+            if trending:
+                phase = "trend"
+
+        # Phase 3: extension — last 2 UK candles continue the trend with acceleration
+        if phase == "trend" and len(uk_df) >= 4:
+            last2 = uk_df.tail(2)
+            last2_range = float(last2["high"].max()) - float(last2["low"].min())
+            avg_range = float((uk_df["high"] - uk_df["low"]).mean())
+            if last2_range > avg_range * 1.2:  # extension = last candles wider than average
+                phase = "extension"
+
+        # Phase 4: us_reversal — US open candles reverse the UK trend
+        if phase in ("trend", "extension") and len(us_candles) >= 1:
+            us_df = pd.DataFrame(us_candles)
+            us_first_close = float(us_df.iloc[0]["close"])
+            uk_last_close = float(uk_df.iloc[-1]["close"])
+            if real_direction == "up" and us_first_close < uk_last_close * 0.998:
+                phase = "us_reversal"
+            elif real_direction == "down" and us_first_close > uk_last_close * 1.002:
+                phase = "us_reversal"
+
+        result = {"phase": phase, "direction": real_direction}
+
+        logger.debug(
+            "mm_friday_trap_pattern",
+            phase=phase,
+            direction=real_direction,
+            false_direction=false_direction,
+            uk_candle_count=len(uk_candles),
+            us_candle_count=len(us_candles),
+        )
+
+        return result
+
+    # ------------------------------------------------------------------
     # Market Resets (Lesson 15 — A6)
     # ------------------------------------------------------------------
 
