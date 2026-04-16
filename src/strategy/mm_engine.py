@@ -48,6 +48,7 @@ from src.strategy.mm_sessions import MMSessionAnalyzer
 from src.strategy.mm_targets import TargetAnalyzer
 from src.strategy.mm_weekly_cycle import WeeklyCycleTracker
 from src.strategy.mm_weekend_trap import WeekendTrapAnalyzer
+from src.strategy.mm_scalp_vwap_rsi import VWAPRSIScalper, ScalpSignal
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -304,6 +305,11 @@ class MMEngine:
         # level is observed.
         from src.strategy.mm_linda import LindaTracker
         self.linda = LindaTracker()
+
+        # A7: VWAP+RSI(2) Scalp Strategy — fallback entry path when no
+        # MM formation is found. Fires on 15m chart with VWAP + RSI(2)
+        # extreme + reversal candlestick at pullback.
+        self.scalper = VWAPRSIScalper()
 
         # Course E1 (lesson 54): "if you have $10K OKX and $10K Binance,
         # 1% of $20K" — multi-exchange combined balance for 1% risk.
@@ -731,6 +737,63 @@ class MMEngine:
                 at_key_level=True,
                 confirmed=True,
             )
+
+    def _try_scalp_signal(self, candles_15m, candles_1h, cycle_state):
+        """A7: VWAP+RSI Scalp — scan for a scalp setup on the 15m chart.
+
+        Gets targets from the weekly cycle (HOW, LOW, HOD, LOD) and calls
+        the VWAPRSIScalper. Returns a ScalpSignal or None.
+        """
+        targets = []
+        for attr in ("how", "low", "hod", "lod"):
+            val = getattr(cycle_state, attr, None)
+            if val and val > 0 and val != float("inf"):
+                targets.append(float(val))
+
+        scalp = self.scalper.scan(candles_15m, candles_1h, targets or None)
+        if scalp is not None and scalp.detected:
+            logger.info(
+                "mm_scalp_signal_detected",
+                direction=scalp.direction,
+                entry=scalp.entry_price,
+                sl=scalp.stop_loss,
+                tp=scalp.target,
+                rr=scalp.risk_reward,
+                rsi2=scalp.rsi_2_value,
+                pattern=scalp.pattern,
+                bias=scalp.rsi_14_bias,
+            )
+        return scalp
+
+    def _formation_from_scalp(self, scalp: "ScalpSignal", candles_15m) -> "Formation":
+        """Synthesize a Formation from a ScalpSignal for pipeline compatibility.
+
+        Tags the formation with variant='scalp_vwap_rsi' so it's
+        distinguishable in the trade log.
+        """
+        from src.strategy.mm_formations import Formation
+
+        ftype = "W" if scalp.direction == "long" else "M"
+        direction = "bullish" if scalp.direction == "long" else "bearish"
+
+        n = len(candles_15m)
+        peak2_idx = max(0, n - 1)
+        peak1_idx = max(0, n - 3)  # ~30 min prior
+
+        return Formation(
+            type=ftype,
+            variant="scalp_vwap_rsi",
+            peak1_idx=peak1_idx,
+            peak1_price=scalp.stop_loss,
+            peak2_idx=peak2_idx,
+            peak2_price=scalp.entry_price,
+            trough_idx=peak2_idx,
+            trough_price=scalp.entry_price,
+            direction=direction,
+            quality_score=0.5,
+            at_key_level=False,
+            confirmed=True,
+        )
 
     def _try_200ema_rejection_formation(self, candles_1h, candles_4h, candles_15m):
         """Course lesson 18 alternative #2: 200 EMA rejection trade.
@@ -1553,6 +1616,14 @@ class MMEngine:
                     logger.info("mm_33_trade_formation_synthesized",
                                 symbol=symbol, type=best_formation.type,
                                 variant=best_formation.variant)
+
+            # A7: VWAP+RSI Scalp fallback when no MM formation found.
+            # Scans 15m chart for a pullback-to-VWAP/255-EMA setup with
+            # extreme RSI(2) and a reversal candlestick pattern.
+            if best_formation is None and candles_15m is not None and len(candles_15m) >= 30:
+                scalp = self._try_scalp_signal(candles_15m, candles_1h, cycle_state)
+                if scalp is not None and scalp.detected:
+                    best_formation = self._formation_from_scalp(scalp, candles_15m)
 
             if best_formation is None:
                 return self._reject("no_formation", symbol)
