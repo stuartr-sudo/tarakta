@@ -399,10 +399,13 @@ class MMEngine:
                 continue
             # Map direction → W (bullish long) / M (bearish short)
             ftype = "W" if direction == "bullish" else "M"
-            # peak1/peak2 prices — approximate from BM bounds
-            p1 = float(entry.entry_price)
+            # peak1/peak2 prices — use SL reference as the invalidation extreme.
+            # For W (long): peaks = lows (SL goes below them).
+            # For M (short): peaks = highs (SL goes above them).
+            # entry.stop_loss from BM detector is the correct invalidation level.
+            p1 = float(entry.stop_loss) if entry.stop_loss else float(entry.entry_price)
             p2 = float(entry.entry_price)
-            trough = float(entry.target) if entry.target else p1
+            trough = float(entry.target) if entry.target else p2
             return Formation(
                 type=ftype,
                 variant="board_meeting",
