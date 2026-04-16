@@ -2873,6 +2873,28 @@ class MMEngine:
         # money" — the course allows holding through the weekend in this case.
         session = self.session_analyzer.get_current_session()
         if session.session_name == "uk" and session.day_of_week == 4:  # Friday
+            # D8: Detect and log the Friday trap pattern progression before closing.
+            # The existing UK exit already closes positions at the right time;
+            # this adds pattern-awareness logging so post-trade analysis can
+            # identify which phase of the Friday trap the exit occurred in.
+            if candles_1h is not None:
+                try:
+                    now_dt = datetime.now(timezone.utc)
+                    friday_trap = self.weekly_cycle_tracker.detect_friday_trap_pattern(
+                        candles_1h, now_dt
+                    )
+                    if friday_trap is not None:
+                        logger.info(
+                            "mm_friday_trap_pattern_detected",
+                            symbol=symbol,
+                            phase=friday_trap["phase"],
+                            direction=friday_trap["direction"],
+                            position_direction=pos.direction,
+                            level=new_level,
+                        )
+                except Exception:
+                    pass  # Telemetry only
+
             if pos.current_level >= 1 and pos.sl_moved_to_breakeven:
                 logger.info("mm_weekend_hold_allowed", symbol=symbol,
                             level=new_level, sl_at_breakeven=True)
