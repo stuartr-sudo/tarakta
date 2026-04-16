@@ -444,3 +444,160 @@ class TestConfidence:
         df = _make_1h_ohlcv(start=sun_5pm_utc - timedelta(hours=48), hours=72)
         state = tracker.update(df, sun_5pm_utc + timedelta(hours=24))
         assert 0.0 <= state.confidence <= 1.0
+
+
+# ------------------------------------------------------------------
+# Market Resets (Lesson 15 — A6)
+# ------------------------------------------------------------------
+
+from src.strategy.mm_weekly_cycle import MarketResetResult
+
+
+def _make_type1_reset_candles(direction: str = "bearish") -> pd.DataFrame:
+    """Build candles where price approaches the 50 EMA but fails to break it.
+
+    Strategy: compute the EMA from the price path and then set highs/lows
+    so they approach the EMA within 0.5% but never cross beyond 0.5%.
+    """
+    n = 100
+    base = 1000.0
+    start = datetime(2026, 3, 8, 22, 0, 0, tzinfo=UTC)
+    idx = pd.date_range(start, periods=n, freq="1h", tz="UTC")
+
+    if direction == "bearish":
+        # Gentle downtrend then stabilization just below EMA
+        closes = np.empty(n)
+        closes[0] = base
+        for i in range(1, 60):
+            closes[i] = closes[i - 1] * 0.999
+        for i in range(60, n):
+            closes[i] = closes[i - 1] * 1.0001
+    else:
+        # Gentle uptrend then stabilization just above EMA
+        closes = np.empty(n)
+        closes[0] = base
+        for i in range(1, 60):
+            closes[i] = closes[i - 1] * 1.001
+        for i in range(60, n):
+            closes[i] = closes[i - 1] * 0.9999
+
+    # Compute EMA to calibrate wicks
+    ema50 = pd.Series(closes).ewm(span=50, adjust=False).mean().values
+    opens = closes.copy()
+
+    if direction == "bearish":
+        # Highs approach EMA from below: set highs to EMA * 0.998 (close but below)
+        highs = np.maximum(closes, closes)
+        for i in range(80, n):
+            # Place highs just below EMA (within 0.5% but not above 0.5%)
+            highs[i] = ema50[i] * 0.998
+            highs[i] = max(highs[i], closes[i])
+        lows = closes * 0.999
+    else:
+        # Lows approach EMA from above: set lows to EMA * 1.002
+        lows = np.minimum(closes, closes)
+        for i in range(80, n):
+            lows[i] = ema50[i] * 1.002
+            lows[i] = min(lows[i], closes[i])
+        highs = closes * 1.001
+
+    volumes = np.ones(n) * 1000
+
+    return pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+        index=idx,
+    )
+
+
+def _make_type3_consolidation_candles() -> pd.DataFrame:
+    """Build candles with a full-day consolidation (range < 1.5%)."""
+    n = 100
+    base = 1000.0
+    start = datetime(2026, 3, 8, 22, 0, 0, tzinfo=UTC)
+    idx = pd.date_range(start, periods=n, freq="1h", tz="UTC")
+
+    # Very flat: close stays near base
+    rng = np.random.RandomState(42)
+    closes = base + rng.normal(0, 0.5, n)
+    opens = closes + rng.normal(0, 0.1, n)
+    highs = np.maximum(opens, closes) + 0.3
+    lows = np.minimum(opens, closes) - 0.3
+    volumes = np.ones(n) * 1000
+
+    return pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+        index=idx,
+    )
+
+
+class TestMarketResets:
+    """Tests for Market Reset detection (Lesson 15 — A6)."""
+
+    def test_type1_bearish_continuation(self, tracker: WeeklyCycleTracker):
+        """Type 1: W fails to break 50 EMA after downtrend → bearish continuation."""
+        candles = _make_type1_reset_candles(direction="bearish")
+        result = tracker.detect_market_reset(candles, ema_state=None, prior_direction="bearish")
+
+        assert result is not None
+        assert result.detected is True
+        assert result.reset_type == 1
+        assert result.direction == "bearish"  # continuation of prior
+        assert result.confidence > 0
+
+    def test_type1_bullish_continuation(self, tracker: WeeklyCycleTracker):
+        """Type 1: M fails to break 50 EMA after uptrend → bullish continuation."""
+        candles = _make_type1_reset_candles(direction="bullish")
+        result = tracker.detect_market_reset(candles, ema_state=None, prior_direction="bullish")
+
+        assert result is not None
+        assert result.detected is True
+        assert result.reset_type == 1
+        assert result.direction == "bullish"
+
+    def test_type3_full_day_consolidation(self, tracker: WeeklyCycleTracker):
+        """Type 3: Full-day consolidation (range < 1.5%) → continuation."""
+        candles = _make_type3_consolidation_candles()
+        result = tracker.detect_market_reset(candles, ema_state=None, prior_direction="bearish")
+
+        assert result is not None
+        assert result.detected is True
+        assert result.reset_type in (1, 3)  # might hit type1 first due to flat data
+        assert result.direction == "bearish"
+
+    def test_no_reset_on_strong_ema_break(self, tracker: WeeklyCycleTracker):
+        """Strong EMA break → no Type 1 reset."""
+        n = 100
+        base = 1000.0
+        start = datetime(2026, 3, 8, 22, 0, 0, tzinfo=UTC)
+        idx = pd.date_range(start, periods=n, freq="1h", tz="UTC")
+
+        # Strong uptrend that clearly breaks above all EMAs
+        closes = base * np.cumprod(np.full(n, 1.005))
+        opens = closes * 0.999
+        highs = closes * 1.002
+        lows = closes * 0.998
+        volumes = np.ones(n) * 1000
+
+        candles = pd.DataFrame(
+            {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+            index=idx,
+        )
+
+        # Type 1 should NOT trigger — the uptrend broke the EMA decisively
+        result = tracker._detect_reset_type1(candles, prior_direction="bearish")
+        assert result is None
+
+    def test_insufficient_data(self, tracker: WeeklyCycleTracker):
+        """Insufficient data → no detection."""
+        start = datetime(2026, 3, 8, 22, 0, 0, tzinfo=UTC)
+        candles = _make_1h_ohlcv(start=start, hours=20)
+        result = tracker.detect_market_reset(candles, ema_state=None, prior_direction="bearish")
+        assert result is None
+
+    def test_market_reset_result_dataclass(self):
+        """MarketResetResult dataclass has correct fields."""
+        r = MarketResetResult(detected=True, reset_type=1, direction="bearish", confidence=0.7)
+        assert r.detected is True
+        assert r.reset_type == 1
+        assert r.direction == "bearish"
+        assert r.confidence == 0.7

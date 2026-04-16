@@ -142,6 +142,29 @@ class CycleState:
     confidence: float = 0.0  # 0-1
 
 
+@dataclass
+class MarketResetResult:
+    """Result of market reset detection (Lesson 15 — A6).
+
+    Three reset patterns that indicate CONTINUATION (not reversal):
+
+    Type 1: W/M fails to break 50 EMA → continuation in prior direction.
+    Type 2: Two consecutive Asia sessions at same price level.
+    Type 3: Full-day consolidation (Asia to Asia).
+
+    Attributes:
+        detected: True if a reset pattern was found.
+        reset_type: 1, 2, or 3.
+        direction: The continuation direction (same as prior trend).
+        confidence: 0-1 confidence score.
+    """
+
+    detected: bool
+    reset_type: int  # 1, 2, or 3
+    direction: str  # The continuation direction (same as prior trend)
+    confidence: float
+
+
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
@@ -842,8 +865,23 @@ class WeeklyCycleTracker:
                 # Check for reversal formation at level 3
                 rev_formation = self._detect_reversal_at_level3(ohlc_1h, direction)
                 if rev_formation:
-                    self._state.phase = MIDWEEK_REVERSAL
-                    logger.info("transition_to_midweek_reversal", formation=rev_formation)
+                    # Before flipping direction, check for market reset (Type 1).
+                    # A reset means the formation is a CONTINUATION signal,
+                    # not a reversal — keep direction and stay at Level 3.
+                    reset = self.detect_market_reset(
+                        ohlc_1h, ema_state=None, prior_direction=direction or "",
+                    )
+                    if reset is not None and reset.reset_type == 1:
+                        logger.info(
+                            "market_reset_blocks_reversal",
+                            reset_type=reset.reset_type,
+                            direction=reset.direction,
+                            confidence=reset.confidence,
+                        )
+                        # Stay in LEVEL_3, don't flip direction
+                    else:
+                        self._state.phase = MIDWEEK_REVERSAL
+                        logger.info("transition_to_midweek_reversal", formation=rev_formation)
             elif _is_friday_uk_session(ny_now):
                 self._transition_to_friday_trap()
 
@@ -1108,6 +1146,229 @@ class WeeklyCycleTracker:
         else:
             self._level_swing_high = 0.0
             self._level_swing_low = float("inf")
+
+    # ------------------------------------------------------------------
+    # Market Resets (Lesson 15 — A6)
+    # ------------------------------------------------------------------
+
+    def detect_market_reset(
+        self,
+        candles_1h: pd.DataFrame,
+        ema_state: dict | None,
+        prior_direction: str,
+    ) -> "MarketResetResult | None":
+        """Detect a market reset pattern indicating CONTINUATION (not reversal).
+
+        Three reset types from Lesson 15:
+
+        Type 1: W fails to break 50 EMA → continuation downtrend.
+            After a 3-level drop completes, a W forms but FAILS to break
+            above the 50 EMA. The downtrend continues. Do NOT enter long.
+
+        Type 2: Two consecutive Asia sessions at same price level.
+            UK/US do fakeouts both days, close back in range. Final stop
+            hunt indicates real direction. (Detection only — not wired
+            into state machine yet.)
+
+        Type 3: Full-day consolidation (Asia to Asia).
+            After cycle completes, MM consolidates for an entire day.
+            Stop hunt or fake move in opposite direction → continuation.
+            (Detection only — not wired into state machine yet.)
+
+        Args:
+            candles_1h: 1H OHLCV DataFrame.
+            ema_state: Dict with EMA values (e.g. {"ema50": float}) or None.
+            prior_direction: The prior trend direction ("bullish" or "bearish").
+
+        Returns:
+            MarketResetResult if detected, else None.
+        """
+        if candles_1h is None or candles_1h.empty or len(candles_1h) < 50:
+            return None
+
+        # --- Type 1: W/M fails to break 50 EMA → continuation ---
+        type1 = self._detect_reset_type1(candles_1h, prior_direction)
+        if type1 is not None:
+            return type1
+
+        # --- Type 2: Two consecutive Asia sessions at same level ---
+        type2 = self._detect_reset_type2(candles_1h, prior_direction)
+        if type2 is not None:
+            return type2
+
+        # --- Type 3: Full-day consolidation ---
+        type3 = self._detect_reset_type3(candles_1h, prior_direction)
+        if type3 is not None:
+            return type3
+
+        return None
+
+    def _detect_reset_type1(
+        self,
+        candles_1h: pd.DataFrame,
+        prior_direction: str,
+    ) -> "MarketResetResult | None":
+        """Type 1: Formation fails to break 50 EMA → continuation.
+
+        After a downtrend: W forms but fails to break above 50 EMA.
+        After an uptrend: M forms but fails to break below 50 EMA.
+        """
+        if len(candles_1h) < EMA_50_PERIOD + 10:
+            return None
+
+        ema50 = _compute_ema(candles_1h["close"], EMA_50_PERIOD)
+        recent = candles_1h.tail(20)
+        recent_ema = ema50.tail(20)
+
+        if prior_direction == "bearish":
+            # After downtrend, look for a W that failed to break above 50 EMA
+            # A failed W = price rallied (W shape) but the rally highs stayed
+            # below the 50 EMA
+            highs = recent["high"].values.astype(float)
+            ema_vals = recent_ema.values.astype(float)
+
+            # Find the highest point in the recent window
+            max_high = float(np.max(highs))
+            max_ema = float(np.max(ema_vals))
+
+            # W attempt: price tried to go up but stayed below EMA
+            # Check that there was a rally attempt (some highs approached EMA)
+            # but never broke above it
+            close_to_ema = np.any(highs > ema_vals * 0.995)
+            broke_ema = np.any(highs > ema_vals * 1.005)
+
+            if close_to_ema and not broke_ema:
+                logger.info(
+                    "market_reset_type1",
+                    direction="bearish",
+                    prior_direction=prior_direction,
+                    max_high=round(max_high, 2),
+                    max_ema=round(max_ema, 2),
+                )
+                return MarketResetResult(
+                    detected=True,
+                    reset_type=1,
+                    direction=prior_direction,  # continuation
+                    confidence=0.7,
+                )
+
+        elif prior_direction == "bullish":
+            # After uptrend, look for an M that failed to break below 50 EMA
+            lows = recent["low"].values.astype(float)
+            ema_vals = recent_ema.values.astype(float)
+
+            min_low = float(np.min(lows))
+
+            close_to_ema = np.any(lows < ema_vals * 1.005)
+            broke_ema = np.any(lows < ema_vals * 0.995)
+
+            if close_to_ema and not broke_ema:
+                logger.info(
+                    "market_reset_type1",
+                    direction="bullish",
+                    prior_direction=prior_direction,
+                    min_low=round(min_low, 2),
+                )
+                return MarketResetResult(
+                    detected=True,
+                    reset_type=1,
+                    direction=prior_direction,
+                    confidence=0.7,
+                )
+
+        return None
+
+    def _detect_reset_type2(
+        self,
+        candles_1h: pd.DataFrame,
+        prior_direction: str,
+    ) -> "MarketResetResult | None":
+        """Type 2: Two consecutive Asia sessions at same price level.
+
+        UK/US do fakeouts high and low both days, close back in range.
+        Detection only — logged for telemetry, not hard-wired into state machine.
+        """
+        if len(candles_1h) < 48:  # need ~2 days of data
+            return None
+
+        # Compare the last two Asia sessions (roughly hours 0-8 UTC each day)
+        # For simplicity, compare the range of the last 24h vs prior 24h
+        last_24 = candles_1h.iloc[-24:]
+        prev_24 = candles_1h.iloc[-48:-24]
+
+        if len(last_24) < 24 or len(prev_24) < 24:
+            return None
+
+        # Asia is roughly the first 8 candles of each 24h period
+        asia_last = last_24.iloc[:8]
+        asia_prev = prev_24.iloc[:8]
+
+        # Check if both Asia sessions consolidated at the same level
+        last_mid = (float(asia_last["high"].max()) + float(asia_last["low"].min())) / 2
+        prev_mid = (float(asia_prev["high"].max()) + float(asia_prev["low"].min())) / 2
+
+        if last_mid <= 0 or prev_mid <= 0:
+            return None
+
+        # Same level = midpoints within 0.5% of each other
+        diff_pct = abs(last_mid - prev_mid) / last_mid
+        if diff_pct < 0.005:
+            logger.info(
+                "market_reset_type2",
+                prior_direction=prior_direction,
+                last_mid=round(last_mid, 2),
+                prev_mid=round(prev_mid, 2),
+                diff_pct=round(diff_pct * 100, 3),
+            )
+            return MarketResetResult(
+                detected=True,
+                reset_type=2,
+                direction=prior_direction,
+                confidence=0.5,
+            )
+
+        return None
+
+    def _detect_reset_type3(
+        self,
+        candles_1h: pd.DataFrame,
+        prior_direction: str,
+    ) -> "MarketResetResult | None":
+        """Type 3: Full-day consolidation (Asia to Asia).
+
+        After cycle completes, MM consolidates for an entire day. The
+        range of the last 24 candles is very tight (< 1.5% of price).
+        Detection only — logged for telemetry.
+        """
+        if len(candles_1h) < 24:
+            return None
+
+        last_24 = candles_1h.iloc[-24:]
+        day_high = float(last_24["high"].max())
+        day_low = float(last_24["low"].min())
+
+        if day_low <= 0:
+            return None
+
+        day_range_pct = (day_high - day_low) / day_low * 100
+
+        # Full-day consolidation: range < 1.5%
+        if day_range_pct < 1.5:
+            logger.info(
+                "market_reset_type3",
+                prior_direction=prior_direction,
+                day_range_pct=round(day_range_pct, 3),
+                day_high=round(day_high, 2),
+                day_low=round(day_low, 2),
+            )
+            return MarketResetResult(
+                detected=True,
+                reset_type=3,
+                direction=prior_direction,
+                confidence=0.4,
+            )
+
+        return None
 
     # ------------------------------------------------------------------
     # Confidence scoring
