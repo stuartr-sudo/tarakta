@@ -645,6 +645,88 @@ class MMEngine:
             confirmed=True,
         )
 
+    def _try_33_trade_formation(self, candles_1h, cycle_state):
+        """Course lesson 12 (A5): 33 Trade.
+
+        Three rises over three days AND three hits to high on Day 3 AND
+        EMAs fanning out (trend acceleration). Short off inverted hammer
+        at Rise Level 3. Target: 50 EMA first, then 200 EMA.
+
+        All three components already exist individually:
+        1. level >= 3 (from level tracker)
+        2. three hits at HOW (from formation detector)
+        3. EMA fan-out (from _detect_ema_fan_out)
+        """
+        from src.strategy.mm_formations import Formation
+
+        # Condition 1: level >= 3
+        level_bull = self.level_tracker.analyze(candles_1h, direction="bullish")
+        level_bear = self.level_tracker.analyze(candles_1h, direction="bearish")
+        current_level = max(level_bull.current_level, level_bear.current_level)
+        if current_level < 3:
+            return None
+
+        # Condition 2: three hits at HOW (bearish) or LOW (bullish)
+        three_hits_how = None
+        three_hits_low = None
+        if cycle_state.how and cycle_state.how > 0:
+            three_hits_how = self.formation_detector.detect_three_hits(
+                candles_1h, cycle_state.how,
+            )
+        if cycle_state.low and cycle_state.low < float("inf") and cycle_state.low > 0:
+            three_hits_low = self.formation_detector.detect_three_hits(
+                candles_1h, cycle_state.low,
+            )
+
+        how_detected = three_hits_how is not None and three_hits_how.detected
+        low_detected = three_hits_low is not None and three_hits_low.detected
+
+        if not how_detected and not low_detected:
+            return None
+
+        # Condition 3: EMA fan-out
+        if not self._detect_ema_fan_out(candles_1h):
+            return None
+
+        # All three conditions met — synthesize formation
+        slice_len = min(40, len(candles_1h))
+        p_prev_idx = max(0, slice_len - 2)
+        p_last_idx = max(0, slice_len - 1)
+        last_price = float(candles_1h["close"].iloc[-1])
+
+        if how_detected:
+            # Three hits at HOW → bearish reversal (short)
+            return Formation(
+                type="M",
+                variant="33_trade",
+                peak1_idx=p_prev_idx,
+                peak1_price=cycle_state.how,
+                peak2_idx=p_last_idx,
+                peak2_price=last_price,
+                trough_idx=p_last_idx,
+                trough_price=last_price,
+                direction="bearish",
+                quality_score=0.6,
+                at_key_level=True,
+                confirmed=True,
+            )
+        else:
+            # Three hits at LOW → bullish reversal (long)
+            return Formation(
+                type="W",
+                variant="33_trade",
+                peak1_idx=p_prev_idx,
+                peak1_price=cycle_state.low,
+                peak2_idx=p_last_idx,
+                peak2_price=last_price,
+                trough_idx=p_last_idx,
+                trough_price=last_price,
+                direction="bullish",
+                quality_score=0.6,
+                at_key_level=True,
+                confirmed=True,
+            )
+
     def _try_200ema_rejection_formation(self, candles_1h, candles_4h, candles_15m):
         """Course lesson 18 alternative #2: 200 EMA rejection trade.
 
@@ -1434,6 +1516,19 @@ class MMEngine:
                 best_formation = self._try_half_batman_formation(candles_1h)
                 if best_formation is not None:
                     logger.info("mm_half_batman_formation_synthesized",
+                                symbol=symbol, type=best_formation.type,
+                                variant=best_formation.variant)
+
+            # Course lesson 12 alternative #9: 33 Trade (A5).
+            # Three rises over three days AND three hits to high on Day 3
+            # AND EMAs fanning out (trend acceleration). All three conditions
+            # already exist individually — this combines them.
+            if best_formation is None:
+                best_formation = self._try_33_trade_formation(
+                    candles_1h, cycle_state,
+                )
+                if best_formation is not None:
+                    logger.info("mm_33_trade_formation_synthesized",
                                 symbol=symbol, type=best_formation.type,
                                 variant=best_formation.variant)
 

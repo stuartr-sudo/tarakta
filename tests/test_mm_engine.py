@@ -667,3 +667,126 @@ class TestSessionEntryBias:
         assert any("mm_uk_reversal_warning" in c for c in calls), (
             "mm_uk_reversal_warning should fire for final_damage at UK L3"
         )
+
+
+# ---------------------------------------------------------------------------
+# 33 Trade (A5): level 3 + three hits + EMA fan-out combination check
+# ---------------------------------------------------------------------------
+
+class Test33Trade:
+    """Tests for the 33 Trade pattern (Lesson 12 — A5).
+
+    All three conditions must be met simultaneously:
+    1. Level >= 3
+    2. Three hits at HOW or LOW
+    3. EMA fan-out
+    Missing any one condition should NOT produce a formation.
+    """
+
+    def test_33_trade_all_conditions_produce_formation(self, engine: MMEngine):
+        """All three conditions met → 33_trade formation synthesized."""
+        candles = _make_fan_out_candles(300)
+        cycle_state = MagicMock()
+        cycle_state.how = float(candles["high"].max())
+        cycle_state.low = float(candles["low"].min())
+
+        # Mock level tracker to return level >= 3
+        level_result = MagicMock()
+        level_result.current_level = 3
+        engine.level_tracker.analyze = MagicMock(return_value=level_result)
+
+        # Mock three hits detection to return detected
+        three_hits = MagicMock()
+        three_hits.detected = True
+        three_hits.hit_count = 3
+        three_hits.expected_outcome = "reversal"
+        engine.formation_detector.detect_three_hits = MagicMock(return_value=three_hits)
+
+        # EMA fan-out is already true for _make_fan_out_candles
+        result = engine._try_33_trade_formation(candles, cycle_state)
+
+        assert result is not None
+        assert result.variant == "33_trade"
+        assert result.type == "M"  # HOW hit → bearish → M
+        assert result.direction == "bearish"
+        assert result.at_key_level is True
+
+    def test_33_trade_missing_level_3(self, engine: MMEngine):
+        """Level < 3 → no formation."""
+        candles = _make_fan_out_candles(300)
+        cycle_state = MagicMock()
+        cycle_state.how = float(candles["high"].max())
+        cycle_state.low = float(candles["low"].min())
+
+        # Level only 2
+        level_result = MagicMock()
+        level_result.current_level = 2
+        engine.level_tracker.analyze = MagicMock(return_value=level_result)
+
+        result = engine._try_33_trade_formation(candles, cycle_state)
+        assert result is None
+
+    def test_33_trade_missing_three_hits(self, engine: MMEngine):
+        """Three hits NOT detected → no formation."""
+        candles = _make_fan_out_candles(300)
+        cycle_state = MagicMock()
+        cycle_state.how = float(candles["high"].max())
+        cycle_state.low = float(candles["low"].min())
+
+        # Level 3
+        level_result = MagicMock()
+        level_result.current_level = 3
+        engine.level_tracker.analyze = MagicMock(return_value=level_result)
+
+        # Three hits NOT detected
+        three_hits = MagicMock()
+        three_hits.detected = False
+        engine.formation_detector.detect_three_hits = MagicMock(return_value=three_hits)
+
+        result = engine._try_33_trade_formation(candles, cycle_state)
+        assert result is None
+
+    def test_33_trade_missing_ema_fan_out(self, engine: MMEngine):
+        """EMA NOT fanned out → no formation."""
+        candles = _make_flat_candles(300)  # flat = no fan-out
+        cycle_state = MagicMock()
+        cycle_state.how = float(candles["high"].max())
+        cycle_state.low = float(candles["low"].min())
+
+        # Level 3
+        level_result = MagicMock()
+        level_result.current_level = 3
+        engine.level_tracker.analyze = MagicMock(return_value=level_result)
+
+        # Three hits detected
+        three_hits = MagicMock()
+        three_hits.detected = True
+        three_hits.hit_count = 3
+        three_hits.expected_outcome = "reversal"
+        engine.formation_detector.detect_three_hits = MagicMock(return_value=three_hits)
+
+        result = engine._try_33_trade_formation(candles, cycle_state)
+        assert result is None
+
+    def test_33_trade_low_hits_produces_bullish(self, engine: MMEngine):
+        """Three hits at LOW → bullish W formation."""
+        candles = _make_fan_out_candles(300)
+        cycle_state = MagicMock()
+        cycle_state.how = 0  # no HOW
+        cycle_state.low = float(candles["low"].min())
+
+        level_result = MagicMock()
+        level_result.current_level = 3
+        engine.level_tracker.analyze = MagicMock(return_value=level_result)
+
+        three_hits = MagicMock()
+        three_hits.detected = True
+        three_hits.hit_count = 3
+        three_hits.expected_outcome = "reversal"
+        engine.formation_detector.detect_three_hits = MagicMock(return_value=three_hits)
+
+        result = engine._try_33_trade_formation(candles, cycle_state)
+        assert result is not None
+        assert result.variant == "33_trade"
+        assert result.type == "W"
+        assert result.direction == "bullish"
