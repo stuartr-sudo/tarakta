@@ -561,3 +561,70 @@ class TestScalpSignal:
         assert sig.detected is True
         assert sig.direction == "long"
         assert sig.risk_reward == 6.0
+
+
+# --- Audit Fix Tests: Scalp Exit Management ---
+
+class TestScalpExitManagement:
+    """Tests for should_exit_scalp() and should_exit_vwap_flatten() (audit fixes #2, #3)."""
+
+    def _make_candles(self, closes):
+        import pandas as pd
+        n = len(closes)
+        return pd.DataFrame({
+            "open": closes,
+            "high": [c * 1.001 for c in closes],
+            "low": [c * 0.999 for c in closes],
+            "close": closes,
+            "volume": [1000.0] * n,
+        })
+
+    def test_exit_long_price_below_10ema(self):
+        from src.strategy.mm_scalp_vwap_rsi import VWAPRSIScalper
+        s = VWAPRSIScalper()
+        # Trending up then sudden drop below EMA
+        closes = [100 + i * 0.5 for i in range(30)]
+        closes[-1] = 100.0  # sharp drop below 10 EMA
+        candles = self._make_candles(closes)
+        result = s.should_exit_scalp(candles, "long")
+        assert result is not None
+        assert result["should_exit"] is True
+        assert result["reason"] == "price_below_10ema"
+
+    def test_no_exit_long_price_above_10ema(self):
+        from src.strategy.mm_scalp_vwap_rsi import VWAPRSIScalper
+        s = VWAPRSIScalper()
+        closes = [100 + i * 0.5 for i in range(30)]  # steady uptrend
+        candles = self._make_candles(closes)
+        result = s.should_exit_scalp(candles, "long")
+        assert result is not None
+        assert result["should_exit"] is False
+
+    def test_exit_short_price_above_10ema(self):
+        from src.strategy.mm_scalp_vwap_rsi import VWAPRSIScalper
+        s = VWAPRSIScalper()
+        closes = [120 - i * 0.5 for i in range(30)]
+        closes[-1] = 120.0  # sharp bounce above EMA
+        candles = self._make_candles(closes)
+        result = s.should_exit_scalp(candles, "short")
+        assert result is not None
+        assert result["should_exit"] is True
+        assert result["reason"] == "price_above_10ema"
+
+    def test_exit_ema_flattening(self):
+        from src.strategy.mm_scalp_vwap_rsi import VWAPRSIScalper
+        s = VWAPRSIScalper()
+        closes = [100.0] * 30  # perfectly flat
+        candles = self._make_candles(closes)
+        result = s.should_exit_scalp(candles, "long")
+        assert result is not None
+        assert result["should_exit"] is True
+        assert result["reason"] == "ema10_flattening"
+
+    def test_insufficient_data_returns_none(self):
+        from src.strategy.mm_scalp_vwap_rsi import VWAPRSIScalper
+        s = VWAPRSIScalper()
+        closes = [100.0] * 10
+        candles = self._make_candles(closes)
+        result = s.should_exit_scalp(candles, "long")
+        assert result is None

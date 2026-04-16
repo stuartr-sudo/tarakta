@@ -404,3 +404,37 @@ class TestAsiaClosingSpike:
         now = datetime(2026, 3, 10, 10, 0, 0, tzinfo=UTC)
         result = analyzer.detect_asia_closing_spike(candles, now)
         assert result.detected is False
+
+
+# --- Audit Fix Test: 1H Candle Close Warning ---
+
+class TestNear1HCandleClose:
+    """Tests for is_near_1h_candle_close() (audit fix #5)."""
+
+    def test_at_minute_55_is_near(self):
+        from src.strategy.mm_sessions import MMSessionAnalyzer
+        from datetime import datetime, timezone
+        s = MMSessionAnalyzer()
+        dt = datetime(2025, 1, 7, 10, 55, tzinfo=timezone.utc)
+        assert s.is_near_1h_candle_close(dt) is True
+
+    def test_at_minute_30_is_not_near(self):
+        from src.strategy.mm_sessions import MMSessionAnalyzer
+        from datetime import datetime, timezone
+        s = MMSessionAnalyzer()
+        dt = datetime(2025, 1, 7, 10, 30, tzinfo=timezone.utc)
+        assert s.is_near_1h_candle_close(dt) is False
+
+    def test_at_minute_51_is_near(self):
+        from src.strategy.mm_sessions import MMSessionAnalyzer
+        from datetime import datetime, timezone
+        s = MMSessionAnalyzer()
+        dt = datetime(2025, 1, 7, 10, 51, tzinfo=timezone.utc)
+        assert s.is_near_1h_candle_close(dt) is True
+
+    def test_at_minute_49_is_not_near(self):
+        from src.strategy.mm_sessions import MMSessionAnalyzer
+        from datetime import datetime, timezone
+        s = MMSessionAnalyzer()
+        dt = datetime(2025, 1, 7, 10, 49, tzinfo=timezone.utc)  # 11 min to close
+        assert s.is_near_1h_candle_close(dt) is False

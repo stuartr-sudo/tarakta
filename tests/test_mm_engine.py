@@ -1198,3 +1198,94 @@ class TestCorrelationSignalInterface:
         # Stub provider returns confidence=0 → _check_correlation_signal returns None
         result = await engine._check_correlation_signal()
         assert result is None
+
+
+# --- Audit Fix Tests: RSI Pre-filter + Funding Fee ---
+
+class TestScalpPreFilter:
+    """Tests for _is_scalp_candidate() (audit fix #6)."""
+
+    def _make_candles_1h(self, closes):
+        import pandas as pd
+        n = len(closes)
+        return pd.DataFrame({
+            "open": closes,
+            "high": [c * 1.01 for c in closes],
+            "low": [c * 0.99 for c in closes],
+            "close": closes,
+            "volume": [1000.0] * n,
+        })
+
+    def test_oversold_is_candidate(self):
+        """RSI < 20 on 1H → scalp candidate."""
+        from src.strategy.mm_engine import MMEngine
+        from unittest.mock import MagicMock
+        from src.strategy.mm_rsi import RSIState, RSIAnalyzer
+        engine = MagicMock()
+        engine._is_scalp_candidate = MMEngine._is_scalp_candidate.__get__(engine)
+        engine.rsi_analyzer = MagicMock(spec=RSIAnalyzer)
+        engine.rsi_analyzer.calculate.return_value = RSIState(
+            rsi_value=15.0, trend_bias="bearish", divergence_detected=False,
+            divergence_type=None, crossed_50=False
+        )
+        candles = self._make_candles_1h([100.0] * 20)
+        assert engine._is_scalp_candidate(candles) is True
+
+    def test_neutral_rsi_not_candidate(self):
+        """RSI between 20-80 on 1H → NOT a scalp candidate."""
+        from src.strategy.mm_engine import MMEngine
+        from unittest.mock import MagicMock
+        from src.strategy.mm_rsi import RSIState, RSIAnalyzer
+        engine = MagicMock()
+        engine._is_scalp_candidate = MMEngine._is_scalp_candidate.__get__(engine)
+        engine.rsi_analyzer = MagicMock(spec=RSIAnalyzer)
+        engine.rsi_analyzer.calculate.return_value = RSIState(
+            rsi_value=55.0, trend_bias="neutral", divergence_detected=False,
+            divergence_type=None, crossed_50=False
+        )
+        candles = self._make_candles_1h([100.0] * 20)
+        assert engine._is_scalp_candidate(candles) is False
+
+    def test_insufficient_data_not_candidate(self):
+        """Too few candles → NOT a scalp candidate."""
+        from src.strategy.mm_engine import MMEngine
+        from unittest.mock import MagicMock
+        engine = MagicMock()
+        engine._is_scalp_candidate = MMEngine._is_scalp_candidate.__get__(engine)
+        candles = self._make_candles_1h([100.0] * 5)
+        assert engine._is_scalp_candidate(candles) is False
+
+
+class TestFundingFeeProximity:
+    """Tests for check_funding_fee_proximity() (audit fix #4)."""
+
+    def test_near_funding_time(self):
+        from src.strategy.mm_risk import MMRiskCalculator
+        from datetime import datetime, timezone
+        calc = MMRiskCalculator()
+        # 7:45 UTC → 15 min to 8:00 UTC funding
+        dt = datetime(2025, 1, 7, 7, 45, tzinfo=timezone.utc)
+        result = calc.check_funding_fee_proximity(dt)
+        assert result["minutes_to_next"] == 15.0
+        assert result["is_near"] is True
+        assert result["next_time"] == "08:00 UTC"
+
+    def test_not_near_funding_time(self):
+        from src.strategy.mm_risk import MMRiskCalculator
+        from datetime import datetime, timezone
+        calc = MMRiskCalculator()
+        # 5:00 UTC → 180 min to 8:00 UTC
+        dt = datetime(2025, 1, 7, 5, 0, tzinfo=timezone.utc)
+        result = calc.check_funding_fee_proximity(dt)
+        assert result["minutes_to_next"] == 180.0
+        assert result["is_near"] is False
+
+    def test_wrap_to_next_day(self):
+        from src.strategy.mm_risk import MMRiskCalculator
+        from datetime import datetime, timezone
+        calc = MMRiskCalculator()
+        # 23:00 UTC → 60 min to 00:00 UTC next day
+        dt = datetime(2025, 1, 7, 23, 0, tzinfo=timezone.utc)
+        result = calc.check_funding_fee_proximity(dt)
+        assert result["minutes_to_next"] == 60.0
+        assert result["next_time"] == "00:00 UTC"

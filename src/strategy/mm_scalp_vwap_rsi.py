@@ -578,6 +578,60 @@ class VWAPRSIScalper:
             sl_ref = max(vwap, ema)
             return sl_ref * (1 + buffer_pct)
 
+    def should_exit_scalp(self, candles_15m: pd.DataFrame, direction: str) -> dict | None:
+        """Check if an open scalp position should exit based on 10/20 EMA.
+
+        Course Lesson 08: exit when price crosses below 10 EMA (long) or above 10 EMA (short).
+        Also exit when 10/20 EMAs flatten out.
+
+        Returns: {should_exit: bool, reason: str} or None
+        """
+        if candles_15m is None or len(candles_15m) < 25:
+            return None
+        closes = candles_15m["close"].astype(float)
+        ema10 = closes.ewm(span=10, adjust=False).mean()
+        ema20 = closes.ewm(span=20, adjust=False).mean()  # noqa: F841  (kept for future use)
+        price = float(closes.iloc[-1])
+
+        if direction == "long" and price < float(ema10.iloc[-1]):
+            return {"should_exit": True, "reason": "price_below_10ema"}
+        if direction == "short" and price > float(ema10.iloc[-1]):
+            return {"should_exit": True, "reason": "price_above_10ema"}
+
+        # Check for EMA flattening (slope near zero)
+        slope10 = (
+            (float(ema10.iloc[-1]) - float(ema10.iloc[-5])) / float(ema10.iloc[-5])
+            if len(ema10) >= 5
+            else 0
+        )
+        if abs(slope10) < 0.0005:  # <0.05% change over 5 candles
+            return {"should_exit": True, "reason": "ema10_flattening"}
+
+        return {"should_exit": False, "reason": ""}
+
+    def should_exit_vwap_flatten(self, candles_15m: pd.DataFrame) -> bool:
+        """Check if VWAP is flattening — signal to take profit.
+
+        Course Lesson 03: once VWAP starts to flatten/curve, take profit.
+        """
+        if candles_15m is None or len(candles_15m) < 10:
+            return False
+        vwap_values = []
+        for i in range(-5, 0):
+            subset = candles_15m.iloc[: len(candles_15m) + i + 1] if i < -1 else candles_15m
+            v = self.vwap_calc.calculate(subset)
+            if v is not None:
+                vwap_values.append(v)
+        if len(vwap_values) < 3:
+            return False
+        # Check if VWAP slope is near zero
+        slope = (
+            (vwap_values[-1] - vwap_values[0]) / vwap_values[0]
+            if vwap_values[0] != 0
+            else 0
+        )
+        return abs(slope) < 0.0003  # <0.03% change = flattening
+
     def _find_target(
         self,
         price: float,

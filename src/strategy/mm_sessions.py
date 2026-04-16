@@ -285,6 +285,20 @@ class MMSessionAnalyzer:
         ny = _to_ny(dt) if dt is not None else datetime.now(NY_TZ)
         return _in_range(ny.time(), _DEAD_ZONE_START, _DEAD_ZONE_END)
 
+    def is_near_1h_candle_close(
+        self, dt: datetime | None = None, minutes_threshold: int = 10
+    ) -> bool:
+        """Check if we're within the last N minutes of a 1H candle close.
+
+        Course (Scalp Lesson 03): last 10 minutes of a 1H candle is where MM
+        paints the picture. Be careful entering or holding scalps.
+        """
+        if dt is None:
+            dt = datetime.now(ZoneInfo("UTC"))
+        minutes_past_hour = dt.minute
+        minutes_to_close = 60 - minutes_past_hour
+        return minutes_to_close <= minutes_threshold
+
     def detect_asia_closing_spike(
         self,
         candles_1h: pd.DataFrame,

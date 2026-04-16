@@ -25,6 +25,7 @@ Win rate / R:R relationship:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from src.utils.logging import get_logger
 
@@ -34,6 +35,10 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+# Perpetual funding fee schedule
+FUNDING_INTERVAL_HOURS = 8  # Perpetual funding every 8 hours
+FUNDING_TIMES_UTC = [0, 8, 16]  # UTC hours when funding is charged
 
 # Default risk per trade (as fraction of total account)
 DEFAULT_RISK_PER_TRADE = 0.01  # 1%
@@ -400,6 +405,38 @@ class MMRiskCalculator:
             expected_r_per_trade=round(expected_r, 3),
             assessment=assessment,
         )
+
+    def check_funding_fee_proximity(self, now: datetime | None = None) -> dict:
+        """Check proximity to next perpetual funding fee.
+
+        Course (Scalp Lesson 06): fees charged on entire position size.
+        Be aware of funding timing when scalp trading.
+
+        Returns: {minutes_to_next: float, is_near: bool, next_time: str}
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        current_hour = now.hour
+        current_min = now.minute
+
+        # Find next funding time
+        for ft in FUNDING_TIMES_UTC:
+            if ft > current_hour or (ft == current_hour and current_min == 0):
+                minutes_to = (ft - current_hour) * 60 - current_min
+                return {
+                    "minutes_to_next": float(minutes_to),
+                    "is_near": minutes_to <= 30,
+                    "next_time": f"{ft:02d}:00 UTC",
+                }
+
+        # Wrap to next day
+        minutes_to = (24 - current_hour + FUNDING_TIMES_UTC[0]) * 60 - current_min
+        return {
+            "minutes_to_next": float(minutes_to),
+            "is_near": minutes_to <= 30,
+            "next_time": f"{FUNDING_TIMES_UTC[0]:02d}:00 UTC",
+        }
 
     @staticmethod
     def _interpolate_win_rate(rr: float) -> float:

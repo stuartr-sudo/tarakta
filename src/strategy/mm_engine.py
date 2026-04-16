@@ -744,6 +744,19 @@ class MMEngine:
                 confirmed=True,
             )
 
+    def _is_scalp_candidate(self, candles_1h) -> bool:
+        """Pre-filter: only run scalp analysis on coins with RSI extremes on 1H.
+
+        Course (Scalp Lesson 07): use screener to find oversold (<20) or
+        overbought (>80) coins on 1H before analyzing.
+        """
+        if candles_1h is None or candles_1h.empty or len(candles_1h) < 15:
+            return False
+        rsi_state = self.rsi_analyzer.calculate(candles_1h)
+        if rsi_state is None:
+            return False
+        return rsi_state.rsi_value < 20 or rsi_state.rsi_value > 80
+
     def _try_scalp_signal(self, candles_15m, candles_1h, cycle_state):
         """A7: VWAP+RSI Scalp — scan for a scalp setup on the 15m chart.
 
@@ -1683,7 +1696,11 @@ class MMEngine:
             # A7: VWAP+RSI Scalp fallback when no MM formation found.
             # Scans 15m chart for a pullback-to-VWAP/255-EMA setup with
             # extreme RSI(2) and a reversal candlestick pattern.
-            if best_formation is None and candles_15m is not None and len(candles_15m) >= 30:
+            # Gate: only run scalp on coins with RSI extremes on 1H (Scalp Lesson 07).
+            if best_formation is None and candles_15m is not None and len(candles_15m) >= 30 and self._is_scalp_candidate(candles_1h):
+                # Scalp Lesson 03: warn if near 1H candle close (last 10 min)
+                if self.session_analyzer.is_near_1h_candle_close():
+                    logger.info("mm_scalp_near_1h_close_warning", symbol=symbol)
                 scalp = self._try_scalp_signal(candles_15m, candles_1h, cycle_state)
                 if scalp is not None and scalp.detected:
                     best_formation = self._formation_from_scalp(scalp, candles_15m)
