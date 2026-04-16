@@ -95,6 +95,7 @@ class VectorCandle:
     direction: str = ""            # "bullish" (close > open) or "bearish"
     midpoint: float = 0.0         # 50% of the candle body (primary target)
     recovered: bool = False       # Has price returned to fill this zone?
+    recovery_pct: float = 0.0    # Course lesson 13: how much of the body has been recovered (0.0–1.0)
 
 
 @dataclass
@@ -222,6 +223,22 @@ class VectorScanner:
                     except Exception:
                         pass
 
+                # Course lesson 13: calculate how much of the body has been recovered
+                # by subsequent candles (even if not fully recovered). If >50% has been
+                # recovered, the full recovery is more likely — boost the priority.
+                recovery_pct = 0.0
+                if body_size := (body_high - body_low):
+                    for j in range(i + 1, len(df)):
+                        # How far into the body has price penetrated?
+                        if direction == "bullish":
+                            # For a bullish vector, recovery is price coming DOWN into it
+                            penetration = body_high - max(lows[j], body_low)
+                        else:
+                            # For a bearish vector, recovery is price coming UP into it
+                            penetration = min(highs[j], body_high) - body_low
+                        if penetration > 0:
+                            recovery_pct = max(recovery_pct, min(1.0, penetration / body_size))
+
                 vectors.append(VectorCandle(
                     index=i,
                     timestamp=ts,
@@ -233,6 +250,7 @@ class VectorScanner:
                     direction=direction,
                     midpoint=round(midpoint, 8),
                     recovered=False,
+                    recovery_pct=round(recovery_pct, 3),
                 ))
 
         # Sort by distance from current price
@@ -401,32 +419,51 @@ class TargetAnalyzer:
         for v in vectors:
             if self._is_valid_target(v.midpoint, direction, entry_price):
                 dist = abs(v.midpoint - entry_price) / entry_price * 100 if entry_price > 0 else 0
+                # Course lesson 13: vectors with >50% body recovery are more likely
+                # to reach full recovery — boost priority by 1 (lower number = higher
+                # priority). This reflects "if price has recovered >50% of a vector
+                # candle's body → expect full recovery."
+                partially_recovered = v.recovery_pct > 0.5
+                recovery_boost = -1 if partially_recovered else 0  # subtract 1 from priority
+
                 # Assign to appropriate level based on distance
                 if level == 1 and dist <= 3:
+                    base_priority = 2
                     targets.append(TargetLevel(
                         price=v.midpoint,
                         source="vector",
                         level_num=level,
-                        priority=2,
-                        description=f"Unrecovered {v.vector_type} ({v.direction})",
+                        priority=max(1, base_priority + recovery_boost),
+                        description=(
+                            f"Unrecovered {v.vector_type} ({v.direction})"
+                            + (f" [>50% recovered, boost]" if partially_recovered else "")
+                        ),
                         distance_pct=round(dist, 2),
                     ))
                 elif level == 2 and 2 < dist <= 8:
+                    base_priority = 2
                     targets.append(TargetLevel(
                         price=v.midpoint,
                         source="vector",
                         level_num=level,
-                        priority=2,
-                        description=f"Unrecovered {v.vector_type} ({v.direction})",
+                        priority=max(1, base_priority + recovery_boost),
+                        description=(
+                            f"Unrecovered {v.vector_type} ({v.direction})"
+                            + (f" [>50% recovered, boost]" if partially_recovered else "")
+                        ),
                         distance_pct=round(dist, 2),
                     ))
                 elif level == 3 and dist > 5:
+                    base_priority = 3
                     targets.append(TargetLevel(
                         price=v.midpoint,
                         source="vector",
                         level_num=level,
-                        priority=3,
-                        description=f"Unrecovered {v.vector_type} ({v.direction})",
+                        priority=max(1, base_priority + recovery_boost),
+                        description=(
+                            f"Unrecovered {v.vector_type} ({v.direction})"
+                            + (f" [>50% recovered, boost]" if partially_recovered else "")
+                        ),
                         distance_pct=round(dist, 2),
                     ))
 
