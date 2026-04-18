@@ -57,6 +57,12 @@ class Repository:
         # direction at entry and whether the trade fought the 4H trend.
         # Without these, counter-trend losses are invisible in post-mortems.
         "htf_trend_4h", "htf_trend_1d", "counter_trend",
+        # MM Sanity Agent verdict persistence (migration 019). Only APPROVE
+        # verdicts ever land here — VETOs never become trades. The full
+        # decision log (including VETOs and ERRORs) lives in the separate
+        # mm_agent_decisions table via insert_mm_agent_decision().
+        "mm_agent_decision", "mm_agent_reason", "mm_agent_confidence",
+        "mm_agent_model", "mm_agent_concerns",
         "created_at", "updated_at",
     }
 
@@ -1047,5 +1053,61 @@ class Repository:
                 .gte("created_at", month_start.isoformat()),
             )
             return sum(float(r.get("cost_usd", 0)) for r in (result.data or []))
+        except Exception:
+            return 0.0
+
+    # --- MM Sanity Agent decisions (migration 019) ---
+
+    # Allowlist so we silently drop malformed keys rather than failing the
+    # insert. Mirrors the _TRADE_COLUMNS pattern.
+    _MM_AGENT_DECISION_COLUMNS = {
+        "symbol", "instance_id", "cycle_count",
+        "formation_type", "formation_variant",
+        "confluence_grade", "confluence_pct",
+        "direction", "decision", "reason", "confidence",
+        "htf_trend_4h", "htf_trend_1d", "counter_trend",
+        "concerns", "input_context", "raw_response",
+        "model", "prompt_version", "latency_ms", "cost_usd",
+        "trade_id",
+    }
+
+    async def insert_mm_agent_decision(self, decision: dict[str, Any]) -> dict:
+        """Log a sanity-agent call. Every APPROVE, VETO and ERROR gets a row.
+
+        Fire-and-forget: log but never raise. The agent's decision was
+        already applied to the trade path before this is called — we must
+        not let an observability-layer failure tank the engine.
+        """
+        decision["instance_id"] = self.instance_id
+        clean = {k: v for k, v in decision.items() if k in self._MM_AGENT_DECISION_COLUMNS}
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("mm_agent_decisions").insert(clean),
+            )
+            return result.data[0] if result.data else {}
+        except Exception as e:
+            logger.warning("mm_agent_decision_insert_failed",
+                           symbol=decision.get("symbol"), error=str(e))
+            return {}
+
+    async def get_mm_agent_month_cost(self) -> float:
+        """Sum of mm_agent_decisions.cost_usd this calendar month.
+
+        Used by the budget-cap auto-downgrade: if projected month cost
+        (trailing-7d × 30/7) exceeds the configured cap, the agent
+        switches to the fallback model for the rest of the month.
+        """
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("mm_agent_decisions")
+                .select("cost_usd")
+                .eq("instance_id", self.instance_id)
+                .gte("created_at", month_start.isoformat()),
+            )
+            return sum(float(r.get("cost_usd", 0) or 0) for r in (result.data or []))
         except Exception:
             return 0.0

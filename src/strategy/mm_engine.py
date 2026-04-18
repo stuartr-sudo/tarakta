@@ -192,6 +192,16 @@ class MMSignal:
     htf_trend_1d: str = "unknown"  # "bullish" | "bearish" | "sideways" | "unknown"
     counter_trend: bool = False    # True when trade_direction opposes a non-sideways 4H trend
 
+    # MM Sanity Agent verdict (migration 019). VETOs never reach here —
+    # only APPROVEs get persisted. ``decision`` is None when the agent
+    # was disabled / unavailable, which is indistinguishable from "not
+    # yet reviewed" — either way treat as "not reviewed by agent".
+    mm_agent_decision: str | None = None      # "APPROVE" | None
+    mm_agent_reason: str = ""
+    mm_agent_confidence: float = 0.0
+    mm_agent_model: str = ""
+    mm_agent_concerns: list[str] = field(default_factory=list)
+
 
 @dataclass
 class MMPosition:
@@ -324,6 +334,16 @@ class MMEngine:
         # when neither MM formation nor VWAP+RSI scalp is found. Uses a
         # 9-EMA ribbon (periods 2-100) with trend-flip + yellow-EMA pullback.
         self.ribbon_analyzer = RibbonAnalyzer()
+
+        # MM Sanity Agent (Agent 4) — Opus 4.7 LLM guardrail that reviews every
+        # setup surviving the deterministic rules and vetoes judgement-call
+        # failures rules can't catch (e.g. "three_hits_how exemption voided by
+        # accelerating 4H trend"). See docs/MM_SANITY_AGENT_DESIGN.md.
+        #
+        # When the API key or SDK is missing, .review() returns None and the
+        # engine fails open (approves). Same for timeouts / API errors.
+        from src.strategy.mm_sanity_agent import MMSanityAgent
+        self.sanity_agent = MMSanityAgent(config=config, repo=repo)
 
         # Course E1 (lesson 54): "if you have $10K OKX and $10K Binance,
         # 1% of $20K" — multi-exchange combined balance for 1% risk.
@@ -1358,7 +1378,7 @@ class MMEngine:
             stage_order = [
                 "candles_ok", "formation_found", "htf_aligned", "level_ok", "phase_valid",
                 "direction_ok", "target_acquired", "rr_passed", "scored",
-                "confluence_passed", "retest_passed", "signal_built",
+                "confluence_passed", "retest_passed", "sanity_agent_passed", "signal_built",
             ]
             stages = {k: self._scan_stage_counts.get(k, 0) for k in stage_order}
 
@@ -2633,6 +2653,94 @@ class MMEngine:
 
         self._advance("retest_passed")
 
+        # ---------------------------------------------------------------
+        # MM Sanity Agent (Agent 4) — LLM veto layer.
+        # ---------------------------------------------------------------
+        # Fires on every setup that survives all deterministic rules.
+        # Returns None on failure (API error / timeout / SDK missing / no
+        # key) — we fail OPEN (approve) rather than halt trading. A VETO
+        # decision is binding; a LOW-CONFIDENCE veto is already downgraded
+        # inside the agent per `mm_sanity_agent_min_confidence` config.
+        #
+        # Derived-feature context is assembled via build_context() so the
+        # LLM reasons over pre-computed facts rather than raw candles.
+        agent_verdict = None  # type: ignore[assignment]
+        if getattr(self.config, "mm_sanity_agent_enabled", True):
+            try:
+                from src.strategy.mm_sanity_agent import build_context
+                # Asia spike direction — use the existing detector that
+                # already runs as a soft filter earlier in this function.
+                # We don't have a separate "asia range pct" computation
+                # here; leave None and let the agent work without it.
+                asia_range_pct = None
+                try:
+                    _asia_spike = self.session_analyzer.detect_asia_closing_spike(
+                        candles_1h, now,
+                    )
+                    asia_spike_dir = (
+                        _asia_spike.direction if getattr(_asia_spike, "detected", False)
+                        else "none"
+                    )
+                    asia_range_pct = round(
+                        float(getattr(_asia_spike, "magnitude_pct", 0.0) or 0.0), 3,
+                    )
+                except Exception:
+                    asia_spike_dir = "none"
+
+                # Recent trades on this symbol — regime signal per Rubric 7.
+                try:
+                    recent_trades = await self.repo.get_recent_trades_for_symbol(
+                        symbol, limit=5,
+                    )
+                except Exception:
+                    recent_trades = []
+
+                agent_ctx = build_context(
+                    symbol=symbol,
+                    trade_direction=trade_direction,
+                    best_formation=best_formation,
+                    confluence_result=confluence_result,
+                    entry_price=entry_price,
+                    sl_ref=sl_price,
+                    trend_state_4h=trend_state_4h,
+                    trend_state_1d=trend_state_1d,
+                    ema_state=ema_state,
+                    ema_values=ema_values,
+                    session=session,
+                    cycle_state=cycle_state,
+                    candles_4h=candles_4h,
+                    candles_1h=candles_1h,
+                    candles_15m=candles_15m,
+                    asia_range_pct=asia_range_pct,
+                    asia_spike_dir=asia_spike_dir,
+                    recent_trades=recent_trades,
+                    cycle_count=self.cycle_count,
+                    now=now,
+                )
+                agent_verdict = await self.sanity_agent.review(agent_ctx)
+            except Exception as e:
+                # Assembly failure — log but don't block. This should be rare.
+                logger.warning("mm_sanity_agent_context_failed",
+                               symbol=symbol, error=str(e))
+                agent_verdict = None
+
+        if agent_verdict is not None and agent_verdict.decision == "VETO":
+            return self._reject(
+                "sanity_agent_veto",
+                symbol,
+                agent_reason=agent_verdict.reason,
+                agent_confidence=round(agent_verdict.confidence, 3),
+                concerns=",".join(agent_verdict.concerns),
+                htf_4h=agent_verdict.htf_trend_4h,
+                htf_1d=agent_verdict.htf_trend_1d,
+                counter_trend=agent_verdict.counter_trend,
+                formation_variant=best_formation.variant,
+                grade=confluence_result.grade,
+            )
+
+        self._advance("sanity_agent_passed")
+        # ---------------------------------------------------------------
+
         # Course-faithful: determine entry type & peak2 wick for Refund Zone
         # Aggressive = 2nd-peak entry (refund zone applies).
         # Conservative = post-L1 retest entry (refund zone NOT applicable per lesson 49).
@@ -2700,6 +2808,23 @@ class MMEngine:
             htf_trend_4h=htf_4h_dir,
             htf_trend_1d=htf_1d_dir,
             counter_trend=is_counter_trend_4h,
+            # MM Sanity Agent verdict (only APPROVE reaches here; VETO
+            # would have returned earlier via `sanity_agent_veto` reject)
+            mm_agent_decision=(
+                agent_verdict.decision if agent_verdict is not None else None
+            ),
+            mm_agent_reason=(
+                agent_verdict.reason if agent_verdict is not None else ""
+            ),
+            mm_agent_confidence=(
+                float(agent_verdict.confidence) if agent_verdict is not None else 0.0
+            ),
+            mm_agent_model=(
+                agent_verdict.model if agent_verdict is not None else ""
+            ),
+            mm_agent_concerns=(
+                list(agent_verdict.concerns) if agent_verdict is not None else []
+            ),
             reason=f"{best_formation.type} formation ({best_formation.variant}) "
                    f"grade={confluence_result.grade} R:R={rr:.1f} "
                    f"phase={cycle_state.phase} entry={entry_type}",
@@ -2935,6 +3060,13 @@ class MMEngine:
                 "htf_trend_4h": getattr(signal, "htf_trend_4h", "unknown"),
                 "htf_trend_1d": getattr(signal, "htf_trend_1d", "unknown"),
                 "counter_trend": bool(getattr(signal, "counter_trend", False)),
+                # MM Sanity Agent verdict (migration 019). Only APPROVE
+                # verdicts reach insert; VETOs rejected upstream.
+                "mm_agent_decision": getattr(signal, "mm_agent_decision", None),
+                "mm_agent_reason": getattr(signal, "mm_agent_reason", "") or "",
+                "mm_agent_confidence": float(getattr(signal, "mm_agent_confidence", 0.0) or 0.0),
+                "mm_agent_model": getattr(signal, "mm_agent_model", "") or "",
+                "mm_agent_concerns": list(getattr(signal, "mm_agent_concerns", []) or []),
                 "mode": self.config.trading_mode if hasattr(self.config, 'trading_mode') else "paper",
                 "status": "open",
             })

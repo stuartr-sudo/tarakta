@@ -66,6 +66,18 @@ class Settings(BaseSettings):
     # Flip to False to loosen to the 50M-volume universe.
     mm_majors_only: bool = True
 
+    # MM Sanity Agent (Agent 4) — LLM guardrail that reviews every MM setup
+    # that survives the deterministic rules and vetoes ones that don't pass
+    # a course-fluent sanity check. See docs/MM_SANITY_AGENT_DESIGN.md.
+    anthropic_api_key: str = ""
+    mm_sanity_agent_enabled: bool = True
+    mm_sanity_agent_model: str = "claude-opus-4-7"
+    mm_sanity_agent_fallback_model: str = "claude-sonnet-4-6"
+    mm_sanity_agent_thinking_budget: int = 4000  # tokens reserved for extended thinking
+    mm_sanity_agent_timeout_s: float = 20.0
+    mm_sanity_agent_min_confidence: float = 0.0  # 0 = honour every VETO (no shadow)
+    mm_sanity_agent_monthly_budget_usd: float = 600.0
+
     # Scanning defaults
     min_volume_usd: float = 5_000_000
     scan_interval_minutes: int = 5
