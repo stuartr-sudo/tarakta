@@ -167,7 +167,7 @@ RUBRIC — reason through these in order before committing to a verdict:
 
 WORKED EXAMPLES:
 
-EXAMPLE 1 — BNB short 2026-04-17 (the trade this agent exists to catch):
+EXAMPLE 1 — Counter-trend reversal into accelerating HTF (pattern seed: BNB 2026-04-17):
 - direction=short, variant=three_hits_how, grade=F(37.8%), retest_met=2/4
 - 4h_trend=bullish strength=0.72 accelerating=true
 - 1d_trend=bullish
@@ -457,16 +457,23 @@ All funnel buckets: `sanity_agent_approved`, `sanity_agent_veto`, `sanity_agent_
 
 Each fixture is a JSON snapshot of the payload the agent would receive, plus the asserted expected decision. Run against **a mocked LLM** that replays pre-recorded agent responses (for CI determinism) and against the **live LLM** in a nightly integration test.
 
-Required fixtures:
-- `bnb_short_4h_uptrend_2026_04_17.json` — the trade this whole project exists to catch. **Assertion: `decision == "VETO"` AND `concerns` contains `4h_alignment` AND `counter_trend == true`. Reason must cite Rubric 1 or 4H trend explicitly.**
-- `btc_long_multi_session_at_how.json` — textbook long at LOW during accumulation, HTF aligned. **Assertion: `decision == "APPROVE"` AND `confidence > 0.75`.**
-- `eth_short_friday.json` — Friday trap counter-trend short. **Assertion: `decision == "VETO"` AND `concerns` contains `friday_trap` or `wrong_phase`.**
-- `sol_same_session_mid_session.json` — same-session M in middle of London, grade C. **Assertion: `decision == "VETO"` AND `concerns` contains `same_session` OR `mid_session`.**
-- `doge_asia_spike_counter.json` — long after a wide Asia pump during early UK. **Assertion: `decision == "VETO"` AND `concerns` contains `asia_spike`.**
-- `ada_3_recent_losses_same_direction.json` — regime signal, recent_trades shows 3 losing shorts, new short proposed. **Assertion: `decision == "VETO"` AND `concerns` contains `recent_losses`.**
-- `link_exempt_at_exhaustion.json` — three_hits_low counter-4H-trend, but htf_4h_accel=false, Level-3 confirmed, grade A. **Assertion: `decision == "APPROVE"` AND reason cites Level-3 exhaustion exemption.**
+Fixtures are named for the **pattern they represent**, not the symbol in the recorded trade. BNB 2026-04-17 seeds `counter_4h_trend_accelerating.json` but the pattern is symbol-agnostic.
 
-The BNB fixture is non-negotiable and must ship with the initial PR. Additionally, the BNB fixture is run against **both** the mocked LLM (for CI determinism) **and** the live Opus 4.7 (in a nightly integration test) — if the live model ever fails this assertion, the build goes red and we must investigate before shipping a prompt change.
+Required fixtures:
+
+| Fixture | Pattern | Seed data | Expected |
+|---|---|---|---|
+| `counter_4h_trend_accelerating.json` | Counter-4H-trend reversal variant into accelerating HTF | BNB 2026-04-17 short | `VETO`, `concerns` ⊇ `{4h_alignment, accelerating_trend}`, cites Rubric 1 |
+| `multi_session_at_key_level.json` | Textbook premium — multi-session formation at HOW/LOW, HTF aligned, Grade A | synthetic or best winning trade on record | `APPROVE`, `confidence ≥ 0.75` |
+| `friday_trap_counter_trend.json` | Counter-trend short during FRIDAY_TRAP phase | any DOW=4 losing short | `VETO`, `concerns` ⊇ `{friday_trap}` or `{wrong_phase}` |
+| `same_session_mid_session.json` | Same-session formation, mid-London, Grade C, 2/4 retest | any such recorded trade | `VETO`, `concerns` ⊇ `{same_session}` or `{mid_session}` |
+| `asia_spike_counter.json` | Long after wide Asia up-spike during early UK | any matching trade | `VETO`, `concerns` ⊇ `{asia_spike}` |
+| `recent_regime_against.json` | 3+ recent losses same direction, new trade proposes same direction | any symbol | `VETO`, `concerns` ⊇ `{recent_losses}` |
+| `exempt_at_exhaustion.json` | Counter-4H-trend reversal variant, `htf_4h_accel=false`, Level-3 confirmed, Grade A | handcrafted | `APPROVE`, reason cites Level-3 exhaustion exemption |
+
+The first fixture (`counter_4h_trend_accelerating.json`) is non-negotiable for the initial PR — it's the specific class this whole project exists to catch. It is run against **both** the mocked LLM (for CI determinism) **and** the live Opus 4.7 (in a nightly integration test) — if the live model ever fails this assertion, the build goes red and we must investigate before shipping a prompt change.
+
+**New fixtures get added whenever Task 2 (weekly audit, §11) identifies a recurring failure pattern the current fixture set doesn't cover.** The fixture library grows with real-world experience, not by upfront imagination. Don't invent fixtures we haven't seen the agent fail on — they become lint-test-passing theatre.
 
 **Fixture schema** matches the user-prompt template in §3. Each fixture is a dict of the pre-computed derived features listed in §4, with recorded expected assertions in a separate block:
 
@@ -536,49 +543,66 @@ The `trade_id` foreign key on `mm_agent_decisions` lets us later join: for every
 
 ---
 
-## 11. Async learning loop — Claude Code Routines
+## 11. Async learning loop — Claude Code scheduled tasks (local)
 
-The real-time sanity agent is only as good as its current prompt. The prompt gets *better* via a feedback loop that analyses closed-trade outcomes against agent decisions and surfaces improvements. That feedback loop is a poor fit for in-scan API calls (slow, high-volume, not time-critical), but is a **perfect** fit for Claude Code Routines — cloud-hosted scheduled automations announced 2026-04-14.
+The real-time sanity agent is only as good as its current prompt. The prompt gets *better* via a feedback loop that analyses closed-trade outcomes against agent decisions and surfaces improvements. That feedback loop is a poor fit for in-scan API calls (slow, high-volume, not time-critical), but is a good fit for Claude Code's scheduling primitives announced 2026-04-14.
 
-**Why Routines here, not for the real-time agent:**
-- Daily run caps (5–25 depending on plan tier) rule out Routines as the real-time decision path (we expect 60–250 setups/day).
-- Latency model is async — routines are scheduled/webhook-triggered, not inline.
-- But for the learning loop (1 run/day, 1 run/week) they're ideal: full repo access, runs in Anthropic's cloud, no local daemon needed.
+**Local Desktop scheduled tasks are the right primitive here**, not Cloud Routines:
 
-**Routine 1 — `mm-agent-daily-review` (runs 06:00 UTC daily):**
-- Trigger: cron
-- Scope: yesterday's MM trade outcomes joined to `mm_agent_decisions`
-- Task: identify (a) APPROVEs that lost >1R, (b) VETOs that would have won, (c) patterns in the `concerns` tags
-- Output: writes a markdown report to `docs/mm-agent-reviews/YYYY-MM-DD.md` and posts a summary to `/mm-agent` dashboard
-- Cost impact: ~1 Routine run/day, well under cap
+| Tier | Runs on | Cap | Notes |
+|---|---|---|---|
+| Cloud Routines | Anthropic infrastructure | 5–25/day by plan | Best when your Mac is off. Daily cap rules out high-frequency use. |
+| **Desktop scheduled tasks** | **Your Mac / deployment box** | **No daily cap (API cost only)** | **Our choice** — direct repo + Supabase access, no sandbox clone overhead. |
+| CLI `/loop` | Active CC session | every min, 7-day TTL | Interactive debugging only. |
 
-**Routine 2 — `mm-agent-weekly-audit` (runs Sunday 08:00 UTC):**
-- Trigger: cron
-- Scope: last 7 days of `mm_agent_decisions`
-- Task: compute agent precision/recall, surface most-common VETO reasons that were wrong, recommend prompt adjustments
-- Output: opens a draft PR against `docs/MM_SANITY_AGENT_DESIGN.md` with proposed rubric amendments for human review
-- Cost impact: 1 Routine run/week
+Since the trading bot is already running 24/7 on the production host (`tarakta-expanded` on Fly.io), the learning loop rides on the same machine. Scheduled tasks are configured in `~/.claude/settings.json` (or project-local equivalent) and persist across reboots.
 
-**Routine 3 — `mm-agent-prompt-version-review` (runs 1st of month):**
-- Trigger: cron
-- Scope: full month of decisions
-- Task: review accumulated weekly-audit findings, propose a prompt-version bump with updated rubric points and fixtures
-- Output: opens a PR modifying the system prompt constants in `src/strategy/mm_sanity_agent.py` plus an updated `prompt_v` header
-- Cost impact: 1 Routine run/month
+**Why Desktop vs Cloud for our case:**
+- No 5–25/day cap. If a task needs to fire on every closed losing trade, we can.
+- Direct access to `migrations/`, `src/`, and the Supabase service key from `.env`. No cloud clone, no secret re-injection.
+- Uses the same `anthropic-api-key` the bot already has — no separate plan or billing surface.
+- Cloud Routines remain a good option if we later want weekly summaries to run regardless of host state (e.g., migrating off Fly.io).
 
-**Routine 4 — `mm-loss-deep-dive` (GitHub webhook on trade-close events):**
-- Trigger: webhook from the bot when a trade closes with pnl_pct < −2.0%
-- Task: pull the full `mm_agent_decisions` row, the candle context, the course lessons referenced, and produce a "what went wrong" analysis
-- Output: comment on a GitHub issue `#mm-losses` (one issue per calendar week)
-- Cost impact: rare (only big losses), bounded by trade frequency
+**Scheduled tasks to define:**
+
+**Task 1 — `mm-agent-daily-review` (runs 06:00 UTC daily):**
+- Trigger: local cron (`anthropic-skills:schedule` or equivalent).
+- Scope: yesterday's MM trade outcomes joined to `mm_agent_decisions`.
+- Task: identify (a) APPROVEs that lost >1R, (b) VETOs that would have won if allowed through, (c) patterns in the `concerns` tags.
+- Output: writes a markdown report to `docs/mm-agent-reviews/YYYY-MM-DD.md` and posts a summary to `/mm-agent` dashboard.
+- Cost: one Sonnet 4.6 call per day, ~$0.05/run.
+
+**Task 2 — `mm-agent-weekly-audit` (runs Sunday 08:00 UTC):**
+- Trigger: local cron.
+- Scope: last 7 days of `mm_agent_decisions`.
+- Task: compute agent precision/recall, surface most-common VETO reasons that were wrong, recommend rubric amendments.
+- Output: opens a draft PR against `docs/MM_SANITY_AGENT_DESIGN.md` with proposed rubric amendments for human review (not auto-merged).
+- Cost: one Opus 4.7 call per week, ~$0.40/run.
+
+**Task 3 — `mm-agent-prompt-version-review` (runs 1st of month):**
+- Trigger: local cron.
+- Scope: full month of decisions + accumulated weekly audit findings.
+- Task: propose a prompt-version bump with updated rubric points and fixtures.
+- Output: opens a PR modifying the system prompt constants in `src/strategy/mm_sanity_agent.py` plus an updated `prompt_v` header.
+- Cost: one Opus 4.7 call per month, ~$0.40/run.
+
+**Task 4 — `mm-loss-deep-dive` (triggered on every trade close with pnl_pct < −2.0%):**
+- Trigger: DB hook or bot-side event (local cron polls `trades` every 5 min for newly-closed losses).
+- Task: pull the full `mm_agent_decisions` row, the candle context at entry, the course lessons referenced, and produce a "what went wrong" analysis.
+- Output: comments on a GitHub issue `#mm-losses` (one issue per calendar week).
+- Cost: rare (only big losses), ~$0.30/fire.
+
+**Fixture generation loop:**
+Task 2 (weekly audit) should also propose new fixtures — each recurring failure pattern it spots becomes a new `.json` under `tests/fixtures/mm_sanity/`. This is how the fixture set grows from "just BNB" to a comprehensive library of class-based tests.
 
 **Why this architecture is the right shape:**
-1. **Separation of concerns:** real-time decisions use direct API calls (bounded, fast, critical); reflective learning uses Routines (async, thorough, improves the system).
-2. **No duplicate work:** the real-time agent doesn't need to know about yesterday's decisions — Routines summarise history and fold findings into the prompt for the *next* cycle.
-3. **Human-in-the-loop by default:** Routines open PRs rather than directly rewriting prompts. Every rubric change goes through review.
+1. **Separation of concerns:** real-time decisions use direct API calls (bounded, fast, critical); reflective learning uses scheduled tasks (async, thorough, improves the system).
+2. **No duplicate work:** the real-time agent doesn't need to know about yesterday's decisions — scheduled tasks summarise history and fold findings into the prompt for the *next* cycle.
+3. **Human-in-the-loop by default:** scheduled tasks open PRs rather than auto-merging rubric changes. Every prompt change goes through review.
 4. **Self-improving without drift:** the prompt-version header on every call means we can roll back instantly if a bad rubric change ships.
+5. **Runs where the bot runs:** one host, one API key, one set of credentials. No extra infra.
 
-Implementation defers to Phase B (after the real-time agent is stable in shadow mode). The Routines themselves are thin — each is a 20–40 line Claude Code prompt config plus a cron/webhook trigger.
+Implementation defers to Phase B (after the real-time agent is stable in shadow mode). Each scheduled task is a 20–40 line Claude Code prompt config plus a cron entry.
 
 ---
 
