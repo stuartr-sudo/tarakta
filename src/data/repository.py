@@ -53,6 +53,10 @@ class Repository:
         "mm_svc_high", "mm_svc_low",
         "mm_sl_moved_to_breakeven", "mm_sl_moved_under_50ema",
         "mm_took_200ema_partial",
+        # HTF trend persistence (migration 018) — records the 4H/1D EMA trend
+        # direction at entry and whether the trade fought the 4H trend.
+        # Without these, counter-trend losses are invisible in post-mortems.
+        "htf_trend_4h", "htf_trend_1d", "counter_trend",
         "created_at", "updated_at",
     }
 

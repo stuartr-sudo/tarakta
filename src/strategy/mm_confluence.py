@@ -113,6 +113,13 @@ class MMContext:
     output, EMA framework results, session data, and market state.
     """
 
+    # Trade direction ("long" | "short"). Required for direction-aware
+    # scoring — a bullish EMA stack must only score points for a long,
+    # not for a short that's fighting the stack. Prior to 2026-04 this
+    # was missing and the scorer awarded full EMA-alignment points to
+    # counter-trend trades, which contributed to the BNB short loss.
+    trade_direction: str = ""  # "long" | "short" | "" (unset → legacy behaviour)
+
     # M/W formation data
     formation: dict | None = None  # type, variant, at_key_level, session info
 
@@ -649,22 +656,60 @@ class MMConfluenceScorer:
         return weight
 
     def _score_ema_alignment(self, ctx: MMContext) -> float:
-        """EMA alignment (proper 10/20/50/200/800 order).
+        """EMA alignment (proper 10/20/50/200/800 order) — direction-aware.
 
-        Perfect EMA stacking (all EMAs in order for the trend direction)
-        confirms a clean trend. Mixed alignment reduces the score.
+        Course lesson 12 (Trend EMAs): alignment must match the direction
+        you're trading. A bullish stack is confluence for a long; for a
+        short it's a warning flag (counter-trend), not a positive factor.
+
+        Before 2026-04 this scorer awarded full 8 pts whenever the stack
+        was cleanly bullish OR bearish regardless of trade direction,
+        which directly inflated the score of counter-trend setups like
+        the BNB 2026-04-17 short into a bullish 4H stack. The direction
+        check below fixes that.
+
+        If ``ctx.trade_direction`` is empty (legacy caller), we fall back
+        to the old direction-agnostic behaviour so existing callers don't
+        silently break — but in that case we log a warning because every
+        real entry path should now populate trade_direction.
         """
         if not ctx.ema_state:
             return 0.0
 
         alignment = ctx.ema_state.get("alignment", "mixed")
         weight = self._weights["ema_alignment"]
+        direction = (ctx.trade_direction or "").lower()
+
+        expected = {"long": "bullish", "short": "bearish"}.get(direction)
 
         if alignment in ("bullish", "bearish"):
-            logger.debug("EMA alignment: %s — full %s pts", alignment, weight)
-            return weight
+            if expected is None:
+                # Legacy fallback — no trade direction provided. Keep the
+                # old behaviour but flag it so we catch regressions.
+                logger.warning(
+                    "ema_alignment_no_trade_direction_fallback",
+                    alignment=alignment,
+                )
+                return weight
+            if alignment == expected:
+                logger.debug(
+                    "EMA alignment %s matches %s trade — full %s pts",
+                    alignment, direction, weight,
+                )
+                return weight
+            # Counter-trend: alignment is clean but opposes the trade.
+            # Score zero rather than a penalty; the dedicated 4H HTF
+            # hard-veto in mm_engine is the place to reject outright.
+            logger.info(
+                "ema_alignment_opposes_trade",
+                alignment=alignment,
+                trade_direction=direction,
+            )
+            return 0.0
 
-        # Mixed alignment — partial credit if at least mostly aligned
+        # Mixed alignment — partial credit if at least mostly aligned.
+        # Partial alignment doesn't carry a direction, so award the
+        # reduced score regardless of trade direction.
         if alignment == "partial":
             reduced = round(weight * 0.5, 2)
             logger.debug("EMA alignment: partial — %s pts", reduced)

@@ -184,6 +184,14 @@ class MMSignal:
     svc_high: float = 0.0
     svc_low: float = 0.0
 
+    # HTF trend snapshot at entry (2026-04 audit — migration 018).
+    # Recorded on every entry so post-mortems can distinguish trend-aligned
+    # losses from counter-trend losses without having to reconstruct the
+    # 4H EMA state from historical candle data.
+    htf_trend_4h: str = "unknown"  # "bullish" | "bearish" | "sideways" | "unknown"
+    htf_trend_1d: str = "unknown"  # "bullish" | "bearish" | "sideways" | "unknown"
+    counter_trend: bool = False    # True when trade_direction opposes a non-sideways 4H trend
+
 
 @dataclass
 class MMPosition:
@@ -1348,7 +1356,7 @@ class MMEngine:
 
             # Stages in canonical pipeline order (matches _analyze_pair flow)
             stage_order = [
-                "candles_ok", "formation_found", "level_ok", "phase_valid",
+                "candles_ok", "formation_found", "htf_aligned", "level_ok", "phase_valid",
                 "direction_ok", "target_acquired", "rr_passed", "scored",
                 "confluence_passed", "retest_passed", "signal_built",
             ]
@@ -1444,11 +1452,13 @@ class MMEngine:
 
         Returns an MMSignal if entry conditions are met, None otherwise.
         """
-        # Fetch candles (1H primary, 4H for EMA trend, 15m for entry refinement)
+        # Fetch candles (1H primary, 4H and 1D for HTF trend, 15m for entry refinement)
         # Course C1 (lesson 13): "drop down to the 15 minute time frame for
         # the actual Entry... then switch back to the one hour" — we fetch
         # 15m so final-damage hammer/inverted-hammer checks (lesson 21) and
         # other 15m-sensitive validations have data available.
+        # Course lessons 03 / 10 / 12: "shift to higher timeframes" — the 4H
+        # and 1D EMA stacks are the HTF trend-alignment gate (see below).
         try:
             candles_1h = await self.candle_manager.get_candles(symbol, "1h", limit=500)
             candles_4h = await self.candle_manager.get_candles(symbol, "4h", limit=250)
@@ -1456,6 +1466,11 @@ class MMEngine:
                 candles_15m = await self.candle_manager.get_candles(symbol, "15m", limit=200)
             except Exception:
                 candles_15m = None  # best-effort — some markets won't have 15m
+            try:
+                # 1D: 250 bars = ~8 months, plenty for EMA 50/200 daily trend.
+                candles_1d = await self.candle_manager.get_candles(symbol, "1d", limit=250)
+            except Exception:
+                candles_1d = None  # best-effort — not all markets expose 1D
         except Exception as e:
             return self._reject("candle_fetch", symbol, error=str(e))
 
@@ -1538,16 +1553,37 @@ class MMEngine:
 
         # --- Run all MM modules ---
 
-        # EMA Framework (4H for macro trend)
+        # EMA Framework (4H and 1D for HTF trend direction — course lessons
+        # 03, 10, 12). Both trend states feed the HTF alignment hard-veto
+        # (see the block guarded by `trend_state_4h` below trade_direction
+        # derivation) and are persisted on the trade row for post-mortems.
+        # Prior to 2026-04 the 4H trend state was computed and thrown away
+        # (a `# noqa: F841 — kept for future use` line), which let the bot
+        # short BNB into a clearly bullish 4H stack on 2026-04-17.
         ema_state = None
         ema_values = {}
+        trend_state_4h = None
         if candles_4h is not None and not candles_4h.empty and len(candles_4h) > 200:
             ema_state = self.ema_framework.calculate(candles_4h)
-            _trend_state = self.ema_framework.get_trend_state(candles_4h)  # noqa: F841 — kept for future use
+            trend_state_4h = self.ema_framework.get_trend_state(candles_4h)
             ema_values = ema_state.values
             ema_break = self.ema_framework.detect_ema_break(candles_4h, ema_period=50)
         else:
             ema_break = None
+
+        # 1D trend state (best-effort — some markets lack the history).
+        # Used only as a soft secondary context signal and for persistence;
+        # the hard-veto below keys off the 4H state.
+        trend_state_1d = None
+        if (
+            candles_1d is not None
+            and not candles_1d.empty
+            and len(candles_1d) >= 50
+        ):
+            try:
+                trend_state_1d = self.ema_framework.get_trend_state(candles_1d)
+            except Exception:
+                trend_state_1d = None
 
         # C2: RSI state (1H candles) — best-effort; None if insufficient data.
         rsi_state = None
@@ -1821,6 +1857,83 @@ class MMEngine:
         # Derive trade_direction early — used below in weekly bias gating before
         # SL/target calc redefines it. Must match: bullish (W) → long, bearish (M) → short.
         trade_direction = "long" if direction == "bullish" else "short"
+
+        # ---------------------------------------------------------------
+        # HTF trend-alignment hard-veto (course lessons 03 / 10 / 12).
+        # ---------------------------------------------------------------
+        # Prior to 2026-04 the 4H trend state was computed and thrown away.
+        # That's how the BNB short on 2026-04-17 slipped through: the 4H
+        # stack was cleanly bullish and the bot still entered a short on a
+        # 1H "three hits at HOW" reversal. Price never came back.
+        #
+        # Rule: if the 4H trend direction is bullish/bearish (strength is
+        # non-trivial) AND it opposes the trade, reject — unless the
+        # formation is a recognised reversal variant AND the trend is
+        # NOT accelerating (i.e. trend may be exhausting, so a reversal is
+        # at least plausible). The course explicitly allows counter-trend
+        # entries at Level-3 exhaustion (lessons 10, 14) but not earlier.
+        htf_4h_dir = trend_state_4h.direction if trend_state_4h is not None else "unknown"
+        htf_4h_strength = trend_state_4h.strength if trend_state_4h is not None else 0.0
+        htf_4h_accel = trend_state_4h.is_accelerating if trend_state_4h is not None else False
+        htf_1d_dir = trend_state_1d.direction if trend_state_1d is not None else "unknown"
+
+        is_counter_trend_4h = (
+            htf_4h_dir == "bullish" and trade_direction == "short"
+        ) or (
+            htf_4h_dir == "bearish" and trade_direction == "long"
+        )
+
+        # Reversal variants that the course allows against HTF trend at
+        # exhaustion. "three_hits_*" and "final_damage" are named reversal
+        # setups; "half_batman", "nyc_reversal", and "200ema_rejection" are
+        # the other explicit counter-trend setups the course teaches.
+        HTF_REVERSAL_EXEMPT_VARIANTS = {
+            "three_hits_how", "three_hits_low",
+            "final_damage",
+            "half_batman",
+            "nyc_reversal",
+            "200ema_rejection",
+            "stophunt",
+        }
+
+        # Only veto on non-trivial trend strength. A weak/noisy 4H trend
+        # (strength < 0.5) isn't a reliable directional filter.
+        HTF_VETO_STRENGTH_THRESHOLD = 0.5
+
+        if (
+            is_counter_trend_4h
+            and htf_4h_strength >= HTF_VETO_STRENGTH_THRESHOLD
+        ):
+            exempt = (
+                best_formation.variant in HTF_REVERSAL_EXEMPT_VARIANTS
+                and not htf_4h_accel  # accelerating trend = no exemption
+            )
+            if not exempt:
+                return self._reject(
+                    "htf_4h_counter_trend",
+                    symbol,
+                    htf_4h=htf_4h_dir,
+                    htf_4h_strength=round(htf_4h_strength, 3),
+                    htf_4h_accelerating=htf_4h_accel,
+                    htf_1d=htf_1d_dir,
+                    trade_dir=trade_direction,
+                    formation_variant=best_formation.variant,
+                )
+            # Exempt reversal setup against non-accelerating HTF trend.
+            # Log it loudly — these trades deserve scrutiny and want to be
+            # easy to find in logs when they lose.
+            logger.info(
+                "mm_htf_counter_trend_exempt",
+                symbol=symbol,
+                htf_4h=htf_4h_dir,
+                htf_4h_strength=round(htf_4h_strength, 3),
+                trade_dir=trade_direction,
+                formation_variant=best_formation.variant,
+            )
+
+        self._advance("htf_aligned")
+        # ---------------------------------------------------------------
+
         lookback_start = max(0, len(candles_1h) - 40)  # same window formation detector used
         formation_abs_idx = lookback_start + best_formation.peak2_idx
         candles_post_formation = candles_1h.iloc[formation_abs_idx:]
@@ -2441,6 +2554,11 @@ class MMEngine:
             pass  # Provider unavailable — leave as None
 
         mm_ctx = MMContext(
+            # Passed so _score_ema_alignment can gate its 8 pts on direction
+            # match — prior to 2026-04 a bullish stack awarded the same 8 pts
+            # to shorts as to longs, directly inflating counter-trend setup
+            # scores. See `_score_ema_alignment` docstring.
+            trade_direction=trade_direction,
             formation={
                 "type": best_formation.type,
                 "variant": best_formation.variant,
@@ -2579,6 +2697,9 @@ class MMEngine:
             svc_high=svc_high,
             svc_low=svc_low,
             london_pattern_type=london_pattern_type,
+            htf_trend_4h=htf_4h_dir,
+            htf_trend_1d=htf_1d_dir,
+            counter_trend=is_counter_trend_4h,
             reason=f"{best_formation.type} formation ({best_formation.variant}) "
                    f"grade={confluence_result.grade} R:R={rr:.1f} "
                    f"phase={cycle_state.phase} entry={entry_type}",
@@ -2808,6 +2929,12 @@ class MMEngine:
                 "mm_sl_moved_to_breakeven": False,
                 "mm_sl_moved_under_50ema": False,
                 "mm_took_200ema_partial": False,
+                # HTF trend snapshot at entry (migration 018) — so post-mortems
+                # can separate trend-aligned losses from counter-trend losses
+                # without re-fetching historical 4H/1D candles.
+                "htf_trend_4h": getattr(signal, "htf_trend_4h", "unknown"),
+                "htf_trend_1d": getattr(signal, "htf_trend_1d", "unknown"),
+                "counter_trend": bool(getattr(signal, "counter_trend", False)),
                 "mode": self.config.trading_mode if hasattr(self.config, 'trading_mode') else "paper",
                 "status": "open",
             })
