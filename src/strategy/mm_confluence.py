@@ -70,6 +70,13 @@ WEIGHTS: dict[str, float] = {
     # C2: RSI confirmation — divergence at formation OR trend bias aligned
     # with trade direction. 6 pts, same tier as fib and news.
     "rsi_confirmation": 6.0,
+    # Course Lesson 13 (2026-04 audit): "I very rarely would trade Ms or
+    # Ws if they form in the same session... multi-session formations are
+    # much higher probability." Without this bonus, the scorer treated a
+    # tight same-session formation identically to a premium multi-session
+    # one. 6 pts puts it in the same tier as RSI / fib — a solid
+    # confirming factor but not a make-or-break HIGH.
+    "multi_session_formation": 6.0,
     # LOW weight — bonus
     "correlation_confirmed": 4.0,
     # C3: ADR (Average Daily Range) 50% line confluence. Low weight because
@@ -296,6 +303,7 @@ class MMConfluenceScorer:
 
         # --- MEDIUM weight factors (continued) ---
         factors["rsi_confirmation"] = self._score_rsi_confirmation(context)
+        factors["multi_session_formation"] = self._score_multi_session_formation(context)
 
         # --- LOW weight factors ---
         factors["oi_behavior"] = self._score_oi_behavior(context)
@@ -757,6 +765,31 @@ class MMConfluenceScorer:
 
         weight = self._weights["news_event"]
         logger.debug("News event timing — %s pts", weight)
+        return weight
+
+    def _score_multi_session_formation(self, ctx: MMContext) -> float:
+        """Course Lesson 13: multi-session M/W >> same-session.
+
+        The formation detector already tags `variant = "multi_session"`
+        when peak1 and peak2 fall in different major sessions (see
+        `mm_formations.detect_multi_session`). This factor rewards that
+        with 6 pts — same tier as RSI confirmation and fib alignment.
+        Same-session formations get 0 pts (not a penalty — just no bonus).
+
+        Reversal variants (three_hits_*, final_damage, half_batman,
+        nyc_reversal, 200ema_rejection, stophunt) are classified by their
+        reversal character rather than session span, so they also score
+        0 pts here. That is correct: the course treats those as distinct
+        high-probability setups that already earn their place via other
+        factors (key level alignment, stopping volume candle, etc.).
+        """
+        if not ctx.formation:
+            return 0.0
+        variant = str(ctx.formation.get("variant", "")).lower()
+        if variant != "multi_session":
+            return 0.0
+        weight = self._weights["multi_session_formation"]
+        logger.debug("Multi-session formation — %s pts", weight)
         return weight
 
     def _score_rsi_confirmation(self, ctx: MMContext) -> float:

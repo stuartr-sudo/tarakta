@@ -74,8 +74,10 @@ class TestConstants:
         #   +8 when mw_inside_weekend_box added (lesson 15)
         #   +6 when rsi_confirmation added (Task 5.1, C2)
         #   +4 when adr_confluence added (Task 5.2, C3)
-        #  => 133.0
-        assert MAX_POSSIBLE == 133.0
+        #   +6 when multi_session_formation added (2026-04-19 audit,
+        #      Lesson 13 same-session penalty)
+        #  => 139.0
+        assert MAX_POSSIBLE == 139.0
 
     def test_all_factors_have_weights(self):
         expected_factors = [
@@ -83,6 +85,7 @@ class TestConstants:
             "stopping_volume_candle", "unrecovered_vector", "liquidation_cluster",
             "ema_alignment", "mw_inside_weekend_box",
             "fib_alignment", "news_event", "rsi_confirmation",
+            "multi_session_formation",
             "oi_behavior", "correlation_confirmed", "adr_confluence", "moon_cycle",
         ]
         for f in expected_factors:
@@ -177,8 +180,10 @@ class TestScore:
     def test_all_factors_present(self, scorer: MMConfluenceScorer):
         ctx = _full_context()
         result = scorer.score(ctx)
-        # 15 factors: 12 original + mw_inside_weekend_box (lesson 15) + rsi_confirmation (C2) + adr_confluence (C3)
-        assert len(result.factors) == 15
+        # 16 factors: 12 original + mw_inside_weekend_box (lesson 15)
+        # + rsi_confirmation (C2) + adr_confluence (C3)
+        # + multi_session_formation (2026-04-19 audit, lesson 13)
+        assert len(result.factors) == 16
 
     def test_factors_sum_to_total(self, scorer: MMConfluenceScorer):
         ctx = _full_context()
@@ -337,7 +342,7 @@ class TestFactorScoring:
     def test_fib_alignment_included_in_max_possible(self):
         """B2: fib_alignment weight is included in MAX_POSSIBLE (already in WEIGHTS)."""
         assert "fib_alignment" in WEIGHTS
-        assert MAX_POSSIBLE == 133.0
+        assert MAX_POSSIBLE == 139.0
 
     def test_rsi_confirmed_true_scores_full_weight(self, scorer: MMConfluenceScorer):
         """C2: rsi_confirmed=True should contribute 6.0 pts to rsi_confirmation factor."""
@@ -362,7 +367,7 @@ class TestFactorScoring:
         """C2: rsi_confirmation weight is included in MAX_POSSIBLE."""
         assert "rsi_confirmation" in WEIGHTS
         assert WEIGHTS["rsi_confirmation"] == 6.0
-        assert MAX_POSSIBLE == 133.0
+        assert MAX_POSSIBLE == 139.0
 
     def test_adr_at_fifty_pct_true_scores_full_weight(self, scorer: MMConfluenceScorer):
         """C3: adr_at_fifty_pct=True should contribute 4.0 pts to adr_confluence factor."""
@@ -387,7 +392,7 @@ class TestFactorScoring:
         """C3: adr_confluence weight is included in MAX_POSSIBLE."""
         assert "adr_confluence" in WEIGHTS
         assert WEIGHTS["adr_confluence"] == 4.0
-        assert MAX_POSSIBLE == 133.0
+        assert MAX_POSSIBLE == 139.0
 
 
 # ------------------------------------------------------------------

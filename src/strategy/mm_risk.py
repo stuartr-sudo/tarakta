@@ -51,6 +51,16 @@ MIN_RR_AGGRESSIVE = 2.0  # For aggressive entries on 2nd M/W peak
 # Maximum recommended leverage
 MAX_RECOMMENDED_LEVERAGE = 10
 
+# Maximum notional exposure per trade as a fraction of total account.
+# 2026-04 audit (BNB 2026-04-17 loss): the 1% risk rule is correct BUT
+# with a tight SL (0.62%) position size ballooned to 100% of account
+# notional ($99,943 on $100K). A flash gap through SL would have caused
+# a loss far larger than the intended 1%. This cap prevents that —
+# when notional would exceed the cap we shrink the position and
+# proportionally reduce the actual dollar risk. Course-compliant because
+# 1% is a ceiling, not a target.
+DEFAULT_MAX_NOTIONAL_PCT = 0.50  # 50% of account
+
 # Performance evaluation batch size
 EVAL_BATCH_SIZE = 10
 
@@ -78,6 +88,11 @@ class PositionSizeResult:
     margin_required_usd: float = 0.0  # Margin at 1x
     recommended_leverage: float = 1.0  # Practical recommendation
     is_viable: bool = True          # False if position too large for account
+    # Flag + reason when the notional cap kicked in and shrunk the size
+    # below the 1%-risk target. Logged for telemetry; does not block the
+    # trade.
+    notional_capped: bool = False
+    cap_reason: str = ""
 
 
 @dataclass
@@ -135,9 +150,14 @@ class MMRiskCalculator:
         self,
         risk_per_trade: float = DEFAULT_RISK_PER_TRADE,
         max_leverage: float = MAX_RECOMMENDED_LEVERAGE,
+        max_notional_pct: float = DEFAULT_MAX_NOTIONAL_PCT,
     ):
         self.risk_per_trade = risk_per_trade
         self.max_leverage = max_leverage
+        # Fraction of account (0-1) that any single position is allowed to
+        # represent in notional terms. See DEFAULT_MAX_NOTIONAL_PCT for
+        # the rationale (BNB 2026-04-17 blow-up risk).
+        self.max_notional_pct = max_notional_pct
 
     def calculate_position_size(
         self,
@@ -176,8 +196,31 @@ class MMRiskCalculator:
         if sl_distance_pct <= 0:
             return PositionSizeResult(is_viable=False)
 
-        # Position size
+        # Position size (notional) from the 1%-risk rule
         position_size = risk_amount / sl_distance_pct
+
+        # Notional cap — shrink position if it would exceed max_notional_pct
+        # of the account. Recompute actual dollar risk proportionally.
+        notional_cap_usd = account_balance_usd * self.max_notional_pct
+        notional_capped = False
+        cap_reason = ""
+        if self.max_notional_pct > 0 and position_size > notional_cap_usd:
+            shrink_ratio = notional_cap_usd / position_size
+            position_size = notional_cap_usd
+            risk_amount = round(risk_amount * shrink_ratio, 2)
+            notional_capped = True
+            cap_reason = (
+                f"notional>{self.max_notional_pct * 100:.0f}% "
+                f"(sl_dist={sl_distance_pct * 100:.2f}%)"
+            )
+            logger.info(
+                "mm_position_notional_capped",
+                account_balance=account_balance_usd,
+                cap_pct=self.max_notional_pct,
+                cap_usd=round(notional_cap_usd, 2),
+                adjusted_risk=risk_amount,
+                sl_distance_pct=round(sl_distance_pct * 100, 4),
+            )
 
         # Leverage calculation
         # How much leverage needed if using entire exchange balance
@@ -203,6 +246,8 @@ class MMRiskCalculator:
             margin_required_usd=round(margin_required, 2),
             recommended_leverage=recommended_leverage,
             is_viable=is_viable,
+            notional_capped=notional_capped,
+            cap_reason=cap_reason,
         )
 
         logger.info(
@@ -213,6 +258,7 @@ class MMRiskCalculator:
             sl_distance_pct=round(sl_distance_pct * 100, 4),
             leverage_needed=round(leverage_needed, 2),
             is_viable=is_viable,
+            notional_capped=notional_capped,
         )
 
         return result

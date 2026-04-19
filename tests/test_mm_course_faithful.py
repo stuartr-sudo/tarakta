@@ -64,7 +64,7 @@ def test_max_possible_reflects_oi_promotion():
     20+15+15+15 (high) + 8+8+8+8+8 (medium, incl. mw_inside_weekend_box) + 6+6+6 (fib/news/rsi) + 4+4+2 = 133.
     (+4 for adr_confluence added in Task 5.2 C3)
     """
-    assert MAX_POSSIBLE == 133.0
+    assert MAX_POSSIBLE == 139.0
 
 
 # ---------------------------------------------------------------------------
