@@ -158,7 +158,6 @@ fly secrets set ANTHROPIC_API_KEY=sk-ant-... --app tarakta-mm
 - **Instance isolation.** `engine_state` and `trades` are keyed by `instance_id`. `tarakta-mm` uses the default `main` instance_id. Don't spin up a second instance without changing the env var.
 - **OOM risk.** shared-cpu-1x with 2GB. Large parallel candle fetches across the full symbol universe can OOM. Monitor `fly logs --app tarakta-mm`.
 - **python3 only.** No bare `python` on macOS.
-- **pandas-ta.** If re-adding it, install with `--no-deps` (Dockerfile handles this). Don't put it in regular pip install chain — the build breaks.
 - **`Any` imports.** `mm_engine.py` doesn't `from typing import Any`. If you need a typed None placeholder in the engine, use `= None  # type: ignore[assignment]` rather than adding the import (one is enough, the type checker isn't run in CI here).
 - **7 pre-existing F821 lint errors.** Quoted forward references to dataclasses in other modules (`"CorrelationSignal | None"` etc.). They're intentional (would create circular imports) and have been there for months. Don't "fix" them unless you also restructure the imports.
 
