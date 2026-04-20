@@ -41,6 +41,10 @@ Before modifying any MM engine code (`src/strategy/mm_engine.py`, `src/strategy/
 
 Before modifying the sanity agent (`src/strategy/mm_sanity_agent.py`), read `docs/MM_SANITY_AGENT_DESIGN.md`. The rubric, prompt-caching contract, and cost-cap behaviour are specified there.
 
+Before making ANY rule change (scratch rule, confluence weights, target hierarchy, SL progression, etc.), read the relevant lesson in `docs/courses/mmm-masterclasses/` FIRST. The bot is only valuable if it implements the course; inventing rules is how we got the BNB disaster on 2026-04-17. **Cite the exact lesson + timestamp in the commit message.**
+
+For the running history of every engine change with course citations: see `docs/CHANGELOG.md`. For current project state: see the latest `docs/STATUS_YYYY-MM-DD.md`.
+
 ## Architecture
 
 ```
@@ -151,6 +155,9 @@ fly secrets set ANTHROPIC_API_KEY=sk-ant-... --app tarakta-mm
 - **MM Engine DB contract.** Adding a new `trades` column needs THREE changes: (1) migration file, (2) add name to `_TRADE_COLUMNS` in `src/data/repository.py`, (3) reference the exact column name in `mm_engine.py`. Miss any step and data silently drops. Same applies to `mm_agent_decisions` via `_MM_AGENT_DECISION_COLUMNS`. See `docs/MM_ENGINE_INTEGRATION_GUIDE.md`.
 - **State persistence.** Every in-memory MMPosition change (SL tighten, level advance, partial close, SVC invalidation flag, breakeven move) must be followed by `repo.update_trade(...)`. Otherwise a restart loses progress and the engine can double-enter or re-close partials.
 - **Dead-code pattern to avoid.** `_var = compute()  # noqa: F841 — kept for future use` is exactly what let the BNB 2026-04-17 short slip through — `trend_state_4h` was computed and discarded. If state is worth computing it's worth using or deleting. Don't add new `noqa: F841` comments silencing "unused" state in the engine.
+- **Unused lookup dicts.** `LEVEL_EMA_FALLBACKS` was defined in `mm_targets.py` and never referenced anywhere. It fooled reviewers into thinking the fallback was wired. Before trusting any config/lookup dict, grep to confirm it's actually used. Deleted 2026-04-20 per `eb1f130`.
+- **Don't invent rules not in the course.** Commit `2a04c2e` shipped a "dynamic-by-SL scratch + board-meeting exemption" rule that wasn't in the course. Reverted same day by `eb1f130`. When the engine surprises you, read the course BEFORE inventing a fix. Cite the exact lesson + timestamp in the commit.
+- **Measure what the course measures.** The old scratch rule checked `current_level == 0` when Lesson 13 [47:00] says "substantial profit." Two different signals. A rule is only course-faithful if it measures the thing the course describes. Current scratch rule checks unrealized P&L.
 - **Prompt caching TTL.** Anthropic changed the default from 1h → 5m silently in March 2026. The sanity agent requests `ttl=1h` explicitly in `mm_sanity_agent._call_model`. Don't remove that — 5m is useless for our cadence.
 - **Direction-aware scoring.** `mm_confluence._score_ema_alignment` takes `trade_direction` from `MMContext` and scores 0 when EMA alignment opposes the trade. Before migration 018 it awarded full 8 pts either way, which inflated counter-trend setup scores. Keep it direction-aware.
 - **Deploy flag.** Always `--depot=false --remote-only`. Depot builder on Fly times out on this image.
