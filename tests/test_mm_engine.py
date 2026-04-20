@@ -1798,3 +1798,143 @@ class TestSVCWickReturnBreakoutFirst:
         )
         assert broke_out is True
         assert returned is False
+
+
+# ---------------------------------------------------------------------------
+# Dynamic scratch window — BNB 2026-04-20 fix
+# SL < 2%   → 2h
+# SL 2-4%   → 3h
+# SL ≥ 4%   → 4h
+# BOARD_MEETING_* phase → min 4h regardless of SL
+# ---------------------------------------------------------------------------
+
+def _make_position_with_sl(
+    entry: float = 100.0,
+    sl: float = 99.0,                       # 1% SL by default
+    hours_old: float = 2.5,
+    current_level: int = 0,
+    cycle_phase: str = "",
+) -> MMPosition:
+    """Helper: position with configurable SL distance, age, and phase."""
+    pos = MMPosition(
+        symbol="BNB/USDT",
+        direction="long",
+        entry_price=entry,
+        quantity=1.0,
+        stop_loss=sl,
+        current_level=current_level,
+        cycle_phase=cycle_phase,
+    )
+    pos.entry_time = datetime.now(timezone.utc) - timedelta(hours=hours_old)
+    return pos
+
+
+async def _run_manage_and_capture(engine: MMEngine, pos: MMPosition) -> list[str]:
+    """Wire up the engine mocks and capture scratch-reason close calls."""
+    engine.positions[pos.symbol] = pos
+    engine.exchange = MagicMock()
+    engine.exchange.fetch_ticker = AsyncMock(return_value={"last": pos.entry_price})
+    engine.candle_manager = MagicMock()
+    engine.candle_manager.get_candles = AsyncMock(return_value=None)
+
+    scratch_reasons: list[str] = []
+
+    async def _spy_close(p, price, reason):
+        if reason == "scratch_2h":
+            scratch_reasons.append(reason)
+            engine.positions.pop(p.symbol, None)
+
+    with patch.object(engine, "_close_position", side_effect=_spy_close):
+        with patch.object(engine, "_is_stopped_out", return_value=False):
+            await engine._manage_position(pos.symbol)
+    return scratch_reasons
+
+
+@pytest.mark.asyncio
+async def test_dynamic_scratch_tight_sl_fires_at_2h(engine: MMEngine):
+    """SL 1% (tight) + 2.5h old → should scratch (2h window applies)."""
+    pos = _make_position_with_sl(entry=100.0, sl=99.0, hours_old=2.5)
+    # Confirm SL distance is ~1%
+    assert abs(pos.entry_price - pos.stop_loss) / pos.entry_price * 100 == pytest.approx(1.0)
+    reasons = await _run_manage_and_capture(engine, pos)
+    assert reasons == ["scratch_2h"]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_scratch_medium_sl_waits_until_3h(engine: MMEngine):
+    """SL 3% (medium) + 2.5h old → must NOT fire yet (3h window)."""
+    pos = _make_position_with_sl(entry=100.0, sl=97.0, hours_old=2.5)
+    assert abs(pos.entry_price - pos.stop_loss) / pos.entry_price * 100 == pytest.approx(3.0)
+    reasons = await _run_manage_and_capture(engine, pos)
+    assert reasons == [], "3% SL should give 3h window, not scratch at 2.5h"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_scratch_medium_sl_fires_at_3h(engine: MMEngine):
+    """SL 3% (medium) + 3.5h old → should fire (3h window passed)."""
+    pos = _make_position_with_sl(entry=100.0, sl=97.0, hours_old=3.5)
+    reasons = await _run_manage_and_capture(engine, pos)
+    assert reasons == ["scratch_2h"]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_scratch_wide_sl_waits_until_4h(engine: MMEngine):
+    """SL 6% (wide) + 3.5h old → must NOT fire (4h window)."""
+    pos = _make_position_with_sl(entry=100.0, sl=94.0, hours_old=3.5)
+    assert abs(pos.entry_price - pos.stop_loss) / pos.entry_price * 100 == pytest.approx(6.0)
+    reasons = await _run_manage_and_capture(engine, pos)
+    assert reasons == [], "6% SL should give 4h window, not scratch at 3.5h"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_scratch_wide_sl_fires_at_4h(engine: MMEngine):
+    """SL 6% (wide) + 4.5h old → should fire (4h window passed)."""
+    pos = _make_position_with_sl(entry=100.0, sl=94.0, hours_old=4.5)
+    reasons = await _run_manage_and_capture(engine, pos)
+    assert reasons == ["scratch_2h"]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_scratch_board_meeting_always_4h(engine: MMEngine):
+    """BOARD_MEETING_1 + tight 1% SL + 2.5h old → must NOT fire yet.
+
+    Board meetings are the explicit MM-consolidating phase. Minimum 4h
+    regardless of SL distance. This is the BNB 2026-04-20 fix: entry
+    was board_meeting variant, bot scratched at 122 min during the
+    natural retracement phase.
+    """
+    pos = _make_position_with_sl(
+        entry=100.0, sl=99.0, hours_old=2.5, cycle_phase="BOARD_MEETING_1",
+    )
+    reasons = await _run_manage_and_capture(engine, pos)
+    assert reasons == [], "Board meeting must extend scratch to 4h even with tight SL"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_scratch_board_meeting_fires_at_4h(engine: MMEngine):
+    """BOARD_MEETING_2 + 4.5h old → should fire (4h minimum passed)."""
+    pos = _make_position_with_sl(
+        entry=100.0, sl=99.0, hours_old=4.5, cycle_phase="BOARD_MEETING_2",
+    )
+    reasons = await _run_manage_and_capture(engine, pos)
+    assert reasons == ["scratch_2h"]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_scratch_bnb_20260420_scenario(engine: MMEngine):
+    """The exact BNB trade that triggered this fix.
+
+    Entry $622.10, SL $571.92 (8.07% SL — wide), cycle_phase=BOARD_MEETING_1.
+    At 122 min (2.03h), old code scratched. New code must NOT scratch
+    until 4h — wide SL + board meeting → 4h window.
+    """
+    pos = _make_position_with_sl(
+        entry=622.10, sl=571.92, hours_old=2.03, cycle_phase="BOARD_MEETING_1",
+    )
+    sl_pct = abs(pos.entry_price - pos.stop_loss) / pos.entry_price * 100
+    assert 7.5 < sl_pct < 8.5, f"expected ~8% SL, got {sl_pct}%"
+    reasons = await _run_manage_and_capture(engine, pos)
+    assert reasons == [], (
+        "BNB 2026-04-20 pattern — wide SL + board meeting + 2h old "
+        "must NOT scratch (regression guard)"
+    )

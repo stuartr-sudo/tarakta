@@ -3372,23 +3372,62 @@ class MMEngine:
             except Exception as e:
                 logger.debug("mm_refund_zone_check_failed", symbol=symbol, error=str(e))
 
-        # B1: Scratch rule — if position has not reached L1 after 2 hours,
-        # cut for a small scratch rather than letting it drift to SL.
+        # B1: Scratch rule — if position has not reached L1 within a
+        # setup-appropriate time window, cut for a small scratch rather
+        # than letting it drift to SL.
         # Course citation: "if you don't see movement within 2 hours, it's
         # a scratch — take your loss and move on."
+        #
+        # 2026-04-20 fix: the 2-hour window is course-written for tight-SL
+        # tactical entries (0.5-1.5% stops). BNB 2026-04-20 entered as a
+        # board_meeting variant with an 8% SL and TP1 at +15.5% — scratched
+        # at exactly 122 min for -$3 while the setup was still in its
+        # natural retracement phase. Wide-SL setups need more time to
+        # prove themselves, and board_meeting variants ARE the "sit
+        # sideways in the fib zone" phase by design.
+        #
+        # Dynamic scratch window:
+        #   SL < 2%     → 2h  (tight tactical — course default)
+        #   SL 2-4%     → 3h
+        #   SL ≥ 4%     → 4h  (wide structural)
+        #   BOARD_MEETING_* phase → min 4h regardless of SL
+        #
         # Only applies pre-L1 (current_level == 0). Once L1 is hit the
         # trade is running and the scratch rule no longer applies.
         now = datetime.now(timezone.utc)
-        if pos.current_level == 0 and (now - pos.entry_time).total_seconds() >= 7200:
-            logger.info(
-                "mm_scratch_2h",
-                symbol=symbol,
-                entry_time=pos.entry_time.isoformat(),
-                elapsed_seconds=int((now - pos.entry_time).total_seconds()),
-                current_price=current_price,
+        if pos.current_level == 0:
+            sl_dist_pct = (
+                abs(pos.entry_price - pos.stop_loss) / pos.entry_price * 100
+                if pos.entry_price > 0 else 0.0
             )
-            await self._close_position(pos, current_price, "scratch_2h")
-            return
+            if sl_dist_pct < 2.0:
+                scratch_hours = 2.0
+            elif sl_dist_pct < 4.0:
+                scratch_hours = 3.0
+            else:
+                scratch_hours = 4.0
+            # Board meeting is the explicit "MM is consolidating" phase —
+            # always give at least 4h regardless of SL distance.
+            if pos.cycle_phase and "BOARD_MEETING" in pos.cycle_phase:
+                scratch_hours = max(scratch_hours, 4.0)
+
+            elapsed = (now - pos.entry_time).total_seconds()
+            if elapsed >= scratch_hours * 3600:
+                logger.info(
+                    "mm_scratch_rule",
+                    symbol=symbol,
+                    entry_time=pos.entry_time.isoformat(),
+                    elapsed_hours=round(elapsed / 3600, 2),
+                    scratch_hours_applied=scratch_hours,
+                    sl_distance_pct=round(sl_dist_pct, 2),
+                    cycle_phase=pos.cycle_phase,
+                    current_price=current_price,
+                )
+                # Keep the historic reason string "scratch_2h" so existing
+                # analytics and reports continue to group these together.
+                # The actual window applied is in elapsed_hours_applied.
+                await self._close_position(pos, current_price, "scratch_2h")
+                return
 
         # Check stop loss hit
         if self._is_stopped_out(pos, current_price):
