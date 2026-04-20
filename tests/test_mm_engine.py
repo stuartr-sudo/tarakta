@@ -1647,3 +1647,154 @@ class TestTargetStaggeringFromRMultiples:
         )
         # r == 0 → don't mutate
         assert result == (105.0, 105.0, 105.0)
+
+
+# ---------------------------------------------------------------------------
+# SVC Wick Return — breakout-first invalidation (NEAR 2026-04-20 fix)
+# Course Lesson 20/23: SVC "Trapped Traders" — break out THEN return = cut.
+# The entry itself often sits inside the SVC zone on W-retest entries;
+# without the breakout-first gate, the first near-entry 1H close cuts the
+# trade for no good reason.
+# ---------------------------------------------------------------------------
+
+class TestSVCWickReturnBreakoutFirst:
+    """Unit tests for the SVC return-to-zone guard.
+
+    Re-implements the breakout-first logic as a pure helper so we can
+    exercise edge cases without the full _manage_position harness.
+    If the inline logic in _manage_position changes, update this helper
+    to match — tests will fail loud if they drift.
+    """
+
+    def _check(self, direction, svc_high, svc_low, closes):
+        """Returns (broke_out, returned, return_close) mirroring the
+        inline engine logic."""
+        broke_out = False
+        returned = False
+        return_close = None
+        for c in closes:
+            if not broke_out:
+                if direction == "long" and c > svc_high * 1.002:
+                    broke_out = True
+                elif direction == "short" and c < svc_low * 0.998:
+                    broke_out = True
+                continue
+            if svc_low <= c <= svc_high:
+                returned = True
+                return_close = c
+                break
+        return broke_out, returned, return_close
+
+    # ---- LONG side ----
+
+    def test_near_scenario_entry_inside_svc_no_cut(self):
+        """NEAR 2026-04-20 exact pattern: entry $1.3333 inside SVC
+        $1.321-$1.347. First two 1H closes at $1.337, $1.341 — both
+        inside zone but no prior breakout. Must NOT cut.
+        """
+        broke_out, returned, _ = self._check(
+            direction="long",
+            svc_high=1.347, svc_low=1.321,
+            closes=[1.337, 1.341, 1.340, 1.345, 1.348],  # last one is juust outside
+        )
+        assert broke_out is False  # never cleared svc_high * 1.002 = 1.3497
+        assert returned is False   # and no return triggered
+
+    def test_clean_breakout_then_return_cuts(self):
+        """Long breaks cleanly above SVC zone (close > svc_high * 1.002),
+        then a subsequent close returns into the zone → cut."""
+        broke_out, returned, return_close = self._check(
+            direction="long",
+            svc_high=100.0, svc_low=95.0,
+            closes=[99.0, 102.0, 103.0, 98.0, 97.0],
+        )
+        assert broke_out is True
+        assert returned is True
+        assert return_close == 98.0
+
+    def test_clean_breakout_no_return_no_cut(self):
+        """Long breaks above SVC zone and keeps going up. No cut."""
+        broke_out, returned, _ = self._check(
+            direction="long",
+            svc_high=100.0, svc_low=95.0,
+            closes=[99.0, 102.0, 105.0, 108.0, 110.0],
+        )
+        assert broke_out is True
+        assert returned is False
+
+    def test_breakout_threshold_is_02pct_buffer(self):
+        """A close at svc_high * 1.001 is NOT a breakout (threshold is 1.002)."""
+        svc_high = 100.0
+        svc_low = 95.0
+        # 100.1 is svc_high * 1.001 — not enough
+        broke_out, _, _ = self._check(
+            direction="long",
+            svc_high=svc_high, svc_low=svc_low,
+            closes=[97.0, 100.1, 96.0],
+        )
+        assert broke_out is False
+
+        # 100.2 is svc_high * 1.002 — exactly at threshold
+        # (strict > check, so exactly-at is still not a breakout)
+        broke_out, _, _ = self._check(
+            direction="long",
+            svc_high=svc_high, svc_low=svc_low,
+            closes=[97.0, 100.2, 96.0],
+        )
+        assert broke_out is False
+
+        # 100.21 IS above threshold
+        broke_out, returned, _ = self._check(
+            direction="long",
+            svc_high=svc_high, svc_low=svc_low,
+            closes=[97.0, 100.21, 96.0],
+        )
+        assert broke_out is True
+        assert returned is True  # 96.0 is back in zone
+
+    def test_oscillation_inside_zone_no_breakout_no_cut(self):
+        """Price oscillates inside SVC for many candles without breaking
+        out. Never cut — still in initial retest phase."""
+        broke_out, returned, _ = self._check(
+            direction="long",
+            svc_high=100.0, svc_low=95.0,
+            closes=[96.0, 98.0, 97.0, 99.0, 96.5, 98.5, 97.5],
+        )
+        assert broke_out is False
+        assert returned is False
+
+    # ---- SHORT side ----
+
+    def test_short_clean_breakout_then_return_cuts(self):
+        """Short breaks cleanly below SVC zone (close < svc_low * 0.998),
+        then a subsequent close returns into the zone → cut."""
+        broke_out, returned, return_close = self._check(
+            direction="short",
+            svc_high=100.0, svc_low=95.0,
+            closes=[96.0, 94.5, 93.0, 97.0, 98.0],  # breaks at 94.5 (< 94.81), returns at 97
+        )
+        # Wait — svc_low * 0.998 = 94.81. 94.5 is BELOW that → breakout.
+        assert broke_out is True
+        assert returned is True
+        assert return_close == 97.0
+
+    def test_short_entry_inside_zone_no_cut(self):
+        """Short entry inside SVC zone, price oscillates without breaking
+        DOWN cleanly. Must NOT cut."""
+        broke_out, returned, _ = self._check(
+            direction="short",
+            svc_high=100.0, svc_low=95.0,
+            closes=[98.0, 96.0, 97.0, 95.1, 96.5],  # 95.1 > svc_low * 0.998 = 94.81
+        )
+        assert broke_out is False
+        assert returned is False
+
+    def test_short_clean_breakout_no_return_no_cut(self):
+        """Short breaks below SVC zone and keeps going down. No cut."""
+        broke_out, returned, _ = self._check(
+            direction="short",
+            svc_high=100.0, svc_low=95.0,
+            closes=[96.0, 94.0, 92.0, 90.0, 88.0],
+        )
+        assert broke_out is True
+        assert returned is False

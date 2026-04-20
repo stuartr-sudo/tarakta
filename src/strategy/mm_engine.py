@@ -3279,10 +3279,18 @@ class MMEngine:
         # Course verbatim: "We always want to see price fail to get back to
         # the wick of a stopping volume candle." This is a CONTINUOUS
         # guarantee over the life of the trade (until L1 is cleared), not
-        # a one-off check of the most recent bar. Earlier implementation
-        # only inspected `iloc[-2]` and could miss a return that happened
-        # between cycles (5-min scan interval on 1H bars = up to 55 min
-        # of blind spot). Now scans EVERY closed 1H candle since entry.
+        # a one-off check of the most recent bar.
+        #
+        # 2026-04-20 NEAR fix: the course rule is "break out of SVC then
+        # return = invalidation." Previously we fired on ANY close inside
+        # the zone since entry — but if the entry price itself is inside
+        # the SVC zone (common for W-retest entries at the wick), the
+        # trade would cut on the very first 1H close near entry. NEAR
+        # closed at +$553 profit but missed TP1 (+$1,473) because of this.
+        # Require a clean breakout ABOVE svc_high (for longs) / BELOW
+        # svc_low (for shorts) BEFORE the return-to-SVC invalidation
+        # becomes active. 0.2% buffer matches the style used in
+        # _tighten_sl for similar level-proximity checks.
         #
         # Still only pre-L1: once the 50 EMA breaks with volume and price
         # clears L1, the move is in progress and the SVC stops being the
@@ -3297,11 +3305,24 @@ class MMEngine:
                     # on bars older than the trade).
                     if pos.entry_time and hasattr(closed_only.index, "tz"):
                         closed_only = closed_only[closed_only.index >= pos.entry_time]
+                    broke_out = False
                     returned = False
                     return_close = None
                     return_ts = None
                     for ts, row in closed_only.iterrows():
                         c = float(row["close"])
+                        # Phase 1: waiting for clean breakout out of the
+                        # SVC zone. The breakout candle itself by
+                        # definition closes outside the zone, so we
+                        # don't need to also check it for "return."
+                        if not broke_out:
+                            if pos.direction == "long" and c > pos.svc_high * 1.002:
+                                broke_out = True
+                            elif pos.direction == "short" and c < pos.svc_low * 0.998:
+                                broke_out = True
+                            continue
+                        # Phase 2: post-breakout — any close returning
+                        # INTO the SVC zone invalidates the formation.
                         if pos.svc_low <= c <= pos.svc_high:
                             returned = True
                             return_close = c
@@ -3314,6 +3335,13 @@ class MMEngine:
                                     svc_high=pos.svc_high, svc_low=pos.svc_low)
                         await self._close_position(pos, current_price, "svc_wick_return")
                         return
+                    elif not broke_out:
+                        # Still in pre-breakout phase — log once per cycle
+                        # for telemetry, no action.
+                        logger.debug("mm_svc_pre_breakout",
+                                     symbol=symbol,
+                                     svc_high=pos.svc_high, svc_low=pos.svc_low,
+                                     current_price=current_price)
             except Exception as e:
                 logger.debug("mm_svc_check_failed", symbol=symbol, error=str(e))
 
