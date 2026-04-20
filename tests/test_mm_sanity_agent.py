@@ -396,3 +396,82 @@ def test_agent_verdict_defaults():
     assert v.concerns == []
     assert v.model == ""
     assert v.cost_usd == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 learning loop (2026-04-21)
+# ---------------------------------------------------------------------------
+
+class TestUserPromptOutcomeStats:
+    """The user prompt must render the RECENT PROFILE OUTCOMES block
+    when outcome stats are attached to context, and mark the THIS
+    PROFILE row for the current (grade, htf_4h)."""
+
+    def _agent(self):
+        return MMSanityAgent(config=SimpleNamespace(), repo=MagicMock())
+
+    def test_no_stats_renders_first_pass_placeholder(self):
+        ctx = {
+            "symbol": "BNB/USDT",
+            "grade": "C",
+            "htf_trend_4h": "sideways",
+            "_outcome_stats": {},
+            "_outcome_lookback_days": 14,
+        }
+        p = self._agent()._build_user_prompt(ctx)
+        assert "RECENT PROFILE OUTCOMES" in p
+        assert "first pass" in p
+        assert "THIS setup's profile: C|sideways" in p
+
+    def test_stats_rendered_with_this_profile_marker(self):
+        stats = {
+            "C|sideways": {
+                "n": 4, "wins": 0, "losses": 3, "scratches": 1, "opens": 0,
+                "net_pnl_usd": -163.61, "avg_pnl_usd": -40.90,
+                "sample_trades": ["BNB/USDT", "NEAR/USDT", "AVAX/USDT", "DOGE/USDT"],
+            },
+            "F|sideways": {
+                "n": 2, "wins": 0, "losses": 0, "scratches": 2, "opens": 0,
+                "net_pnl_usd": -9.00, "avg_pnl_usd": -4.50,
+                "sample_trades": ["BNB/USDT", "BTC/USDT"],
+            },
+        }
+        ctx = {
+            "symbol": "DOGE/USDT",
+            "grade": "C",
+            "htf_trend_4h": "sideways",
+            "_outcome_stats": stats,
+            "_outcome_lookback_days": 14,
+        }
+        p = self._agent()._build_user_prompt(ctx)
+        assert "C|sideways" in p
+        assert "F|sideways" in p
+        assert "net=$-163.61" in p
+        assert "net=$-9.00" in p
+        # The current setup's profile must be marked so the agent sees itself
+        assert "C|sideways" in p and "← THIS PROFILE" in p
+        # And the unrelated F profile must NOT have the marker
+        lines = p.split("\n")
+        c_line = next(line for line in lines if "C|sideways" in line and "net=" in line)
+        f_line = next(line for line in lines if "F|sideways" in line and "net=" in line)
+        assert "← THIS PROFILE" in c_line
+        assert "← THIS PROFILE" not in f_line
+
+    def test_prompt_version_bumped_to_rubric_v2(self):
+        """The system prompt rubric changed (added point 8) so the
+        version must bump to prevent silent cache reuse of the old
+        rubric."""
+        assert "rubric_v=2" in PROMPT_VERSION
+        assert "prompt_v=2" in PROMPT_VERSION
+
+
+def test_system_prompt_has_rubric_8():
+    """The outcome-aware rubric point must be present in the system
+    prompt, otherwise the agent won't know what to do with the stats
+    block in the user prompt."""
+    assert "8. Your own track record" in SYSTEM_PROMPT
+    # Must mention the specific thresholds so decisions are reproducible
+    assert "n >= 5" in SYSTEM_PROMPT
+    assert "0.85" in SYSTEM_PROMPT
+    # And the concern tag we expect vetoes to use
+    assert "recent_losses" in SYSTEM_PROMPT

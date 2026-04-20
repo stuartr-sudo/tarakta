@@ -65,7 +65,7 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
 # Prompt version — bump when the rubric changes so decisions can be joined
 # to their prompt version during post-hoc analysis.
 # ---------------------------------------------------------------------------
-PROMPT_VERSION = "prompt_v=1 rubric_v=1"
+PROMPT_VERSION = "prompt_v=2 rubric_v=2"
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +119,24 @@ RUBRIC — reason through these in order before committing to a verdict:
 7. Recent outcome context:
    If the last 3 trades on this symbol in this direction all lost, the
    current regime for this symbol is against us. Heavily weight VETO.
+
+8. Your own track record (RUBRIC ADDED 2026-04-21, rubric_v=2):
+   Each call receives a RECENT PROFILE OUTCOMES block showing the net
+   P&L of APPROVE decisions YOU made in the lookback window, grouped
+   by GRADE|HTF_4H profile. If the current setup's profile (marked
+   "← THIS PROFILE") has:
+     - n >= 5 AND net_pnl_usd < 0 AND losses >= wins: strongly prefer
+       VETO unless your confidence is >= 0.85 AND you can cite a
+       concrete factor in THIS setup that the losing trades lacked.
+     - n >= 3 AND net_pnl_usd is clearly negative (net < -avg_risk):
+       prefer VETO unless confidence >= 0.80 + clear differentiator.
+     - net_pnl_usd is positive or no prior samples: proceed under the
+       other rubric points — no penalty.
+   When you veto based on this rubric point, put "recent_losses" in
+   concerns AND cite the specific profile and sample count in reason
+   (e.g. "C|sideways profile is 0W/3L/$-160 over 4 samples").
+   This rubric point lets the agent calibrate from its own history
+   rather than committing to each profile fresh every call.
 
 WORKED EXAMPLES:
 
@@ -279,6 +297,24 @@ class MMSanityAgent:
         effort = str(getattr(self.config, "mm_sanity_agent_effort", "high")).lower()
         if effort not in {"low", "medium", "high", "max"}:
             effort = "high"
+
+        # Tier 2 learning loop (2026-04-21): fetch aggregate outcomes of
+        # recent similar-profile decisions so the agent sees its own track
+        # record. Injected into the per-call user prompt (not the cached
+        # system prompt) so each decision gets fresh stats without
+        # invalidating the cache.
+        outcome_lookback_days = int(
+            getattr(self.config, "mm_sanity_agent_outcome_lookback_days", 14)
+        )
+        try:
+            outcome_stats = await self.repo.get_mm_agent_outcome_stats(
+                days=outcome_lookback_days,
+            )
+        except Exception as e:
+            logger.debug("mm_agent_outcome_stats_failed", error=str(e))
+            outcome_stats = {}
+        context = {**context, "_outcome_stats": outcome_stats,
+                   "_outcome_lookback_days": outcome_lookback_days}
 
         user_prompt = self._build_user_prompt(context)
         started = time.perf_counter()
@@ -555,6 +591,30 @@ class MMSanityAgent:
         else:
             recent_str = "\n".join(str(r) for r in recent)
 
+        # Tier 2 learning loop: aggregate outcomes of recent APPROVE
+        # decisions grouped by (grade, htf_4h) profile. The agent uses
+        # this to apply Rubric 8 — weighting VETO when its own past
+        # approvals on the same profile have been systematically losing.
+        outcome_stats = ctx.get("_outcome_stats") or {}
+        lookback_days = ctx.get("_outcome_lookback_days", 14)
+        this_profile_key = (
+            f"{str(ctx.get('grade') or '?').upper()}|"
+            f"{str(ctx.get('htf_trend_4h') or '?').lower()}"
+        )
+        if outcome_stats:
+            stats_lines = []
+            for key, v in sorted(outcome_stats.items(), key=lambda kv: -abs(kv[1].get("net_pnl_usd", 0))):
+                marker = " ← THIS PROFILE" if key == this_profile_key else ""
+                stats_lines.append(
+                    f"  {key:<16} n={v['n']:>2}  "
+                    f"wins={v['wins']} losses={v['losses']} "
+                    f"scratches={v['scratches']} open={v['opens']}  "
+                    f"net=${v['net_pnl_usd']:+.2f}{marker}"
+                )
+            outcome_block = "\n".join(stats_lines)
+        else:
+            outcome_block = "  (no prior APPROVE outcomes in lookback window — first pass)"
+
         return f"""# {PROMPT_VERSION}
 
 SETUP
@@ -583,6 +643,11 @@ multi_session_formation={ctx.get('multi_session')}
 
 RECENT (last 5 closed {ctx.get('symbol')} MM trades)
 {recent_str}
+
+RECENT PROFILE OUTCOMES (last {lookback_days} days — APPROVE decisions only, \
+grouped as GRADE|HTF_4H)
+{outcome_block}
+THIS setup's profile: {this_profile_key}
 
 REGIME (last 10 closes per TF, oldest-first; for context only)
 4h: {_fmt_closes('c4h_closes')}

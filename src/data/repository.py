@@ -1111,3 +1111,143 @@ class Repository:
             return sum(float(r.get("cost_usd", 0) or 0) for r in (result.data or []))
         except Exception:
             return 0.0
+
+    async def get_mm_agent_outcome_stats(
+        self, days: int = 14,
+    ) -> dict[str, dict]:
+        """Aggregate outcomes of recent APPROVE decisions, keyed by
+        (grade, htf_4h) profile. Tier 2 learning-loop data source —
+        feeds the sanity agent's user prompt so each decision sees its
+        own track record.
+
+        Returns a dict like::
+
+            {
+              "C|sideways": {
+                "n": 4, "wins": 0, "losses": 3, "scratches": 1,
+                "net_pnl_usd": -163.61, "avg_pnl_usd": -40.90,
+                "sample_trades": ["BNB/USDT:USDT", "NEAR/USDT:USDT", ...]
+              },
+              "F|sideways": {"n": 2, "wins": 0, "losses": 0, ...},
+              ...
+            }
+
+        Join logic: agent decisions matched to trades by symbol +
+        abs(created_at - entry_time) < 120s (same heuristic as
+        scripts/agent_review.py — until we land the FK trade_id
+        backfill as a follow-up).
+
+        Empty dict when no data or on error — caller should render
+        "no data" in the prompt rather than crashing.
+        """
+        from collections import defaultdict
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        try:
+            dres = await asyncio.to_thread(
+                _exec,
+                self.db.table("mm_agent_decisions")
+                .select("*")
+                .eq("instance_id", self.instance_id)
+                .gte("created_at", cutoff.isoformat())
+                .eq("decision", "APPROVE"),
+            )
+            decisions = dres.data or []
+            tres = await asyncio.to_thread(
+                _exec,
+                self.db.table("trades")
+                .select("id,symbol,entry_time,pnl_usd,status,exit_reason")
+                .eq("instance_id", self.instance_id)
+                .eq("strategy", "mm_method")
+                .gte("entry_time", cutoff.isoformat()),
+            )
+            trades = tres.data or []
+        except Exception as e:
+            logger.debug("get_mm_agent_outcome_stats_failed", error=str(e))
+            return {}
+
+        by_symbol: dict[str, list[dict]] = defaultdict(list)
+        for t in trades:
+            by_symbol[t.get("symbol") or ""].append(t)
+
+        def _parse(ts):
+            if ts is None:
+                return None
+            if isinstance(ts, datetime):
+                return ts
+            try:
+                return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            except Exception:
+                return None
+
+        stats: dict[str, dict] = defaultdict(lambda: {
+            "n": 0, "wins": 0, "losses": 0, "scratches": 0,
+            "opens": 0, "net_pnl_usd": 0.0, "sample_trades": [],
+        })
+
+        for d in decisions:
+            ctx = d.get("input_context") or {}
+            if isinstance(ctx, str):
+                try:
+                    import json as _json
+                    ctx = _json.loads(ctx)
+                except Exception:
+                    ctx = {}
+            grade = str(ctx.get("grade") or "?").upper()
+            htf = str(d.get("htf_trend_4h") or ctx.get("htf_trend_4h") or "?").lower()
+            key = f"{grade}|{htf}"
+
+            ct = _parse(d.get("created_at"))
+            if ct is None:
+                continue
+            sym = d.get("symbol") or ""
+            matched = None
+            for t in by_symbol.get(sym, []):
+                et = _parse(t.get("entry_time"))
+                if et is None:
+                    continue
+                if abs((ct - et).total_seconds()) <= 120:
+                    matched = t
+                    break
+            if matched is None:
+                # Approved but didn't enter (rare — sizing failure post-approve).
+                stats[key]["n"] += 1
+                continue
+
+            stats[key]["n"] += 1
+            status = matched.get("status")
+            pnl_raw = matched.get("pnl_usd")
+            try:
+                pnl = float(pnl_raw) if pnl_raw is not None else None
+            except (TypeError, ValueError):
+                pnl = None
+
+            if status == "open" or pnl is None:
+                stats[key]["opens"] += 1
+                continue
+
+            stats[key]["net_pnl_usd"] += pnl
+            if pnl > 5:
+                stats[key]["wins"] += 1
+            elif pnl < -5:
+                stats[key]["losses"] += 1
+            else:
+                stats[key]["scratches"] += 1
+            if len(stats[key]["sample_trades"]) < 5:
+                stats[key]["sample_trades"].append(sym)
+
+        out: dict[str, dict] = {}
+        for key, v in stats.items():
+            n_closed = v["wins"] + v["losses"] + v["scratches"]
+            avg = (v["net_pnl_usd"] / n_closed) if n_closed else 0.0
+            out[key] = {
+                "n": v["n"],
+                "wins": v["wins"],
+                "losses": v["losses"],
+                "scratches": v["scratches"],
+                "opens": v["opens"],
+                "net_pnl_usd": round(v["net_pnl_usd"], 2),
+                "avg_pnl_usd": round(avg, 2),
+                "sample_trades": v["sample_trades"],
+            }
+        return out

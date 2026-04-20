@@ -17,6 +17,75 @@ Paired docs:
 
 ---
 
+## 2026-04-21 — Day 4: Agent learning loop (Tier 1 + Tier 2)
+
+### `<pending>` — feat(mm-agent): outcome-aware rubric + review CLI
+
+Motivation: user observed "the agent keeps approving setups that end up
+scratching or losing." Post-hoc analysis of 48h (7 APPROVE, 9 VETO,
+1 ERROR) confirmed the pattern — all 7 APPROVEs were on HTF=sideways
+Grade C/F setups; 4 of them closed at a net loss, 0 clear winners. The
+agent reasoned correctly per the existing rubric, but its rubric had
+no feedback from its own track record.
+
+**Tier 1 — scripts/agent_review.py (visibility):**
+
+- One-command forensic report on the last N days of agent activity
+- Breakdown by decision × grade × HTF × formation variant
+- VETO-reason frequency (most common concerns)
+- APPROVED-trade outcomes (win/scratch/loss) + realized P&L
+- Profile-level P&L (grade × HTF) — surfaces "which profiles are net-negative"
+- `--json` flag for machine-readable output (future: feed weekly cron)
+
+First run revealed the actionable signal: **C|sideways profile is
+-$163.61 across 4 trades, 0 wins**. That's the precise anti-edge the
+agent wasn't aware of.
+
+**Tier 2 — outcome-aware prompting (self-improvement):**
+
+- New repo helper `get_mm_agent_outcome_stats(days=14)` — aggregates
+  APPROVE-decision outcomes grouped by (grade, htf_4h) profile. Match
+  logic: decision created_at within ±120s of trade entry_time.
+- User prompt now includes a `RECENT PROFILE OUTCOMES` block showing
+  each profile's n / wins / losses / scratches / net-pnl, with the
+  current setup's profile marked "← THIS PROFILE". Kept in the per-call
+  user prompt (NOT the cached system prompt) so each decision sees
+  fresh data without invalidating the 1h cache.
+- System prompt rubric gets a new point 8 — "Your own track record":
+  > If the current setup's profile has n≥5 with net_pnl_usd<0 and
+  > losses≥wins, strongly prefer VETO unless confidence≥0.85 AND you
+  > can cite a concrete factor THIS setup has that the losing trades
+  > lacked. n≥3 with clearly negative net → prefer VETO unless
+  > confidence≥0.80+clear differentiator. Positive or no samples → no
+  > penalty. When vetoing on this rubric, put `recent_losses` in
+  > concerns + cite the specific profile stats in reason.
+- `PROMPT_VERSION` bumped 1→2 to prevent silent cache reuse of the
+  old rubric on the new user prompt shape.
+- New config `mm_sanity_agent_outcome_lookback_days = 14` — set to 0
+  to disable the learning loop (reverts to pre-Tier-2 behaviour).
+
+This is the cheapest form of "learning" — no retraining, no new model,
+no vector store. Just feed the agent its own win/loss history as part
+of every decision it makes. When patterns are systematically losing,
+the agent can VETO them. When patterns haven't been sampled, no
+penalty.
+
+Tests: 4 new — first-pass placeholder rendering, stats block with
+THIS PROFILE marker, version-bump guard, system-prompt rubric-8
+presence check. Full suite 693 passing (was 689), 1 skipped.
+
+Scheduled-task integration (Tier 3 of the original design doc's §11):
+not yet. The next natural step is a daily cron running
+scripts/agent_review.py and posting the output somewhere visible.
+
+Refs:
+  - scripts/agent_review.py (new)
+  - src/data/repository.py::get_mm_agent_outcome_stats
+  - src/strategy/mm_sanity_agent.py::SYSTEM_PROMPT (rubric 8)
+  - src/strategy/mm_sanity_agent.py::_build_user_prompt (outcome block)
+
+---
+
 ## 2026-04-20 — Day 3: Course-faithful rewrites
 
 ### `<pending>` — fix(mm): target-timeframe hierarchy (A + B + C)

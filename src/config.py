@@ -106,6 +106,12 @@ class Settings(BaseSettings):
     mm_sanity_agent_timeout_s: float = 20.0
     mm_sanity_agent_min_confidence: float = 0.0  # 0 = honour every VETO (no shadow)
     mm_sanity_agent_monthly_budget_usd: float = 600.0
+    # Tier 2 learning-loop lookback: how many days of past APPROVE
+    # outcomes are aggregated and shown to the agent as "your own
+    # track record" per Rubric 8. 14 balances signal (enough samples)
+    # and recency (regime changes). 0 disables the learning loop
+    # (reverts to pre-Tier-2 behaviour).
+    mm_sanity_agent_outcome_lookback_days: int = 14
 
     # Scanning defaults
     min_volume_usd: float = 5_000_000
