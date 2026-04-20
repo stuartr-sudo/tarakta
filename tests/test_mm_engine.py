@@ -1410,3 +1410,107 @@ class TestSignalDensity:
         # Engine would apply: max(MIN_RR_COURSE_FLOOR, self.min_rr - 0.1)
         effective_rr = max(MIN_RR_COURSE_FLOOR, engine.min_rr - 0.1)
         assert effective_rr >= MIN_RR_COURSE_FLOOR
+
+
+# ---------------------------------------------------------------------------
+# Aggregate-risk budget (mm_max_aggregate_risk_pct)
+# Course citation: lesson 16 — "1% risk per trade". Expressed at portfolio
+# level so the bot can run more than 3 concurrent positions without
+# blowing the drawdown budget.
+# ---------------------------------------------------------------------------
+
+class TestAggregateOpenRiskUsd:
+    def test_empty_positions_returns_zero(self, engine: MMEngine):
+        engine.positions = {}
+        assert engine._aggregate_open_risk_usd() == 0.0
+
+    def test_single_long_at_risk(self, engine: MMEngine):
+        # $1000 notional @ entry 100, SL 99 → risk per unit 1.0, qty 10 → $10 risk
+        engine.positions = {
+            "BTC/USDT": MMPosition(
+                trade_id="t1", symbol="BTC/USDT", direction="long",
+                entry_price=100.0, stop_loss=99.0, quantity=10.0,
+            ),
+        }
+        assert engine._aggregate_open_risk_usd() == 10.0
+
+    def test_single_short_at_risk(self, engine: MMEngine):
+        # Short at 100, SL 101 (above entry) → risk 1.0 per unit, qty 5 → $5
+        engine.positions = {
+            "ETH/USDT": MMPosition(
+                trade_id="t2", symbol="ETH/USDT", direction="short",
+                entry_price=100.0, stop_loss=101.0, quantity=5.0,
+            ),
+        }
+        assert engine._aggregate_open_risk_usd() == 5.0
+
+    def test_breakeven_long_has_zero_risk(self, engine: MMEngine):
+        # SL moved to entry — no open risk regardless of quantity
+        engine.positions = {
+            "BTC/USDT": MMPosition(
+                trade_id="t3", symbol="BTC/USDT", direction="long",
+                entry_price=100.0, stop_loss=100.0, quantity=10.0,
+            ),
+        }
+        assert engine._aggregate_open_risk_usd() == 0.0
+
+    def test_locked_in_profit_long_has_zero_risk(self, engine: MMEngine):
+        # SL tightened above entry — locked-in profit, no open risk
+        engine.positions = {
+            "BTC/USDT": MMPosition(
+                trade_id="t4", symbol="BTC/USDT", direction="long",
+                entry_price=100.0, stop_loss=102.0, quantity=10.0,
+            ),
+        }
+        assert engine._aggregate_open_risk_usd() == 0.0
+
+    def test_locked_in_profit_short_has_zero_risk(self, engine: MMEngine):
+        engine.positions = {
+            "ETH/USDT": MMPosition(
+                trade_id="t5", symbol="ETH/USDT", direction="short",
+                entry_price=100.0, stop_loss=95.0, quantity=5.0,
+            ),
+        }
+        assert engine._aggregate_open_risk_usd() == 0.0
+
+    def test_multiple_positions_sum(self, engine: MMEngine):
+        engine.positions = {
+            "BTC/USDT": MMPosition(
+                trade_id="t6", symbol="BTC/USDT", direction="long",
+                entry_price=100.0, stop_loss=99.0, quantity=10.0,  # $10 risk
+            ),
+            "ETH/USDT": MMPosition(
+                trade_id="t7", symbol="ETH/USDT", direction="short",
+                entry_price=50.0, stop_loss=52.0, quantity=8.0,  # $16 risk
+            ),
+            "BE_POS": MMPosition(  # at breakeven — contributes 0
+                trade_id="t8", symbol="BNB/USDT", direction="long",
+                entry_price=200.0, stop_loss=200.0, quantity=5.0,
+            ),
+        }
+        # $10 + $16 + $0 = $26
+        assert engine._aggregate_open_risk_usd() == 26.0
+
+    def test_skips_zero_qty_position(self, engine: MMEngine):
+        engine.positions = {
+            "X": MMPosition(
+                trade_id="t9", symbol="X/USDT", direction="long",
+                entry_price=100.0, stop_loss=99.0, quantity=0.0,
+            ),
+        }
+        assert engine._aggregate_open_risk_usd() == 0.0
+
+    def test_max_aggregate_risk_pct_default_from_constant(self, engine: MMEngine):
+        """The engine picks up MAX_AGGREGATE_RISK_PCT when config doesn't override."""
+        from src.strategy.mm_engine import MAX_AGGREGATE_RISK_PCT
+        # engine fixture passes config=None; getattr default path
+        assert engine.max_aggregate_risk_pct == MAX_AGGREGATE_RISK_PCT
+
+    def test_max_positions_raised_default(self, engine: MMEngine):
+        """Default concurrent-position ceiling is now 20 (was 3/6).
+
+        It's a sanity backstop — real limit is aggregate-risk budget.
+        """
+        from src.strategy.mm_engine import MAX_MM_POSITIONS
+        assert MAX_MM_POSITIONS == 20
+        assert engine.max_positions == 20

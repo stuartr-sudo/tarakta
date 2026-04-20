@@ -77,8 +77,17 @@ MIN_RR_AGGRESSIVE = 1.4    # was 1.0 — 1.0 is below the course floor
 # Minimum formation quality to act on
 MIN_FORMATION_QUALITY = 0.4
 
-# Maximum concurrent MM positions (6 for bots — 3 was for human traders)
-MAX_MM_POSITIONS = 6
+# Hard-ceiling sanity backstop for concurrent MM positions. The actual
+# limit is the aggregate-risk budget (MAX_AGGREGATE_RISK_PCT below). 20
+# is ~the majors universe size, so this never fires unless something
+# else is broken. Raised 3→6→20 on 2026-04-20.
+MAX_MM_POSITIONS = 20
+
+# Aggregate open risk cap across ALL concurrent positions, as % of
+# account balance. Course rule is 1% per trade; this expresses the same
+# principle at portfolio level. If proposed trade would push aggregate
+# risk over this cap, the trade is rejected (reason=aggregate_risk).
+MAX_AGGREGATE_RISK_PCT = 5.0
 
 # Maximum margin utilization — don't open new positions if margin > 60% of balance
 MAX_MARGIN_UTILIZATION = 0.60
@@ -275,6 +284,11 @@ class MMEngine:
         self.config = config
         self.scan_interval = scan_interval_minutes * 60  # Convert to seconds
         self.max_positions = getattr(config, "mm_max_positions", MAX_MM_POSITIONS)
+        # Aggregate-risk budget (portfolio-level expression of the
+        # course's 1%-per-trade rule). See MAX_AGGREGATE_RISK_PCT.
+        self.max_aggregate_risk_pct = float(
+            getattr(config, "mm_max_aggregate_risk_pct", MAX_AGGREGATE_RISK_PCT)
+        )
 
         # Tunable parameters (overridable via settings page)
         self.risk_pct = RISK_PER_TRADE_PCT
@@ -1069,6 +1083,10 @@ class MMEngine:
                         self._scanning_active = bool(mm_settings["scanning_active"])
                     if "mm_max_positions" in mm_settings:
                         self.max_positions = int(mm_settings["mm_max_positions"])
+                    if "mm_max_aggregate_risk_pct" in mm_settings:
+                        self.max_aggregate_risk_pct = float(
+                            mm_settings["mm_max_aggregate_risk_pct"]
+                        )
                     if "mm_scan_interval" in mm_settings:
                         self.scan_interval = float(mm_settings["mm_scan_interval"]) * 60
                     if "mm_cooldown_hours" in mm_settings:
@@ -2971,6 +2989,33 @@ class MMEngine:
             except Exception as e:
                 logger.warning("mm_entry_failed", symbol=signal.symbol, error=str(e))
 
+    def _aggregate_open_risk_usd(self) -> float:
+        """Sum of dollar risk (entry→current SL) across all open positions.
+
+        Uses each position's *current* SL, not the original — so trades
+        that have had SL tightened to breakeven/better contribute zero
+        (or even negative, clamped to 0) to aggregate risk. That is the
+        correct live number: a locked-in-profit position doesn't consume
+        new-trade risk budget.
+        """
+        total = 0.0
+        for pos in self.positions.values():
+            if pos.entry_price <= 0 or pos.quantity <= 0:
+                continue
+            # Risk = |entry - current SL| * remaining qty, but only if
+            # SL is still in the loss direction. Past breakeven (long
+            # with SL > entry, or short with SL < entry) risk is 0.
+            if pos.direction == "long":
+                if pos.stop_loss >= pos.entry_price:
+                    continue  # SL is at/above entry → no open risk
+                risk = (pos.entry_price - pos.stop_loss) * pos.quantity
+            else:  # short
+                if pos.stop_loss <= pos.entry_price:
+                    continue  # SL is at/below entry → no open risk
+                risk = (pos.stop_loss - pos.entry_price) * pos.quantity
+            total += max(0.0, risk)
+        return round(total, 2)
+
     async def _enter_trade(self, signal: MMSignal) -> None:
         """Execute an MM Method trade entry."""
         # Get balance for position sizing — course E1 (lesson 54): 1% of TOTAL
@@ -2993,6 +3038,30 @@ class MMEngine:
         if not pos_result.is_viable or pos_result.position_size_usd < 10:
             logger.info("mm_position_too_small", symbol=signal.symbol, size=pos_result.position_size_usd, viable=pos_result.is_viable, balance=account_balance)
             return
+
+        # Aggregate-risk budget gate (course 1%/trade expressed at
+        # portfolio level — see MAX_AGGREGATE_RISK_PCT). This replaces
+        # the old mm_max_positions=3 hard cap, which was a human-
+        # attention limit, with a risk-budget cap that scales with SL
+        # tightness and a bot's ability to track many positions.
+        cap_pct = self.max_aggregate_risk_pct
+        if cap_pct > 0:
+            current_risk = self._aggregate_open_risk_usd()
+            proposed_risk = float(pos_result.risk_amount_usd or 0.0)
+            projected_risk = current_risk + proposed_risk
+            cap_usd = account_balance * (cap_pct / 100.0)
+            if projected_risk > cap_usd:
+                logger.info(
+                    "mm_reject_aggregate_risk",
+                    symbol=signal.symbol,
+                    current_risk_usd=round(current_risk, 2),
+                    proposed_risk_usd=round(proposed_risk, 2),
+                    projected_risk_usd=round(projected_risk, 2),
+                    cap_usd=round(cap_usd, 2),
+                    cap_pct=cap_pct,
+                    open_positions=len(self.positions),
+                )
+                return
 
         # Calculate quantity
         quantity = pos_result.position_size_usd / signal.entry_price

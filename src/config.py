@@ -55,7 +55,19 @@ class Settings(BaseSettings):
     # MM Method Engine
     mm_method_enabled: bool = True
     mm_scan_interval_minutes: float = 5.0
-    mm_max_positions: int = 3
+    # Hard-ceiling sanity backstop, NOT the real limit — the actual
+    # constraint is mm_max_aggregate_risk_pct (aggregate-risk budget).
+    # Raised 3 → 20 on 2026-04-20 (~size of majors universe) because the
+    # old 3-cap was a human-attention limit from the course, not a
+    # bot-appropriate one.
+    mm_max_positions: int = 20
+    # Aggregate open risk cap across ALL concurrent positions, as % of
+    # account balance. Course rule is "1% per trade"; this expresses the
+    # same principle at portfolio level. Default 5.0 allows ~5 open
+    # trades at 1% risk each (or more if SLs are tight and notional-cap
+    # shrinks per-trade risk below 1%). The engine refuses to open a
+    # new trade when aggregate_open_risk + proposed_trade_risk > cap.
+    mm_max_aggregate_risk_pct: float = 5.0
     mm_risk_per_trade_pct: float = 1.0
     mm_initial_balance: float = 10000.0
     # Pair selection — course says MM Method is a majors strategy. Separate
