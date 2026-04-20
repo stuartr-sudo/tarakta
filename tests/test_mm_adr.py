@@ -172,19 +172,18 @@ class TestAtFiftyPct:
         assert state.at_fifty_pct is True
 
     def test_at_line_within_tolerance(self):
-        """Price 0.2% away from 50% line → at_fifty_pct=True (tolerance=0.3%)."""
+        """Price 0.5% away from 50% line → at_fifty_pct=True (tolerance=1.0%)."""
         fifty_pct = 50000.0
-        # 0.2% above line
-        current_price = fifty_pct * (1 + 0.002)
+        # 0.5% above line
+        current_price = fifty_pct * (1 + 0.005)
         state = self._make_state_with_line(fifty_pct, current_price=current_price)
         assert state is not None
         assert state.at_fifty_pct is True
 
     def test_outside_tolerance(self):
-        """Price 0.5% away from 50% line → at_fifty_pct=False."""
+        """Price 1.5% away from 50% line → at_fifty_pct=False (tolerance=1.0%)."""
         fifty_pct = 50000.0
-        # 0.5% above line (> 0.3% tolerance)
-        current_price = fifty_pct * (1 + 0.005)
+        current_price = fifty_pct * (1 + 0.015)
         state = self._make_state_with_line(fifty_pct, current_price=current_price)
         assert state is not None
         assert state.at_fifty_pct is False
@@ -192,20 +191,21 @@ class TestAtFiftyPct:
     def test_tolerance_boundary(self):
         """Price far enough outside 50% line to be strictly False.
 
-        The tolerance is 0.3% of current_price. We use 0.4% to be clearly
-        outside — avoids floating-point ambiguity at the exact boundary.
+        The tolerance is 1.0% of current_price (widened from 0.3% on
+        2026-04-20 after replay diagnostic showed the old band was
+        too tight — 0% hit rate over 14 days). We use 1.2% to be
+        clearly outside.
         """
         fifty_pct = 50000.0
-        # 0.4% above line: abs(50200 - 50000) / 50200 ≈ 0.398% > 0.3%
-        current_price = fifty_pct * (1 + 0.004)
+        current_price = fifty_pct * (1 + 0.012)
         state = self._make_state_with_line(fifty_pct, current_price=current_price)
         assert state is not None
         assert state.at_fifty_pct is False
 
     def test_below_line_within_tolerance(self):
-        """Price 0.2% below 50% line → at_fifty_pct=True."""
+        """Price 0.5% below 50% line → at_fifty_pct=True."""
         fifty_pct = 50000.0
-        current_price = fifty_pct * (1 - 0.002)
+        current_price = fifty_pct * (1 - 0.005)
         state = self._make_state_with_line(fifty_pct, current_price=current_price)
         assert state is not None
         assert state.at_fifty_pct is True

@@ -265,6 +265,222 @@ class BarResult:
     stage: str                 # deepest stage reached
     signal: dict | None = None # non-None if signal produced
     rejects: dict[str, int] = field(default_factory=dict)
+    pnl: "PnlResult | None" = None  # populated by P&L simulation (--pnl)
+
+
+@dataclass
+class PnlResult:
+    """Simulated outcome of one would-have-been signal.
+
+    Walks 1H candles forward from the signal bar, checking TP1/TP2/TP3
+    and SL. Tracks partial closes (30/40/30 split) and SL progression
+    (move to breakeven after TP1 per course Lesson 47/48).
+
+    Simplifications — documented here so the P&L number is honest:
+    - Fees: flat 0.08% round-trip (4bps per side). Slippage: ignored.
+    - Same-bar SL vs TP tie: SL wins (pessimistic — MM course emphasises
+      "if stopped, you're stopped"). Real intra-bar ordering is
+      unknowable from candle data.
+    - SVC invalidation, refund zone cuts, 200-EMA partial, 2-hour
+      scratch rule: NOT simulated. Only the SL/TP ladder and timeout.
+    - Max hold: 7 days — if no tier/SL triggers, close at current bar.
+    - Sanity agent: not consulted (it's deterministic-only replay).
+      Real live P&L may differ (agent could have VETO'd marginal setups).
+    """
+    entry_ts: datetime
+    exit_ts: datetime | None = None
+    entry_price: float = 0.0
+    exit_price: float = 0.0         # weighted-avg exit across all fills
+    direction: str = ""             # "long" | "short"
+    sl_initial: float = 0.0
+    sl_final: float = 0.0
+    tp1: float = 0.0
+    tp2: float = 0.0
+    tp3: float = 0.0
+    # Outcomes
+    tp1_hit: bool = False
+    tp2_hit: bool = False
+    tp3_hit: bool = False
+    sl_hit: bool = False
+    timed_out: bool = False
+    exit_reason: str = ""           # "tp3", "tp2_sl_be", "sl", "timeout"
+    # Money
+    risk_usd: float = 0.0           # initial $ at risk (1% of balance)
+    realized_pnl_usd: float = 0.0   # net after fees
+    r_multiple: float = 0.0         # realized_pnl / initial_risk
+    hours_held: float = 0.0
+
+
+def simulate_signal(
+    *,
+    signal_ts: datetime,
+    direction: str,
+    entry_price: float,
+    sl: float,
+    tp1: float,
+    tp2: float,
+    tp3: float,
+    forward_candles: pd.DataFrame,
+    balance_usd: float = 100_000.0,
+    risk_pct: float = 0.01,
+    max_hold_hours: int = 24 * 7,
+    fee_per_side: float = 0.0004,
+    partial_split: tuple[float, float, float] = (0.30, 0.40, 0.30),
+) -> PnlResult:
+    """Walk forward from the signal bar and return the simulated outcome.
+
+    `forward_candles` must be the 1H candles with index strictly after
+    `signal_ts`. Caller is responsible for slicing appropriately.
+    """
+    is_long = direction == "long"
+    # Convert to floats and sanity-check
+    entry = float(entry_price)
+    sl_initial = float(sl)
+    sl_current = sl_initial
+    tp1_f, tp2_f, tp3_f = float(tp1), float(tp2), float(tp3)
+
+    # Initial risk: $ at stake on whole position if SL hits immediately.
+    # Use the intended 1% of balance — in production the position is sized
+    # so this is the actual loss. In simulation we scale quantity to match.
+    risk_usd = balance_usd * risk_pct
+    sl_distance = abs(entry - sl_initial)
+    if sl_distance <= 0 or entry <= 0:
+        return PnlResult(
+            entry_ts=signal_ts, entry_price=entry, direction=direction,
+            sl_initial=sl_initial, sl_final=sl_initial,
+            tp1=tp1_f, tp2=tp2_f, tp3=tp3_f,
+            exit_reason="invalid_risk",
+        )
+    quantity_notional = risk_usd / (sl_distance / entry)
+    quantity = quantity_notional / entry
+    remaining = 1.0  # fraction of original quantity
+
+    p1, p2, p3 = partial_split
+    p1_qty = quantity * p1
+    p2_qty = quantity * p2
+    p3_qty = quantity * p3
+
+    # Running totals
+    realized_cashflow = 0.0   # signed: positive = profit, negative = loss
+    fees_paid = 0.0
+    exit_reason = ""
+    exit_ts: datetime | None = None
+    exit_price = 0.0
+
+    # Entry fee
+    fees_paid += entry * quantity * fee_per_side
+
+    result = PnlResult(
+        entry_ts=signal_ts, entry_price=entry, direction=direction,
+        sl_initial=sl_initial, sl_final=sl_initial,
+        tp1=tp1_f, tp2=tp2_f, tp3=tp3_f, risk_usd=risk_usd,
+    )
+
+    # Walk forward one 1H bar at a time
+    for ts, row in forward_candles.iterrows():
+        bar_high = float(row["high"])
+        bar_low = float(row["low"])
+        bar_close = float(row["close"])
+        # Hours since entry
+        try:
+            elapsed_h = (ts - signal_ts).total_seconds() / 3600
+        except Exception:
+            elapsed_h = 0
+
+        if elapsed_h > max_hold_hours:
+            # Timeout — close remainder at bar close
+            pnl_per_unit = (bar_close - entry) if is_long else (entry - bar_close)
+            units_remaining = quantity * remaining
+            realized_cashflow += pnl_per_unit * units_remaining
+            fees_paid += bar_close * units_remaining * fee_per_side
+            remaining = 0.0
+            exit_reason = "timeout"
+            exit_ts = ts
+            exit_price = bar_close
+            break
+
+        # Check SL (pessimistic: SL wins same-bar conflict)
+        if is_long:
+            sl_touched = bar_low <= sl_current
+        else:
+            sl_touched = bar_high >= sl_current
+        if sl_touched:
+            fill = sl_current  # assume filled at SL price
+            pnl_per_unit = (fill - entry) if is_long else (entry - fill)
+            units_remaining = quantity * remaining
+            realized_cashflow += pnl_per_unit * units_remaining
+            fees_paid += fill * units_remaining * fee_per_side
+            result.sl_hit = True
+            remaining = 0.0
+            exit_reason = "sl"
+            exit_ts = ts
+            exit_price = fill
+            break
+
+        # Check TPs in order (1 → 2 → 3). Each fires at most once.
+        # After TP1, move SL to breakeven (entry + fee buffer).
+        if not result.tp1_hit:
+            hit = (bar_high >= tp1_f) if is_long else (bar_low <= tp1_f)
+            if hit:
+                pnl_per_unit = (tp1_f - entry) if is_long else (entry - tp1_f)
+                realized_cashflow += pnl_per_unit * p1_qty
+                fees_paid += tp1_f * p1_qty * fee_per_side
+                remaining -= p1
+                result.tp1_hit = True
+                # Move SL to breakeven + fee buffer
+                if is_long:
+                    sl_current = entry * (1 + 2 * fee_per_side)
+                else:
+                    sl_current = entry * (1 - 2 * fee_per_side)
+                result.sl_final = sl_current
+
+        if result.tp1_hit and not result.tp2_hit:
+            hit = (bar_high >= tp2_f) if is_long else (bar_low <= tp2_f)
+            if hit:
+                pnl_per_unit = (tp2_f - entry) if is_long else (entry - tp2_f)
+                realized_cashflow += pnl_per_unit * p2_qty
+                fees_paid += tp2_f * p2_qty * fee_per_side
+                remaining -= p2
+                result.tp2_hit = True
+
+        if result.tp2_hit and not result.tp3_hit:
+            hit = (bar_high >= tp3_f) if is_long else (bar_low <= tp3_f)
+            if hit:
+                pnl_per_unit = (tp3_f - entry) if is_long else (entry - tp3_f)
+                realized_cashflow += pnl_per_unit * p3_qty
+                fees_paid += tp3_f * p3_qty * fee_per_side
+                remaining = 0.0
+                result.tp3_hit = True
+                exit_reason = "tp3"
+                exit_ts = ts
+                exit_price = tp3_f
+                break
+
+    # If we exited the loop without closing (iterator ran out), close
+    # remainder at the last close. This happens when the window ends
+    # before SL/TP3/timeout triggers.
+    if remaining > 0 and not exit_reason:
+        if not forward_candles.empty:
+            final_close = float(forward_candles.iloc[-1]["close"])
+            final_ts = forward_candles.index[-1]
+            pnl_per_unit = (final_close - entry) if is_long else (entry - final_close)
+            units_remaining = quantity * remaining
+            realized_cashflow += pnl_per_unit * units_remaining
+            fees_paid += final_close * units_remaining * fee_per_side
+            remaining = 0.0
+            exit_reason = "window_end"
+            exit_ts = final_ts
+            exit_price = final_close
+
+    result.realized_pnl_usd = round(realized_cashflow - fees_paid, 2)
+    result.r_multiple = round(result.realized_pnl_usd / risk_usd, 2) if risk_usd > 0 else 0.0
+    result.exit_reason = exit_reason or "incomplete"
+    result.exit_ts = exit_ts
+    result.exit_price = exit_price
+    if exit_ts:
+        result.hours_held = round((exit_ts - signal_ts).total_seconds() / 3600, 1)
+    result.timed_out = exit_reason == "timeout"
+    return result
 
 
 def _snapshot_stage_counts(engine: MMEngine) -> dict[str, int]:
@@ -312,6 +528,7 @@ async def replay_single_symbol(
     days: int,
     hours_step: int,
     engine_overrides: dict,
+    pnl_enabled: bool = False,
 ) -> SymbolResult:
     """Replay one symbol over the window. Returns aggregated results."""
     end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
@@ -378,6 +595,20 @@ async def replay_single_symbol(
         stages = dict(engine._scan_stage_counts)
         rejects = dict(engine._scan_reject_counts)
         if signal:
+            pnl_res: PnlResult | None = None
+            if pnl_enabled:
+                # Slice forward candles (strictly after signal ts)
+                forward = history["1h"][history["1h"].index > as_of]
+                pnl_res = simulate_signal(
+                    signal_ts=as_of,
+                    direction=signal.direction,
+                    entry_price=signal.entry_price,
+                    sl=signal.stop_loss,
+                    tp1=signal.target_l1,
+                    tp2=signal.target_l2,
+                    tp3=signal.target_l3,
+                    forward_candles=forward,
+                )
             result.bars.append(BarResult(
                 ts=as_of, stage="signal_built",
                 signal={
@@ -394,6 +625,7 @@ async def replay_single_symbol(
                     "entry_type": signal.entry_type,
                     "reason": signal.reason,
                 },
+                pnl=pnl_res,
             ))
         else:
             stage = _deepest_stage(stages, {})
@@ -412,6 +644,7 @@ async def replay(
     show_rejects: bool,
     factor_rates: bool,
     engine_overrides: dict,
+    pnl_enabled: bool = False,
 ) -> int:
     end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     start = end - timedelta(days=days)
@@ -420,14 +653,16 @@ async def replay(
     print(f"Symbols: {', '.join(symbols)}   step: {hours_step}h")
     if engine_overrides:
         print(f"Overrides: {engine_overrides}")
+    if pnl_enabled:
+        print("P&L simulation: ON (SL/TP/timeout, 30/40/30 partials, breakeven after TP1)")
 
     symbol_results: list[SymbolResult] = []
     for sym in symbols:
-        r = await replay_single_symbol(sym, days, hours_step, engine_overrides)
+        r = await replay_single_symbol(
+            sym, days, hours_step, engine_overrides, pnl_enabled=pnl_enabled,
+        )
         symbol_results.append(r)
 
-    # Use the first symbol's results to drive the per-symbol summary,
-    # then render a cross-symbol summary if multiple symbols.
     for sr in symbol_results:
         _render_symbol_summary(sr, days, show_rejects, factor_rates)
 
@@ -523,6 +758,56 @@ def _render_symbol_summary(
                 f"{sig['variant']:<18} {sig['entry_type']}"
             )
             print(f"    entry={sig['entry']}  sl={sig['sl']}  tp1={sig['tp1']}")
+            if r.pnl is not None:
+                p = r.pnl
+                tiers = ""
+                if p.tp3_hit:
+                    tiers = "TP1+TP2+TP3"
+                elif p.tp2_hit:
+                    tiers = "TP1+TP2"
+                elif p.tp1_hit:
+                    tiers = "TP1"
+                else:
+                    tiers = "—"
+                print(
+                    f"    → {p.exit_reason:<10} tiers={tiers:<12} "
+                    f"r={p.r_multiple:+.2f} pnl=${p.realized_pnl_usd:+,.2f} "
+                    f"held={p.hours_held}h"
+                )
+
+    # --- P&L aggregate ---
+    pnls = [r.pnl for r in signals if r.pnl is not None]
+    if pnls:
+        wins = [p for p in pnls if p.realized_pnl_usd > 0]
+        losses = [p for p in pnls if p.realized_pnl_usd < 0]
+        scratches = [p for p in pnls if p.realized_pnl_usd == 0]
+        total_pnl = sum(p.realized_pnl_usd for p in pnls)
+        total_r = sum(p.r_multiple for p in pnls)
+        win_rate = len(wins) / len(pnls) * 100
+        avg_r = total_r / len(pnls)
+        avg_win_r = (sum(p.r_multiple for p in wins) / len(wins)) if wins else 0.0
+        avg_loss_r = (sum(p.r_multiple for p in losses) / len(losses)) if losses else 0.0
+        tp3_count = sum(1 for p in pnls if p.tp3_hit)
+        tp2_count = sum(1 for p in pnls if p.tp2_hit and not p.tp3_hit)
+        tp1_count = sum(1 for p in pnls if p.tp1_hit and not p.tp2_hit)
+        sl_count = sum(1 for p in pnls if p.sl_hit and not p.tp1_hit)
+        sl_after_tp1 = sum(1 for p in pnls if p.sl_hit and p.tp1_hit)
+        timeout_count = sum(1 for p in pnls if p.timed_out)
+
+        print(f"\nP&L SIMULATION ({len(pnls)} signals)")
+        print(f"  total realized pnl:  ${total_pnl:+,.2f}")
+        print(f"  total R-multiple:    {total_r:+.2f}R")
+        print(f"  avg R/trade:         {avg_r:+.2f}R")
+        print(f"  win rate:            {win_rate:.1f}% ({len(wins)}W / {len(losses)}L / {len(scratches)}S)")
+        print(f"  avg win:             {avg_win_r:+.2f}R")
+        print(f"  avg loss:            {avg_loss_r:+.2f}R")
+        print(f"  exit breakdown:")
+        print(f"    TP3 full win:      {tp3_count}")
+        print(f"    TP2 partial win:   {tp2_count}")
+        print(f"    TP1-only win:      {tp1_count}")
+        print(f"    SL after TP1 (BE): {sl_after_tp1}")
+        print(f"    SL full loss:      {sl_count}")
+        print(f"    timeout:           {timeout_count}")
 
     if show_rejects:
         print("\nBar-by-bar detail (non-trivial rejections only):")
@@ -595,6 +880,8 @@ def main() -> int:
                     help="Print bar-by-bar rejection detail")
     ap.add_argument("--factor-rates", action="store_true",
                     help="Print per-factor hit rates (diagnostic)")
+    ap.add_argument("--pnl", action="store_true",
+                    help="Forward-simulate each signal (SL/TP/timeout) + P&L aggregate")
     # Engine-level config overrides for A/B testing rule changes
     ap.add_argument("--min-confluence", type=float, default=None,
                     help="Override engine.min_confluence threshold (default 35.0)")
@@ -624,6 +911,7 @@ def main() -> int:
         show_rejects=args.show_rejects,
         factor_rates=args.factor_rates,
         engine_overrides=engine_overrides,
+        pnl_enabled=args.pnl,
     ))
 
 

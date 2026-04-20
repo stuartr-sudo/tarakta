@@ -33,7 +33,16 @@ logger = get_logger(__name__)
 DEFAULT_ADR_PERIOD: int = 14
 
 # Price is considered "at" the 50% line when within this percentage
-AT_FIFTY_PCT_TOLERANCE: float = 0.003  # 0.3%
+# Tolerance for "price at the 50% ADR line" proximity check.
+#
+# 2026-04-20: widened from 0.3% → 1.0% after replay diagnostic showed
+# 0% hit rate across 14 days × 3 majors. A 0.3% band on BNB at $620
+# is a $20 window — price passes through so briefly the factor almost
+# never fired. The course language is "price at or near the middle of
+# the day's range"; 1.0% is a truer "near". For reference, a typical
+# BTC ADR is ~3% so 1.0% tolerance means "within a third of the ADR
+# of the mid-line" — course-aligned.
+AT_FIFTY_PCT_TOLERANCE: float = 0.010  # 1.0%
 
 
 # ---------------------------------------------------------------------------
