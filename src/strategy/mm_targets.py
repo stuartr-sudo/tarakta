@@ -39,23 +39,36 @@ logger = get_logger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-# EMA periods used as targets per level (course lessons 12, 47, 48)
-# Level 1 → 50 EMA (primary, lesson 12 "Level 1 should break the 50 EMA")
-# Level 2 → 800 EMA (lesson 12: "Depending on where the 800 EMA is, that is
-#                    often the level 2 target") — **200 was wrong before 2026-04**
-# Level 3 → higher-TF 200/800 EMA (lesson 12: "a 200 or an 800 EMA on a higher
-#                                   time frame as a Target")
+# EMA periods used as targets per level (course lessons 12, 16, 47, 48).
+#
+# Lesson 16 [47:00] verbatim:
+#   "A Rise or a Drop at level 1 is to break the 50 EMA and head for the
+#    200. Then once it gets to the 200 EMA, one of two things happen. We
+#    either retrace and price heads back to the 50 EMA, or we go into a
+#    board meeting and the EMA catches up to the price."
+#
+# So the course-correct TARGET hierarchy is:
+#   Level 1 TARGET = 200 EMA ("head for the 200")
+#   Level 2 TARGET = 800 EMA (lesson 12)
+#   Level 3 TARGET = higher-TF 200/800 EMA (lesson 12)
+#
+# The 50 EMA is the LEVEL 1 *event* (breaking through it), NOT the
+# target. Prior to 2026-04-20 this dict had L1 → 50 EMA, which on a
+# long retest entry was almost always already below price (failing
+# _is_valid_target) — causing the engine to skip straight to unrecovered
+# vectors as the effective L1 target. That made TP1 far-structural
+# (multi-week) on trades written for intraday retests.
+#
+# Also killed the dead LEVEL_EMA_FALLBACKS dict that was defined but
+# never referenced. Course fallback from lesson 48 ("If the 200 isn't a
+# good target because it's too close, look for a previous unrecovered
+# Vector candle") is already implemented via the vector-scan path
+# below — so a bad/unavailable 200 EMA naturally falls through to
+# vectors, which is what the course teaches.
 LEVEL_EMA_TARGETS = {
-    1: 50,    # Level 1 targets the 50 EMA
-    2: 800,   # Level 2 targets the 800 EMA (corrected 2026-04 per course audit)
-    3: 800,   # Level 3 targets higher-TF EMA — best same-TF proxy is still 800
-}
-
-# Fallback EMAs at each level (used when primary not in direction)
-LEVEL_EMA_FALLBACKS = {
-    1: 200,   # Lesson 48: "If the 200 isn't a good target because it's too close, look for a previous unrecovered Vector candle"
-    2: 200,
-    3: 200,
+    1: 200,   # course Lesson 16 [47:00] — "head for the 200"
+    2: 800,   # course Lesson 12 — "800 EMA is often the L2 target"
+    3: 800,   # same-TF 800 fallback when higher-TF EMAs unavailable
 }
 
 # Minimum volume ratio to qualify as a "Vector" candle (PVSRA)

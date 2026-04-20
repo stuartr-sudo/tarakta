@@ -17,10 +17,7 @@ from src.strategy.mm_moon import (
     compute_moon_phase,
     moon_signal_aligns_with_direction,
 )
-from src.strategy.mm_targets import (
-    LEVEL_EMA_FALLBACKS,
-    LEVEL_EMA_TARGETS,
-)
+from src.strategy.mm_targets import LEVEL_EMA_TARGETS
 
 
 @pytest.fixture
@@ -34,18 +31,27 @@ def engine() -> MMEngine:
 
 
 def test_level2_target_is_800_ema_per_lesson_12():
-    """Course lesson 12: 'Depending on where the 800 EMA is, that is often
+    """Course Lesson 12: 'Depending on where the 800 EMA is, that is often
     the level 2 target'. Was wrongly set to 200 before 2026-04-15 audit."""
     assert LEVEL_EMA_TARGETS[2] == 800
 
 
-def test_level1_target_is_50_ema():
-    assert LEVEL_EMA_TARGETS[1] == 50
+def test_level1_target_is_200_ema_per_lesson_16():
+    """Course Lesson 16 [47:00]: 'A Rise or a Drop at level 1 is to break
+    the 50 EMA and head for the 200'. The 50 EMA is the Level-1 EVENT
+    (price breaks through it); the 200 EMA is the TARGET. Was wrongly
+    set to 50 until 2026-04-20 — which on long retest entries resulted
+    in the 50 EMA failing direction checks and L1 silently cascading to
+    unrecovered vectors (multi-week structural highs) instead of the
+    intended 200 EMA."""
+    assert LEVEL_EMA_TARGETS[1] == 200
 
 
-def test_level_ema_fallbacks_exist():
-    assert LEVEL_EMA_FALLBACKS[1] == 200
-    assert LEVEL_EMA_FALLBACKS[2] == 200
+def test_level3_target_is_800_ema_same_tf_fallback():
+    """L3 uses higher-TF 200/800 when htf_ema_values supplied; otherwise
+    falls back to same-TF 800. Deleted LEVEL_EMA_FALLBACKS dict that was
+    defined but never read (dead code)."""
+    assert LEVEL_EMA_TARGETS[3] == 800
 
 
 # ---------------------------------------------------------------------------

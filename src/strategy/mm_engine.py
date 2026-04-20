@@ -3372,60 +3372,54 @@ class MMEngine:
             except Exception as e:
                 logger.debug("mm_refund_zone_check_failed", symbol=symbol, error=str(e))
 
-        # B1: Scratch rule — if position has not reached L1 within a
-        # setup-appropriate time window, cut for a small scratch rather
-        # than letting it drift to SL.
-        # Course citation: "if you don't see movement within 2 hours, it's
-        # a scratch — take your loss and move on."
+        # B1: Scratch rule — course Lesson 13 [47:00] verbatim:
         #
-        # 2026-04-20 fix: the 2-hour window is course-written for tight-SL
-        # tactical entries (0.5-1.5% stops). BNB 2026-04-20 entered as a
-        # board_meeting variant with an 8% SL and TP1 at +15.5% — scratched
-        # at exactly 122 min for -$3 while the setup was still in its
-        # natural retracement phase. Wide-SL setups need more time to
-        # prove themselves, and board_meeting variants ARE the "sit
-        # sideways in the fib zone" phase by design.
+        #   "If you're not in substantial profit within two hours you
+        #    scratch the trade. It means the Market Maker has a different
+        #    plan. That's the rule. Market Maker only holds the
+        #    consolidation level to get more contracts."
         #
-        # Dynamic scratch window:
-        #   SL < 2%     → 2h  (tight tactical — course default)
-        #   SL 2-4%     → 3h
-        #   SL ≥ 4%     → 4h  (wide structural)
-        #   BOARD_MEETING_* phase → min 4h regardless of SL
+        # The course specifies TIME (2h flat) and SIGNAL (substantial
+        # profit), NOT level-tracker advancement. The prior implementation
+        # (current_level == 0) measured the wrong thing entirely: a trade
+        # could be in strong profit without advancing the internal level
+        # counter, or advance the level counter without being profitable.
         #
-        # Only applies pre-L1 (current_level == 0). Once L1 is hit the
-        # trade is running and the scratch rule no longer applies.
+        # "Substantial" is the one word the course leaves for interpretation.
+        # We read it conservatively: "any positive unrealized P&L after
+        # round-trip fees" — i.e. a trade that, if closed now, would pay
+        # for itself. If the trade is literally underwater at 2h, the MM
+        # has "a different plan" per the course and we scratch.
+        #
+        # The dynamic-by-SL and board-meeting-exemption logic from
+        # commit 2a04c2e has been removed — both were inventions not
+        # found in the course.
         now = datetime.now(timezone.utc)
-        if pos.current_level == 0:
-            sl_dist_pct = (
-                abs(pos.entry_price - pos.stop_loss) / pos.entry_price * 100
-                if pos.entry_price > 0 else 0.0
-            )
-            if sl_dist_pct < 2.0:
-                scratch_hours = 2.0
-            elif sl_dist_pct < 4.0:
-                scratch_hours = 3.0
+        elapsed = (now - pos.entry_time).total_seconds()
+        if elapsed >= 7200:  # 2 hours
+            # Unrealized P&L at current price (before fees)
+            if pos.direction == "long":
+                gross = (current_price - pos.entry_price) * pos.quantity
             else:
-                scratch_hours = 4.0
-            # Board meeting is the explicit "MM is consolidating" phase —
-            # always give at least 4h regardless of SL distance.
-            if pos.cycle_phase and "BOARD_MEETING" in pos.cycle_phase:
-                scratch_hours = max(scratch_hours, 4.0)
-
-            elapsed = (now - pos.entry_time).total_seconds()
-            if elapsed >= scratch_hours * 3600:
+                gross = (pos.entry_price - current_price) * pos.quantity
+            # Approximate round-trip fees (entry + exit at taker rate).
+            # If gross <= fees, the trade is not in "substantial profit"
+            # by the conservative reading.
+            round_trip_fees = (
+                pos.entry_price * pos.quantity * 0.0004 * 2
+            )
+            in_substantial_profit = gross > round_trip_fees
+            if not in_substantial_profit:
                 logger.info(
                     "mm_scratch_rule",
                     symbol=symbol,
                     entry_time=pos.entry_time.isoformat(),
                     elapsed_hours=round(elapsed / 3600, 2),
-                    scratch_hours_applied=scratch_hours,
-                    sl_distance_pct=round(sl_dist_pct, 2),
-                    cycle_phase=pos.cycle_phase,
+                    unrealized_gross_usd=round(gross, 2),
+                    round_trip_fees_usd=round(round_trip_fees, 2),
                     current_price=current_price,
+                    entry_price=pos.entry_price,
                 )
-                # Keep the historic reason string "scratch_2h" so existing
-                # analytics and reports continue to group these together.
-                # The actual window applied is in elapsed_hours_applied.
                 await self._close_position(pos, current_price, "scratch_2h")
                 return
 

@@ -180,99 +180,187 @@ def test_ema_fan_out_warning_not_logged_when_no_fan_out(engine: MMEngine):
 
 
 # ---------------------------------------------------------------------------
-# B1 — 2-hour scratch rule
+# B1 — 2-hour scratch rule (course Lesson 13 [47:00])
+#
+#   "If you're not in substantial profit within two hours you scratch the
+#    trade. It means the Market Maker has a different plan."
+#
+# Course defines:
+#   TIME   = 2 hours (flat)
+#   SIGNAL = "substantial profit"
+#
+# NOT level-tracker state, NOT dynamic-by-SL (both inventions removed
+# 2026-04-20). The conservative reading of "substantial profit" is
+# "unrealized gross > round-trip fees at current price" — a trade that
+# would actually pay for itself if closed now.
 # ---------------------------------------------------------------------------
 
 
-def _make_stale_position(symbol: str = "BTC/USDT", current_level: int = 0, hours_old: float = 3.0) -> MMPosition:
-    """Build an MMPosition that has been open for `hours_old` hours."""
+def _make_position(
+    symbol: str = "BTC/USDT",
+    direction: str = "long",
+    entry_price: float = 50000.0,
+    quantity: float = 0.01,
+    stop_loss: float = 49000.0,
+    current_level: int = 0,
+    hours_old: float = 3.0,
+) -> MMPosition:
+    """Build a test MMPosition aged `hours_old` hours."""
     pos = MMPosition(
         symbol=symbol,
-        direction="long",
-        entry_price=50000.0,
-        quantity=0.01,
-        stop_loss=49000.0,
+        direction=direction,
+        entry_price=entry_price,
+        quantity=quantity,
+        stop_loss=stop_loss,
         current_level=current_level,
     )
     pos.entry_time = datetime.now(timezone.utc) - timedelta(hours=hours_old)
     return pos
 
 
-@pytest.mark.asyncio
-async def test_scratch_2h_triggers_close_when_no_level_hit(engine: MMEngine):
-    """B1: position open >2h with current_level=0 must close with reason scratch_2h."""
-    pos = _make_stale_position(current_level=0, hours_old=3.0)
-    engine.positions["BTC/USDT"] = pos
-
-    # Mock exchange.fetch_ticker so _manage_position can get a price
+async def _run_manage_capture_scratch(
+    engine: MMEngine, pos: MMPosition, current_price: float,
+) -> list[str]:
+    """Wire engine mocks, run _manage_position, return any scratch_2h reasons."""
+    engine.positions[pos.symbol] = pos
     engine.exchange = MagicMock()
-    engine.exchange.fetch_ticker = AsyncMock(return_value={"last": 50100.0})
+    engine.exchange.fetch_ticker = AsyncMock(return_value={"last": current_price})
+    engine.candle_manager = MagicMock()
+    engine.candle_manager.get_candles = AsyncMock(return_value=None)
 
-    close_calls: list[tuple] = []
-
-    async def _fake_close(p, price, reason):
-        close_calls.append((p, price, reason))
-        engine.positions.pop(p.symbol, None)
-
-    # Patch early-exit checks that run before the scratch rule
-    with patch.object(engine, "_close_position", side_effect=_fake_close):
-        # Also stub the SVC check that would otherwise need candle data
-        engine.candle_manager = MagicMock()
-        engine.candle_manager.get_candles = AsyncMock(return_value=None)
-        await engine._manage_position("BTC/USDT")
-
-    assert len(close_calls) == 1, f"Expected exactly one close call, got {close_calls}"
-    _, _, reason = close_calls[0]
-    assert reason == "scratch_2h", f"Expected reason='scratch_2h', got '{reason}'"
-
-
-@pytest.mark.asyncio
-async def test_scratch_2h_does_not_trigger_when_level_hit(engine: MMEngine):
-    """B1: position open >2h but current_level >= 1 must NOT trigger the scratch rule."""
-    pos = _make_stale_position(current_level=1, hours_old=3.0)
-    engine.positions["BTC/USDT"] = pos
-
-    engine.exchange = MagicMock()
-    engine.exchange.fetch_ticker = AsyncMock(return_value={"last": 50100.0})
-
-    scratch_calls: list[str] = []
+    scratch_reasons: list[str] = []
 
     async def _spy_close(p, price, reason):
         if reason == "scratch_2h":
-            scratch_calls.append(reason)
+            scratch_reasons.append(reason)
+            engine.positions.pop(p.symbol, None)
 
     with patch.object(engine, "_close_position", side_effect=_spy_close):
-        engine.candle_manager = MagicMock()
-        engine.candle_manager.get_candles = AsyncMock(return_value=None)
-        # _is_stopped_out needs to return False so we don't close via stop_loss
         with patch.object(engine, "_is_stopped_out", return_value=False):
-            await engine._manage_position("BTC/USDT")
-
-    assert len(scratch_calls) == 0, "scratch_2h must not fire when current_level >= 1"
+            await engine._manage_position(pos.symbol)
+    return scratch_reasons
 
 
 @pytest.mark.asyncio
-async def test_scratch_2h_does_not_trigger_when_under_2h(engine: MMEngine):
-    """B1: position open <2h with current_level=0 must NOT trigger the scratch rule."""
-    pos = _make_stale_position(current_level=0, hours_old=1.5)
-    engine.positions["BTC/USDT"] = pos
+async def test_scratch_fires_when_flat_after_2h(engine: MMEngine):
+    """Course rule: at 2h+, price flat (== entry) → gross 0, NOT profitable → scratch."""
+    pos = _make_position(entry_price=50000.0, hours_old=3.0)
+    reasons = await _run_manage_capture_scratch(engine, pos, current_price=50000.0)
+    assert reasons == ["scratch_2h"]
 
-    engine.exchange = MagicMock()
-    engine.exchange.fetch_ticker = AsyncMock(return_value={"last": 50100.0})
 
-    scratch_calls: list[str] = []
+@pytest.mark.asyncio
+async def test_scratch_fires_when_losing_after_2h(engine: MMEngine):
+    """Course rule: at 2h+, position down → gross negative → scratch."""
+    pos = _make_position(entry_price=50000.0, hours_old=2.5)
+    reasons = await _run_manage_capture_scratch(engine, pos, current_price=49800.0)
+    assert reasons == ["scratch_2h"]
 
-    async def _spy_close(p, price, reason):
-        if reason == "scratch_2h":
-            scratch_calls.append(reason)
 
-    with patch.object(engine, "_close_position", side_effect=_spy_close):
-        engine.candle_manager = MagicMock()
-        engine.candle_manager.get_candles = AsyncMock(return_value=None)
-        with patch.object(engine, "_is_stopped_out", return_value=False):
-            await engine._manage_position("BTC/USDT")
+@pytest.mark.asyncio
+async def test_scratch_does_not_fire_when_in_profit_after_2h(engine: MMEngine):
+    """Course rule: "substantial profit" exempts the trade. Long up 1% at 3h old."""
+    pos = _make_position(
+        entry_price=50000.0, quantity=0.01, hours_old=3.0,
+    )
+    # Up 1% ($500 on 0.01 BTC × $50000 = $500 position; gross $5.00 vs fees $0.40)
+    reasons = await _run_manage_capture_scratch(engine, pos, current_price=50500.0)
+    assert reasons == [], "In substantial profit — must NOT scratch"
 
-    assert len(scratch_calls) == 0, "scratch_2h must not fire when trade is under 2 hours old"
+
+@pytest.mark.asyncio
+async def test_scratch_does_not_fire_under_2h_regardless_of_pnl(engine: MMEngine):
+    """Under 2h the scratch rule doesn't apply yet, even on a losing position."""
+    pos = _make_position(entry_price=50000.0, hours_old=1.5)
+    reasons = await _run_manage_capture_scratch(engine, pos, current_price=49500.0)
+    assert reasons == [], "Under 2h — scratch rule must not fire"
+
+
+@pytest.mark.asyncio
+async def test_scratch_ignores_level_advance_per_course(engine: MMEngine):
+    """Regression guard: the old rule gated scratch on current_level == 0.
+    The course never mentions level advancement — only time + profit.
+    A trade at level 1 but not profitable at 2h+ must still scratch.
+    """
+    pos = _make_position(
+        entry_price=50000.0, hours_old=3.0, current_level=1,
+    )
+    # Price below entry → not in substantial profit, regardless of level
+    reasons = await _run_manage_capture_scratch(engine, pos, current_price=49500.0)
+    assert reasons == ["scratch_2h"], (
+        "Course says scratch applies on profit, not level. "
+        "Old rule incorrectly exempted level>=1 trades."
+    )
+
+
+@pytest.mark.asyncio
+async def test_scratch_short_loses_scratches(engine: MMEngine):
+    """Short at 100, price rose to 101 at 2.5h → short losing → scratch."""
+    pos = _make_position(
+        direction="short", entry_price=100.0, quantity=1.0,
+        stop_loss=101.5, hours_old=2.5,
+    )
+    reasons = await _run_manage_capture_scratch(engine, pos, current_price=101.0)
+    assert reasons == ["scratch_2h"]
+
+
+@pytest.mark.asyncio
+async def test_scratch_short_winning_exempt(engine: MMEngine):
+    """Short at 100, price fell to 98 at 2.5h → short winning → no scratch."""
+    pos = _make_position(
+        direction="short", entry_price=100.0, quantity=1.0,
+        stop_loss=101.5, hours_old=2.5,
+    )
+    reasons = await _run_manage_capture_scratch(engine, pos, current_price=98.0)
+    assert reasons == []
+
+
+@pytest.mark.asyncio
+async def test_scratch_bnb_20260420_pattern_scratches(engine: MMEngine):
+    """The live BNB trade that triggered this whole investigation.
+
+    Entry $622.10 at 02:01 UTC, price flat at $621.94 at 04:04 UTC.
+    Trade was at Level 0 on a board_meeting variant. Per course rule
+    (not in substantial profit at 2h) this SHOULD scratch — which is
+    what happened live. This test confirms the new profit-based rule
+    matches the course-correct outcome for this case.
+
+    (The issue with the BNB trade wasn't the scratch firing — the issue
+    was the TP1 target being a multi-week vector instead of the 200 EMA.
+    That's a separate fix in mm_targets.py — LEVEL_EMA_TARGETS[1].)
+    """
+    pos = _make_position(
+        symbol="BNB/USDT",
+        entry_price=622.10,
+        quantity=19.42,
+        stop_loss=571.92,
+        current_level=0,
+        hours_old=2.03,
+    )
+    # Price flat, not in profit at all
+    reasons = await _run_manage_capture_scratch(engine, pos, current_price=621.94)
+    assert reasons == ["scratch_2h"]
+
+
+@pytest.mark.asyncio
+async def test_scratch_bnb_hypothetical_profit_would_exempt(engine: MMEngine):
+    """Same BNB setup but if price had moved favourably, no scratch.
+
+    Demonstrates the course behaviour: the MM has a "different plan"
+    only when we're NOT in substantial profit. If we are, the setup
+    is still valid.
+    """
+    pos = _make_position(
+        symbol="BNB/USDT",
+        entry_price=622.10,
+        quantity=19.42,
+        stop_loss=571.92,
+        current_level=0,
+        hours_old=2.03,
+    )
+    # Up 0.5% (~$3 per BNB × 19.42 = ~$60 gross, fees ~$9.67)
+    reasons = await _run_manage_capture_scratch(engine, pos, current_price=625.22)
+    assert reasons == [], "Up 0.5% after 2h → in substantial profit → no scratch"
 
 
 # ---------------------------------------------------------------------------
@@ -1799,142 +1887,3 @@ class TestSVCWickReturnBreakoutFirst:
         assert broke_out is True
         assert returned is False
 
-
-# ---------------------------------------------------------------------------
-# Dynamic scratch window — BNB 2026-04-20 fix
-# SL < 2%   → 2h
-# SL 2-4%   → 3h
-# SL ≥ 4%   → 4h
-# BOARD_MEETING_* phase → min 4h regardless of SL
-# ---------------------------------------------------------------------------
-
-def _make_position_with_sl(
-    entry: float = 100.0,
-    sl: float = 99.0,                       # 1% SL by default
-    hours_old: float = 2.5,
-    current_level: int = 0,
-    cycle_phase: str = "",
-) -> MMPosition:
-    """Helper: position with configurable SL distance, age, and phase."""
-    pos = MMPosition(
-        symbol="BNB/USDT",
-        direction="long",
-        entry_price=entry,
-        quantity=1.0,
-        stop_loss=sl,
-        current_level=current_level,
-        cycle_phase=cycle_phase,
-    )
-    pos.entry_time = datetime.now(timezone.utc) - timedelta(hours=hours_old)
-    return pos
-
-
-async def _run_manage_and_capture(engine: MMEngine, pos: MMPosition) -> list[str]:
-    """Wire up the engine mocks and capture scratch-reason close calls."""
-    engine.positions[pos.symbol] = pos
-    engine.exchange = MagicMock()
-    engine.exchange.fetch_ticker = AsyncMock(return_value={"last": pos.entry_price})
-    engine.candle_manager = MagicMock()
-    engine.candle_manager.get_candles = AsyncMock(return_value=None)
-
-    scratch_reasons: list[str] = []
-
-    async def _spy_close(p, price, reason):
-        if reason == "scratch_2h":
-            scratch_reasons.append(reason)
-            engine.positions.pop(p.symbol, None)
-
-    with patch.object(engine, "_close_position", side_effect=_spy_close):
-        with patch.object(engine, "_is_stopped_out", return_value=False):
-            await engine._manage_position(pos.symbol)
-    return scratch_reasons
-
-
-@pytest.mark.asyncio
-async def test_dynamic_scratch_tight_sl_fires_at_2h(engine: MMEngine):
-    """SL 1% (tight) + 2.5h old → should scratch (2h window applies)."""
-    pos = _make_position_with_sl(entry=100.0, sl=99.0, hours_old=2.5)
-    # Confirm SL distance is ~1%
-    assert abs(pos.entry_price - pos.stop_loss) / pos.entry_price * 100 == pytest.approx(1.0)
-    reasons = await _run_manage_and_capture(engine, pos)
-    assert reasons == ["scratch_2h"]
-
-
-@pytest.mark.asyncio
-async def test_dynamic_scratch_medium_sl_waits_until_3h(engine: MMEngine):
-    """SL 3% (medium) + 2.5h old → must NOT fire yet (3h window)."""
-    pos = _make_position_with_sl(entry=100.0, sl=97.0, hours_old=2.5)
-    assert abs(pos.entry_price - pos.stop_loss) / pos.entry_price * 100 == pytest.approx(3.0)
-    reasons = await _run_manage_and_capture(engine, pos)
-    assert reasons == [], "3% SL should give 3h window, not scratch at 2.5h"
-
-
-@pytest.mark.asyncio
-async def test_dynamic_scratch_medium_sl_fires_at_3h(engine: MMEngine):
-    """SL 3% (medium) + 3.5h old → should fire (3h window passed)."""
-    pos = _make_position_with_sl(entry=100.0, sl=97.0, hours_old=3.5)
-    reasons = await _run_manage_and_capture(engine, pos)
-    assert reasons == ["scratch_2h"]
-
-
-@pytest.mark.asyncio
-async def test_dynamic_scratch_wide_sl_waits_until_4h(engine: MMEngine):
-    """SL 6% (wide) + 3.5h old → must NOT fire (4h window)."""
-    pos = _make_position_with_sl(entry=100.0, sl=94.0, hours_old=3.5)
-    assert abs(pos.entry_price - pos.stop_loss) / pos.entry_price * 100 == pytest.approx(6.0)
-    reasons = await _run_manage_and_capture(engine, pos)
-    assert reasons == [], "6% SL should give 4h window, not scratch at 3.5h"
-
-
-@pytest.mark.asyncio
-async def test_dynamic_scratch_wide_sl_fires_at_4h(engine: MMEngine):
-    """SL 6% (wide) + 4.5h old → should fire (4h window passed)."""
-    pos = _make_position_with_sl(entry=100.0, sl=94.0, hours_old=4.5)
-    reasons = await _run_manage_and_capture(engine, pos)
-    assert reasons == ["scratch_2h"]
-
-
-@pytest.mark.asyncio
-async def test_dynamic_scratch_board_meeting_always_4h(engine: MMEngine):
-    """BOARD_MEETING_1 + tight 1% SL + 2.5h old → must NOT fire yet.
-
-    Board meetings are the explicit MM-consolidating phase. Minimum 4h
-    regardless of SL distance. This is the BNB 2026-04-20 fix: entry
-    was board_meeting variant, bot scratched at 122 min during the
-    natural retracement phase.
-    """
-    pos = _make_position_with_sl(
-        entry=100.0, sl=99.0, hours_old=2.5, cycle_phase="BOARD_MEETING_1",
-    )
-    reasons = await _run_manage_and_capture(engine, pos)
-    assert reasons == [], "Board meeting must extend scratch to 4h even with tight SL"
-
-
-@pytest.mark.asyncio
-async def test_dynamic_scratch_board_meeting_fires_at_4h(engine: MMEngine):
-    """BOARD_MEETING_2 + 4.5h old → should fire (4h minimum passed)."""
-    pos = _make_position_with_sl(
-        entry=100.0, sl=99.0, hours_old=4.5, cycle_phase="BOARD_MEETING_2",
-    )
-    reasons = await _run_manage_and_capture(engine, pos)
-    assert reasons == ["scratch_2h"]
-
-
-@pytest.mark.asyncio
-async def test_dynamic_scratch_bnb_20260420_scenario(engine: MMEngine):
-    """The exact BNB trade that triggered this fix.
-
-    Entry $622.10, SL $571.92 (8.07% SL — wide), cycle_phase=BOARD_MEETING_1.
-    At 122 min (2.03h), old code scratched. New code must NOT scratch
-    until 4h — wide SL + board meeting → 4h window.
-    """
-    pos = _make_position_with_sl(
-        entry=622.10, sl=571.92, hours_old=2.03, cycle_phase="BOARD_MEETING_1",
-    )
-    sl_pct = abs(pos.entry_price - pos.stop_loss) / pos.entry_price * 100
-    assert 7.5 < sl_pct < 8.5, f"expected ~8% SL, got {sl_pct}%"
-    reasons = await _run_manage_and_capture(engine, pos)
-    assert reasons == [], (
-        "BNB 2026-04-20 pattern — wide SL + board meeting + 2h old "
-        "must NOT scratch (regression guard)"
-    )
