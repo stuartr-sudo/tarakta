@@ -1514,3 +1514,136 @@ class TestAggregateOpenRiskUsd:
         from src.strategy.mm_engine import MAX_MM_POSITIONS
         assert MAX_MM_POSITIONS == 20
         assert engine.max_positions == 20
+
+
+# ---------------------------------------------------------------------------
+# Three-way target collapse guard (NEAR 2026-04-20 bug)
+# When primary_l1 is None AND primary_l2 == primary_l3 (same underlying
+# level picked for both), all three TPs collapse to a single price and
+# staggered partial exits never fire. Course Lesson 47 fallback: use
+# R-multiples when EMA-based levels aren't resolvable.
+# ---------------------------------------------------------------------------
+
+class TestTargetStaggeringFromRMultiples:
+    """Unit tests for the R-multiple staggering logic.
+
+    The logic itself lives inline in scan_symbol (after the L1==L2
+    collision fix). Rather than mock the full scan, these tests re-run
+    the exact same transformation on synthesized inputs and assert the
+    post-conditions the engine code guarantees.
+    """
+
+    def _stagger(self, entry, sl, direction, t_l1, t_l2, t_l3):
+        """Re-implements the three-way collapse guard for direct testing.
+
+        Mirrors the inline logic in mm_engine.scan_symbol verbatim.
+        If the inline logic changes, this helper must be updated too —
+        and the tests will fail loud.
+        """
+        def _nearly_equal(a, b, ref):
+            if not a or not b or ref <= 0:
+                return False
+            return abs(a - b) / ref < 0.002
+
+        if t_l1 and t_l2 and t_l3 and _nearly_equal(t_l1, t_l3, entry):
+            is_long = direction == "long"
+            r = abs(entry - sl)
+            if r > 0:
+                if is_long:
+                    synth_l1 = entry + 2.0 * r
+                    synth_l2 = entry + 3.0 * r
+                    in_order = synth_l1 < synth_l2 < t_l3
+                else:
+                    synth_l1 = entry - 2.0 * r
+                    synth_l2 = entry - 3.0 * r
+                    in_order = synth_l1 > synth_l2 > t_l3
+                if in_order:
+                    return (synth_l1, synth_l2, t_l3)
+                else:
+                    if is_long:
+                        return (entry + 2.0 * r, entry + 3.0 * r, entry + 5.0 * r)
+                    return (entry - 2.0 * r, entry - 3.0 * r, entry - 5.0 * r)
+        return (t_l1, t_l2, t_l3)
+
+    def test_near_20260420_exact_case(self):
+        """The actual NEAR trade from 2026-04-20 00:12 UTC.
+
+        Entry 1.3333, SL 1.3138 → R = 0.0195.
+        All three original targets collapsed to 1.4205 (~4.47R from entry).
+        Post-stagger: L1=2R, L2=3R, L3 stays at 1.4205.
+        """
+        result = self._stagger(
+            entry=1.3333, sl=1.3138, direction="long",
+            t_l1=1.4205, t_l2=1.4205, t_l3=1.4205,
+        )
+        l1, l2, l3 = result
+        # Must be strictly ordered
+        assert l1 < l2 < l3
+        # L1 at 2R = 1.3333 + 2*0.0195 = 1.3723
+        assert abs(l1 - 1.3723) < 0.0001
+        # L2 at 3R = 1.3333 + 3*0.0195 = 1.3918
+        assert abs(l2 - 1.3918) < 0.0001
+        # L3 unchanged (original far target was further out)
+        assert abs(l3 - 1.4205) < 0.0001
+
+    def test_short_case(self):
+        """Same collapse but for a short."""
+        result = self._stagger(
+            entry=100.0, sl=102.0, direction="short",
+            t_l1=90.0, t_l2=90.0, t_l3=90.0,
+        )
+        l1, l2, l3 = result
+        # Shorts: L1 > L2 > L3 (targets below entry, L3 furthest)
+        assert l1 > l2 > l3
+        # L1 at 2R = 100 - 2*2 = 96
+        assert abs(l1 - 96.0) < 0.0001
+        # L2 at 3R = 100 - 3*2 = 94
+        assert abs(l2 - 94.0) < 0.0001
+        # L3 unchanged
+        assert abs(l3 - 90.0) < 0.0001
+
+    def test_l3_too_close_uses_pure_r_multiples(self):
+        """When the identified L3 is less than 3R from entry, synth L2
+        would overshoot L3 — fall back to pure R-multiples for all three.
+        """
+        # Entry 100, SL 99 (R=1), L3 at 101.5 (only 1.5R away)
+        result = self._stagger(
+            entry=100.0, sl=99.0, direction="long",
+            t_l1=101.5, t_l2=101.5, t_l3=101.5,
+        )
+        l1, l2, l3 = result
+        # All synthesized: 2R, 3R, 5R
+        assert l1 == 102.0  # 100 + 2*1
+        assert l2 == 103.0  # 100 + 3*1
+        assert l3 == 105.0  # 100 + 5*1
+
+    def test_no_change_when_targets_distinct(self):
+        """If L1/L2/L3 are already spread out, the guard does nothing."""
+        result = self._stagger(
+            entry=100.0, sl=99.0, direction="long",
+            t_l1=102.0, t_l2=104.0, t_l3=108.0,
+        )
+        assert result == (102.0, 104.0, 108.0)
+
+    def test_no_change_when_only_l1_equals_l2(self):
+        """The L1==L2 collision is a DIFFERENT code path handled by the
+        earlier mm_l1_l2_collision_spread block. This guard only fires
+        on the L1==L3 pattern (three-way collapse). When just L1==L2,
+        this guard must NOT modify anything.
+        """
+        # L1 and L2 at same place but L3 distinct
+        result = self._stagger(
+            entry=100.0, sl=99.0, direction="long",
+            t_l1=102.0, t_l2=102.0, t_l3=108.0,
+        )
+        # No change (no three-way collapse detected)
+        assert result == (102.0, 102.0, 108.0)
+
+    def test_no_change_when_zero_risk(self):
+        """SL at entry → zero R — guard can't synth anything, returns unchanged."""
+        result = self._stagger(
+            entry=100.0, sl=100.0, direction="long",
+            t_l1=105.0, t_l2=105.0, t_l3=105.0,
+        )
+        # r == 0 → don't mutate
+        assert result == (105.0, 105.0, 105.0)

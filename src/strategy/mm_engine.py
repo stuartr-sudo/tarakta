@@ -2329,7 +2329,9 @@ class MMEngine:
             spread_reward = max(base_reward * 1.6, entry_price * 0.005)  # at least +0.5% further
             new_l2 = (entry_price + spread_reward) if is_long_tgt else (entry_price - spread_reward)
             # If there's already a distinct L3 further out, respect it.
-            if t_l3:
+            # But if L3 has ALSO collapsed onto L1, this clamp is a no-op —
+            # detect that via the separate three-way guard below.
+            if t_l3 and not _nearly_equal(t_l1, t_l3, entry_price):
                 # Clamp L2 to halfway between L1 and L3 so L3 still dominates.
                 halfway = (t_l1 + t_l3) / 2
                 new_l2 = (min(new_l2, halfway) if is_long_tgt else max(new_l2, halfway))
@@ -2337,6 +2339,61 @@ class MMEngine:
                         original_l1=t_l1, original_l2=t_l2, new_l2=new_l2,
                         entry=entry_price)
             t_l2 = new_l2
+
+        # Three-way collapse guard (2026-04-20 — exposed by NEAR trade).
+        # When the 50 EMA is unavailable (fallback from primary_l1 to l2)
+        # AND the target analyzer returns the same underlying level for
+        # l2 and l3 (common when there's only one unrecovered vector or
+        # one HOW/LOD in the direction), all three TPs collapse to the
+        # same price. The dashboard shows "one TP" and no staggered
+        # partial exits ever fire. Course Lesson 47 fallback: when EMA-
+        # based levels aren't resolvable, use R-multiples of the SL
+        # distance for intermediate exits. Keep the identified target as
+        # the far L3 and synthesize L1 at 2R, L2 at 3R.
+        if (
+            t_l1 and t_l2 and t_l3
+            and _nearly_equal(t_l1, t_l3, entry_price)
+        ):
+            is_long_tgt = (trade_direction == "long") if 'trade_direction' in locals() else (direction == "bullish")
+            r = abs(entry_price - sl_price)
+            if r > 0:
+                if is_long_tgt:
+                    synthesized_l1 = entry_price + 2.0 * r
+                    synthesized_l2 = entry_price + 3.0 * r
+                    in_order = synthesized_l1 < synthesized_l2 < t_l3
+                else:
+                    synthesized_l1 = entry_price - 2.0 * r
+                    synthesized_l2 = entry_price - 3.0 * r
+                    in_order = synthesized_l1 > synthesized_l2 > t_l3
+                if in_order:
+                    logger.info(
+                        "mm_targets_staggered_from_r_multiples",
+                        symbol=symbol,
+                        original_l1=t_l1, original_l2=t_l2, original_l3=t_l3,
+                        new_l1=synthesized_l1, new_l2=synthesized_l2,
+                        r_multiples_used=(2.0, 3.0),
+                        entry=entry_price, sl=sl_price, direction=trade_direction,
+                    )
+                    t_l1 = synthesized_l1
+                    t_l2 = synthesized_l2
+                    # t_l3 stays as the originally-identified far target
+                else:
+                    # Identified L3 is too close (< 3R from entry) — fall
+                    # back to pure R-multiples for all three. This is
+                    # rare; logs it prominently so we can investigate.
+                    logger.warning(
+                        "mm_targets_l3_too_close_using_pure_r",
+                        symbol=symbol, original_l3=t_l3, risk_r=r,
+                        entry=entry_price,
+                    )
+                    if is_long_tgt:
+                        t_l1 = entry_price + 2.0 * r
+                        t_l2 = entry_price + 3.0 * r
+                        t_l3 = entry_price + 5.0 * r
+                    else:
+                        t_l1 = entry_price - 2.0 * r
+                        t_l2 = entry_price - 3.0 * r
+                        t_l3 = entry_price - 5.0 * r
 
         # Only reject if NO target is available at any level (no EMAs, no
         # vectors, no HOW/LOW in direction).
