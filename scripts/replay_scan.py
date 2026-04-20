@@ -16,14 +16,24 @@ WHAT IT DOES NOT DO (yet)
     since we can't fetch their live values retroactively.
 
 USAGE
-  python3 scripts/replay_scan.py --symbol BNB --days 30
-  python3 scripts/replay_scan.py --symbol NEAR --days 14 --hours-step 4
-  python3 scripts/replay_scan.py --symbol BTC --days 7 --show-rejects
+  Single symbol:
+    python3 scripts/replay_scan.py --symbol BNB --days 30
+    python3 scripts/replay_scan.py --symbol NEAR --days 14 --hours-step 4
+
+  Multi-symbol batch (scans each in turn, aggregates at the end):
+    python3 scripts/replay_scan.py --symbols BTC,ETH,BNB,SOL --days 7
+
+  Config overrides (A/B test rule changes before deploying):
+    python3 scripts/replay_scan.py --symbol BNB --days 30 --min-confluence 40
+    python3 scripts/replay_scan.py --symbol BTC --days 14 --max-sl-pct 3.0
+
+  Diagnose low grades (show per-factor hit rates across the window):
+    python3 scripts/replay_scan.py --symbol BNB --days 30 --factor-rates
 
 OUTPUT
-  Table per signal / rejection, plus aggregate funnel stats at the end.
-  Shows the breakdown of where setups died — lets you see at a glance
-  "would min_confluence=40 have killed 5 of these 12 signals?"
+  Per-scan signal/rejection, plus aggregate funnel + (optional) factor
+  hit-rates. Lets you answer "would min_confluence=40 have killed any
+  of last month's signals?" and "which factors never fire on BTC?"
 """
 from __future__ import annotations
 
@@ -209,10 +219,15 @@ class ReplayRepo:
     async def update_signal_components(self, *a, **kw): pass
 
 
-def _replay_config() -> SimpleNamespace:
+def _replay_config(**overrides) -> SimpleNamespace:
     """A config stub with the same defaults as production but with the
-    sanity agent disabled (we do not call the live API during replay)."""
-    return SimpleNamespace(
+    sanity agent disabled (we do not call the live API during replay).
+
+    ``overrides`` lets the caller supply any config override that the
+    engine honours (mm_min_confluence, mm_max_sl_pct, etc.) for A/B
+    testing. Unknown keys are silently ignored — config is permissive.
+    """
+    defaults = dict(
         instance_id="replay",
         trading_mode="paper",
         initial_balance=100_000.0,
@@ -236,6 +251,8 @@ def _replay_config() -> SimpleNamespace:
         markets={},
         leverage=10,
     )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
 
 
 # ---------------------------------------------------------------------------
@@ -280,18 +297,31 @@ def _which_reject(after: dict[str, int], before: dict[str, int]) -> str | None:
     return None
 
 
-async def replay(symbol: str, days: int, hours_step: int,
-                 show_rejects: bool) -> int:
+@dataclass
+class SymbolResult:
+    """Aggregated result for one symbol over the replay window."""
+    symbol: str
+    bars: list[BarResult] = field(default_factory=list)
+    factor_hits: Counter = field(default_factory=Counter)  # factor_name → count
+    score_samples: list[float] = field(default_factory=list)
+    grade_counts: Counter = field(default_factory=Counter)
+
+
+async def replay_single_symbol(
+    symbol: str,
+    days: int,
+    hours_step: int,
+    engine_overrides: dict,
+) -> SymbolResult:
+    """Replay one symbol over the window. Returns aggregated results."""
     end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     start = end - timedelta(days=days)
 
-    print(f"Replay window: {start.isoformat()} → {end.isoformat()} ({days} days)")
-    print(f"Symbol: {symbol}   step: {hours_step}h")
-    print("\nFetching historical candles from Binance…")
+    print(f"\n[{symbol}] fetching candles…")
     history = await fetch_history(symbol, start, end)
     if any(v.empty for v in history.values()):
-        print("ERROR: missing candles for at least one timeframe.")
-        return 1
+        print(f"[{symbol}] ERROR: missing candles for at least one timeframe.")
+        return SymbolResult(symbol=symbol)
 
     mgr = ReplayCandleManager(history)
     exch = ReplayExchange(mgr)
@@ -303,35 +333,52 @@ async def replay(symbol: str, days: int, hours_step: int,
         config=config, scan_interval_minutes=5.0,
     )
 
-    # Walk 1H bars in the window
+    # Apply engine-level overrides (min_confluence, max_sl_pct) AFTER
+    # construction — these are instance attributes on the engine, set
+    # from constants in __init__ and normally only updated via the
+    # engine_state.config_overrides DB path.
+    for k, v in engine_overrides.items():
+        if hasattr(engine, k):
+            setattr(engine, k, v)
+            print(f"[{symbol}] override: engine.{k} = {v}")
+
     bars_1h = history["1h"]
     bars_1h = bars_1h[(bars_1h.index >= start) & (bars_1h.index < end)]
 
-    results: list[BarResult] = []
     step = max(1, hours_step)
+    result = SymbolResult(symbol=symbol)
 
-    print(f"\nStepping through {len(bars_1h)} 1H bars, every {step}h…")
-    for i, ts in enumerate(bars_1h.index[::step]):
-        # "as of" is the END of this bar — the bot would have scanned at close
+    print(f"[{symbol}] stepping through {len(bars_1h)} 1H bars, every {step}h…")
+    for ts in bars_1h.index[::step]:
         as_of = ts + timedelta(hours=1)
         mgr.as_of = as_of
 
-        # Reset per-scan counters and step the engine
         engine._scan_reject_counts = {}
         engine._scan_stage_counts = {}
+        engine._scan_factor_hits = {}
+        engine._scan_score_samples = []
+        engine._scan_grade_counts = {}
 
         session = engine.session_analyzer.get_current_session(as_of)
 
         try:
             signal = await engine._analyze_pair(symbol, session, as_of)
         except Exception as e:
-            results.append(BarResult(ts=as_of, stage=f"EXCEPTION:{type(e).__name__}"))
+            result.bars.append(BarResult(ts=as_of,
+                                         stage=f"EXCEPTION:{type(e).__name__}"))
             continue
 
-        stages = _snapshot_stage_counts(engine)
-        rejects = _snapshot_rejects(engine)
+        # Aggregate factor hits + score samples for the full window.
+        for k, v in engine._scan_factor_hits.items():
+            result.factor_hits[k] += v
+        result.score_samples.extend(engine._scan_score_samples)
+        for g, n in engine._scan_grade_counts.items():
+            result.grade_counts[g] += n
+
+        stages = dict(engine._scan_stage_counts)
+        rejects = dict(engine._scan_reject_counts)
         if signal:
-            results.append(BarResult(
+            result.bars.append(BarResult(
                 ts=as_of, stage="signal_built",
                 signal={
                     "direction": signal.direction,
@@ -351,21 +398,71 @@ async def replay(symbol: str, days: int, hours_step: int,
         else:
             stage = _deepest_stage(stages, {})
             reject = _which_reject(rejects, {})
-            results.append(BarResult(ts=as_of, stage=stage,
-                                     rejects={reject: 1} if reject else {}))
+            result.bars.append(BarResult(
+                ts=as_of, stage=stage,
+                rejects={reject: 1} if reject else {},
+            ))
+    return result
 
-    # --- Summary ---
-    print("\n" + "=" * 72)
-    print(f"REPLAY SUMMARY — {symbol} × {days}d")
-    print("=" * 72)
 
-    stage_counts = Counter(r.stage for r in results)
-    reject_counts = Counter()
+async def replay(
+    symbols: list[str],
+    days: int,
+    hours_step: int,
+    show_rejects: bool,
+    factor_rates: bool,
+    engine_overrides: dict,
+) -> int:
+    end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    start = end - timedelta(days=days)
+
+    print(f"Replay window: {start.isoformat()} → {end.isoformat()} ({days} days)")
+    print(f"Symbols: {', '.join(symbols)}   step: {hours_step}h")
+    if engine_overrides:
+        print(f"Overrides: {engine_overrides}")
+
+    symbol_results: list[SymbolResult] = []
+    for sym in symbols:
+        r = await replay_single_symbol(sym, days, hours_step, engine_overrides)
+        symbol_results.append(r)
+
+    # Use the first symbol's results to drive the per-symbol summary,
+    # then render a cross-symbol summary if multiple symbols.
+    for sr in symbol_results:
+        _render_symbol_summary(sr, days, show_rejects, factor_rates)
+
+    if len(symbol_results) > 1:
+        _render_cross_symbol_summary(symbol_results, days)
+
+    return 0
+
+
+def _render_symbol_summary(
+    sr: SymbolResult,
+    days: int,
+    show_rejects: bool,
+    factor_rates: bool,
+) -> None:
+    """Per-symbol summary block. Called once per symbol in the batch."""
+    results = sr.bars
+    if not results:
+        print(f"\n[{sr.symbol}] no results (fetch failure).")
+        return
+
+    # Local assignments so the rest of this function reads like the
+    # single-symbol flow we had before.
+    reject_counts: Counter = Counter()
     for r in results:
         for k in r.rejects:
             reject_counts[k] += 1
-
+    stage_counts = Counter(r.stage for r in results)
     signals = [r for r in results if r.signal]
+
+    # --- Summary block ---
+    print("\n" + "=" * 72)
+    print(f"REPLAY SUMMARY — {sr.symbol} × {days}d")
+    print("=" * 72)
+
     print(f"\nTotal bars scanned: {len(results)}")
     print(f"Would-have-been signals: {len(signals)}")
     print(f"Exceptions: {sum(1 for r in results if r.stage.startswith('EXCEPTION'))}")
@@ -390,6 +487,29 @@ async def replay(symbol: str, days: int, hours_step: int,
         for reason, n in reject_counts.most_common(10):
             print(f"  {reason:<30} {n}")
 
+    # Score distribution (when the formation scored)
+    if sr.score_samples:
+        scores = sorted(sr.score_samples)
+        n = len(scores)
+        print(f"\nConfluence score distribution (over {n} scored bars):")
+        print(f"  min:    {scores[0]:.1f}%")
+        print(f"  p25:    {scores[n // 4]:.1f}%")
+        print(f"  median: {scores[n // 2]:.1f}%")
+        print(f"  p75:    {scores[3 * n // 4]:.1f}%")
+        print(f"  max:    {scores[-1]:.1f}%")
+        if sr.grade_counts:
+            gd = ", ".join(f"{g}={n}" for g, n in sorted(sr.grade_counts.items()))
+            print(f"  grades: {gd}")
+
+    # Factor hit rates — the diagnostic for "why are grades low?"
+    if factor_rates and sr.factor_hits:
+        total_scored = sum(sr.grade_counts.values()) or 1
+        print(f"\nFactor hit rate (% of scored bars — {total_scored} total):")
+        print(f"  {'factor':<30} {'hits':>5} {'rate':>7}")
+        for factor, n in sorted(sr.factor_hits.items(), key=lambda kv: -kv[1]):
+            rate = n / total_scored * 100
+            print(f"  {factor:<30} {n:>5} {rate:>6.1f}%")
+
     if signals:
         print(f"\nSignals ({len(signals)}):")
         print(f"  {'timestamp':<20} {'dir':<6} {'grade':<6} "
@@ -408,42 +528,102 @@ async def replay(symbol: str, days: int, hours_step: int,
         print("\nBar-by-bar detail (non-trivial rejections only):")
         for r in results:
             if r.stage in ("none", "candles_ok", "formation_found"):
-                continue  # noise
+                continue
             if r.signal:
                 continue
             rej = ",".join(r.rejects) if r.rejects else "—"
             print(f"  {r.ts.strftime('%Y-%m-%d %H:%M'):<20} "
                   f"{r.stage:<24} {rej}")
 
-    print()
-    return 0
+
+def _render_cross_symbol_summary(
+    symbol_results: list[SymbolResult],
+    days: int,
+) -> None:
+    """Cross-symbol aggregate — signals-per-symbol and common-factor hit rates."""
+    print("\n" + "=" * 72)
+    print(f"CROSS-SYMBOL SUMMARY — {len(symbol_results)} symbols × {days}d")
+    print("=" * 72)
+
+    print(f"\n  {'symbol':<18} {'scans':>6} {'signals':>8} {'median_score':>13}")
+    for sr in symbol_results:
+        scans = len(sr.bars)
+        signals = sum(1 for b in sr.bars if b.signal)
+        med = (
+            sorted(sr.score_samples)[len(sr.score_samples) // 2]
+            if sr.score_samples else 0.0
+        )
+        print(f"  {sr.symbol:<18} {scans:>6} {signals:>8} {med:>12.1f}%")
+
+    # Aggregate factor hits across all symbols
+    combined = Counter()
+    total_scored = 0
+    for sr in symbol_results:
+        for k, v in sr.factor_hits.items():
+            combined[k] += v
+        total_scored += sum(sr.grade_counts.values())
+    if combined and total_scored:
+        print(f"\nCross-symbol factor hit rate ({total_scored} scored bars total):")
+        print(f"  {'factor':<30} {'hits':>5} {'rate':>7}")
+        for factor, n in sorted(combined.items(), key=lambda kv: -kv[1]):
+            rate = n / total_scored * 100
+            print(f"  {factor:<30} {n:>5} {rate:>6.1f}%")
+
+
+def _normalise_symbol(s: str) -> str:
+    s = s.strip().upper()
+    if not s.endswith(":USDT"):
+        if "/" not in s:
+            s = f"{s}/USDT:USDT"
+        elif not s.endswith(":USDT"):
+            s = f"{s}:USDT"
+    return s
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--symbol", required=True,
-                    help="Symbol (accepts BNB, BNB/USDT, BNB/USDT:USDT)")
+    sym_group = ap.add_mutually_exclusive_group(required=True)
+    sym_group.add_argument("--symbol",
+                           help="Single symbol (BNB / BNB/USDT / BNB/USDT:USDT)")
+    sym_group.add_argument("--symbols",
+                           help="Comma-separated list, e.g. BTC,ETH,BNB,SOL")
     ap.add_argument("--days", type=int, default=30,
                     help="Days of history to replay (default: 30)")
     ap.add_argument("--hours-step", type=int, default=1,
                     help="Scan every N hours (default: 1 — every 1H bar)")
     ap.add_argument("--show-rejects", action="store_true",
                     help="Print bar-by-bar rejection detail")
+    ap.add_argument("--factor-rates", action="store_true",
+                    help="Print per-factor hit rates (diagnostic)")
+    # Engine-level config overrides for A/B testing rule changes
+    ap.add_argument("--min-confluence", type=float, default=None,
+                    help="Override engine.min_confluence threshold (default 35.0)")
+    ap.add_argument("--max-sl-pct", type=float, default=None,
+                    help="Override engine.max_sl_pct warning threshold (default 5.0)")
+    ap.add_argument("--min-rr", type=float, default=None,
+                    help="Override engine.min_rr threshold")
     args = ap.parse_args()
 
-    # Normalise symbol to the form the engine expects
-    sym = args.symbol.upper()
-    if not sym.endswith(":USDT"):
-        if "/" not in sym:
-            sym = f"{sym}/USDT:USDT"
-        elif not sym.endswith(":USDT"):
-            sym = f"{sym}:USDT"
+    if args.symbol:
+        symbols = [_normalise_symbol(args.symbol)]
+    else:
+        symbols = [_normalise_symbol(s) for s in args.symbols.split(",") if s.strip()]
+
+    engine_overrides: dict = {}
+    if args.min_confluence is not None:
+        engine_overrides["min_confluence"] = args.min_confluence
+    if args.max_sl_pct is not None:
+        engine_overrides["max_sl_pct"] = args.max_sl_pct
+    if args.min_rr is not None:
+        engine_overrides["min_rr"] = args.min_rr
 
     return asyncio.run(replay(
-        symbol=sym,
+        symbols=symbols,
         days=args.days,
         hours_step=args.hours_step,
         show_rejects=args.show_rejects,
+        factor_rates=args.factor_rates,
+        engine_overrides=engine_overrides,
     ))
 
 
