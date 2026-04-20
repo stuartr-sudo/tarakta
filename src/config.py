@@ -69,6 +69,15 @@ class Settings(BaseSettings):
     # new trade when aggregate_open_risk + proposed_trade_risk > cap.
     mm_max_aggregate_risk_pct: float = 5.0
     mm_risk_per_trade_pct: float = 1.0
+    # Max distance from entry to TP1, as % of entry. Engineering cap, NOT
+    # an explicit course rule — the course doesn't give a numeric bound
+    # on target distance. The intent is to reject 1H/intraday formation
+    # entries whose nearest natural target is a multi-week structural
+    # level (e.g. BTC 2026-04-20 where every EMA was below entry and the
+    # cascade landed on a vector 22% away). Disable by setting to 0.
+    # Tune up if you see rejected setups that would have worked; tune
+    # down if wide-target trades keep slipping through.
+    mm_max_tp1_distance_pct: float = 10.0
     mm_initial_balance: float = 10000.0
     # Pair selection — course says MM Method is a majors strategy. Separate
     # from the SMC engine's `min_volume_usd` so we don't disturb that.

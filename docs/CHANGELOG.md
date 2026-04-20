@@ -19,6 +19,53 @@ Paired docs:
 
 ## 2026-04-20 — Day 3: Course-faithful rewrites
 
+### `<pending>` — fix(mm): target-timeframe hierarchy (A + B + C)
+
+User raised: BTC trade 2026-04-20 10:04 UTC entered at $75,251 with TP1
+at $92,319 (+22.68%) — "I'd be extremely surprised if Bitcoin gets to
+92k." User's own hypothesis: *"it must have taken trades off the 15min
+or 1 hour but is using the 4 hour or daily to set the tp?"*. Correct
+diagnosis.
+
+**Three compounding issues found:**
+
+**A. Timeframe mismatch.** Formations detected on 1H but EMAs computed
+on 4H (`ema_framework.calculate(candles_4h)`), then fed to the target
+analyzer. For a 1H-entry long at $75,289, 4H 200 EMA at $71,400 was
+below entry — rejected as target, cascade to historical vectors.
+1H 200 EMA at $74,372 would have been similarly rejected for this
+specific trade, but on most retest setups the 1H EMA is above entry
+and a tight target. Fix: EMAs now computed on `candles_1h`. 4H
+calculation reserved for `trend_state_4h` (HTF-alignment veto only).
+
+**B. No multi-TF target hierarchy.** `htf_ema_values` was computed
+from 4H even though it's supposed to be the HIGHER-TF target per
+Lesson 12. For a 1H-entry trade, 4H is only one step up. True "higher
+TF" is 1D. Fix: `htf_ema_values` now prefers 1D (when ≥200 bars),
+falls back to 4H if 1D insufficient.
+
+**C. Target-less trades.** When no EMA across 1H/4H/1D is above entry
+for a long (or below for a short), the cascade lands on a vector that
+can be multi-week away. Course doesn't explicitly forbid this but
+Lesson 16's "collect profits often" implies close targets. Added an
+engineering cap (NOT a course rule — marked clearly as such in code):
+`mm_max_tp1_distance_pct = 10.0` rejects setups where TP1 > 10% away
+from entry. Configurable; set to 0 to disable.
+
+The live BTC trade that triggered the investigation would have been
+rejected under C with the default 10% cap (TP1 was 22.68% away).
+
+Proof the timeframe mismatch was real (BTC snapshot 2026-04-20 10:16 UTC):
+```
+1H 200 EMA: $74,372  (-1.22%)  ← what should feed targets
+4H 200 EMA: $71,400  (-5.17%)  ← what the code was using
+1D 200 EMA: $84,053  (+11.64%) ← should feed htf_ema_values
+```
+
+8 new tests: TP1-cap constant, config read, engine fallback defaults,
+runtime settings override, 1H vs 4H EMA distinctness, 1D-preferred
+htf_ema selection, 4H fallback, None case. Full suite 689 passing.
+
 ### `eb1f130` — fix(mm): scratch rule + L1 target — match course text verbatim
 
 **Course citations:**

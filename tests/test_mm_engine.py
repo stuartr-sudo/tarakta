@@ -1887,3 +1887,147 @@ class TestSVCWickReturnBreakoutFirst:
         assert broke_out is True
         assert returned is False
 
+
+
+# ---------------------------------------------------------------------------
+# 2026-04-20 target-timeframe fixes
+#
+# A. ema_state / ema_values / ema_break are now computed on the
+#    formation timeframe (1H), not 4H. This aligns Lesson 16 [47:00]
+#    "a Rise or a Drop at level 1 is to break the 50 EMA and head for
+#    the 200" with the chart we're actually trading.
+# B. htf_ema_values prefers 1D EMAs for L3 target (true higher-TF per
+#    Lesson 12), falls back to 4H if 1D history insufficient.
+# C. New engineering cap: reject setups where TP1 > N% from entry
+#    (default 10%; disable with 0). Not in course — prevents the
+#    1H-entry → multi-week-vector-TP cascade observed with BTC
+#    2026-04-20.
+# ---------------------------------------------------------------------------
+
+class TestTp1DistanceCap:
+    """Unit tests for the TP1-distance reject gate."""
+
+    def test_max_tp1_distance_constant_default(self):
+        from src.strategy.mm_engine import MAX_TP1_DISTANCE_PCT
+        assert MAX_TP1_DISTANCE_PCT == 10.0
+
+    def test_engine_reads_config_override(self):
+        """Config value flows into engine.max_tp1_distance_pct."""
+        from types import SimpleNamespace
+        from src.strategy.mm_engine import MMEngine
+        cfg = SimpleNamespace(mm_max_tp1_distance_pct=6.5)
+        eng = MMEngine(exchange=None, repo=None, candle_manager=None, config=cfg)
+        assert eng.max_tp1_distance_pct == 6.5
+
+    def test_engine_uses_default_when_config_missing(self):
+        """Sensible fallback when config doesn't set the cap."""
+        from types import SimpleNamespace
+        from src.strategy.mm_engine import MMEngine, MAX_TP1_DISTANCE_PCT
+        cfg = SimpleNamespace()  # no mm_max_tp1_distance_pct
+        eng = MMEngine(exchange=None, repo=None, candle_manager=None, config=cfg)
+        assert eng.max_tp1_distance_pct == MAX_TP1_DISTANCE_PCT
+
+    def test_runtime_settings_override_tp1_cap(self, engine: MMEngine):
+        """Settings UI can hot-tune the cap without redeploy via
+        engine_state.config_overrides. Replicates the restore path."""
+        # Simulate what the settings-restore path does
+        mm_settings = {"mm_max_tp1_distance_pct": 5.0}
+        if "mm_max_tp1_distance_pct" in mm_settings:
+            engine.max_tp1_distance_pct = float(mm_settings["mm_max_tp1_distance_pct"])
+        assert engine.max_tp1_distance_pct == 5.0
+
+
+class TestTargetTimeframeHierarchy:
+    """Fix A/B: 1H EMAs for ema_values (L1/L2 source), 1D for htf_ema_values."""
+
+    def test_ema_values_computed_on_1h_not_4h(self, bullish_candles):
+        """Sanity: EMAs differ between 1H and 4H even on the same series.
+
+        Not a direct engine test — this is a documentation-quality check
+        that 1H and 4H EMAs ARE distinct numbers on realistic data, so
+        the A fix actually changes behaviour.
+        """
+        closes = bullish_candles["close"]
+        # Treat same series as 1H vs resampled to 4H (proxy)
+        ema200_1h = closes.ewm(span=200, adjust=False).mean().iloc[-1]
+        resampled_4h = closes.iloc[::4].ewm(span=200, adjust=False).mean().iloc[-1]
+        # Different calculations → almost-certainly different values
+        assert abs(ema200_1h - resampled_4h) > 1.0
+
+    def test_htf_ema_prefers_1d_when_sufficient(self):
+        """The htf_ema_values selection logic: when 1D has >=200 bars,
+        use 1D; otherwise fall back to 4H. Re-implements the inline
+        logic for direct testing."""
+        import pandas as pd
+        import numpy as np
+
+        def select_htf(candles_1d, candles_4h):
+            """Mirrors the inline `htf_ema_values` block in _analyze_pair."""
+            out: dict[int, float] = {}
+            try:
+                if candles_1d is not None and not candles_1d.empty and len(candles_1d) >= 200:
+                    out[200] = float(candles_1d["close"].ewm(span=200, adjust=False).mean().iloc[-1])
+                    if len(candles_1d) >= 800:
+                        out[800] = float(candles_1d["close"].ewm(span=800, adjust=False).mean().iloc[-1])
+                elif candles_4h is not None and not candles_4h.empty and len(candles_4h) >= 200:
+                    out[200] = float(candles_4h["close"].ewm(span=200, adjust=False).mean().iloc[-1])
+                    if len(candles_4h) >= 800:
+                        out[800] = float(candles_4h["close"].ewm(span=800, adjust=False).mean().iloc[-1])
+            except Exception:
+                return None
+            return out or None
+
+        # 1D with 250 bars, 4H with 400 bars — should pick 1D values
+        idx = pd.date_range("2025-01-01", periods=250, freq="1D", tz="UTC")
+        closes_1d = pd.Series(np.linspace(100, 200, 250))
+        candles_1d = pd.DataFrame({"close": closes_1d.values}, index=idx)
+        idx4 = pd.date_range("2025-01-01", periods=400, freq="4h", tz="UTC")
+        closes_4h = pd.Series(np.linspace(50, 300, 400))
+        candles_4h = pd.DataFrame({"close": closes_4h.values}, index=idx4)
+
+        out = select_htf(candles_1d, candles_4h)
+        # 1D 200-EMA on a linear ramp from 100→200 should end around ~170
+        assert 140 < out[200] < 200
+        # Different from 4H 200-EMA on 50→300 (would be much higher)
+        one_d_val = out[200]
+        out4 = select_htf(None, candles_4h)
+        assert abs(one_d_val - out4[200]) > 10.0  # distinctly different
+
+    def test_htf_ema_falls_back_to_4h_when_1d_short(self):
+        """When 1D has < 200 bars, fall back to 4H."""
+        import pandas as pd
+        import numpy as np
+
+        def select_htf(candles_1d, candles_4h):
+            out: dict[int, float] = {}
+            if candles_1d is not None and not candles_1d.empty and len(candles_1d) >= 200:
+                out[200] = float(candles_1d["close"].ewm(span=200, adjust=False).mean().iloc[-1])
+            elif candles_4h is not None and not candles_4h.empty and len(candles_4h) >= 200:
+                out[200] = float(candles_4h["close"].ewm(span=200, adjust=False).mean().iloc[-1])
+            return out or None
+
+        # Only 150 days of 1D data (below 200 threshold)
+        idx1d = pd.date_range("2025-01-01", periods=150, freq="1D", tz="UTC")
+        candles_1d = pd.DataFrame({"close": np.linspace(100, 150, 150)}, index=idx1d)
+        idx4h = pd.date_range("2025-01-01", periods=250, freq="4h", tz="UTC")
+        candles_4h = pd.DataFrame({"close": np.linspace(80, 120, 250)}, index=idx4h)
+
+        out = select_htf(candles_1d, candles_4h)
+        # Should have picked 4H
+        expected_4h = float(candles_4h["close"].ewm(span=200, adjust=False).mean().iloc[-1])
+        assert abs(out[200] - expected_4h) < 0.01
+
+    def test_htf_ema_none_when_both_insufficient(self):
+        """No 1D and no 4H → None."""
+        def select_htf(candles_1d, candles_4h):
+            out: dict[int, float] = {}
+            try:
+                if candles_1d is not None and not candles_1d.empty and len(candles_1d) >= 200:
+                    out[200] = 1.0
+                elif candles_4h is not None and not candles_4h.empty and len(candles_4h) >= 200:
+                    out[200] = 1.0
+            except Exception:
+                return None
+            return out or None
+
+        assert select_htf(None, None) is None

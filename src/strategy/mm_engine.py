@@ -89,6 +89,13 @@ MAX_MM_POSITIONS = 20
 # risk over this cap, the trade is rejected (reason=aggregate_risk).
 MAX_AGGREGATE_RISK_PCT = 5.0
 
+# Max distance from entry to TP1, as % of entry price. Engineering cap
+# — NOT an explicit course rule. Rejects setups whose computed TP1 is
+# so far from entry that the formation-timeframe (1H) has little chance
+# of reaching it in a sane hold period. 0 disables.
+# Tuneable via config.mm_max_tp1_distance_pct or settings UI.
+MAX_TP1_DISTANCE_PCT = 10.0
+
 # Maximum margin utilization — don't open new positions if margin > 60% of balance
 MAX_MARGIN_UTILIZATION = 0.60
 
@@ -288,6 +295,10 @@ class MMEngine:
         # course's 1%-per-trade rule). See MAX_AGGREGATE_RISK_PCT.
         self.max_aggregate_risk_pct = float(
             getattr(config, "mm_max_aggregate_risk_pct", MAX_AGGREGATE_RISK_PCT)
+        )
+        # Max TP1 distance cap. See MAX_TP1_DISTANCE_PCT.
+        self.max_tp1_distance_pct = float(
+            getattr(config, "mm_max_tp1_distance_pct", MAX_TP1_DISTANCE_PCT)
         )
 
         # Tunable parameters (overridable via settings page)
@@ -1087,6 +1098,10 @@ class MMEngine:
                         self.max_aggregate_risk_pct = float(
                             mm_settings["mm_max_aggregate_risk_pct"]
                         )
+                    if "mm_max_tp1_distance_pct" in mm_settings:
+                        self.max_tp1_distance_pct = float(
+                            mm_settings["mm_max_tp1_distance_pct"]
+                        )
                     if "mm_scan_interval" in mm_settings:
                         self.scan_interval = float(mm_settings["mm_scan_interval"]) * 60
                     if "mm_cooldown_hours" in mm_settings:
@@ -1591,27 +1606,39 @@ class MMEngine:
 
         # --- Run all MM modules ---
 
-        # EMA Framework (4H and 1D for HTF trend direction — course lessons
-        # 03, 10, 12). Both trend states feed the HTF alignment hard-veto
-        # (see the block guarded by `trend_state_4h` below trade_direction
-        # derivation) and are persisted on the trade row for post-mortems.
-        # Prior to 2026-04 the 4H trend state was computed and thrown away
-        # (a `# noqa: F841 — kept for future use` line), which let the bot
-        # short BNB into a clearly bullish 4H stack on 2026-04-17.
+        # --- EMA timeframe hierarchy (course-faithful as of 2026-04-20) ----
+        #
+        # Course Lesson 12 / 16: the 50 EMA / 200 EMA / 800 EMA targets are
+        # defined "on the chart you're trading". Formations are detected on
+        # 1H here, so 1H is the trade-timeframe and supplies:
+        #   - ema_state       → confluence scorer (ema_alignment, ema50_break)
+        #   - ema_values      → target analyzer for L1 (200 EMA) and L2 (800 EMA)
+        #
+        # 4H is the HTF-alignment / trend-veto context (Lessons 03, 10, 12).
+        # Gives us `trend_state_4h` → hard-veto counter-trend setups.
+        # NOT used for TP targets anymore — previously was, which caused
+        # 1H retest entries to inherit 4H-EMA targets that were often
+        # beyond reach in intraday windows (BTC 2026-04-20 TP1 at +22%).
+        #
+        # 1D is the true higher-timeframe per Lesson 12 "a 200 or 800 EMA
+        # on a higher time frame as a Target". Gives us:
+        #   - trend_state_1d   → post-mortem / directional context
+        #   - htf_ema_values   → target analyzer for L3 (1D 200 / 1D 800)
+        #
+        # When 1D history is insufficient (< 200 bars), 4H EMAs fall back
+        # in to fill htf_ema_values so the L3 target slot isn't empty.
         ema_state = None
-        ema_values = {}
+        ema_values: dict[int, float] = {}
+        ema_break = None
+        if candles_1h is not None and not candles_1h.empty and len(candles_1h) > 200:
+            ema_state = self.ema_framework.calculate(candles_1h)
+            ema_values = ema_state.values
+            ema_break = self.ema_framework.detect_ema_break(candles_1h, ema_period=50)
+
         trend_state_4h = None
         if candles_4h is not None and not candles_4h.empty and len(candles_4h) > 200:
-            ema_state = self.ema_framework.calculate(candles_4h)
             trend_state_4h = self.ema_framework.get_trend_state(candles_4h)
-            ema_values = ema_state.values
-            ema_break = self.ema_framework.detect_ema_break(candles_4h, ema_period=50)
-        else:
-            ema_break = None
 
-        # 1D trend state (best-effort — some markets lack the history).
-        # Used only as a soft secondary context signal and for persistence;
-        # the hard-veto below keys off the 4H state.
         trend_state_1d = None
         if (
             candles_1d is not None
@@ -2171,13 +2198,25 @@ class MMEngine:
                 logger.info(log_event, symbol=symbol, level=cycle_state.low,
                             hits=three_hits_at_low.hit_count, outcome=three_hits_at_low.expected_outcome)
 
-        # Higher-TF EMAs for L3 targets (course lesson 12 — "200 or 800 EMA
-        # on a higher time frame as a Target"). Compute from 4H candles if
-        # we have them; otherwise pass None and the L3 falls back to the
-        # same-TF 800 (previous behaviour).
+        # Higher-TF EMAs for L3 targets (course Lesson 12 — "a 200 or 800
+        # EMA on a higher time frame as a Target"). Prefer 1D EMAs because
+        # they are the true "higher TF" relative to a 1H trade-timeframe
+        # (4H is only one step up and is already used by trend_state_4h
+        # for HTF-alignment veto). If 1D history is insufficient, fall
+        # back to 4H so the L3 slot isn't empty.
         htf_ema_values: dict[int, float] | None = None
         try:
-            if candles_4h is not None and not candles_4h.empty and len(candles_4h) >= 200:
+            # Prefer 1D
+            if candles_1d is not None and not candles_1d.empty and len(candles_1d) >= 200:
+                htf_ema_values = {
+                    200: float(candles_1d["close"].ewm(span=200, adjust=False).mean().iloc[-1]),
+                }
+                if len(candles_1d) >= 800:
+                    htf_ema_values[800] = float(
+                        candles_1d["close"].ewm(span=800, adjust=False).mean().iloc[-1]
+                    )
+            # Fallback: 4H if 1D insufficient
+            elif candles_4h is not None and not candles_4h.empty and len(candles_4h) >= 200:
                 htf_ema_values = {
                     200: float(candles_4h["close"].ewm(span=200, adjust=False).mean().iloc[-1]),
                 }
@@ -2402,6 +2441,27 @@ class MMEngine:
                                 ema_50=ema_values.get(50), ema_200=ema_values.get(200),
                                 vectors=len(target_analysis.unrecovered_vectors),
                                 entry=entry_price, formation=best_formation.type)
+
+        # TP1-distance cap (2026-04-20). Engineering cap, NOT in course —
+        # rejects formation-timeframe entries whose computed TP1 is far
+        # enough from entry that the setup would need a multi-week move
+        # to reach it. Concrete trigger: BTC 2026-04-20 10:04 UTC entered
+        # at $75,251 with TP1 at $92,319 (+22.68%) because all 1H/4H EMAs
+        # were below entry — cascade landed on a historical vector 22%
+        # away. Disable by setting mm_max_tp1_distance_pct to 0.
+        if self.max_tp1_distance_pct > 0 and entry_price > 0:
+            tp1_dist_pct = abs(t_l1 - entry_price) / entry_price * 100
+            if tp1_dist_pct > self.max_tp1_distance_pct:
+                return self._reject(
+                    "tp1_too_far",
+                    symbol,
+                    tp1=round(t_l1, 6),
+                    entry=round(entry_price, 6),
+                    tp1_distance_pct=round(tp1_dist_pct, 2),
+                    max_pct=self.max_tp1_distance_pct,
+                    formation=best_formation.type,
+                    direction=trade_direction,
+                )
 
         self._advance("target_acquired")
 
