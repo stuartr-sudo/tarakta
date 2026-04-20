@@ -273,14 +273,19 @@ class MMSanityAgent:
 
         model = await self._choose_model()
         timeout_s = float(getattr(self.config, "mm_sanity_agent_timeout_s", 20.0))
-        thinking_budget = int(getattr(self.config, "mm_sanity_agent_thinking_budget", 4000))
+        # Effort controls adaptive-thinking depth on Opus 4.7 / Sonnet 4.6.
+        # "high" is the default for this task — money-critical judgement,
+        # not a classification.
+        effort = str(getattr(self.config, "mm_sanity_agent_effort", "high")).lower()
+        if effort not in {"low", "medium", "high", "max"}:
+            effort = "high"
 
         user_prompt = self._build_user_prompt(context)
         started = time.perf_counter()
 
         try:
             raw_response, usage = await asyncio.wait_for(
-                self._call_model(client, model, user_prompt, thinking_budget),
+                self._call_model(client, model, user_prompt, effort),
                 timeout=timeout_s,
             )
         except asyncio.TimeoutError:
@@ -398,7 +403,7 @@ class MMSanityAgent:
         client: Any,
         model: str,
         user_prompt: str,
-        thinking_budget: int,
+        effort: str,
     ) -> tuple[str, dict]:
         """Send the request and return (raw_text, usage_dict).
 
@@ -406,9 +411,13 @@ class MMSanityAgent:
           tokens of rubric + fixtures are charged at 10% of input price
           on cache hits (virtually all calls after the first in a 1-hour
           window).
-        - Extended thinking is enabled. We keep thinking_budget_tokens
-          conservative (~4K) — the rubric is structured enough that the
-          model doesn't need deep exploration, just disciplined traversal.
+        - Adaptive thinking + output_config.effort is the ONLY supported
+          thinking mode on Opus 4.7 — the legacy
+          `thinking={"type": "enabled", "budget_tokens": N}` shape is
+          rejected with a 400 ("thinking.type.enabled is not supported
+          for this model"). Sonnet 4.6 also supports adaptive+effort, so
+          the same call shape works for both our default and fallback
+          models. See: https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
         - Response format: plain text output. We parse JSON out of it via
           _parse_response — belt + braces vs `response_format`.
         """
@@ -426,7 +435,8 @@ class MMSanityAgent:
                 }
             ],
             messages=[{"role": "user", "content": user_prompt}],
-            thinking={"type": "enabled", "budget_tokens": thinking_budget},
+            thinking={"type": "adaptive"},
+            output_config={"effort": effort},
         )
 
         # Extract the JSON-bearing text block. With thinking enabled there

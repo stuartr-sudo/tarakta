@@ -73,7 +73,15 @@ class Settings(BaseSettings):
     mm_sanity_agent_enabled: bool = True
     mm_sanity_agent_model: str = "claude-opus-4-7"
     mm_sanity_agent_fallback_model: str = "claude-sonnet-4-6"
-    mm_sanity_agent_thinking_budget: int = 4000  # tokens reserved for extended thinking
+    # Adaptive thinking effort on Opus 4.7 / Sonnet 4.6. Accepted values:
+    # "low" | "medium" | "high" | "max". Default "high" — this is a
+    # money-critical judgement task, not a classification. Opus 4.7
+    # rejects the legacy thinking={"type":"enabled","budget_tokens":N}
+    # shape with a 400 (invalid_request_error); adaptive+effort is the
+    # only supported mode. Hit live on 2026-04-20 00:12 UTC — the first
+    # real setup of the week (NEAR long) approved via fail-open because
+    # the agent errored. This parameter replaces mm_sanity_agent_thinking_budget.
+    mm_sanity_agent_effort: str = "high"
     mm_sanity_agent_timeout_s: float = 20.0
     mm_sanity_agent_min_confidence: float = 0.0  # 0 = honour every VETO (no shadow)
     mm_sanity_agent_monthly_budget_usd: float = 600.0
