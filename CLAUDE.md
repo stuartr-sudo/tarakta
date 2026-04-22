@@ -196,6 +196,8 @@ Sanity-agent-specific optional overrides (all have sensible defaults in `config.
 | `MM_SANITY_AGENT_TIMEOUT_S` | `20.0` | Hard latency cap |
 | `MM_SANITY_AGENT_MIN_CONFIDENCE` | `0.0` | VETOs below this confidence get downgraded to a log-and-approve; 0.0 = honour every VETO |
 | `MM_SANITY_AGENT_MONTHLY_BUDGET_USD` | `600.0` | Auto-downgrade to Sonnet when projected spend exceeds 90% of this |
+| `MM_SANITY_AGENT_OUTCOME_LOOKBACK_DAYS` | `14` | Rubric 8 learning-loop lookback window |
+| `MM_SANITY_AGENT_OUTCOME_MIN_N` | `20` | Minimum closed samples (wins+losses+scratches) before a GRADE\|HTF_4H profile is shown to the agent. Smaller buckets render as "(insufficient data — skip Rubric 8)". Added rubric_v=3 after rubric_v=2 auto-vetoed on n=1 noise (2026-04-22) |
 
 ## Deployment
 

@@ -65,7 +65,7 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
 # Prompt version — bump when the rubric changes so decisions can be joined
 # to their prompt version during post-hoc analysis.
 # ---------------------------------------------------------------------------
-PROMPT_VERSION = "prompt_v=2 rubric_v=2"
+PROMPT_VERSION = "prompt_v=3 rubric_v=3"
 
 
 # ---------------------------------------------------------------------------
@@ -120,23 +120,29 @@ RUBRIC — reason through these in order before committing to a verdict:
    If the last 3 trades on this symbol in this direction all lost, the
    current regime for this symbol is against us. Heavily weight VETO.
 
-8. Your own track record (RUBRIC ADDED 2026-04-21, rubric_v=2):
-   Each call receives a RECENT PROFILE OUTCOMES block showing the net
-   P&L of APPROVE decisions YOU made in the lookback window, grouped
-   by GRADE|HTF_4H profile. If the current setup's profile (marked
-   "← THIS PROFILE") has:
-     - n >= 5 AND net_pnl_usd < 0 AND losses >= wins: strongly prefer
-       VETO unless your confidence is >= 0.85 AND you can cite a
-       concrete factor in THIS setup that the losing trades lacked.
-     - n >= 3 AND net_pnl_usd is clearly negative (net < -avg_risk):
-       prefer VETO unless confidence >= 0.80 + clear differentiator.
-     - net_pnl_usd is positive or no prior samples: proceed under the
-       other rubric points — no penalty.
-   When you veto based on this rubric point, put "recent_losses" in
-   concerns AND cite the specific profile and sample count in reason
-   (e.g. "C|sideways profile is 0W/3L/$-160 over 4 samples").
-   This rubric point lets the agent calibrate from its own history
-   rather than committing to each profile fresh every call.
+8. Your own track record (rubric_v=3, updated 2026-04-22):
+   Each call receives a RECENT PROFILE OUTCOMES block. The engine
+   pre-filters this block to show only profiles with enough closed
+   samples to carry signal — smaller buckets are hidden because a
+   handful of trades cannot distinguish regime from variance.
+
+   If the block shows "(insufficient data ...)" OR the current setup's
+   profile (GRADE|HTF_4H, labelled after the block) is NOT listed in
+   the block: SKIP this rubric entirely. Decide on Rubrics 1-7 alone.
+   Do NOT cite small-sample profiles — if they are not in the block,
+   they are not informative yet.
+
+   When the current setup's profile IS listed (marked "← THIS PROFILE"):
+     - net_pnl_usd clearly negative AND losses > wins:
+       prefer VETO unless confidence >= 0.85 AND you cite a concrete
+       factor present in THIS setup that the losing trades lacked.
+     - net_pnl_usd positive OR wins >= losses:
+       no penalty; proceed on Rubrics 1-7.
+
+   When vetoing on this rubric, tag "recent_losses" in concerns AND
+   cite the specific profile and sample count in reason (e.g.
+   "C|sideways profile is 4W/18L/$-420 over 22 samples"). Never cite
+   a profile that isn't in the block.
 
 WORKED EXAMPLES:
 
@@ -597,13 +603,24 @@ class MMSanityAgent:
         # approvals on the same profile have been systematically losing.
         outcome_stats = ctx.get("_outcome_stats") or {}
         lookback_days = ctx.get("_outcome_lookback_days", 14)
+        min_n = int(getattr(self.config, "mm_sanity_agent_outcome_min_n", 20))
         this_profile_key = (
             f"{str(ctx.get('grade') or '?').upper()}|"
             f"{str(ctx.get('htf_trend_4h') or '?').lower()}"
         )
-        if outcome_stats:
+        # Rubric 8 pre-filter: only buckets with enough CLOSED samples carry
+        # signal. Opens don't count (outcome unknown). rubric_v=2 shipped
+        # without this filter and auto-vetoed 0W/1L (n=1) profiles on
+        # 2026-04-21/22; rubric_v=3 requires engine-side n-gating so the
+        # model never sees profiles too small to distinguish regime noise.
+        eligible = {
+            k: v for k, v in outcome_stats.items()
+            if (int(v.get("wins", 0)) + int(v.get("losses", 0))
+                + int(v.get("scratches", 0))) >= min_n
+        }
+        if eligible:
             stats_lines = []
-            for key, v in sorted(outcome_stats.items(), key=lambda kv: -abs(kv[1].get("net_pnl_usd", 0))):
+            for key, v in sorted(eligible.items(), key=lambda kv: -abs(kv[1].get("net_pnl_usd", 0))):
                 marker = " ← THIS PROFILE" if key == this_profile_key else ""
                 stats_lines.append(
                     f"  {key:<16} n={v['n']:>2}  "
@@ -613,7 +630,10 @@ class MMSanityAgent:
                 )
             outcome_block = "\n".join(stats_lines)
         else:
-            outcome_block = "  (no prior APPROVE outcomes in lookback window — first pass)"
+            outcome_block = (
+                f"  (insufficient data — no profile has >={min_n} closed "
+                f"samples yet; skip Rubric 8 and decide on Rubrics 1-7 only)"
+            )
 
         return f"""# {PROMPT_VERSION}
 

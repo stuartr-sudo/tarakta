@@ -17,6 +17,48 @@ Paired docs:
 
 ---
 
+## 2026-04-23 — Day 6: Rubric 8 min-n filter (rubric_v=3)
+
+### `<pending>` — fix(mm-agent): engine-side min_n filter on Rubric 8 outcome stats
+
+**Motivation — v44 regression discovered:**
+
+48 hours after v44 shipped (2026-04-21 00:40 UTC), the user noted "0 trades in a long time." Diagnosis confirmed a silent Tier 2 regression:
+
+| Day | APPROVE | VETO | Rate |
+|---|---|---|---|
+| 2026-04-20 (pre-v44) | 7 | 9 | 41% |
+| 2026-04-21 (v44 day) | 1 | 133 | 0.7% |
+| 2026-04-22 | 0 | 102 | 0% |
+
+The 2026-04-22 STATUS doc had read the 0% approve rate as *"agent correctly refusing losing profiles"*. It wasn't. Three defects in `rubric_v=2`:
+
+1. **Thresholds are statistical noise.** "n ≥ 3 prefer VETO" and "n ≥ 5 strongly prefer VETO" fire on samples where win-rate CI spans ~[3%, 66%]. Cannot distinguish regime signal from variance.
+2. **Model wasn't enforcing the rubric's own gates.** Apr 22 VETOs cited `"F|sideways profile already 0W/1L"` as a reason — n=1, which the rubric says should give "no penalty." "Prefer VETO" language was too soft against a pattern the model was primed to see.
+3. **Selection-bias doom loop.** `get_mm_agent_outcome_stats` aggregates APPROVE decisions only. The agent is shown the P&L of its own best past guesses. When those lose, the rubric teaches "approve less" — which shrinks future samples and ratchets deeper into veto-everything. No mechanism to recover.
+
+**Fix shipped (rubric_v=3):**
+
+- New config `MM_SANITY_AGENT_OUTCOME_MIN_N` (default 20 closed samples). `src/config.py`.
+- `_build_user_prompt` pre-filters `outcome_stats` to buckets where `wins + losses + scratches ≥ min_n`. Opens don't count — outcome unknown.
+- When no bucket passes, the block is replaced with a single unified message: *"(insufficient data — no profile has ≥20 closed samples yet; skip Rubric 8 and decide on Rubrics 1-7 only)"*. Collapses the old "first pass" and "all filtered" branches into one.
+- Rubric 8 text rewritten: instructs model to SKIP this rubric entirely when THIS PROFILE is not in the (filtered) block. Explicit "never cite a profile that isn't in the block" — closes defect #2.
+- `PROMPT_VERSION` bumped `prompt_v=2 rubric_v=2` → `prompt_v=3 rubric_v=3`. Prompt cache rebuilds on first call post-deploy (one-time ~$0.04 cache write).
+
+**Statistical rationale for min_n=20:** n=20 is roughly the sample size at which a 75% vs 25% win rate becomes distinguishable from variance at 95% CI. Lower values trade statistical rigour for faster feedback-loop activation. Tunable without redeploy.
+
+**Defect #1 (thresholds)** — resolved by engine-side filter.
+**Defect #2 (model ignoring rubric gates)** — resolved by not emitting small-sample buckets at all.
+**Defect #3 (selection-bias doom loop)** — mitigated: buckets must reach n=20 before they gate future approvals, giving the agent 2-4 weeks to accumulate samples before self-blocking. Not fully solved — the feedback loop is still one-directional. Logged in ROADMAP as a future enhancement (two-way signal: if a profile runs clearly positive, surface that as *bullish* prior).
+
+**Tests:** 6 new in `TestUserPromptOutcomeStatsFilter`. 3 existing (`test_no_stats_…`, `test_stats_rendered_…`, `test_prompt_version_bumped_…`) updated for v3 semantics. Full suite: **699 passing, 1 skipped**.
+
+**Not a course change.** Rubric 8 is about the agent calibrating from its own track record, not about MM course rules. No course lesson citation required.
+
+Ref: `docs/STATUS_2026-04-23.md` for full session notes.
+
+---
+
 ## 2026-04-22 — Day 5: Tier 2 learning loop verified live
 
 No code changes today — this is an operational milestone, captured

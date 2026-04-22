@@ -410,7 +410,10 @@ class TestUserPromptOutcomeStats:
     def _agent(self):
         return MMSanityAgent(config=SimpleNamespace(), repo=MagicMock())
 
-    def test_no_stats_renders_first_pass_placeholder(self):
+    def test_no_stats_renders_insufficient_data_placeholder(self):
+        """Empty stats render the unified insufficient-data fallback
+        (rubric_v=3 collapsed the old 'first pass' branch into this
+        single message)."""
         ctx = {
             "symbol": "BNB/USDT",
             "grade": "C",
@@ -420,19 +423,23 @@ class TestUserPromptOutcomeStats:
         }
         p = self._agent()._build_user_prompt(ctx)
         assert "RECENT PROFILE OUTCOMES" in p
-        assert "first pass" in p
+        assert "insufficient data" in p.lower()
+        assert "skip Rubric 8" in p
         assert "THIS setup's profile: C|sideways" in p
 
     def test_stats_rendered_with_this_profile_marker(self):
+        """With enough closed samples per bucket, both render and the
+        current setup's profile is flagged ← THIS PROFILE. Sample sizes
+        here are realistic for rubric_v=3 (min_n=20)."""
         stats = {
             "C|sideways": {
-                "n": 4, "wins": 0, "losses": 3, "scratches": 1, "opens": 0,
-                "net_pnl_usd": -163.61, "avg_pnl_usd": -40.90,
+                "n": 24, "wins": 6, "losses": 14, "scratches": 2, "opens": 2,
+                "net_pnl_usd": -163.61, "avg_pnl_usd": -7.44,
                 "sample_trades": ["BNB/USDT", "NEAR/USDT", "AVAX/USDT", "DOGE/USDT"],
             },
             "F|sideways": {
-                "n": 2, "wins": 0, "losses": 0, "scratches": 2, "opens": 0,
-                "net_pnl_usd": -9.00, "avg_pnl_usd": -4.50,
+                "n": 22, "wins": 8, "losses": 10, "scratches": 4, "opens": 0,
+                "net_pnl_usd": -9.00, "avg_pnl_usd": -0.41,
                 "sample_trades": ["BNB/USDT", "BTC/USDT"],
             },
         }
@@ -457,12 +464,12 @@ class TestUserPromptOutcomeStats:
         assert "← THIS PROFILE" in c_line
         assert "← THIS PROFILE" not in f_line
 
-    def test_prompt_version_bumped_to_rubric_v2(self):
-        """The system prompt rubric changed (added point 8) so the
-        version must bump to prevent silent cache reuse of the old
-        rubric."""
-        assert "rubric_v=2" in PROMPT_VERSION
-        assert "prompt_v=2" in PROMPT_VERSION
+    def test_prompt_version_bumped_to_rubric_v3(self):
+        """rubric_v=3 added engine-side min-n filter + removed over-eager
+        n>=3 threshold. Version must bump so agents don't silently reuse
+        cached rubric_v=2."""
+        assert "rubric_v=3" in PROMPT_VERSION
+        assert "prompt_v=3" in PROMPT_VERSION
 
 
 def test_system_prompt_has_rubric_8():
@@ -470,8 +477,117 @@ def test_system_prompt_has_rubric_8():
     prompt, otherwise the agent won't know what to do with the stats
     block in the user prompt."""
     assert "8. Your own track record" in SYSTEM_PROMPT
-    # Must mention the specific thresholds so decisions are reproducible
-    assert "n >= 5" in SYSTEM_PROMPT
+    # Must mention confidence floor for VETO on this rubric
     assert "0.85" in SYSTEM_PROMPT
     # And the concern tag we expect vetoes to use
     assert "recent_losses" in SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 min-n filter (2026-04-22, rubric_v=3): block buckets that don't
+# carry statistical signal so the agent doesn't VETO on 0W/1L noise.
+# See docs/MM_SANITY_AGENT_DESIGN.md; triggered by v44 regression.
+# ---------------------------------------------------------------------------
+
+class TestUserPromptOutcomeStatsFilter:
+    """Rubric 8 only reaches the model for buckets with enough closed
+    samples to distinguish regime signal from variance. Threshold is
+    ``mm_sanity_agent_outcome_min_n`` on config (default 20)."""
+
+    def _agent(self, **config_kwargs):
+        return MMSanityAgent(
+            config=SimpleNamespace(**config_kwargs), repo=MagicMock()
+        )
+
+    def test_bucket_below_min_n_is_filtered_out(self):
+        stats = {
+            "C|sideways": {  # 4 closed — below threshold, must be filtered
+                "n": 5, "wins": 1, "losses": 2, "scratches": 1, "opens": 1,
+                "net_pnl_usd": -40.0,
+            },
+            "C|bullish": {   # 25 closed — passes threshold
+                "n": 25, "wins": 15, "losses": 8, "scratches": 2, "opens": 0,
+                "net_pnl_usd": 125.50,
+            },
+        }
+        ctx = {"symbol": "X", "grade": "C", "htf_trend_4h": "bullish",
+               "_outcome_stats": stats, "_outcome_lookback_days": 14}
+        p = self._agent(mm_sanity_agent_outcome_min_n=20)._build_user_prompt(ctx)
+        assert "C|sideways" not in p, "below-threshold bucket leaked into prompt"
+        assert "C|bullish" in p
+        assert "net=$+125.50" in p
+
+    def test_all_buckets_below_min_n_renders_insufficient_data(self):
+        stats = {
+            "C|sideways": {"n": 5, "wins": 1, "losses": 2, "scratches": 1,
+                           "opens": 1, "net_pnl_usd": -40.0},
+            "F|sideways": {"n": 1, "wins": 0, "losses": 1, "scratches": 0,
+                           "opens": 0, "net_pnl_usd": -12.0},
+        }
+        ctx = {"symbol": "X", "grade": "C", "htf_trend_4h": "sideways",
+               "_outcome_stats": stats, "_outcome_lookback_days": 14}
+        p = self._agent(mm_sanity_agent_outcome_min_n=20)._build_user_prompt(ctx)
+        # No bucket rows
+        assert "net=$" not in p
+        # Explicit fallback so the model knows to skip Rubric 8
+        assert "insufficient data" in p.lower()
+        assert "skip Rubric 8" in p
+        # The active threshold surfaces so decisions are reproducible
+        assert ">=20" in p
+
+    def test_empty_stats_renders_insufficient_data(self):
+        """Empty stats (first pass, before any approvals closed) takes the
+        same path as all-filtered — a single unified fallback message."""
+        ctx = {"symbol": "X", "grade": "C", "htf_trend_4h": "sideways",
+               "_outcome_stats": {}, "_outcome_lookback_days": 14}
+        p = self._agent(mm_sanity_agent_outcome_min_n=20)._build_user_prompt(ctx)
+        assert "insufficient data" in p.lower()
+        assert "skip Rubric 8" in p
+
+    def test_min_n_is_configurable(self):
+        stats = {
+            "C|sideways": {"n": 10, "wins": 4, "losses": 4, "scratches": 2,
+                           "opens": 0, "net_pnl_usd": 5.0},
+        }
+        ctx = {"symbol": "X", "grade": "C", "htf_trend_4h": "sideways",
+               "_outcome_stats": stats, "_outcome_lookback_days": 14}
+        # n_closed = 10; passes when min_n=5 → bucket row renders (has net=$)
+        p_low = self._agent(mm_sanity_agent_outcome_min_n=5)._build_user_prompt(ctx)
+        assert "net=$+5.00" in p_low
+        # Same bucket filtered out when min_n=20 → no bucket rows, fallback shown
+        p_high = self._agent(mm_sanity_agent_outcome_min_n=20)._build_user_prompt(ctx)
+        assert "net=$" not in p_high
+        assert "insufficient data" in p_high.lower()
+
+    def test_opens_do_not_count_toward_min_n(self):
+        """Open trades have no pnl yet — they cannot contribute to a
+        profile's win/loss signal, so they must not satisfy the filter."""
+        stats = {
+            "C|bullish": {  # 3 closed + 20 open; only 3 count
+                "n": 23, "wins": 1, "losses": 2, "scratches": 0, "opens": 20,
+                "net_pnl_usd": -5.0,
+            },
+        }
+        ctx = {"symbol": "X", "grade": "C", "htf_trend_4h": "bullish",
+               "_outcome_stats": stats, "_outcome_lookback_days": 14}
+        p = self._agent(mm_sanity_agent_outcome_min_n=20)._build_user_prompt(ctx)
+        # No bucket row rendered — only 3 closed samples, below threshold
+        assert "net=$" not in p
+        assert "insufficient data" in p.lower()
+
+    def test_default_min_n_when_config_missing(self):
+        """If the config namespace lacks the attr, default 20 applies —
+        this is the behaviour in production until a tuning knob is set."""
+        stats = {
+            "C|sideways": {"n": 6, "wins": 1, "losses": 4, "scratches": 0,
+                           "opens": 1, "net_pnl_usd": -159.0},
+        }
+        ctx = {"symbol": "X", "grade": "C", "htf_trend_4h": "sideways",
+               "_outcome_stats": stats, "_outcome_lookback_days": 14}
+        # Bare SimpleNamespace — no min_n attr. n_closed=5, below default 20.
+        agent = MMSanityAgent(config=SimpleNamespace(), repo=MagicMock())
+        p = agent._build_user_prompt(ctx)
+        # No bucket row; insufficient-data fallback with the default threshold
+        assert "net=$" not in p
+        assert "insufficient data" in p.lower()
+        assert ">=20" in p

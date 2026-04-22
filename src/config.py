@@ -112,6 +112,16 @@ class Settings(BaseSettings):
     # and recency (regime changes). 0 disables the learning loop
     # (reverts to pre-Tier-2 behaviour).
     mm_sanity_agent_outcome_lookback_days: int = 14
+    # Minimum number of CLOSED samples (wins+losses+scratches) a
+    # GRADE|HTF_4H profile bucket must have before it's surfaced to the
+    # agent in Rubric 8. Smaller buckets get filtered to an
+    # "(insufficient data — skip Rubric 8)" line. Added 2026-04-22 after
+    # v44 shipped rubric_v=2 and the agent vetoed ~100% of setups on
+    # 1W/4L (n=5) profiles — classic small-sample overfitting.
+    # 20 = roughly the sample size at which a 75% vs 25% win rate is
+    # distinguishable from variance at 95% CI. Lower values trade
+    # statistical rigour for faster feedback-loop activation.
+    mm_sanity_agent_outcome_min_n: int = 20
 
     # Scanning defaults
     min_volume_usd: float = 5_000_000
