@@ -9,28 +9,15 @@ Read alongside:
 
 ---
 
-## Now (unblocks everything else)
+## ✅ Done
 
-### 1. Deploy the 3 pending engine commits
+### 1. Deploy the 3 pending engine commits — DEPLOYED 2026-04-21 as v44
 
-```
-3231277  feat(mm-agent): Tier 1 + Tier 2 source files
-d633dcb  fix(mm): target-timeframe hierarchy (1H/4H/1D + TP1 cap)
-eb1f130  fix(mm): scratch rule + L1 target — course-faithful
-```
-
-Everything else downstream assumes these are live.
-
-**Command:** `fly deploy --depot=false --remote-only` (auth as `stuartasta@gmail.com`).
-
-**How to verify after deploy:**
-- Next trade entered should have TP1 within ~10% of entry (the cap)
-- `mm_agent_decisions.prompt_version` should show `prompt_v=2 rubric_v=2`
-- `input_context` should include `_outcome_stats` (initially empty — "first pass")
+Verified 2026-04-22: `prompt_version='prompt_v=2 rubric_v=2'` on all recent rows. 82 VETOs in 6h, all citing Rubric 8 with correct profile stats. Tier 2 learning loop confirmed working.
 
 ---
 
-## Next 1–2 sessions (small, high-value)
+## Now (operational + small, high-value)
 
 ### 2. Tier 3 — daily cron running agent_review.py
 
@@ -44,6 +31,24 @@ Goal: you wake up, there's a report in Slack / email / the dashboard saying "age
 - (c) Cloud Routine — future-proof but 5-25/day cap (overkill for 1 run/day)
 
 **Recommendation:** (b). Same host as the bot, always on. Roughly 30 min of wiring.
+
+### 2b. Per-setup decision cache (cost mitigation) — new 2026-04-22
+
+**Why:** agent cost spiked from projected $6/mo → observed $250/mo because the 1H formation detector re-generates the same setup every 5-min scan, and each re-evaluation bills a full Opus 4.7 call. Observed: 82 calls on the same DOGE long setup in 6h, all identical VETO.
+
+**Design:** add a small in-memory cache on `MMSanityAgent` keyed by `(symbol, formation_variant, round(entry_price, 4), int(sl_ref * 10000))`. Cache hit within the last 30 min → return the cached decision without calling the API.
+
+**Safety:** cache invalidates on:
+- Any price move >0.5% from the cached entry_price
+- `current_level` advancing (setup has progressed)
+- Formation variant changing
+- Time-based: 30-min TTL hard limit
+
+**Not needed yet** — current cost $250/mo is well under the $600 cap. But if the pattern continues for 2–3 days, shipping this saves ~$200/mo while keeping full protection.
+
+**Size:** ~60 lines + tests.
+
+---
 
 ### 3. Backfill `mm_agent_decisions.trade_id`
 

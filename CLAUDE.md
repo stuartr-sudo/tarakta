@@ -43,9 +43,9 @@ Before modifying the sanity agent (`src/strategy/mm_sanity_agent.py`), read `doc
 
 Before making ANY rule change (scratch rule, confluence weights, target hierarchy, SL progression, etc.), read the relevant lesson in `docs/courses/mmm-masterclasses/` FIRST. The bot is only valuable if it implements the course; inventing rules is how we got the BNB disaster on 2026-04-17. **Cite the exact lesson + timestamp in the commit message.**
 
-For the running history of every engine change with course citations: see `docs/CHANGELOG.md`. For current project state: see the latest `docs/STATUS_YYYY-MM-DD.md`. For what's coming next: see `docs/ROADMAP.md`.
+For the running history of every engine change with course citations: see `docs/CHANGELOG.md`. For current project state: see the latest `docs/STATUS_YYYY-MM-DD.md` (most recent is `docs/STATUS_2026-04-22.md`). For what's coming next: see `docs/ROADMAP.md`.
 
-**Fresh session onboarding order:** (1) latest STATUS doc for today's state → (2) CHANGELOG for history → (3) ROADMAP for next steps → (4) this file for gotchas → (5) run `python3 scripts/agent_review.py --days 7` and `python3 scripts/replay_scan.py --symbol BNB --days 7` to ground in actual bot behaviour.
+**Fresh session onboarding order:** (1) latest STATUS doc for today's state → (2) CHANGELOG for history → (3) ROADMAP for next steps → (4) this file for gotchas → (5) run `python3 scripts/agent_review.py --days 2` and `python3 scripts/replay_scan.py --symbol BNB --days 7` to ground in actual bot behaviour.
 
 ## Architecture
 

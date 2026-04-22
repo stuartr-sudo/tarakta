@@ -17,6 +17,43 @@ Paired docs:
 
 ---
 
+## 2026-04-22 — Day 5: Tier 2 learning loop verified live
+
+No code changes today — this is an operational milestone, captured
+for the handoff record.
+
+**Verified v44 is deployed and running the Tier 2 rubric:**
+- `prompt_version = 'prompt_v=2 rubric_v=2'` on 82 decisions in the
+  last 6 hours
+- 81 VETOs, 0 APPROVEs, 1 ERROR
+- Average VETO confidence: 0.82
+- Representative VETO reason: *"Rubric 8: C|sideways profile is
+  1W/4L/$-158.93 over 6 samples; no differentiator here to justify
+  override."* with concerns `["recent_losses", "low_grade"]`
+
+**Interpretation:** the agent is correctly reading its own 14-day
+track record via `get_mm_agent_outcome_stats()` and refusing to take
+the same losing pattern again. Before Tier 2 went live, the same
+DOGE long setup would have been approved (Grade C + sideways HTF +
+multi-session W + 3/4 retest = rubric-compliant) and lost. Tier 2
+closes the loop.
+
+**Operational note:** agent cost rose from a projected $6/mo to an
+observed $250/mo (at current 82-calls/6h pace). Still under the $600
+cap, but worth monitoring. Contributing factor: the 1H formation
+detector re-generates the same DOGE long setup every 5-min scan, and
+each re-evaluation bills an agent call. A per-setup decision cache
+(keyed by symbol + formation_hash, ~30 min TTL) would bring cost back
+under control without losing protection. Logged as follow-up in
+`docs/ROADMAP.md` §2b.
+
+**No red flags observed.** Pipeline healthy, agent reasoning coherent,
+no unexplained approvals or error spikes.
+
+Ref: `docs/STATUS_2026-04-22.md` for full snapshot.
+
+---
+
 ## 2026-04-21 — Day 4: Agent learning loop (Tier 1 + Tier 2)
 
 ### `<pending>` — feat(mm-agent): outcome-aware rubric + review CLI
