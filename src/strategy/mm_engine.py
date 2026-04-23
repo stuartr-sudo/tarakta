@@ -2278,16 +2278,33 @@ class MMEngine:
             sl_price = sl_ref * 1.002  # 0.2% buffer above invalidation
             trade_direction = "short"
 
-        # Course-faithful change (2026-04): the course (lesson 53) is explicit —
-        # "SL goes where it needs to go. NEVER tighten SL to improve R:R."
-        # Risk is controlled by position sizing (1% of account / SL distance),
-        # NOT by refusing to trade wide-SL setups. The previous 5% cap was a
-        # code invention not found anywhere in the course. Logged for telemetry
-        # only so we can see when SL is unusually wide.
+        # Re-added 2026-04-23 as a REJECT (not a tighten). Earlier removal
+        # (2026-04) conflated two distinct actions:
+        #   - Tightening SL to improve RR — prohibited per Lesson 53
+        #     ("SL goes where it needs to go. NEVER tighten SL.")
+        #   - Rejecting a setup because SL distance indicates we MISSED
+        #     the retest — course-compatible (Lesson 9: "enter at the
+        #     proper swing level"). A wide SL relative to entry means
+        #     current_price has drifted far past the formation's
+        #     invalidation point — i.e. we are LATE, not at the retest.
+        # Keeping the rule-change at the reject path (not the SL
+        # placement) is course-faithful. SL is untouched; we simply
+        # don't enter when price is no longer at the retest level.
+        #
+        # Concrete impact (2026-04-22 funnel): LTC long SL 7.15%, SOL
+        # long 9.96%, XRP long 10.06% all produce RR < 0.4 that waste
+        # agent calls ($0.08 each, re-billed every 5-min scan) even
+        # though they will never pass downstream gates.
         sl_distance_pct = abs(entry_price - sl_price) / entry_price * 100
         if sl_distance_pct > self.max_sl_pct:
-            logger.info("mm_wide_sl_warning", symbol=symbol,
-                        sl_distance_pct=round(sl_distance_pct, 2), threshold=self.max_sl_pct)
+            return self._reject(
+                "sl_too_wide",
+                symbol,
+                sl_distance_pct=round(sl_distance_pct, 2),
+                threshold=self.max_sl_pct,
+                entry=entry_price,
+                sl=sl_price,
+            )
 
         # Minimum SL distance guard (added 2026-04-15 after STRK entered with
         # SL $0.00000317 above entry — 0.01% of price — and got stopped out
