@@ -17,9 +17,16 @@ Paired docs:
 
 ---
 
-## 2026-04-23 — Day 6: Rubric 8 min-n filter (rubric_v=3)
+## 2026-04-23 — Day 6: Rubric 8 min-n filter (rubric_v=3) + three user-reported bugs
 
-### `<pending>` — fix(mm-agent): engine-side min_n filter on Rubric 8 outcome stats
+Multiple fixes shipped on the same day. Structured as:
+1. `eda4193` — Rubric 8 min-n filter (agent over-vetoing from small samples)
+2. `ca38f8d` — `sl_too_wide` gate re-added (late-retest entries, lesson 9)
+3. `01038af` — entry-slippage gate from peak2 wick (P1/3, this batch)
+4. `a2c00d1` — per-setup decision cache (P2/3, this batch)
+5. `40a0860` — MFE-based 2h scratch rule (P3/3, this batch)
+
+### `eda4193` — fix(mm-agent): engine-side min_n filter on Rubric 8 outcome stats
 
 **Motivation — v44 regression discovered:**
 
@@ -56,6 +63,117 @@ The 2026-04-22 STATUS doc had read the 0% approve rate as *"agent correctly refu
 **Not a course change.** Rubric 8 is about the agent calibrating from its own track record, not about MM course rules. No course lesson citation required.
 
 Ref: `docs/STATUS_2026-04-23.md` for full session notes.
+
+### User-reported bugs batch (P1 + P2 + P3)
+
+User flagged three issues after the first week of live operation:
+
+> "The 2h scratch is odd... it seems to always close out too early...
+> if the initial trade goes in the wrong direction, but comes back in
+> the direction we expect, it gets closed... before it can actually
+> realized. The entry points are all wrong... a lot of trades are
+> getting rejected for 'SL too wide'... but that is actually because
+> the entry point is NOT being calculated correctly. You made a HUGE
+> mistake... the Agent was only supposed to be called when a setup is
+> confirmed... NOT all potential trades. THAT cost me too much in
+> wasted API credit."
+
+All three shipped as P1/P2/P3 on the same day.
+
+### `01038af` — fix(mm): entry-slippage gate from peak2 wick (P1/3)
+
+**Motivation:** BTC entry on 2026-04-20 was +4.39% above the course's
+"retest level" (2nd-peak wick). The engine was using `current_price`
+as the entry reference, which silently drifted from the course-correct
+peak2 wick whenever the 1H formation candle was not the most recent.
+This cascaded:
+- entry too high → SL placement too far below → "SL too wide" reject
+- symptoms misdiagnosed: the rejection reason was the entry, not the SL
+
+**Course citation (Lesson 20 [08:00] / Lesson 47 [12:00]):**
+> *"The retest of the 2nd peak is where we enter — that wick is the
+> level, not wherever price is sitting when we scan."*
+
+**Fix:** new `mm_max_entry_slippage_pct` config (default 1.0%). Before
+setting `entry_price = current_price`, we compute the slippage from the
+peak2 wick. Setups where current_price has moved more than 1% past the
+wick are rejected with `rejection_reason='entry_slipped_from_retest'`.
+
+**Tests:** 10 new — config + runtime overrides + BTC/NEAR/BNB
+regression guards with specific computed numbers.
+
+### `a2c00d1` — fix(mm-agent): per-setup decision cache (P2/3)
+
+**Motivation:** 82 identical Opus 4.7 calls on the same DOGE long setup
+over 6 hours (2026-04-21). The 1H formation detector re-emits the same
+setup every 5-min scan; each re-emit billed a fresh agent call (~$0.05
+each) for zero new information. Projected spend spiked from $6/mo →
+$250/mo.
+
+**Fix:** in-memory cache on `MMSanityAgent` keyed by
+`(symbol, direction, formation_variant, round(entry_price, 4))`. Hits
+within the configurable TTL (30 min default) + price-drift bound
+(0.5% default) replay the cached verdict. Cached verdicts prefix reason
+with `"[cached]"` and report zero cost/latency.
+
+**Invalidation rules:**
+- TTL expiry — prevents a stale verdict from outliving regime change.
+- Price drift above threshold — refetch when the setup has shifted.
+- Malformed API responses never populate the cache (no poison).
+- Kill switch short-circuits BEFORE cache lookup (no cached verdicts
+  after disabling the agent).
+
+**Config:** `mm_sanity_agent_cache_ttl_seconds` (0 disables),
+`mm_sanity_agent_cache_price_drift_pct`.
+
+**Tests:** 14 new — 7 cache-key edge cases + 7 review() integration
+tests (first call, repeat hit, TTL expiry, drift invalidation, variant
+/ symbol / direction key changes, malformed non-caching, kill switch
+bypass).
+
+**Expected impact:** 82-call DOGE pattern → ~12 calls over 6h (85%
+reduction), cost back toward the designed $6/mo.
+
+### `40a0860` — fix(mm-engine): MFE-based 2h scratch rule (P3/3)
+
+**Motivation:** user's "closes too early" report. The B1 rule measured
+unrealized P&L at the 2h instant only, so a trade that had been +1R
+mid-flight but pulled back to break-even by the check was being
+scratched — even though the MM clearly had been "holding for a move"
+earlier.
+
+**Course citation (Lesson 13 [47:00]):**
+> *"If you're not in substantial profit within two hours you scratch
+> the trade. It means the Market Maker has a different plan."*
+
+The word "within" is a window, not an instant — the prior
+implementation was over-eager.
+
+**Fix:** track Max Favorable Excursion (MFE) in R-multiples on every
+`_manage_position` tick. `R = abs(entry - original_stop_loss)`. At
+the 2h mark, scratch only if peak MFE never cleared
+`mm_scratch_mfe_threshold_r` (default 0.3R). A trade that peaked at
++0.5R and is now flat survives; a trade that never showed any favourable
+movement still scratches.
+
+**Persistence (migration 020):** new
+`trades.mm_max_favorable_excursion_r` column. Persisted when MFE
+increases by ≥0.1R (caps DB writes at ~10/trade) and restored on
+engine restart so mid-trade outages don't lose the "already cleared
+the bar" fact.
+
+**Behaviour delta:**
+- Recovered trades no longer scratched (the user-reported bug).
+- Very-wide-SL trades with tiny absolute profits (e.g. 0.5% gain on
+  8% risk = 0.062R) now scratch — this is stricter in the right
+  direction, matching the course's sense of "substantial".
+
+**Config:** `mm_scratch_mfe_threshold_r`. 0 effectively disables the
+rule.
+
+**Tests:** 10 new + 2 existing helpers updated (MFE tracking helpers
+needed `original_stop_loss` to be set to use the new rule). Full
+suite after all of today's batches merged: 745+ tests passing.
 
 ---
 

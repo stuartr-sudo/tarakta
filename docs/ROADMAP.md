@@ -15,6 +15,18 @@ Read alongside:
 
 Verified 2026-04-22: `prompt_version='prompt_v=2 rubric_v=2'` on all recent rows. 82 VETOs in 6h, all citing Rubric 8 with correct profile stats. Tier 2 learning loop confirmed working.
 
+### P1 — Entry slippage gate from peak2 wick — SHIPPED 2026-04-23 (`01038af`)
+
+Symptoms of "SL too wide" rejects were actually entries drifting >1% above the course's retest level (2nd-peak wick per Lesson 20/47). New `mm_max_entry_slippage_pct` config rejects those setups explicitly with `entry_slipped_from_retest` reason. 10 new tests covering BTC/NEAR/BNB regression cases.
+
+### P2 (= §2b below) — Per-setup decision cache — SHIPPED 2026-04-23 (`a2c00d1`)
+
+In-memory cache keyed by (symbol, direction, formation_variant, round(entry_price,4)) with 30 min TTL + 0.5% price-drift invalidation. 14 new tests. Expected 85% call reduction on duplicate-setup scan storms.
+
+### P3 — MFE-based 2h scratch rule — SHIPPED 2026-04-23 (`40a0860`)
+
+Course Lesson 13 "substantial profit WITHIN two hours" is a window, not an instant. Track Max Favorable Excursion in R-multiples; scratch at 2h only if peak MFE never cleared 0.3R. Stops closing trades that recovered from an early dip. Migration 020 persists MFE so restarts don't lose the bar-cleared fact. 10 new tests.
+
 ---
 
 ## Now (operational + small, high-value)
@@ -32,21 +44,7 @@ Goal: you wake up, there's a report in Slack / email / the dashboard saying "age
 
 **Recommendation:** (b). Same host as the bot, always on. Roughly 30 min of wiring.
 
-### 2b. Per-setup decision cache (cost mitigation) — new 2026-04-22
-
-**Why:** agent cost spiked from projected $6/mo → observed $250/mo because the 1H formation detector re-generates the same setup every 5-min scan, and each re-evaluation bills a full Opus 4.7 call. Observed: 82 calls on the same DOGE long setup in 6h, all identical VETO.
-
-**Design:** add a small in-memory cache on `MMSanityAgent` keyed by `(symbol, formation_variant, round(entry_price, 4), int(sl_ref * 10000))`. Cache hit within the last 30 min → return the cached decision without calling the API.
-
-**Safety:** cache invalidates on:
-- Any price move >0.5% from the cached entry_price
-- `current_level` advancing (setup has progressed)
-- Formation variant changing
-- Time-based: 30-min TTL hard limit
-
-**Not needed yet** — current cost $250/mo is well under the $600 cap. But if the pattern continues for 2–3 days, shipping this saves ~$200/mo while keeping full protection.
-
-**Size:** ~60 lines + tests.
+### 2b. Per-setup decision cache — SHIPPED 2026-04-23 as P2 (see Done section above).
 
 ---
 
