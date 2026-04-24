@@ -96,6 +96,13 @@ MAX_AGGREGATE_RISK_PCT = 5.0
 # Tuneable via config.mm_max_tp1_distance_pct or settings UI.
 MAX_TP1_DISTANCE_PCT = 10.0
 
+# Max slippage (%) between current market price and the 2nd-peak wick
+# (the course's retest entry level per Lesson 20 / 47). Setups where
+# price has bounced further than this from peak2 wick are rejected as
+# "missed entry window". 0 disables the gate. Configurable via
+# config.mm_max_entry_slippage_pct (settings UI).
+MAX_ENTRY_SLIPPAGE_PCT = 1.0
+
 # Maximum margin utilization — don't open new positions if margin > 60% of balance
 MAX_MARGIN_UTILIZATION = 0.60
 
@@ -299,6 +306,10 @@ class MMEngine:
         # Max TP1 distance cap. See MAX_TP1_DISTANCE_PCT.
         self.max_tp1_distance_pct = float(
             getattr(config, "mm_max_tp1_distance_pct", MAX_TP1_DISTANCE_PCT)
+        )
+        # Max entry slippage from retest wick. See MAX_ENTRY_SLIPPAGE_PCT.
+        self.max_entry_slippage_pct = float(
+            getattr(config, "mm_max_entry_slippage_pct", MAX_ENTRY_SLIPPAGE_PCT)
         )
 
         # Tunable parameters (overridable via settings page)
@@ -1101,6 +1112,10 @@ class MMEngine:
                     if "mm_max_tp1_distance_pct" in mm_settings:
                         self.max_tp1_distance_pct = float(
                             mm_settings["mm_max_tp1_distance_pct"]
+                        )
+                    if "mm_max_entry_slippage_pct" in mm_settings:
+                        self.max_entry_slippage_pct = float(
+                            mm_settings["mm_max_entry_slippage_pct"]
                         )
                     if "mm_scan_interval" in mm_settings:
                         self.scan_interval = float(mm_settings["mm_scan_interval"]) * 60
@@ -2239,6 +2254,61 @@ class MMEngine:
             low=cycle_state.low if cycle_state.low < float("inf") else None,
             htf_ema_values=htf_ema_values,
         )
+
+        # --- Entry price & retest-slippage gate (2026-04-22 fix) ---
+        #
+        # Course Lesson 20 / 47 entry for M/W retests: the entry is a limit
+        # order placed at the 2nd peak wick — the retest level. For an at-
+        # market scanning bot (which we are), the closest honest
+        # approximation is: only take the setup when current price is
+        # CLOSE to peak2 wick. If price has already bounced far from the
+        # retest, we've missed the course's intended entry window.
+        #
+        # Pre-fix behaviour: entry_price = current_price unconditionally.
+        # Measured impact on 5 days of trades:
+        #   BTC long  : entry was +4.39% ABOVE peak2 wick  → SL 12.47% (course-correct: 8.45%)
+        #   NEAR long : entry was +4.67% ABOVE peak2 wick  → SL 15.77% (course-correct: 11.65%)
+        #   BNB long  : entry was +1.70% ABOVE peak2 wick  → SL  8.02% (course-correct: 6.42%)
+        # "Wide SL" rejections upstream were symptoms of this entry
+        # inflation, not real structural problems.
+        #
+        # Fix: compute peak2_wick_price early and reject setups where the
+        # current market price has slipped past it by more than
+        # mm_max_entry_slippage_pct (default 1.0%). Below that threshold,
+        # current_price is close enough to peak2_wick that entering at
+        # market effectively is entering at the retest.
+        peak2_abs_idx_early = lookback_start + best_formation.peak2_idx
+        peak2_wick_price_early = 0.0
+        try:
+            if 0 <= peak2_abs_idx_early < len(candles_1h):
+                p2 = candles_1h.iloc[peak2_abs_idx_early]
+                if best_formation.type.upper() == "W":
+                    peak2_wick_price_early = float(p2["low"])
+                else:
+                    peak2_wick_price_early = float(p2["high"])
+        except Exception:
+            peak2_wick_price_early = float(best_formation.peak2_price)
+
+        if peak2_wick_price_early > 0 and self.max_entry_slippage_pct > 0:
+            # For a W-long retest, "favourable slippage" = current ABOVE peak2 wick.
+            # For an M-short retest, "favourable slippage" = current BELOW peak2 wick.
+            if best_formation.type.upper() == "W":
+                slip_pct = (current_price - peak2_wick_price_early) / current_price * 100
+            else:
+                slip_pct = (peak2_wick_price_early - current_price) / current_price * 100
+            if slip_pct > self.max_entry_slippage_pct:
+                return self._reject(
+                    "entry_slipped_from_retest",
+                    symbol,
+                    current_price=round(current_price, 6),
+                    peak2_wick=round(peak2_wick_price_early, 6),
+                    slippage_pct=round(slip_pct, 2),
+                    threshold_pct=self.max_entry_slippage_pct,
+                    formation=best_formation.type,
+                    direction=(
+                        "long" if best_formation.type.upper() == "W" else "short"
+                    ),
+                )
 
         # Calculate entry, SL, and targets
         entry_price = current_price

@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     # Tune up if you see rejected setups that would have worked; tune
     # down if wide-target trades keep slipping through.
     mm_max_tp1_distance_pct: float = 10.0
+    # Max slippage (%) from the 2nd-peak wick ("retest level" per course
+    # Lesson 20 / 47) before we skip a setup. 0 disables. See engine
+    # comment at the entry-price block for the trade-data rationale.
+    mm_max_entry_slippage_pct: float = 1.0
     mm_initial_balance: float = 10000.0
     # Pair selection — course says MM Method is a majors strategy. Separate
     # from the SMC engine's `min_volume_usd` so we don't disturb that.

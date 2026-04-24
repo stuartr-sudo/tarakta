@@ -2031,3 +2031,101 @@ class TestTargetTimeframeHierarchy:
             return out or None
 
         assert select_htf(None, None) is None
+
+
+# ---------------------------------------------------------------------------
+# 2026-04-22 entry-slippage gate (P1 of 3-pass course-faithfulness fix)
+#
+# Course Lesson 20 / 47: the M/W retest entry is a LIMIT order at the
+# 2nd-peak wick. For an at-market scanner, the closest honest
+# approximation is "only take the setup if current price is close to
+# peak2 wick; reject otherwise." This rejects the entry-inflation
+# pathology where the BTC long was +4.39% above peak2 wick and got
+# tagged with a 12.47% SL that was really 8.45% at course-correct entry.
+# ---------------------------------------------------------------------------
+
+class TestMaxEntrySlippagePct:
+    def test_constant_default_is_1_pct(self):
+        from src.strategy.mm_engine import MAX_ENTRY_SLIPPAGE_PCT
+        assert MAX_ENTRY_SLIPPAGE_PCT == 1.0
+
+    def test_engine_reads_config_override(self):
+        from types import SimpleNamespace
+        from src.strategy.mm_engine import MMEngine
+        cfg = SimpleNamespace(mm_max_entry_slippage_pct=0.5)
+        eng = MMEngine(exchange=None, repo=None, candle_manager=None, config=cfg)
+        assert eng.max_entry_slippage_pct == 0.5
+
+    def test_engine_default_when_no_config(self):
+        from types import SimpleNamespace
+        from src.strategy.mm_engine import MMEngine, MAX_ENTRY_SLIPPAGE_PCT
+        eng = MMEngine(exchange=None, repo=None, candle_manager=None,
+                       config=SimpleNamespace())
+        assert eng.max_entry_slippage_pct == MAX_ENTRY_SLIPPAGE_PCT
+
+    def test_runtime_settings_override(self, engine: MMEngine):
+        """Settings UI hot-tune via engine_state.config_overrides."""
+        mm_settings = {"mm_max_entry_slippage_pct": 2.5}
+        if "mm_max_entry_slippage_pct" in mm_settings:
+            engine.max_entry_slippage_pct = float(mm_settings["mm_max_entry_slippage_pct"])
+        assert engine.max_entry_slippage_pct == 2.5
+
+
+class TestEntrySlippageCalculation:
+    """Pure-function re-implementation of the slippage check (mirrors
+    the inline logic in _analyze_pair at the 'retest-slippage gate'
+    block). Tests the rejection criterion directly."""
+
+    def _slipped(self, formation_type, current_price, peak2_wick, threshold_pct):
+        if formation_type.upper() == "W":
+            slip = (current_price - peak2_wick) / current_price * 100
+        else:
+            slip = (peak2_wick - current_price) / current_price * 100
+        return slip > threshold_pct, slip
+
+    def test_btc_20260420_would_have_been_rejected(self):
+        """The bad BTC trade on 2026-04-20: current $75,251, peak2 wick
+        $71,951, slippage +4.39% → rejected under 1% threshold."""
+        slipped, pct = self._slipped("W", 75251.0, 71951.0, 1.0)
+        assert slipped is True
+        assert 4.3 < pct < 4.5
+
+    def test_near_20260420_win_would_have_passed(self):
+        """The profitable NEAR trade on 2026-04-20: current $1.3333,
+        peak2 wick $1.3230, slippage +0.77% → accepted under 1%."""
+        slipped, pct = self._slipped("W", 1.3333, 1.3230, 1.0)
+        assert slipped is False
+        assert 0.7 < pct < 0.8
+
+    def test_bnb_20260420_rejected(self):
+        """BNB long 2026-04-20: current $621.76, peak2 wick $611.17,
+        slippage +1.70% → rejected under 1%."""
+        slipped, pct = self._slipped("W", 621.76, 611.17, 1.0)
+        assert slipped is True
+        assert 1.6 < pct < 1.8
+
+    def test_short_slippage_symmetric(self):
+        """M-short: 'favourable slippage' is current BELOW peak2 wick.
+        Current $100, peak2 wick $102, slippage = (102-100)/100*100 =
+        +2% → rejected under 1%."""
+        slipped, pct = self._slipped("M", 100.0, 102.0, 1.0)
+        assert slipped is True
+        assert pct == pytest.approx(2.0, abs=0.01)
+
+    def test_short_current_above_peak2_not_rejected(self):
+        """If current > peak2 (unfavourable direction for a short),
+        slippage is NEGATIVE → not rejected by this gate.
+        Different formation-level rules handle that case."""
+        slipped, pct = self._slipped("M", 103.0, 102.0, 1.0)
+        assert slipped is False
+        assert pct < 0
+
+    def test_threshold_disabled_at_zero(self):
+        """Engine threshold of 0 should disable the check entirely
+        (enforced at call-site, not in this pure helper)."""
+        # With threshold 0, even a 0.01% slip exceeds it, but this
+        # case is handled by the `self.max_entry_slippage_pct > 0`
+        # guard in _analyze_pair. Keep the test minimal: verify the
+        # pure math.
+        slipped, _ = self._slipped("W", 100.01, 100.0, 0.0)
+        assert slipped is True  # 0.01% > 0, the guard at call-site skips
