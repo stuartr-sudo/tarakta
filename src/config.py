@@ -82,6 +82,17 @@ class Settings(BaseSettings):
     # Lesson 20 / 47) before we skip a setup. 0 disables. See engine
     # comment at the entry-price block for the trade-data rationale.
     mm_max_entry_slippage_pct: float = 1.0
+    # 2h scratch rule MFE threshold in R-multiples (P3 fix 2026-04-22).
+    # Course Lesson 13 [47:00] "If you're not in substantial profit
+    # within two hours you scratch the trade." "Within two hours" is a
+    # WINDOW — we track the highest R-multiple reached during the
+    # trade and only scratch at 2h if peak R never cleared this
+    # threshold. 0.3R reads "substantial" conservatively: low enough
+    # that any trade starting to work has crossed it, high enough to
+    # rule out noise. Tuned down (e.g. 0.2) = more trades kept; tuned
+    # up (e.g. 0.5) = stricter scratch. Set to 0 to effectively
+    # disable the scratch rule (any trade at all is safe).
+    mm_scratch_mfe_threshold_r: float = 0.3
     mm_initial_balance: float = 10000.0
     # Pair selection — course says MM Method is a majors strategy. Separate
     # from the SMC engine's `min_volume_usd` so we don't disturb that.

@@ -204,8 +204,15 @@ def _make_position(
     stop_loss: float = 49000.0,
     current_level: int = 0,
     hours_old: float = 3.0,
+    original_stop_loss: float | None = None,
+    max_favorable_excursion_r: float = 0.0,
 ) -> MMPosition:
-    """Build a test MMPosition aged `hours_old` hours."""
+    """Build a test MMPosition aged `hours_old` hours.
+
+    original_stop_loss: defaults to stop_loss. The MFE scratch rule
+    (P3 fix 2026-04-22) uses it to compute R-multiples; tests that
+    leave it at 0 would silently disable MFE tracking.
+    """
     pos = MMPosition(
         symbol=symbol,
         direction=direction,
@@ -213,6 +220,8 @@ def _make_position(
         quantity=quantity,
         stop_loss=stop_loss,
         current_level=current_level,
+        original_stop_loss=stop_loss if original_stop_loss is None else original_stop_loss,
+        max_favorable_excursion_r=max_favorable_excursion_r,
     )
     pos.entry_time = datetime.now(timezone.utc) - timedelta(hours=hours_old)
     return pos
@@ -349,6 +358,12 @@ async def test_scratch_bnb_hypothetical_profit_would_exempt(engine: MMEngine):
     Demonstrates the course behaviour: the MM has a "different plan"
     only when we're NOT in substantial profit. If we are, the setup
     is still valid.
+
+    UPDATED 2026-04-22 (P3): "substantial" is now defined in
+    R-multiples (0.3R default), not absolute %. BNB has an 8%-wide
+    SL here (risk $50.18 per unit), so 0.5% profit = 0.062R — NOT
+    substantial by the new definition. The test now uses a price
+    that clears the 0.3R threshold (~2.4% from entry on this wide SL).
     """
     pos = _make_position(
         symbol="BNB/USDT",
@@ -358,9 +373,288 @@ async def test_scratch_bnb_hypothetical_profit_would_exempt(engine: MMEngine):
         current_level=0,
         hours_old=2.03,
     )
-    # Up 0.5% (~$3 per BNB × 19.42 = ~$60 gross, fees ~$9.67)
-    reasons = await _run_manage_capture_scratch(engine, pos, current_price=625.22)
-    assert reasons == [], "Up 0.5% after 2h → in substantial profit → no scratch"
+    # Risk = 50.18; 0.3R threshold = 15.05 → exempt price >= 637.15
+    reasons = await _run_manage_capture_scratch(engine, pos, current_price=637.50)
+    assert reasons == [], (
+        "Up ~2.5% after 2h on an 8%-wide SL is >0.3R → in substantial "
+        "profit → no scratch"
+    )
+
+
+# ---------------------------------------------------------------------------
+# P3 (2026-04-22) — MFE-based scratch rule
+#
+# Course Lesson 13 [47:00] says "substantial profit WITHIN two hours" —
+# that's a window, not an instant. The old rule only checked unrealized
+# P&L at the 2h mark, which closed trades that had been +1R mid-flight
+# but pulled back to break-even by the check. User complaint:
+#   "if the initial trade goes in the wrong direction, but comes back
+#    in the direction we expect, it gets closed...before it can
+#    actually realized."
+#
+# Fix: track Max Favorable Excursion in R-multiples on every tick.
+# Scratch only if the trade NEVER reached the MFE threshold during
+# its first 2 hours.
+# ---------------------------------------------------------------------------
+
+
+async def _run_manage_steps(
+    engine: MMEngine,
+    pos: MMPosition,
+    price_steps: list[float],
+) -> tuple[list[str], MMPosition]:
+    """Run _manage_position once per price step. Returns (scratch_reasons, pos).
+
+    Each step represents a scan cycle. The last step uses pos.entry_time
+    as-is; earlier steps do NOT rewind entry_time — MFE is what matters.
+    """
+    engine.positions[pos.symbol] = pos
+    engine.exchange = MagicMock()
+    engine.candle_manager = MagicMock()
+    engine.candle_manager.get_candles = AsyncMock(return_value=None)
+    if engine.repo is None:
+        engine.repo = AsyncMock()
+        engine.repo.update_trade = AsyncMock(return_value=None)
+
+    scratch_reasons: list[str] = []
+
+    async def _spy_close(p, price, reason):
+        if reason == "scratch_2h":
+            scratch_reasons.append(reason)
+            engine.positions.pop(p.symbol, None)
+
+    for price in price_steps:
+        if pos.symbol not in engine.positions:
+            break  # stop if the trade was already closed mid-sequence
+        engine.exchange.fetch_ticker = AsyncMock(return_value={"last": price})
+        with patch.object(engine, "_close_position", side_effect=_spy_close):
+            with patch.object(engine, "_is_stopped_out", return_value=False):
+                await engine._manage_position(pos.symbol)
+
+    return scratch_reasons, pos
+
+
+@pytest.mark.asyncio
+async def test_mfe_tracks_peak_r_across_calls(engine: MMEngine):
+    """MFE is the running max of current R, never decreasing."""
+    pos = _make_position(entry_price=50000.0, stop_loss=49000.0, hours_old=0.5)
+    engine.repo = AsyncMock()
+    engine.repo.update_trade = AsyncMock(return_value=None)
+    # Sequence: price rises to 50500 (0.5R), then to 50700 (0.7R),
+    # then pulls back to 50100 (0.1R). MFE should end at 0.7.
+    _, pos = await _run_manage_steps(
+        engine, pos, [50500.0, 50700.0, 50100.0],
+    )
+    assert abs(pos.max_favorable_excursion_r - 0.7) < 1e-6, (
+        f"Expected MFE=0.7, got {pos.max_favorable_excursion_r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_recovered_trade_not_scratched_after_2h(engine: MMEngine):
+    """The core user-reported bug fix.
+
+    A long trade that went in-the-money (+0.5R) early, then pulled
+    back to break-even by the 2h mark, must NOT be scratched. Under
+    the old rule it was; under the new MFE rule it survives because
+    MFE cleared 0.3R mid-flight.
+    """
+    pos = _make_position(entry_price=50000.0, stop_loss=49000.0, hours_old=0.5)
+    # Step 1 at 30 min: price at 50500 → MFE=0.5R (clears 0.3 threshold)
+    # Step 2 at 60 min: price pulled back to 50000 (flat)
+    # Simulate elapsed time: rewind entry_time to age 2.5h for final step
+    engine.repo = AsyncMock()
+    engine.repo.update_trade = AsyncMock(return_value=None)
+    engine.positions[pos.symbol] = pos
+    engine.exchange = MagicMock()
+    engine.candle_manager = MagicMock()
+    engine.candle_manager.get_candles = AsyncMock(return_value=None)
+
+    scratch_reasons: list[str] = []
+
+    async def _spy_close(p, price, reason):
+        if reason == "scratch_2h":
+            scratch_reasons.append(reason)
+            engine.positions.pop(p.symbol, None)
+
+    # Tick 1: price at 50500 (early in trade)
+    engine.exchange.fetch_ticker = AsyncMock(return_value={"last": 50500.0})
+    with patch.object(engine, "_close_position", side_effect=_spy_close):
+        with patch.object(engine, "_is_stopped_out", return_value=False):
+            await engine._manage_position(pos.symbol)
+    assert pos.max_favorable_excursion_r >= 0.3
+    assert scratch_reasons == []  # under 2h anyway
+
+    # Tick 2: time has advanced past 2h; price now back at entry
+    pos.entry_time = datetime.now(timezone.utc) - timedelta(hours=2.5)
+    engine.exchange.fetch_ticker = AsyncMock(return_value={"last": 50000.0})
+    with patch.object(engine, "_close_position", side_effect=_spy_close):
+        with patch.object(engine, "_is_stopped_out", return_value=False):
+            await engine._manage_position(pos.symbol)
+
+    assert scratch_reasons == [], (
+        "Trade was +0.5R earlier — must not be scratched just because "
+        "it's flat at the 2h mark. This was the user-reported bug."
+    )
+
+
+@pytest.mark.asyncio
+async def test_trade_that_never_worked_still_scratches(engine: MMEngine):
+    """A trade whose MFE never cleared the threshold by the 2h mark
+    IS scratched. This preserves the original intent of the rule:
+    the MM has a different plan, we're not being held for a real move."""
+    pos = _make_position(entry_price=50000.0, stop_loss=49000.0, hours_old=2.5)
+    # Price hovered at 50000 ± 50 for the entire trade — MFE max ~0.05R
+    engine.repo = AsyncMock()
+    engine.repo.update_trade = AsyncMock(return_value=None)
+    reasons, pos = await _run_manage_steps(
+        engine, pos, [50050.0, 49960.0, 50020.0, 49990.0, 50000.0],
+    )
+    assert pos.max_favorable_excursion_r < 0.3
+    assert reasons == ["scratch_2h"]
+
+
+@pytest.mark.asyncio
+async def test_mfe_for_short_direction(engine: MMEngine):
+    """MFE on a short is measured in the reverse direction."""
+    pos = _make_position(
+        direction="short", entry_price=100.0, stop_loss=101.5,
+        quantity=1.0, hours_old=0.5,
+    )
+    engine.repo = AsyncMock()
+    engine.repo.update_trade = AsyncMock(return_value=None)
+    # Price falls (good for a short) to 98.5 → R = (100 - 98.5) / 1.5 = 1.0
+    _, pos = await _run_manage_steps(engine, pos, [98.5])
+    assert abs(pos.max_favorable_excursion_r - 1.0) < 1e-6
+
+
+@pytest.mark.asyncio
+async def test_mfe_persisted_to_db_on_significant_increase(engine: MMEngine):
+    """When MFE increases by ≥0.1R since last persist, write to DB so
+    a mid-trade restart doesn't lose the fact that the bar was cleared."""
+    pos = _make_position(entry_price=50000.0, stop_loss=49000.0, hours_old=0.1)
+    pos.trade_id = "test-trade-id-42"
+    engine.repo = AsyncMock()
+    engine.repo.update_trade = AsyncMock(return_value=None)
+
+    # Single step with a 0.5R move — should trigger a persist
+    _, pos = await _run_manage_steps(engine, pos, [50500.0])
+
+    # The persist call must have happened at least once with the MFE column
+    update_calls = engine.repo.update_trade.call_args_list
+    mfe_persists = [
+        c for c in update_calls
+        if "mm_max_favorable_excursion_r" in c.args[1]
+    ]
+    assert len(mfe_persists) >= 1
+    assert mfe_persists[0].args[0] == "test-trade-id-42"
+    assert mfe_persists[0].args[1]["mm_max_favorable_excursion_r"] >= 0.5
+
+
+@pytest.mark.asyncio
+async def test_mfe_not_persisted_below_0_1r_increase(engine: MMEngine):
+    """MFE increase of <0.1R must not trigger a DB write — that would
+    burn writes on every tick and add DB churn without benefit."""
+    pos = _make_position(entry_price=50000.0, stop_loss=49000.0, hours_old=0.1)
+    pos.trade_id = "test-trade-id-43"
+    engine.repo = AsyncMock()
+    engine.repo.update_trade = AsyncMock(return_value=None)
+
+    # Tiny move — 0.05R
+    _, pos = await _run_manage_steps(engine, pos, [50050.0])
+
+    update_calls = engine.repo.update_trade.call_args_list
+    mfe_persists = [
+        c for c in update_calls
+        if "mm_max_favorable_excursion_r" in c.args[1]
+    ]
+    assert mfe_persists == [], (
+        "A 0.05R move should not write to DB — below the 0.1R threshold"
+    )
+
+
+@pytest.mark.asyncio
+async def test_persisted_mfe_survives_restart(engine: MMEngine):
+    """Simulate restart: the MMPosition is reconstructed with a non-zero
+    MFE. At 2h+ the scratch rule must respect the persisted value and
+    not close the trade.
+    """
+    pos = _make_position(
+        entry_price=50000.0, stop_loss=49000.0, hours_old=2.5,
+        max_favorable_excursion_r=0.45,  # was +0.45R pre-restart
+    )
+    # Current price flat — old rule would have scratched.
+    engine.repo = AsyncMock()
+    engine.repo.update_trade = AsyncMock(return_value=None)
+    reasons, _ = await _run_manage_steps(engine, pos, [50000.0])
+    assert reasons == [], (
+        "Persisted MFE=0.45R > threshold — must not re-scratch after restart"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mfe_threshold_configurable(engine: MMEngine):
+    """Tuning `mm_scratch_mfe_threshold_r` must change the exempt/scratch
+    boundary. A threshold of 1.0R means a +0.5R peak no longer exempts."""
+    # Default: 0.3 threshold → 0.5R exempts
+    pos_default = _make_position(
+        entry_price=50000.0, stop_loss=49000.0, hours_old=2.5,
+        max_favorable_excursion_r=0.5,
+    )
+    engine.repo = AsyncMock()
+    engine.repo.update_trade = AsyncMock(return_value=None)
+    reasons, _ = await _run_manage_steps(engine, pos_default, [50000.0])
+    assert reasons == []
+
+    # Raised threshold: 1.0 → the same 0.5R MFE now gets scratched
+    engine.scratch_mfe_threshold_r = 1.0
+    pos_strict = _make_position(
+        entry_price=50000.0, stop_loss=49000.0, hours_old=2.5,
+        max_favorable_excursion_r=0.5,
+    )
+    reasons, _ = await _run_manage_steps(engine, pos_strict, [50000.0])
+    assert reasons == ["scratch_2h"]
+
+
+@pytest.mark.asyncio
+async def test_mfe_never_decreases(engine: MMEngine):
+    """MFE is the running max — a retrace must not lower it."""
+    pos = _make_position(entry_price=50000.0, stop_loss=49000.0, hours_old=0.5)
+    engine.repo = AsyncMock()
+    engine.repo.update_trade = AsyncMock(return_value=None)
+    # Rally to 50800 (0.8R), retrace to 50200 (0.2R), rally again to 50400 (0.4R)
+    _, pos = await _run_manage_steps(
+        engine, pos, [50800.0, 50200.0, 50400.0],
+    )
+    assert abs(pos.max_favorable_excursion_r - 0.8) < 1e-6
+
+
+@pytest.mark.asyncio
+async def test_mfe_skipped_when_original_stop_zero(engine: MMEngine):
+    """Edge case: if original_stop_loss is 0 (shouldn't happen in prod
+    but defensive), MFE tracking is skipped safely — no divide-by-zero,
+    MFE remains 0, scratch fires at 2h."""
+    pos = _make_position(
+        entry_price=50000.0, stop_loss=49000.0,
+        original_stop_loss=0.0,  # explicit zero
+        hours_old=2.5,
+    )
+    engine.repo = AsyncMock()
+    engine.repo.update_trade = AsyncMock(return_value=None)
+    # Even with price far above entry, MFE never updates
+    reasons, pos = await _run_manage_steps(engine, pos, [55000.0])
+    assert pos.max_favorable_excursion_r == 0.0
+    assert reasons == ["scratch_2h"]
+
+
+def test_scratch_mfe_threshold_config_default():
+    """Regression guard: the default threshold must be 0.3R so replay /
+    live behaviour stays predictable across deploys."""
+    from src.config import Settings
+    from src.strategy.mm_engine import SCRATCH_MFE_THRESHOLD_R
+    s = Settings()
+    assert s.mm_scratch_mfe_threshold_r == 0.3
+    assert SCRATCH_MFE_THRESHOLD_R == 0.3
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +842,11 @@ def _make_position_for_weekend(
         entry_price=entry_price,
         quantity=0.01,
         stop_loss=stop_loss,
+        # original_stop_loss must match stop_loss for MFE-based scratch
+        # rule to work correctly in these tests — leaving it at the
+        # 0.0 default silently disables MFE tracking and causes the
+        # scratch rule to fire before the Friday UK check can.
+        original_stop_loss=stop_loss,
         current_level=current_level,
         sl_moved_to_breakeven=sl_moved_to_breakeven,
     )

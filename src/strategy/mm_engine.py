@@ -103,6 +103,18 @@ MAX_TP1_DISTANCE_PCT = 10.0
 # config.mm_max_entry_slippage_pct (settings UI).
 MAX_ENTRY_SLIPPAGE_PCT = 1.0
 
+# 2h scratch rule — Max Favorable Excursion threshold in R-multiples.
+# Course Lesson 13 [47:00]: "If you're not in substantial profit within
+# two hours you scratch the trade." "Within two hours" is a window, not
+# an instant — we track the highest R-multiple reached during the trade
+# and only scratch if peak R never cleared this threshold by the 2h
+# mark. 0.3R reads "substantial" conservatively: enough to rule out
+# noise, small enough that any trade starting to work will have crossed
+# it. Tuneable via config.mm_scratch_mfe_threshold_r. 0 effectively
+# disables the scratch rule (any trade with 0 favorable excursion is
+# already 0R so would always scratch at 0; 0 means "scratch nothing").
+SCRATCH_MFE_THRESHOLD_R = 0.3
+
 # Maximum margin utilization — don't open new positions if margin > 60% of balance
 MAX_MARGIN_UTILIZATION = 0.60
 
@@ -272,6 +284,21 @@ class MMPosition:
     # Track whether we've already taken the 200-EMA hammer partial (C6)
     took_200ema_partial: bool = False
 
+    # Max Favorable Excursion in R-multiples (P3 fix 2026-04-22).
+    # R = distance from entry to original_stop_loss. MFE is the highest
+    # R-multiple the trade has reached at any point in its lifetime.
+    # Used by the 2h scratch rule (course Lesson 13 [47:00]):
+    #   "If you're not in substantial profit within two hours you scratch."
+    # The course says "within two hours" — meaning at ANY point during
+    # that window the trade must have reached substantial profit, not
+    # "at the 2h mark". The prior rule (gross > round_trip_fees at the
+    # 2h instant) closed winners that had been +1R mid-flight but
+    # pulled back to break-even by the check, defeating the intent.
+    # MFE tracking + a threshold lets us honour the course quote
+    # faithfully: a trade that ever reached +0.3R during its first 2h
+    # is not scratched, even if it's currently at break-even.
+    max_favorable_excursion_r: float = 0.0
+
 
 # ---------------------------------------------------------------------------
 # MM Engine
@@ -310,6 +337,10 @@ class MMEngine:
         # Max entry slippage from retest wick. See MAX_ENTRY_SLIPPAGE_PCT.
         self.max_entry_slippage_pct = float(
             getattr(config, "mm_max_entry_slippage_pct", MAX_ENTRY_SLIPPAGE_PCT)
+        )
+        # 2h scratch MFE threshold in R-multiples. See SCRATCH_MFE_THRESHOLD_R.
+        self.scratch_mfe_threshold_r = float(
+            getattr(config, "mm_scratch_mfe_threshold_r", SCRATCH_MFE_THRESHOLD_R)
         )
 
         # Tunable parameters (overridable via settings page)
@@ -1117,6 +1148,10 @@ class MMEngine:
                         self.max_entry_slippage_pct = float(
                             mm_settings["mm_max_entry_slippage_pct"]
                         )
+                    if "mm_scratch_mfe_threshold_r" in mm_settings:
+                        self.scratch_mfe_threshold_r = float(
+                            mm_settings["mm_scratch_mfe_threshold_r"]
+                        )
                     if "mm_scan_interval" in mm_settings:
                         self.scan_interval = float(mm_settings["mm_scan_interval"]) * 60
                     if "mm_cooldown_hours" in mm_settings:
@@ -1210,6 +1245,13 @@ class MMEngine:
                     sl_moved_to_breakeven=bool(t.get("mm_sl_moved_to_breakeven") or False),
                     sl_moved_under_50ema=bool(t.get("mm_sl_moved_under_50ema") or False),
                     took_200ema_partial=bool(t.get("mm_took_200ema_partial") or False),
+                    # Max Favorable Excursion in R (migration 020 / P3 fix).
+                    # Without this, a mid-trade restart loses the fact
+                    # that the trade already cleared the scratch bar,
+                    # leading to a false-positive scratch at 2h.
+                    max_favorable_excursion_r=float(
+                        t.get("mm_max_favorable_excursion_r") or 0
+                    ),
                 )
                 restored += 1
             if mm_trades:
@@ -3327,6 +3369,9 @@ class MMEngine:
                 "mm_sl_moved_to_breakeven": False,
                 "mm_sl_moved_under_50ema": False,
                 "mm_took_200ema_partial": False,
+                # MFE baseline at entry (migration 020 / P3 fix). Live
+                # updates happen in _manage_position as price moves.
+                "mm_max_favorable_excursion_r": 0.0,
                 # HTF trend snapshot at entry (migration 018) — so post-mortems
                 # can separate trend-aligned losses from counter-trend losses
                 # without re-fetching historical 4H/1D candles.
@@ -3526,44 +3571,84 @@ class MMEngine:
         #    plan. That's the rule. Market Maker only holds the
         #    consolidation level to get more contracts."
         #
-        # The course specifies TIME (2h flat) and SIGNAL (substantial
-        # profit), NOT level-tracker advancement. The prior implementation
-        # (current_level == 0) measured the wrong thing entirely: a trade
-        # could be in strong profit without advancing the internal level
-        # counter, or advance the level counter without being profitable.
+        # P3 FIX 2026-04-22 — "within two hours" is a window, not an
+        # instant.
         #
-        # "Substantial" is the one word the course leaves for interpretation.
-        # We read it conservatively: "any positive unrealized P&L after
-        # round-trip fees" — i.e. a trade that, if closed now, would pay
-        # for itself. If the trade is literally underwater at 2h, the MM
-        # has "a different plan" per the course and we scratch.
+        # The prior rule measured unrealized P&L at the 2h mark only.
+        # That closed trades that had been +1R mid-flight but pulled
+        # back to break-even by the 2h check — the trade HAD shown
+        # "substantial profit within two hours" but we closed it anyway
+        # because we only looked at the snapshot. User reported the
+        # pattern: "if the initial trade goes in the wrong direction,
+        # but comes back in the direction we expect, it gets closed...
+        # before it can actually realized."
         #
-        # The dynamic-by-SL and board-meeting-exemption logic from
-        # commit 2a04c2e has been removed — both were inventions not
-        # found in the course.
+        # The fix: track Max Favorable Excursion (MFE) in R-multiples
+        # continuously. "R" = distance from entry to original_stop_loss.
+        # A trade's MFE is the highest R-value it has reached at any
+        # point during its lifetime. At the 2h mark, we check whether
+        # MFE ever cleared `scratch_mfe_threshold_r` (default 0.3R).
+        # If so, the trade has shown "substantial profit within two
+        # hours" per the course and is safe from scratch.
+        #
+        # Threshold rationale: 0.3R is conservative — low enough that
+        # any trade starting to work has crossed it, high enough that
+        # noise alone won't trigger it. Tunable via
+        # config.mm_scratch_mfe_threshold_r.
+        #
+        # MFE persistence: on every tick we update pos.MFE and if it
+        # increased by ≥0.1R since last persist, write to DB so a
+        # mid-trade restart doesn't lose the fact that the bar was
+        # already cleared.
+        #
+        # Prior anti-patterns removed here (commit 2a04c2e, reverted):
+        # dynamic-by-SL scratch + board-meeting exemption. Both were
+        # inventions not in the course.
+        if pos.original_stop_loss > 0:
+            risk_per_unit = abs(pos.entry_price - pos.original_stop_loss)
+            if risk_per_unit > 0:
+                if pos.direction == "long":
+                    current_r = (current_price - pos.entry_price) / risk_per_unit
+                else:
+                    current_r = (pos.entry_price - current_price) / risk_per_unit
+                if current_r > pos.max_favorable_excursion_r:
+                    prev_mfe = pos.max_favorable_excursion_r
+                    pos.max_favorable_excursion_r = current_r
+                    # Persist in ~0.1R buckets to keep DB writes bounded
+                    # — worst case 10 writes per trade from 0 to 1R.
+                    if current_r - prev_mfe >= 0.1 and pos.trade_id:
+                        try:
+                            await self.repo.update_trade(pos.trade_id, {
+                                "mm_max_favorable_excursion_r": round(
+                                    pos.max_favorable_excursion_r, 3,
+                                ),
+                            })
+                        except Exception as e:
+                            logger.debug("mm_mfe_persist_failed",
+                                         symbol=symbol, error=str(e))
+
         now = datetime.now(timezone.utc)
         elapsed = (now - pos.entry_time).total_seconds()
         if elapsed >= 7200:  # 2 hours
-            # Unrealized P&L at current price (before fees)
-            if pos.direction == "long":
-                gross = (current_price - pos.entry_price) * pos.quantity
-            else:
-                gross = (pos.entry_price - current_price) * pos.quantity
-            # Approximate round-trip fees (entry + exit at taker rate).
-            # If gross <= fees, the trade is not in "substantial profit"
-            # by the conservative reading.
-            round_trip_fees = (
-                pos.entry_price * pos.quantity * 0.0004 * 2
-            )
-            in_substantial_profit = gross > round_trip_fees
-            if not in_substantial_profit:
+            # Scratch iff MFE never cleared the threshold during the
+            # two-hour window. A trade that was once in substantial
+            # profit but has since retraced is NOT scratched — that's
+            # a separate management concern (breakeven stop, partial
+            # take) handled elsewhere.
+            if pos.max_favorable_excursion_r < self.scratch_mfe_threshold_r:
+                # Recompute gross for log continuity with the old format
+                if pos.direction == "long":
+                    gross = (current_price - pos.entry_price) * pos.quantity
+                else:
+                    gross = (pos.entry_price - current_price) * pos.quantity
                 logger.info(
                     "mm_scratch_rule",
                     symbol=symbol,
                     entry_time=pos.entry_time.isoformat(),
                     elapsed_hours=round(elapsed / 3600, 2),
+                    mfe_r=round(pos.max_favorable_excursion_r, 3),
+                    mfe_threshold_r=self.scratch_mfe_threshold_r,
                     unrealized_gross_usd=round(gross, 2),
-                    round_trip_fees_usd=round(round_trip_fees, 2),
                     current_price=current_price,
                     entry_price=pos.entry_price,
                 )

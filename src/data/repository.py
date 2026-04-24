@@ -53,6 +53,12 @@ class Repository:
         "mm_svc_high", "mm_svc_low",
         "mm_sl_moved_to_breakeven", "mm_sl_moved_under_50ema",
         "mm_took_200ema_partial",
+        # Max Favorable Excursion in R-multiples (migration 020, P3 fix).
+        # Used by the 2h scratch rule to honour "substantial profit
+        # within two hours" as a window not an instant. Must persist
+        # across restarts or mid-trade outages lose the fact that the
+        # trade already cleared the scratch threshold.
+        "mm_max_favorable_excursion_r",
         # HTF trend persistence (migration 018) — records the 4H/1D EMA trend
         # direction at entry and whether the trade fought the 4H trend.
         # Without these, counter-trend losses are invisible in post-mortems.
