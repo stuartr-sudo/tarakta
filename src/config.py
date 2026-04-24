@@ -126,6 +126,23 @@ class Settings(BaseSettings):
     # distinguishable from variance at 95% CI. Lower values trade
     # statistical rigour for faster feedback-loop activation.
     mm_sanity_agent_outcome_min_n: int = 20
+    # Per-setup decision cache (P2 fix 2026-04-22). The 1H formation
+    # detector re-generates the same setup every 5-min scan, so without
+    # a cache we pay for the same Opus 4.7 call repeatedly. On
+    # 2026-04-21 we logged 82 identical VETOs on one DOGE long setup in
+    # 6h. This cache keys by
+    # (symbol, direction, formation_variant, round(entry_price, 4))
+    # and returns the prior verdict on subsequent calls within the TTL.
+    # cache_ttl_seconds: 1800s (30 min) — long enough to collapse the
+    # 5-min rescan storm, short enough that a stale veto can't outlive
+    # a regime change. Set to 0 to disable the cache entirely.
+    mm_sanity_agent_cache_ttl_seconds: float = 1800.0
+    # price_drift_pct: any current vs cached entry-price drift above
+    # this threshold invalidates the cache even within TTL. 0.5%
+    # matches the course's "1% retest tolerance" halved — well inside
+    # noise for a real retest, but catches a genuinely new formation
+    # price. Set high (e.g. 100) to effectively disable drift check.
+    mm_sanity_agent_cache_price_drift_pct: float = 0.5
 
     # Scanning defaults
     min_volume_usd: float = 5_000_000

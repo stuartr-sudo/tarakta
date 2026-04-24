@@ -249,6 +249,46 @@ class MMSanityAgent:
         self.repo = repo
         self._client: Any = None  # lazily initialised (see _get_client)
         self._budget_exceeded_this_month: bool = False
+        # Per-setup decision cache (2026-04-22 P2 fix). The 1H formation
+        # detector re-generates the same setup every 5-min scan. Pre-fix
+        # we were paying for up to 82 identical Opus 4.7 calls on the
+        # same DOGE long setup over a single 6h window (~$2.07 for zero
+        # new information). Now we cache by
+        # (symbol, direction, formation_variant, round(entry_price, 4))
+        # with a configurable TTL, invalidating early on meaningful
+        # price drift. In-memory only — a restart clears the cache and
+        # the worst case is one extra API call per open pattern.
+        self._decision_cache: dict[tuple, tuple[AgentVerdict, float, float]] = {}
+        # tuple schema: (cached_verdict, cached_at_epoch, cached_entry_price)
+
+    # -----------------------------------------------------------------
+    # Per-setup decision cache helpers (P2 fix 2026-04-22)
+    # -----------------------------------------------------------------
+    def _cache_key(self, ctx: dict[str, Any]) -> tuple | None:
+        """Return a cache key for the current setup, or None if too sparse.
+
+        Key schema: (symbol, direction, formation_variant, entry_price_4dp).
+        entry_price is rounded to 4 decimal places so that tick-level noise
+        on a quote like 0.15234 doesn't fragment the cache across scans.
+        Meaningful price drift is handled separately at lookup time via
+        `mm_sanity_agent_cache_price_drift_pct`.
+
+        Returning None means "don't cache this call" — safer than caching
+        incomplete context that might collide with a different setup.
+        """
+        sym = ctx.get("symbol")
+        direction = ctx.get("direction")
+        variant = ctx.get("formation_variant")
+        entry = ctx.get("entry_price")
+        if not sym or not direction or not variant or not entry:
+            return None
+        try:
+            entry_rounded = round(float(entry), 4)
+        except (TypeError, ValueError):
+            return None
+        if entry_rounded <= 0:
+            return None
+        return (str(sym), str(direction), str(variant), entry_rounded)
 
     def _get_client(self) -> Any | None:
         """Lazily instantiate the Anthropic client.
@@ -284,6 +324,62 @@ class MMSanityAgent:
         # Kill switch
         if not getattr(self.config, "mm_sanity_agent_enabled", True):
             return None
+
+        # Per-setup cache lookup (P2 fix 2026-04-22). If this exact setup
+        # has been reviewed recently and the price hasn't drifted much,
+        # replay the cached verdict instead of paying for another API
+        # call. See __init__ comment for motivation.
+        cache_ttl_s = float(getattr(
+            self.config, "mm_sanity_agent_cache_ttl_seconds", 1800.0,
+        ))
+        cache_price_drift_pct = float(getattr(
+            self.config, "mm_sanity_agent_cache_price_drift_pct", 0.5,
+        ))
+        cache_key = self._cache_key(context)
+        if cache_ttl_s > 0 and cache_key is not None:
+            hit = self._decision_cache.get(cache_key)
+            if hit is not None:
+                cached_verdict, cached_at, cached_entry = hit
+                age_s = time.time() - cached_at
+                current_entry = float(context.get("entry_price") or 0)
+                if age_s > cache_ttl_s:
+                    # Expired — drop and fall through to fresh call
+                    self._decision_cache.pop(cache_key, None)
+                elif current_entry <= 0 or cached_entry <= 0:
+                    # Bad data; don't trust cache
+                    self._decision_cache.pop(cache_key, None)
+                else:
+                    drift_pct = (
+                        abs(current_entry - cached_entry) / cached_entry * 100
+                    )
+                    if drift_pct <= cache_price_drift_pct:
+                        logger.info(
+                            "mm_agent_cache_hit",
+                            symbol=context.get("symbol"),
+                            decision=cached_verdict.decision,
+                            age_seconds=int(age_s),
+                            drift_pct=round(drift_pct, 3),
+                            saved_cost_usd=round(cached_verdict.cost_usd, 4),
+                        )
+                        # Return a COPY so callers can't mutate the cached
+                        # object. Confidence / reason / concerns are
+                        # preserved; latency/cost reflect the cache path.
+                        return AgentVerdict(
+                            decision=cached_verdict.decision,
+                            reason=f"[cached] {cached_verdict.reason}",
+                            confidence=cached_verdict.confidence,
+                            htf_trend_4h=cached_verdict.htf_trend_4h,
+                            htf_trend_1d=cached_verdict.htf_trend_1d,
+                            counter_trend=cached_verdict.counter_trend,
+                            concerns=list(cached_verdict.concerns),
+                            model=cached_verdict.model,
+                            latency_ms=0,
+                            cost_usd=0.0,
+                            raw_response=cached_verdict.raw_response,
+                        )
+                    else:
+                        # Price drifted too far — fresh call needed
+                        self._decision_cache.pop(cache_key, None)
 
         client = self._get_client()
         if client is None:
@@ -394,6 +490,24 @@ class MMSanityAgent:
             raw_response=raw_response,
             model=model, latency_ms=latency_ms, cost_usd=cost_usd,
         )
+
+        # Store the fresh verdict in the per-setup cache (P2 fix 2026-04-22).
+        # Future calls within the TTL + price-drift bounds will return this
+        # cached decision instead of paying for another API call. Only cache
+        # when we have a complete cache_key — partial context shouldn't
+        # collide with a later, more-complete setup.
+        if cache_ttl_s > 0 and cache_key is not None:
+            try:
+                cached_entry_price = float(context.get("entry_price") or 0)
+            except (TypeError, ValueError):
+                cached_entry_price = 0.0
+            if cached_entry_price > 0:
+                self._decision_cache[cache_key] = (
+                    verdict,
+                    time.time(),
+                    cached_entry_price,
+                )
+
         return verdict
 
     # -----------------------------------------------------------------

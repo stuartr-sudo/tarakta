@@ -13,6 +13,7 @@ file and is gated on ``ANTHROPIC_LIVE_TEST=1`` so CI doesn't need a key.
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -591,3 +592,317 @@ class TestUserPromptOutcomeStatsFilter:
         assert "net=$" not in p
         assert "insufficient data" in p.lower()
         assert ">=20" in p
+
+
+# ---------------------------------------------------------------------------
+# Per-setup decision cache (P2 fix 2026-04-22)
+# ---------------------------------------------------------------------------
+# Context: the 1H formation detector re-generates the same setup every 5-min
+# scan. Pre-fix, each rescan billed a full Opus 4.7 call for zero new info —
+# 82 calls on the same DOGE long setup over 6h on 2026-04-21. The cache
+# collapses this into one call per 30-min window (+ invalidation on price
+# drift / setup change).
+# ---------------------------------------------------------------------------
+
+class TestCacheKey:
+    """_cache_key must be None-safe for incomplete contexts and stable
+    for complete ones. A None return means "don't cache this call" —
+    safer than caching partial data that might collide with a later
+    setup."""
+
+    def _agent(self):
+        return MMSanityAgent(config=SimpleNamespace(), repo=MagicMock())
+
+    def test_complete_context_returns_tuple(self):
+        k = self._agent()._cache_key({
+            "symbol": "DOGE/USDT",
+            "direction": "long",
+            "formation_variant": "standard",
+            "entry_price": 0.156789,
+        })
+        # entry rounded to 4dp so tick-noise doesn't fragment the cache
+        assert k == ("DOGE/USDT", "long", "standard", 0.1568)
+
+    def test_missing_symbol_returns_none(self):
+        assert self._agent()._cache_key({
+            "direction": "long",
+            "formation_variant": "standard",
+            "entry_price": 1.0,
+        }) is None
+
+    def test_missing_direction_returns_none(self):
+        assert self._agent()._cache_key({
+            "symbol": "X",
+            "formation_variant": "standard",
+            "entry_price": 1.0,
+        }) is None
+
+    def test_missing_variant_returns_none(self):
+        assert self._agent()._cache_key({
+            "symbol": "X",
+            "direction": "long",
+            "entry_price": 1.0,
+        }) is None
+
+    def test_zero_entry_returns_none(self):
+        assert self._agent()._cache_key({
+            "symbol": "X",
+            "direction": "long",
+            "formation_variant": "s",
+            "entry_price": 0.0,
+        }) is None
+
+    def test_negative_entry_returns_none(self):
+        assert self._agent()._cache_key({
+            "symbol": "X",
+            "direction": "long",
+            "formation_variant": "s",
+            "entry_price": -1.0,
+        }) is None
+
+    def test_invalid_entry_returns_none(self):
+        assert self._agent()._cache_key({
+            "symbol": "X",
+            "direction": "long",
+            "formation_variant": "s",
+            "entry_price": "not-a-number",
+        }) is None
+
+    def test_4dp_rounding_collapses_tick_noise(self):
+        """Two setups with entry_price differing only in the 5th decimal
+        place must collapse to the same cache key — otherwise the
+        detector's floating-point drift would fragment the cache."""
+        agent = self._agent()
+        k1 = agent._cache_key({
+            "symbol": "X", "direction": "long",
+            "formation_variant": "s", "entry_price": 0.150001,
+        })
+        k2 = agent._cache_key({
+            "symbol": "X", "direction": "long",
+            "formation_variant": "s", "entry_price": 0.150004,
+        })
+        assert k1 == k2
+
+
+def _cache_agent(**cfg_over):
+    """Build an MMSanityAgent wired for cache tests.
+
+    Mocks out the real Anthropic client and the `_call_model` network
+    call. Returns (agent, repo, call_counter) where call_counter lets
+    tests assert whether the API was hit on a given review().
+    """
+    default_cfg = dict(
+        mm_sanity_agent_enabled=True,
+        anthropic_api_key="sk-test",
+        mm_sanity_agent_model="claude-opus-4-7",
+        mm_sanity_agent_fallback_model="claude-sonnet-4-6",
+        # Disable the budget-cap auto-downgrade — it would call the DB
+        mm_sanity_agent_monthly_budget_usd=0,
+        mm_sanity_agent_timeout_s=20.0,
+        mm_sanity_agent_effort="high",
+        mm_sanity_agent_min_confidence=0.0,
+        # Disable the learning-loop repo call — not under test here
+        mm_sanity_agent_outcome_lookback_days=0,
+        mm_sanity_agent_cache_ttl_seconds=1800.0,
+        mm_sanity_agent_cache_price_drift_pct=0.5,
+    )
+    default_cfg.update(cfg_over)
+    config = SimpleNamespace(**default_cfg)
+
+    repo = AsyncMock()
+    repo.get_mm_agent_month_cost = AsyncMock(return_value=0.0)
+    repo.get_mm_agent_outcome_stats = AsyncMock(return_value={})
+    repo.insert_mm_agent_decision = AsyncMock(return_value=None)
+
+    agent = MMSanityAgent(config=config, repo=repo)
+    # Bypass the real anthropic SDK entirely
+    agent._client = object()
+
+    call_counter = {"count": 0, "return": "veto"}
+
+    async def stub_call_model(client, model, user_prompt, effort):
+        call_counter["count"] += 1
+        if call_counter["return"] == "malformed":
+            raw = "not valid json at all"
+        else:
+            raw = (
+                '{"decision":"VETO","reason":"counter-trend per rubric 1",'
+                '"confidence":0.9,"htf_trend_4h":"bullish",'
+                '"htf_trend_1d":"bullish","counter_trend":true,'
+                '"concerns":["4h_alignment"]}'
+            )
+        usage = {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 10_000,
+        }
+        return raw, usage
+
+    agent._call_model = stub_call_model
+    return agent, repo, call_counter
+
+
+BASE_CTX = {
+    "symbol": "DOGE/USDT",
+    "direction": "long",
+    "formation_variant": "standard",
+    "formation_type": "W",
+    "entry_price": 0.1500,
+    "sl_ref": 0.1470,
+    "grade": "C",
+    "score_pct": 40.0,
+    "retest_met": 3,
+    "htf_trend_4h": "sideways",
+    "htf_trend_1d": "sideways",
+    "cycle_count": 1,
+}
+
+
+class TestDecisionCache:
+    """End-to-end cache behaviour through MMSanityAgent.review().
+
+    Each test asserts against `call_counter` — our proxy for
+    'did we pay for an API call?'. A cache hit should mean zero
+    additional calls.
+    """
+
+    async def test_first_call_hits_api_and_populates_cache(self):
+        agent, _repo, counter = _cache_agent()
+        v = await agent.review(dict(BASE_CTX))
+        assert v is not None
+        assert v.decision == "VETO"
+        assert counter["count"] == 1
+        assert len(agent._decision_cache) == 1
+
+    async def test_second_call_same_setup_hits_cache(self):
+        """The core P2 guarantee: identical setup within TTL must NOT
+        trigger a second API call."""
+        agent, _repo, counter = _cache_agent()
+        v1 = await agent.review(dict(BASE_CTX))
+        v2 = await agent.review(dict(BASE_CTX))
+        assert counter["count"] == 1, "second call must be served from cache"
+        assert v2 is not None
+        assert v2.decision == v1.decision
+        # The cached copy must mark itself clearly so downstream audit
+        # rows don't look like a fresh decision.
+        assert v2.reason.startswith("[cached]")
+        # Cached verdicts are free and instant
+        assert v2.latency_ms == 0
+        assert v2.cost_usd == 0.0
+
+    async def test_cache_disabled_by_zero_ttl(self):
+        """A cache_ttl_seconds of 0 must disable caching entirely —
+        every review pays the full API cost. This is the kill switch."""
+        agent, _repo, counter = _cache_agent(
+            mm_sanity_agent_cache_ttl_seconds=0,
+        )
+        await agent.review(dict(BASE_CTX))
+        await agent.review(dict(BASE_CTX))
+        await agent.review(dict(BASE_CTX))
+        assert counter["count"] == 3
+        assert len(agent._decision_cache) == 0
+
+    async def test_expired_ttl_forces_fresh_call(self):
+        """Entries older than TTL must be evicted and refetched.
+        Simulated by back-dating the cached timestamp."""
+        agent, _repo, counter = _cache_agent(
+            mm_sanity_agent_cache_ttl_seconds=1800.0,
+        )
+        await agent.review(dict(BASE_CTX))
+        # Back-date the entry to 31 minutes ago (> 1800s TTL)
+        key = agent._cache_key(BASE_CTX)
+        verdict, _ts, entry = agent._decision_cache[key]
+        agent._decision_cache[key] = (verdict, time.time() - 1860, entry)
+        await agent.review(dict(BASE_CTX))
+        assert counter["count"] == 2, "expired cache must force fresh call"
+
+    async def test_different_variant_is_new_key(self):
+        """A formation_variant change yields a different cache key —
+        the two setups are distinct decisions and must not share a
+        cached verdict."""
+        agent, _repo, counter = _cache_agent()
+        ctx_a = dict(BASE_CTX, formation_variant="standard")
+        ctx_b = dict(BASE_CTX, formation_variant="three_hits_how")
+        await agent.review(ctx_a)
+        await agent.review(ctx_b)
+        assert counter["count"] == 2
+        assert len(agent._decision_cache) == 2
+
+    async def test_different_symbol_is_new_key(self):
+        agent, _repo, counter = _cache_agent()
+        await agent.review(dict(BASE_CTX, symbol="DOGE/USDT"))
+        await agent.review(dict(BASE_CTX, symbol="NEAR/USDT"))
+        assert counter["count"] == 2
+
+    async def test_direction_flip_is_new_key(self):
+        """Same symbol + variant + entry but opposite direction is a
+        genuinely different trade — must not share a cache entry."""
+        agent, _repo, counter = _cache_agent()
+        await agent.review(dict(BASE_CTX, direction="long"))
+        await agent.review(dict(BASE_CTX, direction="short"))
+        assert counter["count"] == 2
+
+    async def test_entry_price_drift_invalidates_cache(self):
+        """If the cached entry_price has drifted >0.5% from the current
+        entry_price, the cached verdict is stale and must be refetched.
+
+        Simulated by directly mutating the cached entry value (since
+        the cache key's 4dp rounding makes a natural drift scenario
+        hard to construct without changing the key)."""
+        agent, _repo, counter = _cache_agent(
+            mm_sanity_agent_cache_price_drift_pct=0.5,
+        )
+        await agent.review(dict(BASE_CTX))
+        key = agent._cache_key(BASE_CTX)
+        verdict, ts, _entry = agent._decision_cache[key]
+        # Seed a "stale" cached entry 5% below current — far above the
+        # 0.5% threshold
+        stale_entry = BASE_CTX["entry_price"] * 0.95
+        agent._decision_cache[key] = (verdict, ts, stale_entry)
+        await agent.review(dict(BASE_CTX))
+        assert counter["count"] == 2, "5% drift must force fresh call"
+
+    async def test_malformed_response_not_cached(self):
+        """If the API returns unparseable JSON, review() returns None
+        (fail-open). That failure must NOT be cached — otherwise a
+        transient bad response poisons the cache for the whole TTL."""
+        agent, _repo, counter = _cache_agent()
+        counter["return"] = "malformed"
+        v = await agent.review(dict(BASE_CTX))
+        assert v is None
+        assert len(agent._decision_cache) == 0
+        # A retry must be allowed to hit the API
+        counter["return"] = "veto"
+        v2 = await agent.review(dict(BASE_CTX))
+        assert counter["count"] == 2
+        assert v2 is not None
+
+    async def test_kill_switch_bypasses_cache(self):
+        """The kill switch must short-circuit BEFORE the cache is
+        consulted — you don't want to be serving cached verdicts after
+        you've disabled the agent."""
+        agent, _repo, counter = _cache_agent()
+        # Warm the cache
+        await agent.review(dict(BASE_CTX))
+        assert counter["count"] == 1
+        # Kill the agent
+        agent.config.mm_sanity_agent_enabled = False
+        v = await agent.review(dict(BASE_CTX))
+        assert v is None  # kill switch wins
+        assert counter["count"] == 1  # no new call, but also no cached replay
+
+
+class TestCacheConfigDefaults:
+    """The cache config flags must exist with sane defaults. A regression
+    that drops them silently reverts to un-cached (expensive) behaviour."""
+
+    def test_default_ttl_is_30_minutes(self):
+        from src.config import Settings
+        s = Settings()
+        assert s.mm_sanity_agent_cache_ttl_seconds == 1800.0
+
+    def test_default_drift_is_half_percent(self):
+        from src.config import Settings
+        s = Settings()
+        assert s.mm_sanity_agent_cache_price_drift_pct == 0.5
