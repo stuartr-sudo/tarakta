@@ -121,12 +121,14 @@ async def _fetch_klines(
 
 async def fetch_history(symbol_spot: str, start: datetime, end: datetime) -> dict[str, pd.DataFrame]:
     """Fetch 1H / 4H / 1D / 15m candles covering [start, end] with warmup."""
-    # Warmup buffers so EMA-200 etc. have data
+    # Warmup buffers — must cover the longest EMA period in
+    # DEFAULT_EMA_PERIODS (=800). Previously sized for EMA-200 only,
+    # which made 4H/1D trend states always read "sideways" in replay.
     warmup_by_tf = {
-        "1h":  timedelta(days=22),   # 500 bars warmup
-        "4h":  timedelta(days=50),   # 300 bars warmup
-        "1d":  timedelta(days=260),  # 260 bars warmup (EMA-200 on 1D)
-        "15m": timedelta(days=3),    # 300 bars warmup
+        "1h":  timedelta(days=22),    # 500 bars warmup
+        "4h":  timedelta(days=200),   # ~1200 bars — covers EMA-800 on 4H
+        "1d":  timedelta(days=1000),  # 1000 bars — covers EMA-800 on 1D
+        "15m": timedelta(days=3),     # 300 bars warmup
     }
     binance_symbol = symbol_spot.replace("/", "").replace(":USDT", "")
     out: dict[str, pd.DataFrame] = {}
@@ -266,6 +268,11 @@ class BarResult:
     signal: dict | None = None # non-None if signal produced
     rejects: dict[str, int] = field(default_factory=dict)
     pnl: "PnlResult | None" = None  # populated by P&L simulation (--pnl)
+
+
+# Module-level toggle for the SL-to-breakeven move after TP1 hits.
+# Wrapper scripts can flip this to False to test "let wins run" hypothesis.
+MOVE_SL_TO_BE: bool = True
 
 
 @dataclass
@@ -427,12 +434,15 @@ def simulate_signal(
                 fees_paid += tp1_f * p1_qty * fee_per_side
                 remaining -= p1
                 result.tp1_hit = True
-                # Move SL to breakeven + fee buffer
-                if is_long:
-                    sl_current = entry * (1 + 2 * fee_per_side)
-                else:
-                    sl_current = entry * (1 - 2 * fee_per_side)
-                result.sl_final = sl_current
+                # Move SL to breakeven + fee buffer (default).
+                # Wrapper scripts can disable this by setting
+                # replay_scan.MOVE_SL_TO_BE = False before main().
+                if MOVE_SL_TO_BE:
+                    if is_long:
+                        sl_current = entry * (1 + 2 * fee_per_side)
+                    else:
+                        sl_current = entry * (1 - 2 * fee_per_side)
+                    result.sl_final = sl_current
 
         if result.tp1_hit and not result.tp2_hit:
             hit = (bar_high >= tp2_f) if is_long else (bar_low <= tp2_f)
