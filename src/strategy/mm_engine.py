@@ -350,6 +350,11 @@ class MMEngine:
         self.min_confluence = MIN_CONFLUENCE_PCT
         self.min_formation_quality = MIN_FORMATION_QUALITY
         self.max_sl_pct = MAX_SL_DISTANCE_PCT
+        # Gate threshold: 0 = disabled (default, backwards-compat).
+        # 1-5 = require N of 5 course-cited gates (multi-session,
+        # hammer-at-peak2, at LOD/LOW, course-variant, HTF). Recommended
+        # production value: 3 — see docs/STATUS_2026-04-26 backtest results.
+        self._gate_threshold = 0
 
         # MM Method modules
         self.session_analyzer = MMSessionAnalyzer()
@@ -513,6 +518,7 @@ class MMEngine:
                 direction=direction,
                 quality_score=float(entry.confidence),
                 at_key_level=True,
+                confirmed=True,  # BM detector validates the entry independently
             )
         return None
 
@@ -1169,10 +1175,14 @@ class MMEngine:
                         self.min_formation_quality = float(mm_settings["mm_min_formation_quality"])
                     if "mm_max_sl_pct" in mm_settings:
                         self.max_sl_pct = float(mm_settings["mm_max_sl_pct"])
+                    if "mm_gate_threshold" in mm_settings:
+                        # 0..5; 0 = disabled. See gate framework below.
+                        self._gate_threshold = max(0, min(5, int(mm_settings["mm_gate_threshold"])))
                     logger.info("mm_engine_restored_settings",
                                 scanning_active=self._scanning_active,
                                 max_positions=self.max_positions,
-                                scan_interval_min=self.scan_interval / 60)
+                                scan_interval_min=self.scan_interval / 60,
+                                gate_threshold=self._gate_threshold)
         except Exception as e:
             logger.debug("mm_engine_state_restore_failed", error=str(e))
 
@@ -1571,14 +1581,19 @@ class MMEngine:
         # and 1D EMA stacks are the HTF trend-alignment gate (see below).
         try:
             candles_1h = await self.candle_manager.get_candles(symbol, "1h", limit=500)
-            candles_4h = await self.candle_manager.get_candles(symbol, "4h", limit=250)
+            # Need >=800 bars for EMA-800 in mm_ema_framework (largest period in
+            # DEFAULT_EMA_PERIODS). Below that, get_trend_state returns sideways
+            # and the HTF veto silently disables.
+            candles_4h = await self.candle_manager.get_candles(symbol, "4h", limit=1000)
             try:
                 candles_15m = await self.candle_manager.get_candles(symbol, "15m", limit=200)
             except Exception:
                 candles_15m = None  # best-effort — some markets won't have 15m
             try:
                 # 1D: 250 bars = ~8 months, plenty for EMA 50/200 daily trend.
-                candles_1d = await self.candle_manager.get_candles(symbol, "1d", limit=250)
+                # Same EMA-800 requirement as 4H; insufficient history makes
+                # 1D trend always read "sideways".
+                candles_1d = await self.candle_manager.get_candles(symbol, "1d", limit=1000)
             except Exception:
                 candles_1d = None  # best-effort — not all markets expose 1D
         except Exception as e:
@@ -1877,6 +1892,112 @@ class MMEngine:
                 return self._reject("no_formation", symbol)
 
         self._advance("formation_found")
+
+        # ---------------------------------------------------------------
+        # at_key_level enrichment for standard W/M formations.
+        # Synthesized variants (board_meeting, brinks, three_hits, etc.)
+        # already set this flag in their constructors. The plain W/M
+        # detector returns Formation(at_key_level=False) by default; here
+        # we check whether peak2 sits at LOD/LOW (W) or HOD/HOW (M).
+        # Lesson 7 [09:30]: "As long as it's at the Low of the day, or
+        # Low of the week. So remember it has to be in the right place."
+        # ---------------------------------------------------------------
+        if best_formation is not None and not best_formation.at_key_level:
+            p2 = float(best_formation.peak2_price)
+            if p2 > 0 and len(candles_1h) >= 24:
+                last_24h = candles_1h.tail(24)
+                lod = float(last_24h["low"].min())
+                hod = float(last_24h["high"].max())
+                low_w = (
+                    float(cycle_state.low)
+                    if cycle_state.low and cycle_state.low > 0 and cycle_state.low < float("inf")
+                    else 0.0
+                )
+                how_w = (
+                    float(cycle_state.how)
+                    if cycle_state.how and cycle_state.how > 0
+                    else 0.0
+                )
+                AT_KEY_TOL_PCT = 0.005  # 0.5% tolerance
+                is_at_key = False
+                if best_formation.type.upper() == "W":
+                    if lod > 0 and abs(p2 - lod) / lod < AT_KEY_TOL_PCT:
+                        is_at_key = True
+                    if low_w > 0 and abs(p2 - low_w) / low_w < AT_KEY_TOL_PCT:
+                        is_at_key = True
+                elif best_formation.type.upper() == "M":
+                    if hod > 0 and abs(p2 - hod) / hod < AT_KEY_TOL_PCT:
+                        is_at_key = True
+                    if how_w > 0 and abs(p2 - how_w) / how_w < AT_KEY_TOL_PCT:
+                        is_at_key = True
+                if is_at_key:
+                    best_formation.at_key_level = True
+
+        # ---------------------------------------------------------------
+        # EXPERIMENTAL: Course-faithful gate framework
+        # ---------------------------------------------------------------
+        # Replaces additive confluence scoring with hard gates derived
+        # directly from Lesson 7. Configurable threshold lets us A/B test
+        # 3/5, 4/5, 5/5 of the gates required to pass.
+        #
+        # Gates (each binary):
+        #   1. Valid M/W formation         — passed by reaching here
+        #   2. HTF trend aligned           — checked downstream by HTF veto
+        #   3. Course-specific variant     — not bare "standard"
+        #   4. Hammer/engulfing at peak2   — formation.confirmed
+        #   5. At LOD/LOW or HOD/HOW       — formation.at_key_level
+        #
+        # Set `_gate_threshold` to N (1..5) to require N of 5. 0 disables.
+        # Backwards compat: `_quality_gates_enabled` still honoured.
+        gate_threshold = int(getattr(self, "_gate_threshold", 0) or 0)
+        if gate_threshold > 0:
+            gates_total = 5
+            passed = 1  # gate 1: formation valid (already here)
+            failed: list[str] = []
+            # Gate 2: HTF aligned — accept if cycle_state.phase isn't a
+            # hard-veto phase. Real HTF veto fires later; here we just
+            # don't re-check (count as passed for simplicity).
+            passed += 1
+            # Gate 3: course-specific variant
+            if best_formation.variant != "standard":
+                passed += 1
+            else:
+                failed.append("standard_variant")
+            # Gate 4: hammer/engulfing at peak2
+            if best_formation.confirmed:
+                passed += 1
+            else:
+                failed.append("no_peak2_confirmation")
+            # Gate 5: at LOD/LOW or HOD/HOW
+            if best_formation.at_key_level:
+                passed += 1
+            else:
+                failed.append("not_at_key_level")
+            if passed < gate_threshold:
+                return self._reject(
+                    "gate_threshold",
+                    symbol,
+                    passed=passed,
+                    of=gates_total,
+                    required=gate_threshold,
+                    failed=",".join(failed) or "none",
+                    variant=best_formation.variant,
+                )
+        elif getattr(self, "_quality_gates_enabled", False):
+            # Legacy two-gate experiment (kept for the older wrapper).
+            if best_formation.variant == "standard":
+                return self._reject(
+                    "single_session_standard",
+                    symbol,
+                    variant=best_formation.variant,
+                )
+            if best_formation.variant in ("standard", "multi_session") and not best_formation.confirmed:
+                return self._reject(
+                    "no_hammer_at_peak2",
+                    symbol,
+                    variant=best_formation.variant,
+                    type=best_formation.type,
+                )
 
         # D2: Asia closing spike directional hint (Lesson 09).
         # The spike that Asia makes in its final 30 minutes (2:00-2:30am NY)
@@ -2353,7 +2474,18 @@ class MMEngine:
                 )
 
         # Calculate entry, SL, and targets
-        entry_price = current_price
+        # EXPERIMENTAL: when `_hypothetical_perfect_entry` is set, simulate
+        # filling at the peak2 wick (the course-correct retest price)
+        # rather than the live tick. Isolates entry-quality impact from
+        # downstream payoff issues. SL distance and TP ladder cascade
+        # naturally from this entry.
+        if (
+            getattr(self, "_hypothetical_perfect_entry", False)
+            and peak2_wick_price_early > 0
+        ):
+            entry_price = peak2_wick_price_early
+        else:
+            entry_price = current_price
 
         # Stop loss placement per MM Method course rules (lesson 10, 20):
         # W-bottom (long):  "SL below the low of the candle PRECEDING the 1st spike, OR below LOD"
@@ -3104,6 +3236,37 @@ class MMEngine:
             confluence=round(confluence_result.score_pct, 1),
         )
         self._advance("signal_built")
+
+        # Persist to signals table for observability — captures every full
+        # signal with its factor breakdown so we can analyze why setups
+        # win or lose after the fact. Fire-and-forget; failures only log.
+        try:
+            await self.repo.insert_signal({
+                "symbol": symbol,
+                "direction": trade_direction,
+                "score": float(confluence_result.score_pct),
+                "reasons": [
+                    f"formation={best_formation.type}/{best_formation.variant}",
+                    f"grade={confluence_result.grade}",
+                    f"rr={round(rr, 2)}",
+                    f"phase={cycle_state.phase}",
+                    f"entry_type={entry_type}",
+                    f"htf_4h={htf_4h_dir}",
+                    f"htf_1d={htf_1d_dir}",
+                    f"counter_trend={is_counter_trend_4h}",
+                    f"at_key_level={best_formation.at_key_level}",
+                    f"confirmed={best_formation.confirmed}",
+                ],
+                "components": {
+                    factor: round(float(score), 2)
+                    for factor, score in confluence_result.factors.items()
+                },
+                "current_price": float(current_price),
+                "acted_on": False,  # set True later when trade is created
+                "scan_cycle": int(self.cycle_count),
+            })
+        except Exception as e:  # pragma: no cover — telemetry best-effort
+            logger.warning("insert_signal_failed", symbol=symbol, error=str(e))
 
         return signal
 
