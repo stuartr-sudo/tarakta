@@ -43,7 +43,7 @@ Before modifying the sanity agent (`src/strategy/mm_sanity_agent.py`), read `doc
 
 Before making ANY rule change (scratch rule, confluence weights, target hierarchy, SL progression, etc.), read the relevant lesson in `docs/courses/mmm-masterclasses/` FIRST. The bot is only valuable if it implements the course; inventing rules is how we got the BNB disaster on 2026-04-17. **Cite the exact lesson + timestamp in the commit message.**
 
-For the running history of every engine change with course citations: see `docs/CHANGELOG.md`. For current project state: see the latest `docs/STATUS_YYYY-MM-DD.md` (most recent is `docs/STATUS_2026-04-22.md`). For what's coming next: see `docs/ROADMAP.md`.
+For the running history of every engine change with course citations: see `docs/CHANGELOG.md`. For current project state: see the latest `docs/STATUS_YYYY-MM-DD.md` (most recent is `docs/STATUS_2026-04-23.md`). For what's coming next: see `docs/ROADMAP.md`.
 
 **Fresh session onboarding order:** (1) latest STATUS doc for today's state → (2) CHANGELOG for history → (3) ROADMAP for next steps → (4) this file for gotchas → (5) run `python3 scripts/agent_review.py --days 2` and `python3 scripts/replay_scan.py --symbol BNB --days 7` to ground in actual bot behaviour.
 
@@ -154,6 +154,10 @@ fly secrets set ANTHROPIC_API_KEY=sk-ant-... --app tarakta-mm
 
 ## Gotchas
 
+- **Strategy is net-negative on the deterministic ceiling (as of 2026-04-26).** 30-day × 10-symbol backtests show -$14k to -$31k P&L depending on gate width. Avg win 0.2-0.5R / avg loss 1.0R cannot break even at any plausible win rate. The 97% live agent veto rate is what's keeping the live bot at break-even — the agent is doing the actual selection. Documented in `review-package/HANDOFF.md` and `review-package/BACKTEST_RESULTS.md`. Don't assume new gates fix the problem; they may just remove signals at the same negative expectancy.
+- **Replay infrastructure limitation.** `scripts/replay_scan.py` only sees bars CLOSED strictly before `as_of`. The live bot has access to the developing 1H bar via the live exchange tick. Combined with `SWING_WINDOW = 5` in `mm_formations.py` (requires 5 forward bars to confirm a swing), this means the most-recent 5 bars can never contain a confirmed swing peak in replay. Backtest P&L numbers are a LOWER BOUND on live behaviour, not a true reproduction. Some setups the live bot takes are structurally invisible to the replay (e.g. NEAR 2026-04-20 $553 winner).
+- **Legacy state in `engine_state.config_overrides`.** Production `engine_state` row contains orphaned keys from previous bot iterations: `agent_models` (gpt-5.4-mini OpenAI agents), `custom_trader` / `custom_trader_stocks` / `custom_trader_commodities` (separate trader systems, last_scan 2026-03-08), `main_bot_settings`, `consensus_monitor`, `watchlist_monitor`, plus stock positions in `open_positions` from 2026-03-19. **None of these are read by the active MM engine.** Audit verified in `review-package/OVERLAP_AUDIT.md`. They pollute observability — namespace-cleanup is recommended (move MM keys to `mm_*` prefix, drop legacy) but not required for correctness.
+- **`src/strategy/volume.py` is dead code.** SMC-era `VolumeAnalyzer` class, ~200 LOC, NOT imported anywhere in `src/` or `tests/`. Safe to delete. Other SMC mentions in active source files (`mm_engine.py:3,21`, `config.py:98`, `mm_targets.py`, `mm_data_feeds.py`, `dashboard/review_tool_map.py:7`) are stale comments only — don't execute.
 - **MM Engine DB contract.** Adding a new `trades` column needs THREE changes: (1) migration file, (2) add name to `_TRADE_COLUMNS` in `src/data/repository.py`, (3) reference the exact column name in `mm_engine.py`. Miss any step and data silently drops. Same applies to `mm_agent_decisions` via `_MM_AGENT_DECISION_COLUMNS`. See `docs/MM_ENGINE_INTEGRATION_GUIDE.md`.
 - **State persistence.** Every in-memory MMPosition change (SL tighten, level advance, partial close, SVC invalidation flag, breakeven move) must be followed by `repo.update_trade(...)`. Otherwise a restart loses progress and the engine can double-enter or re-close partials.
 - **Dead-code pattern to avoid.** `_var = compute()  # noqa: F841 — kept for future use` is exactly what let the BNB 2026-04-17 short slip through — `trend_state_4h` was computed and discarded. If state is worth computing it's worth using or deleting. Don't add new `noqa: F841` comments silencing "unused" state in the engine.
@@ -259,6 +263,6 @@ FastAPI + Jinja2, port 8080. Health check at `/health`.
 
 `pyproject.toml` sets `asyncio_mode = "auto"` — don't `@pytest.mark.asyncio` async tests, it's redundant.
 
-Full suite: **641 passing, 1 skipped** as of migration 019. CI runs `pytest -x`. Lint runs `ruff check src/ tests/`.
+Full suite: **745 passing, 1 skipped** as of 2026-04-23 (migration 020 + Batch A/B fixes). CI runs `pytest -x`. Lint runs `ruff check src/ tests/`.
 
 `tests/test_mm_sanity_agent.py` covers parse_response, compute_cost, build_user_prompt, graceful degradation, and the `build_context` canary for the BNB 2026-04-17 pattern (counter-trend + accelerating + Grade F must all be visible to the model). Do not mock away the BNB canary — it's the regression test for the class of failure this whole agent exists to catch.
