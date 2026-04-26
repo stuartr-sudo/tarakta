@@ -342,6 +342,22 @@ class WeeklyCycleTracker:
 
         ny_now = _to_ny(current_time)
         week_start = _sunday_5pm_ny(current_time)
+        # Auto-reset when crossing into a new trading week (Sunday 5pm NY).
+        # Without this the state machine stays in FRIDAY_TRAP indefinitely
+        # after the first Friday it ever sees, killing every subsequent
+        # week's signals on every symbol.
+        if (
+            self._state.week_start is not None
+            and week_start is not None
+            and week_start > self._state.week_start
+        ):
+            logger.info(
+                "mm_weekly_cycle_auto_reset",
+                prior_week=self._state.week_start.isoformat(),
+                new_week=week_start.isoformat(),
+                prior_phase=self._state.phase,
+            )
+            self.reset_week()
         self._state.week_start = week_start
 
         # Calculate HOW, LOW, HOD, LOD
