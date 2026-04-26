@@ -57,6 +57,21 @@ SWING_WINDOW = 5
 # Minimum candle separation between the two peaks of an M/W.
 MIN_PEAK_SEPARATION = 3
 
+# Maximum candle separation between the two peaks of an M/W.
+# Lesson 7 [09:30] frames W/M formations within "the Low of the day, or Low of
+# the week" and [13:30] describes "multi-session" formations as the high-quality
+# variant. On a 1H chart, 24 bars = one trading day = at most 3 sessions
+# (Asia → London → US), which captures the multi-session case without admitting
+# multi-day historical patterns.
+#
+# Concrete impact (NEAR 2026-04-20 winner): the live bot detected a tight W
+# with peak1 at ~1.317 and peak2 at ~1.323, SL 1.46% from entry. Post-detector
+# scoring (no MAX cap) prefers the deeper, more dramatic W, so the replay was
+# anchoring SL to a swing low at ~1.126 ~30+ bars before peak2 — 15.7% SL
+# distance, which then trips sl_too_wide. Capping the lookback restores the
+# session-bound retest the course actually teaches.
+MAX_PEAK_SEPARATION = 24
+
 # Default candle lookback for formation scanning.
 DEFAULT_LOOKBACK = 40
 
@@ -750,6 +765,9 @@ class FormationDetector:
                 # Enforce minimum separation.
                 if sh2 - sh1 < MIN_PEAK_SEPARATION:
                     continue
+                # Enforce maximum separation (Lesson 7 — session-bound formations).
+                if sh2 - sh1 > MAX_PEAK_SEPARATION:
+                    continue
 
                 # Find the deepest trough (swing low) between the two peaks.
                 trough_idx = self._find_trough_between(
@@ -847,6 +865,9 @@ class FormationDetector:
 
                 # Enforce minimum separation.
                 if sl2 - sl1 < MIN_PEAK_SEPARATION:
+                    continue
+                # Enforce maximum separation (Lesson 7 — session-bound formations).
+                if sl2 - sl1 > MAX_PEAK_SEPARATION:
                     continue
 
                 # Find the highest ridge (swing high) between the two troughs.
