@@ -274,6 +274,12 @@ class BarResult:
 # Wrapper scripts can flip this to False to test "let wins run" hypothesis.
 MOVE_SL_TO_BE: bool = True
 
+# Predictive mode toggles (read by simulate_signal callers).
+# Set via wrapper script or CLI --predictive.
+PREDICTIVE_MODE: bool = False
+PREDICTIVE_OFFSET_PCT: float = 0.5      # +0.5% above peak2 for higher-low W bias
+PREDICTIVE_TIMEOUT_HOURS: int = 24      # cancel limit if not filled
+
 
 @dataclass
 class PnlResult:
@@ -333,11 +339,20 @@ def simulate_signal(
     max_hold_hours: int = 24 * 7,
     fee_per_side: float = 0.0004,
     partial_split: tuple[float, float, float] = (0.30, 0.40, 0.30),
+    predictive_mode: bool = False,
+    predictive_timeout_hours: int = 24,
 ) -> PnlResult:
     """Walk forward from the signal bar and return the simulated outcome.
 
     `forward_candles` must be the 1H candles with index strictly after
     `signal_ts`. Caller is responsible for slicing appropriately.
+
+    PREDICTIVE MODE: when True, treats `entry_price` as a LIMIT price.
+    Walks forward looking for the first bar where bar.low <= entry_price
+    (long) or bar.high >= entry_price (short). On touch: fill at
+    entry_price, then existing SL/TP simulation runs from NEXT bar
+    onward. If no touch within `predictive_timeout_hours`: returns
+    PnlResult with exit_reason='not_filled' (no risk taken, no P&L).
     """
     is_long = direction == "long"
     # Convert to floats and sanity-check
@@ -345,6 +360,40 @@ def simulate_signal(
     sl_initial = float(sl)
     sl_current = sl_initial
     tp1_f, tp2_f, tp3_f = float(tp1), float(tp2), float(tp3)
+
+    # PREDICTIVE: wait for limit to be touched.
+    if predictive_mode:
+        fill_found = False
+        for ts, row in forward_candles.iterrows():
+            try:
+                elapsed_h = (ts - signal_ts).total_seconds() / 3600
+            except Exception:
+                elapsed_h = 0
+            if elapsed_h > predictive_timeout_hours:
+                return PnlResult(
+                    entry_ts=signal_ts, entry_price=entry, direction=direction,
+                    sl_initial=sl_initial, sl_final=sl_initial,
+                    tp1=tp1_f, tp2=tp2_f, tp3=tp3_f,
+                    exit_reason="not_filled",
+                )
+            bar_high = float(row["high"])
+            bar_low = float(row["low"])
+            touched = (bar_low <= entry) if is_long else (bar_high >= entry)
+            if touched:
+                # Limit fills. Update signal_ts to fill bar; subsequent SL/TP
+                # logic starts from bars AFTER the fill bar (avoids same-bar
+                # TP/SL conflict on the fill itself).
+                signal_ts = ts
+                forward_candles = forward_candles[forward_candles.index > ts]
+                fill_found = True
+                break
+        if not fill_found:
+            return PnlResult(
+                entry_ts=signal_ts, entry_price=entry, direction=direction,
+                sl_initial=sl_initial, sl_final=sl_initial,
+                tp1=tp1_f, tp2=tp2_f, tp3=tp3_f,
+                exit_reason="not_filled",
+            )
 
     # Initial risk: $ at stake on whole position if SL hits immediately.
     # Use the intended 1% of balance — in production the position is sized
@@ -609,16 +658,42 @@ async def replay_single_symbol(
             if pnl_enabled:
                 # Slice forward candles (strictly after signal ts)
                 forward = history["1h"][history["1h"].index > as_of]
-                pnl_res = simulate_signal(
-                    signal_ts=as_of,
-                    direction=signal.direction,
-                    entry_price=signal.entry_price,
-                    sl=signal.stop_loss,
-                    tp1=signal.target_l1,
-                    tp2=signal.target_l2,
-                    tp3=signal.target_l3,
-                    forward_candles=forward,
-                )
+                # Predictive mode: limit at peak2 wick + offset.
+                # Disabled by default — controlled by replay_scan.PREDICTIVE_MODE.
+                pred_mode = bool(globals().get("PREDICTIVE_MODE", False))
+                pred_offset_pct = float(globals().get("PREDICTIVE_OFFSET_PCT", 0.5))
+                pred_timeout_h = int(globals().get("PREDICTIVE_TIMEOUT_HOURS", 24))
+                if pred_mode and getattr(signal, "peak2_wick_price", 0) > 0:
+                    p2w = float(signal.peak2_wick_price)
+                    if signal.direction == "long":
+                        # For W: anticipated entry slightly ABOVE peak2 wick
+                        # (higher-low W bias). Empirical median offset = +1%.
+                        pred_entry = p2w * (1 + pred_offset_pct / 100)
+                    else:
+                        pred_entry = p2w * (1 - pred_offset_pct / 100)
+                    pnl_res = simulate_signal(
+                        signal_ts=as_of,
+                        direction=signal.direction,
+                        entry_price=pred_entry,
+                        sl=signal.stop_loss,
+                        tp1=signal.target_l1,
+                        tp2=signal.target_l2,
+                        tp3=signal.target_l3,
+                        forward_candles=forward,
+                        predictive_mode=True,
+                        predictive_timeout_hours=pred_timeout_h,
+                    )
+                else:
+                    pnl_res = simulate_signal(
+                        signal_ts=as_of,
+                        direction=signal.direction,
+                        entry_price=signal.entry_price,
+                        sl=signal.stop_loss,
+                        tp1=signal.target_l1,
+                        tp2=signal.target_l2,
+                        tp3=signal.target_l3,
+                        forward_candles=forward,
+                    )
             result.bars.append(BarResult(
                 ts=as_of, stage="signal_built",
                 signal={
@@ -897,9 +972,23 @@ def main() -> int:
                     help="Override engine.min_confluence threshold (default 35.0)")
     ap.add_argument("--max-sl-pct", type=float, default=None,
                     help="Override engine.max_sl_pct warning threshold (default 5.0)")
+    ap.add_argument("--predictive", action="store_true",
+                    help="Use limit-order entry at peak2 wick + offset; skip if not filled in N hours")
+    ap.add_argument("--predictive-offset-pct", type=float, default=0.5,
+                    help="Offset above peak2 wick (long) or below (short), in %")
+    ap.add_argument("--predictive-timeout-hours", type=int, default=24,
+                    help="Timeout for limit fill (h); skip trade if not filled in time")
     ap.add_argument("--min-rr", type=float, default=None,
                     help="Override engine.min_rr threshold")
     args = ap.parse_args()
+
+    # Wire predictive flags into module globals (read by simulate_signal callers).
+    global PREDICTIVE_MODE, PREDICTIVE_OFFSET_PCT, PREDICTIVE_TIMEOUT_HOURS
+    PREDICTIVE_MODE = bool(args.predictive)
+    PREDICTIVE_OFFSET_PCT = float(args.predictive_offset_pct)
+    PREDICTIVE_TIMEOUT_HOURS = int(args.predictive_timeout_hours)
+    if PREDICTIVE_MODE:
+        print(f"# PREDICTIVE MODE on: limit at peak2_wick × (1 ± {PREDICTIVE_OFFSET_PCT}%), timeout {PREDICTIVE_TIMEOUT_HOURS}h\n", flush=True)
 
     if args.symbol:
         symbols = [_normalise_symbol(args.symbol)]

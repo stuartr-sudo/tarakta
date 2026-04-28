@@ -17,6 +17,101 @@ Paired docs:
 
 ---
 
+## 2026-04-28 — Engine v2 architecture deployed; sanity agent disabled; experimental cleanup
+
+Five engine fixes shipped to production over 2026-04-26/27, deployed as Fly v50 (image built from main `750eeb5`). Production state captured in [`STATUS_2026-04-28.md`](./STATUS_2026-04-28.md).
+
+### Commits
+
+| Commit | Summary |
+|---|---|
+| `fd0b361` | `WeeklyCycleTracker.update()` auto-resets state on Sunday-5pm-NY boundary. `reset_week()` was defined but never called — bot stayed in `FRIDAY_TRAP` phase indefinitely after the first Friday. Empirically biggest single unlock: BTC/ETH/BNB/SOL/LINK went from 0 signals/year to producing real signals across the universe. |
+| `4b46077` | `MAX_PEAK_SEPARATION = 24` cap added to `_detect_w_bottoms` and `_detect_m_tops` in `mm_formations.py`. Course-cited (Lesson 7 [09:30] "Low of the day, or Low of the week"). Stops the detector from anchoring SL to deep historical swings 30+ bars before peak2. |
+| `70f886b` | Five engine-level changes: 4H/1D candle limit raised 250 → 1000 (HTF EMA-800 trend filter actually computes — was returning "sideways" for every symbol due to insufficient data); `at_key_level` enrichment for standard W/M; `confirmed=True` on `board_meeting` formations (BM detector validates independently); 5-gate framework with `mm_gate_threshold` config flag (1-5 of: formation valid, HTF aligned, course-specific variant, hammer at peak2, at LOD/LOW); `repo.insert_signal` wired at `signal_built` for full setup observability. |
+| `67d9318` | Replay testing infrastructure (one-off wrappers — REMOVED 2026-04-28 in cleanup; see "Cleanup" below). |
+| `750eeb5` | CLAUDE.md gotcha additions. |
+| `35e42db` | `compounded_backtest.py` — true compounded-balance simulator with concurrent-position cap (default 5). |
+
+### Production state changes (DB / Fly secrets)
+
+```sql
+-- engine_state for tarakta-mm: previously had no row at all (engine reads but
+-- never writes; only dashboard saves writes). Created via direct insert.
+INSERT INTO engine_state (...) VALUES ('tarakta-mm', 'running', 'paper', 100000, ...);
+
+-- Settings nested under mm_engine_settings (the path mm_engine.run() reads):
+UPDATE engine_state SET config_overrides = jsonb_build_object(
+  'mm_engine_settings',
+    jsonb_build_object(
+      'mm_gate_threshold', 3,
+      'mm_max_aggregate_risk_pct', 10
+    )
+) WHERE instance_id = 'tarakta-mm';
+```
+
+```
+fly secrets set MM_SANITY_AGENT_ENABLED=false --app tarakta-mm
+```
+
+### Sanity agent disabled
+
+The rubric_v=3 prompt was calibrated on data from a broken architecture (HTF always "sideways" because EMA-800 couldn't compute). With HTF now real, the agent's calibration is stale. Decision: disable agent entirely while the deterministic engine collects clean baseline data. Re-enabling requires either (a) recalibrating Rubric 8 outcome stats on the new data once 30+ trades accumulate, or (b) rewriting the rubric to consume the new gate framework outputs as inputs. Neither pursued in this cycle.
+
+### Backtest evidence (post-fix architecture)
+
+- 3/5 gates × 365 days × 20 symbols: 736 signals, **+$97,903** uncompounded P&L
+- Dead-factor zero-out × 90 days × 20 symbols: 695 signals, **+$91,593** (untested in production — proposed ship)
+- Compounded run × 180 days × 20 symbols × cap=10: **+62.8% return** with 35.2% max DD
+- Per-symbol P&L heavily concentrated in APT, FIL, BCH, TRX
+
+### First live signal of v2 architecture
+
+- 2026-04-28 00:05:07 UTC: AVAX/USDT short opened
+- M formation, LEVEL_3 phase, Grade F, conservative entry
+- peak2_wick 9.267, entered at 9.232758 (0.37% slippage, within 1% gate)
+- Closed 2026-04-28 02:05:23 UTC at 9.252 (exactly 2h)
+- Exit reason: `scratch_2h` — MFE was 0.0R the whole time
+- P&L: −$64.55
+
+The MFE-based scratch fix from `ae04581` correctly identified MFE never crossed 0.3R. The user flagged that the fix doesn't help trades that stay flat-but-not-broken for 2h — a real open issue documented in STATUS_2026-04-28.
+
+### Tested and rejected
+
+For audit trail (so the next reviewer doesn't re-test):
+
+- **Naive predictive entry** (limit at peak2 wick after confirmed): worse than reactive (-$54k vs +$80k)
+- **Pre-formation predictive without gates**: −99.96% over 90d × 20 sym (catastrophic)
+- **Pre-formation predictive with v1 gates**: −96.02% (still catastrophic — the 5-bar swing confirmation is doing real quality work)
+- **Hypothetical perfect entries**: tighter SLs whipsaw more
+- **Less-frequent scanning** (`--hours-step=4`): far fewer signals (most don't survive 4h)
+- **Disabling 15M-dependent paths**: worse (15M filtering bad 1H setups via retest checks)
+- **Letting winners run** (no BE-after-TP1): marginal +$1k (most setups don't reach TP3 at current quality)
+- **4/5 and 5/5 gate thresholds**: −$3k and −$54k respectively at 365d × 20 sym scale (3/5 is the verified sweet spot)
+- **Sanity Agent v2 design** (multi-tier APPROVE_FULL/HALF/QUARTER/PASS/DEFER): designed but not built — engine doesn't have variable-sizing plumbing
+
+### Cleanup
+
+Removed 11 experimental wrapper scripts that were one-off backtest variants, plus one design doc that wasn't pursued:
+
+- `scripts/predictive_backtest.py`
+- `scripts/predictive_backtest_gated.py`
+- `scripts/replay_scan_dead_zeroed.py`
+- `scripts/replay_scan_gates_3of5.py`
+- `scripts/replay_scan_gates_4of5.py`
+- `scripts/replay_scan_gates_5of5.py`
+- `scripts/replay_scan_let_run.py`
+- `scripts/replay_scan_no_15m.py`
+- `scripts/replay_scan_perfect_entry.py`
+- `scripts/replay_scan_quality_gates.py`
+- `scripts/replay_scan_swing3.py`
+- `docs/MM_SANITY_AGENT_V2_DESIGN.md`
+
+`scripts/replay_scan.py` retains the `--predictive` CLI flag and module-level `PREDICTIVE_MODE` / `MOVE_SL_TO_BE` toggles for future experimentation. Production tools retained: `agent_review.py`, `compounded_backtest.py`, `evaluate_trades.py`, `extract_tbd_course.py`, `replay_scan.py`, `trade_audit.py`.
+
+Tests: 740 passing, 1 skipped after cleanup.
+
+---
+
 ## 2026-04-23 — Day 6: Rubric 8 min-n filter (rubric_v=3) + three user-reported bugs
 
 Multiple fixes shipped on the same day. Structured as:

@@ -43,7 +43,7 @@ Before modifying the sanity agent (`src/strategy/mm_sanity_agent.py`), read `doc
 
 Before making ANY rule change (scratch rule, confluence weights, target hierarchy, SL progression, etc.), read the relevant lesson in `docs/courses/mmm-masterclasses/` FIRST. The bot is only valuable if it implements the course; inventing rules is how we got the BNB disaster on 2026-04-17. **Cite the exact lesson + timestamp in the commit message.**
 
-For the running history of every engine change with course citations: see `docs/CHANGELOG.md`. For current project state: see the latest `docs/STATUS_YYYY-MM-DD.md` (most recent is `docs/STATUS_2026-04-23.md`). For what's coming next: see `docs/ROADMAP.md`.
+For the running history of every engine change with course citations: see `docs/CHANGELOG.md`. For current project state: see the latest `docs/STATUS_YYYY-MM-DD.md` (most recent is `docs/STATUS_2026-04-28.md` — engine v2 deployed, sanity agent disabled). For what's coming next: see `docs/ROADMAP.md`.
 
 **Fresh session onboarding order:** (1) latest STATUS doc for today's state → (2) CHANGELOG for history → (3) ROADMAP for next steps → (4) this file for gotchas → (5) run `python3 scripts/agent_review.py --days 2` and `python3 scripts/replay_scan.py --symbol BNB --days 7` to ground in actual bot behaviour.
 
@@ -263,6 +263,6 @@ FastAPI + Jinja2, port 8080. Health check at `/health`.
 
 `pyproject.toml` sets `asyncio_mode = "auto"` — don't `@pytest.mark.asyncio` async tests, it's redundant.
 
-Full suite: **745 passing, 1 skipped** as of 2026-04-23 (migration 020 + Batch A/B fixes). CI runs `pytest -x`. Lint runs `ruff check src/ tests/`.
+Full suite: **740 passing, 1 skipped** as of 2026-04-28 (engine v2 deploy + cleanup). CI runs `pytest -x`. Lint runs `ruff check src/ tests/`.
 
 `tests/test_mm_sanity_agent.py` covers parse_response, compute_cost, build_user_prompt, graceful degradation, and the `build_context` canary for the BNB 2026-04-17 pattern (counter-trend + accelerating + Grade F must all be visible to the model). Do not mock away the BNB canary — it's the regression test for the class of failure this whole agent exists to catch.
