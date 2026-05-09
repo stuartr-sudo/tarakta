@@ -24,6 +24,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.exchange.models import OrderResult
+from src.exchange.paper import PaperExchange
 from src.strategy.mm_engine import MMEngine, MMPosition, MIN_RR_COURSE_FLOOR
 from src.strategy.mm_linda import LindaTracker
 
@@ -225,6 +227,17 @@ def _make_position(
     )
     pos.entry_time = datetime.now(timezone.utc) - timedelta(hours=hours_old)
     return pos
+
+
+class _LiveTickerStub:
+    def __init__(self, price: float = 100.0) -> None:
+        self.price = price
+
+    async def fetch_ticker(self, symbol: str) -> dict:
+        return {"last": self.price}
+
+    async def close(self) -> None:
+        return None
 
 
 async def _run_manage_capture_scratch(
@@ -655,6 +668,174 @@ def test_scratch_mfe_threshold_config_default():
     s = Settings()
     assert s.mm_scratch_mfe_threshold_r == 0.3
     assert SCRATCH_MFE_THRESHOLD_R == 0.3
+
+
+# ---------------------------------------------------------------------------
+# Stabilization regressions — restart state, partial qty, margin, score units
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_restores_paper_exchange_positions_and_close_does_not_flip():
+    """Restored DB positions must also hydrate PaperExchange's internal ledger."""
+    live = _LiveTickerStub(price=101.0)
+    exchange = PaperExchange(
+        initial_balance=100_000.0,
+        live_exchange=live,
+        account_type="futures",
+        leverage=10,
+    )
+    repo = AsyncMock()
+    repo.get_engine_state = AsyncMock(return_value=None)
+    repo.get_open_trades = AsyncMock(return_value=[
+        {
+            "id": "trade-1",
+            "symbol": "BTC/USDT:USDT",
+            "direction": "long",
+            "strategy": "mm_method",
+            "entry_price": 100.0,
+            "entry_quantity": 2.0,
+            "original_quantity": 2.0,
+            "remaining_quantity": 2.0,
+            "stop_loss": 95.0,
+            "entry_cost_usd": 200.0,
+            "margin_used": 20.0,
+            "take_profit": 110.0,
+            "entry_time": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        },
+    ])
+    repo.update_trade = AsyncMock(return_value={})
+
+    engine = MMEngine(exchange=exchange, repo=repo, candle_manager=MagicMock(), config=None)
+    engine._running = False
+    await engine.run()
+
+    assert "BTC/USDT:USDT" in engine.positions
+    assert exchange.balance["LONG_BTC"] == 2.0
+    assert "SHORT_BTC" not in exchange.balance
+
+    await engine._close_position(
+        engine.positions["BTC/USDT:USDT"],
+        price=101.0,
+        reason="test_close",
+    )
+
+    assert "LONG_BTC" not in exchange.balance or exchange.balance["LONG_BTC"] == 0
+    assert "SHORT_BTC" not in exchange.balance
+
+
+@pytest.mark.asyncio
+async def test_take_partial_uses_original_quantity_for_cumulative_schedule(engine: MMEngine):
+    """TP schedule is cumulative against original size: 30%, 20%, then 50%."""
+    engine.repo = AsyncMock()
+    engine.repo.update_trade = AsyncMock(return_value={})
+    engine.repo.log_partial_exit = AsyncMock(return_value={})
+    engine.exchange = MagicMock()
+    engine.exchange.place_market_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="partial",
+            symbol="BTC/USDT",
+            side="sell",
+            filled_quantity=0,
+            avg_price=110.0,
+            fee=0.0,
+            status="closed",
+        )
+    )
+    pos = MMPosition(
+        trade_id="trade-1",
+        symbol="BTC/USDT",
+        direction="long",
+        entry_price=100.0,
+        quantity=100.0,
+        original_quantity=100.0,
+    )
+
+    await engine._take_partial(pos, level=1, current_price=110.0)
+    await engine._take_partial(pos, level=2, current_price=120.0)
+    await engine._take_partial(pos, level=3, current_price=130.0)
+
+    quantities = [
+        call.kwargs["quantity"]
+        for call in engine.exchange.place_market_order.call_args_list
+    ]
+    assert quantities == pytest.approx([30.0, 20.0, 50.0])
+    assert pos.quantity == pytest.approx(0.0)
+    assert pos.partial_closed_pct == 1.0
+
+
+@pytest.mark.asyncio
+async def test_enter_trade_records_margin_from_actual_exchange_leverage(engine: MMEngine):
+    """$50k notional at 10x should persist about $5k margin, not $50k."""
+    from src.strategy.mm_engine import MMSignal
+
+    engine.config = MagicMock(trading_mode="paper")
+    engine.exchange = MagicMock()
+    engine.exchange.leverage = 10
+    engine.exchange.get_balance = AsyncMock(return_value={"USD": 100_000.0})
+    engine.exchange.place_market_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="entry",
+            symbol="BTC/USDT",
+            side="buy",
+            filled_quantity=500.0,
+            avg_price=100.0,
+            fee=0.0,
+            status="closed",
+        )
+    )
+    engine.repo = AsyncMock()
+    engine.repo.insert_trade = AsyncMock(return_value={"id": "trade-1"})
+
+    signal = MMSignal(
+        symbol="BTC/USDT",
+        direction="long",
+        entry_price=100.0,
+        stop_loss=98.0,
+        target_l1=104.0,
+        risk_reward=2.0,
+    )
+
+    await engine._enter_trade(signal)
+
+    inserted = engine.repo.insert_trade.call_args.args[0]
+    assert inserted["entry_cost_usd"] == pytest.approx(50_000.0)
+    assert inserted["margin_used"] == pytest.approx(5_000.0)
+    assert inserted["leverage"] == 10
+    assert engine.positions["BTC/USDT"].margin_used == pytest.approx(5_000.0)
+
+
+@pytest.mark.asyncio
+async def test_density_confluence_filter_uses_score_pct_not_raw_points(engine: MMEngine):
+    """Noise-mode threshold must compare percent to percent, not raw points."""
+    from src.strategy.mm_engine import MMSignal
+
+    signal = MMSignal(
+        symbol="BTC/USDT",
+        direction="long",
+        risk_reward=2.0,
+        confluence_score=65.0,
+        confluence_score_pct=44.0,
+    )
+    engine.min_confluence = 40.0
+    engine.exchange = MagicMock()
+    engine.exchange.get_balance = AsyncMock(return_value={"USD": 100_000.0})
+
+    with patch.object(
+        engine,
+        "_calculate_signal_density",
+        return_value={
+            "is_noise": True,
+            "is_premium": False,
+            "density_pct": 80.0,
+            "direction_alignment": 1.0,
+        },
+    ):
+        with patch.object(engine, "_enter_trade", new_callable=AsyncMock) as enter:
+            await engine._process_entries([signal])
+
+    enter.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

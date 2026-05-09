@@ -31,6 +31,7 @@
         <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:1.5rem;">
             {{ slider("mm_risk_pct", "Risk per Trade", mm.risk_pct, 0.5, 5, 0.5, "%", "% of MM balance risked per trade") }}
             {{ slider("mm_max_positions", "Max Open Positions", mm.max_positions, 1, 20, 1, "", "Maximum concurrent MM trades") }}
+            {{ slider("mm_max_aggregate_risk_pct", "Aggregate Risk Cap", mm.max_aggregate_risk_pct, 0, 25, 0.5, "%", "Max total open entry-to-SL risk across positions") }}
             {{ slider("mm_leverage", "Leverage", mm.leverage, 1, 50, 1, "x", "Leverage multiplier for MM trades") }}
         </div>
     </div>
@@ -44,7 +45,10 @@
             {{ slider("mm_min_rr", "Min R:R Ratio", mm.min_rr, 1.0, 5.0, 0.5, "", "Minimum reward-to-risk to enter a trade") }}
             {{ slider("mm_min_confluence", "Min Confluence", mm.min_confluence, 10, 80, 5, "%", "Minimum confluence score to enter") }}
             {{ slider("mm_min_formation_quality", "Min Formation Quality", mm.min_formation_quality, 0.1, 0.9, 0.1, "", "Minimum M/W formation quality (0-1)") }}
+            {{ slider("mm_gate_threshold", "Gate Threshold", mm.gate_threshold, 0, 5, 1, "/5", "Require N of 5 course-cited setup gates; 0 disables") }}
             {{ slider("mm_max_sl_pct", "Max SL Distance", mm.max_sl_pct, 1, 15, 0.5, "%", "Skip formations wider than this (too wide = tiny position, fees eat edge)") }}
+            {{ slider("mm_max_tp1_distance_pct", "Max TP1 Distance", mm.max_tp1_distance_pct, 0, 50, 0.5, "%", "Skip setups whose first target is too far from entry; 0 disables") }}
+            {{ slider("mm_max_entry_slippage_pct", "Entry Slippage Cap", mm.max_entry_slippage_pct, 0, 10, 0.1, "%", "Skip setups that moved too far from the retest wick; 0 disables") }}
         </div>
     </div>
 </div>
@@ -56,6 +60,7 @@
         <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:1.5rem;">
             {{ slider("mm_scan_interval", "Scan Interval", mm.scan_interval, 1, 30, 1, " min", "How often the MM engine scans for setups") }}
             {{ slider("mm_cooldown_hours", "Symbol Cooldown", mm.cooldown_hours, 0, 24, 1, "h", "Hours to wait before re-entering a symbol after exit") }}
+            {{ slider("mm_scratch_mfe_threshold_r", "Scratch MFE", mm.scratch_mfe_threshold_r, 0, 2, 0.05, "R", "MFE required within 2h to avoid scratch") }}
         </div>
     </div>
 </div>
@@ -80,13 +85,18 @@
 const SETTINGS = {
     mm_risk_pct:              { divisor: 1,   suffix: '%' },
     mm_max_positions:         { divisor: 1,   suffix: '' },
+    mm_max_aggregate_risk_pct:{ divisor: 1,   suffix: '%' },
     mm_leverage:              { divisor: 1,   suffix: 'x' },
     mm_min_rr:                { divisor: 1,   suffix: '' },
     mm_min_confluence:        { divisor: 1,   suffix: '%' },
     mm_min_formation_quality: { divisor: 1,   suffix: '' },
+    mm_gate_threshold:        { divisor: 1,   suffix: '/5' },
     mm_scan_interval:         { divisor: 1,   suffix: ' min' },
     mm_cooldown_hours:        { divisor: 1,   suffix: 'h' },
     mm_max_sl_pct:            { divisor: 1,   suffix: '%' },
+    mm_max_tp1_distance_pct:  { divisor: 1,   suffix: '%' },
+    mm_max_entry_slippage_pct:{ divisor: 1,   suffix: '%' },
+    mm_scratch_mfe_threshold_r:{ divisor: 1,  suffix: 'R' },
 };
 
 let saveTimeout = null;

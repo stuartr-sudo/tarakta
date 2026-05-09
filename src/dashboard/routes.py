@@ -250,13 +250,18 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         ctx["mm"] = {
             "risk_pct": mm_settings.get("mm_risk_pct", getattr(config, "mm_risk_per_trade_pct", 1.0)),
             "max_positions": mm_settings.get("mm_max_positions", getattr(config, "mm_max_positions", 3)),
+            "max_aggregate_risk_pct": mm_settings.get("mm_max_aggregate_risk_pct", getattr(config, "mm_max_aggregate_risk_pct", 5.0)),
             "leverage": mm_settings.get("mm_leverage", 10),
             "min_rr": mm_settings.get("mm_min_rr", 1.5),
             "min_confluence": mm_settings.get("mm_min_confluence", 40),
             "min_formation_quality": mm_settings.get("mm_min_formation_quality", 0.4),
+            "gate_threshold": mm_settings.get("mm_gate_threshold", 0),
             "scan_interval": mm_settings.get("mm_scan_interval", getattr(config, "mm_scan_interval_minutes", 5)),
             "cooldown_hours": mm_settings.get("mm_cooldown_hours", 4),
             "max_sl_pct": mm_settings.get("mm_max_sl_pct", 5.0),
+            "max_tp1_distance_pct": mm_settings.get("mm_max_tp1_distance_pct", getattr(config, "mm_max_tp1_distance_pct", 10.0)),
+            "max_entry_slippage_pct": mm_settings.get("mm_max_entry_slippage_pct", getattr(config, "mm_max_entry_slippage_pct", 1.0)),
+            "scratch_mfe_threshold_r": mm_settings.get("mm_scratch_mfe_threshold_r", getattr(config, "mm_scratch_mfe_threshold_r", 0.3)),
             "initial_balance": getattr(config, "mm_initial_balance", 10000.0),
         }
         ctx["instance_id"] = config.instance_id

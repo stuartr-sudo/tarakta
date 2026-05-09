@@ -47,7 +47,7 @@ class PaperExchange:
 
         for symbol, pos in open_positions.items():
             base = parse_symbol_base(symbol)
-            leverage = pos.leverage or self._leverage
+            leverage = getattr(pos, "leverage", None) or self._leverage
 
             if self._account_type == "futures":
                 if pos.direction == "long":

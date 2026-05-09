@@ -76,13 +76,18 @@ def create_router(repo: Repository) -> APIRouter:
     _MM_SETTINGS_VALIDATION = {
         "mm_risk_pct":              (float, 0.1, 10.0),
         "mm_max_positions":         (int,   1,   50),
+        "mm_max_aggregate_risk_pct": (float, 0.0, 25.0),
         "mm_leverage":              (int,   1,   100),
         "mm_min_rr":                (float, 0.5, 10.0),
         "mm_min_confluence":        (float, 5.0, 100.0),
         "mm_min_formation_quality": (float, 0.05, 1.0),
+        "mm_gate_threshold":        (int,   0,   5),
         "mm_scan_interval":         (float, 1.0, 60.0),
         "mm_cooldown_hours":        (float, 0.0, 48.0),
         "mm_max_sl_pct":            (float, 1.0, 15.0),
+        "mm_max_tp1_distance_pct":  (float, 0.0, 50.0),
+        "mm_max_entry_slippage_pct": (float, 0.0, 10.0),
+        "mm_scratch_mfe_threshold_r": (float, 0.0, 2.0),
     }
 
     @router.post("/mm/settings")
@@ -120,6 +125,8 @@ def create_router(repo: Repository) -> APIRouter:
         if mm:
             if "mm_max_positions" in parsed:
                 mm.max_positions = parsed["mm_max_positions"]
+            if "mm_max_aggregate_risk_pct" in parsed:
+                mm.max_aggregate_risk_pct = parsed["mm_max_aggregate_risk_pct"]
             if "mm_scan_interval" in parsed:
                 mm.scan_interval = parsed["mm_scan_interval"] * 60
             if "mm_cooldown_hours" in parsed:
@@ -136,8 +143,16 @@ def create_router(repo: Repository) -> APIRouter:
                 mm.min_confluence = parsed["mm_min_confluence"]
             if "mm_min_formation_quality" in parsed:
                 mm.min_formation_quality = parsed["mm_min_formation_quality"]
+            if "mm_gate_threshold" in parsed:
+                mm._gate_threshold = max(0, min(5, int(parsed["mm_gate_threshold"])))
             if "mm_max_sl_pct" in parsed:
                 mm.max_sl_pct = parsed["mm_max_sl_pct"]
+            if "mm_max_tp1_distance_pct" in parsed:
+                mm.max_tp1_distance_pct = parsed["mm_max_tp1_distance_pct"]
+            if "mm_max_entry_slippage_pct" in parsed:
+                mm.max_entry_slippage_pct = parsed["mm_max_entry_slippage_pct"]
+            if "mm_scratch_mfe_threshold_r" in parsed:
+                mm.scratch_mfe_threshold_r = parsed["mm_scratch_mfe_threshold_r"]
 
         logger.info("mm_settings_saved", settings=parsed)
         return {"success": True, "saved": parsed}

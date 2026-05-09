@@ -63,7 +63,7 @@ logger = get_logger(__name__)
 DEFAULT_SCAN_INTERVAL = 5
 
 # Minimum confluence score (%) to consider an entry — course requires Grade C+ (40%)
-MIN_CONFLUENCE_PCT = 35.0  # Lowered from 40: with 7 stubbed data feeds (18 pts unavailable), 40 was too restrictive
+MIN_CONFLUENCE_PCT = 40.0
 
 # Minimum R:R ratio (to Level 1 target)
 # Course lesson 53: 1.4 is the "don't get out of bed" floor — below that the
@@ -197,7 +197,8 @@ class MMSignal:
     formation_quality: float = 0.0
     cycle_phase: str = ""
     current_level: int = 0
-    confluence_score: float = 0.0
+    confluence_score: float = 0.0      # Raw confluence points
+    confluence_score_pct: float = 0.0  # Percent of available max, used for thresholds
     confluence_grade: str = ""
     session_name: str = ""
     ema_alignment: str = ""
@@ -246,6 +247,7 @@ class MMPosition:
     direction: str = ""         # "long" or "short"
     entry_price: float = 0.0
     quantity: float = 0.0
+    original_quantity: float = 0.0
     stop_loss: float = 0.0
     current_level: int = 0      # Track which level we're at
     last_level_checked: int = 0
@@ -1229,6 +1231,7 @@ class MMEngine:
                     direction=t.get("direction", "long"),
                     entry_price=float(t.get("entry_price", 0)),
                     quantity=float(remain_qty),
+                    original_quantity=float(orig_qty),
                     stop_loss=float(t.get("stop_loss", 0)),
                     current_level=int(t.get("current_tier") or 0),
                     partial_closed_pct=closed_pct,
@@ -1264,6 +1267,11 @@ class MMEngine:
                     ),
                 )
                 restored += 1
+            if restored and hasattr(self.exchange, "restore_positions"):
+                try:
+                    self.exchange.restore_positions(self.positions)
+                except Exception as e:
+                    logger.warning("mm_paper_position_restore_failed", error=str(e))
             if mm_trades:
                 logger.info("mm_positions_restored", restored=restored, orphaned=orphaned,
                             symbols=list(self.positions.keys()))
@@ -3191,6 +3199,7 @@ class MMEngine:
             cycle_phase=cycle_state.phase,
             current_level=level_analysis.current_level,
             confluence_score=round(confluence_result.total_score, 1),
+            confluence_score_pct=round(confluence_result.score_pct, 1),
             confluence_grade=confluence_result.grade,
             session_name=session.session_name,
             ema_alignment=ema_state.alignment if ema_state else "mixed",
@@ -3281,7 +3290,7 @@ class MMEngine:
 
         Rules:
           - noise:   >50% of scanned pairs have signals AND >70% same direction
-          - premium: <20% of scanned pairs signal AND top signal has score >60
+          - premium: <20% of scanned pairs signal AND top signal has score_pct >60
         """
         if not signals:
             return {"density_pct": 0.0, "is_noise": False, "is_premium": False}
@@ -3302,10 +3311,15 @@ class MMEngine:
         direction_alignment = max(long_count, short_count) / len(signals) if signals else 0
 
         is_noise = density_pct > 50 and direction_alignment > 0.7
+        top_score_pct = (
+            signals[0].confluence_score_pct
+            if signals[0].confluence_score_pct > 0
+            else signals[0].confluence_score
+        )
         is_premium = (
             density_pct < 20
             and len(signals) >= 1
-            and signals[0].confluence_score > 60
+            and top_score_pct > 60
         )
 
         return {
@@ -3340,7 +3354,7 @@ class MMEngine:
             logger.info(
                 "mm_density_premium",
                 density_pct=density["density_pct"],
-                top_score=signals[0].confluence_score if signals else 0,
+                top_score_pct=signals[0].confluence_score_pct if signals else 0,
                 effective_min_rr=effective_min_rr,
             )
 
@@ -3357,11 +3371,16 @@ class MMEngine:
                 break
 
             # Density-adjusted confluence filter
-            if signal.confluence_score < effective_min_confluence:
+            signal_score_pct = (
+                signal.confluence_score_pct
+                if signal.confluence_score_pct > 0
+                else signal.confluence_score
+            )
+            if signal_score_pct < effective_min_confluence:
                 logger.info(
                     "mm_reject_density_confluence",
                     symbol=signal.symbol,
-                    score=signal.confluence_score,
+                    score_pct=signal_score_pct,
                     required=effective_min_confluence,
                 )
                 continue
@@ -3493,11 +3512,14 @@ class MMEngine:
 
         fill_price = result.avg_price or signal.entry_price
         cost_usd = result.filled_quantity * fill_price
+        actual_leverage = float(getattr(self.exchange, "leverage", self.leverage) or self.leverage or 1)
+        if actual_leverage <= 0:
+            actual_leverage = 1.0
 
         # Log to database first to get the DB-generated id
         trade_id = str(uuid4())  # valid UUID fallback if DB insert fails
         risk_usd = abs(fill_price - signal.stop_loss) * result.filled_quantity
-        margin = pos_result.position_size_usd / pos_result.recommended_leverage
+        margin = cost_usd / actual_leverage
         try:
             db_row = await self.repo.insert_trade({
                 "symbol": signal.symbol,
@@ -3513,7 +3535,7 @@ class MMEngine:
                 "margin_used": round(margin, 2),
                 "entry_cost_usd": cost_usd,
                 "risk_usd": round(risk_usd, 2),
-                "leverage": getattr(self.config, 'markets', {}).get('crypto', None) and self.config.markets['crypto'].leverage or 10,
+                "leverage": int(round(actual_leverage)),
                 "instance_id": getattr(self.config, 'instance_id', 'footprint'),
                 "entry_time": datetime.now(timezone.utc).isoformat(),
                 "strategy": STRATEGY_TAG,
@@ -3565,6 +3587,7 @@ class MMEngine:
             direction=signal.direction,
             entry_price=fill_price,
             quantity=result.filled_quantity,
+            original_quantity=result.filled_quantity,
             stop_loss=signal.stop_loss,
             current_level=0,
             cost_usd=cost_usd,
@@ -4715,7 +4738,11 @@ class MMEngine:
             return  # Already closed enough
 
         close_pct = target_close_pct - pos.partial_closed_pct
-        close_qty = pos.quantity * close_pct
+        original_qty = pos.original_quantity
+        if original_qty <= 0 and pos.partial_closed_pct < 1.0:
+            original_qty = pos.quantity / max(1.0 - pos.partial_closed_pct, 1e-9)
+        close_qty = original_qty * close_pct
+        close_qty = min(close_qty, pos.quantity)
 
         if close_qty <= 0:
             return
