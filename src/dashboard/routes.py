@@ -17,8 +17,30 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
     router = APIRouter()
     templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
+    def _tracked_instance_ids() -> list[str]:
+        ids = [
+            config.instance_id,
+            getattr(config, "inverse_source_instance_id", "tarakta-mm"),
+            getattr(config, "inverse_instance_id", "tarakta-mm-inverse"),
+        ]
+        result = []
+        for iid in ids:
+            if iid and iid not in result:
+                result.append(iid)
+        return result
+
+    def _active_instance(request: Request) -> str:
+        return request.query_params.get("instance") or config.instance_id
+
+    def _strategy_for_instance(instance_id: str) -> str:
+        if instance_id == getattr(config, "inverse_source_instance_id", ""):
+            return getattr(config, "inverse_source_strategy", "mm_method")
+        if instance_id == getattr(config, "inverse_instance_id", ""):
+            return getattr(config, "inverse_strategy_tag", "mm_inverse")
+        return getattr(config, "mm_dashboard_strategy", "mm_method")
+
     def _get_repo_for_request(request: Request) -> Repository:
-        requested = request.query_params.get("instance")
+        requested = _active_instance(request)
         if not requested or requested == config.instance_id:
             return repo
         repos: dict = getattr(request.app.state, "repos", {})
@@ -35,11 +57,80 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         except Exception:
             state = None
             db_offline = True
+        active_instance = _active_instance(request)
+        all_instances = []
+        try:
+            all_instances = await repo.get_all_instances()
+        except Exception:
+            all_instances = []
+        known = {str(i.get("instance_id")) for i in all_instances if i.get("instance_id")}
+        for iid in _tracked_instance_ids():
+            if iid not in known:
+                all_instances.append({
+                    "instance_id": iid,
+                    "status": "running" if iid == config.instance_id else "unknown",
+                    "mode": config.trading_mode,
+                    "total_pnl_usd": None,
+                })
         return {
             "request": request,
             "state": state,
             "config": config,
             "role": request.session.get("role", "viewer"),
+            "db_offline": db_offline,
+            "active_instance": active_instance,
+            "all_instances": all_instances,
+            "tracked_instance_ids": _tracked_instance_ids(),
+            "enabled_markets": list(getattr(config, "markets", {}).keys()),
+        }
+
+    def _stats_for_trades(trades: list[dict]) -> dict:
+        closed = [t for t in trades if t.get("status") == "closed" and t.get("exit_reason") != "orphan_cleanup"]
+        open_trades = [t for t in trades if t.get("status") == "open"]
+        pnls = [float(t.get("pnl_usd") or 0) for t in closed]
+        wins = sum(1 for t in closed if (t.get("pnl_usd") or 0) > 0)
+        losses = len(closed) - wins
+        total_pnl = round(sum(pnls), 2)
+        return {
+            "total": len(closed),
+            "wins": wins,
+            "losses": losses,
+            "win_rate": wins / len(closed) if closed else 0,
+            "total_pnl": total_pnl,
+            "avg_pnl": round(total_pnl / len(closed), 2) if closed else 0,
+            "open": len(open_trades),
+        }
+
+    def _source_id_from_reason(reason: str | None) -> str | None:
+        if not reason or "inverse_of:" not in reason:
+            return None
+        return reason.split("inverse_of:", 1)[1].split()[0].strip() or None
+
+    async def _bot_summary(instance_id: str, strategy: str, label: str) -> dict:
+        active_repo = repo if instance_id == config.instance_id else Repository(repo.db, instance_id=instance_id)
+        trades = []
+        db_offline = False
+        try:
+            all_trades = await active_repo.get_trades(per_page=500)
+            trades = [t for t in all_trades if t.get("strategy") == strategy]
+            trades.sort(key=lambda t: t.get("entry_time") or t.get("created_at") or "", reverse=True)
+        except Exception:
+            db_offline = True
+        stats = _stats_for_trades(trades)
+        initial = float(getattr(config, "mm_initial_balance", 10000.0) or 10000.0)
+        return {
+            "label": label,
+            "instance_id": instance_id,
+            "strategy": strategy,
+            "trades": trades,
+            "open_trades": [t for t in trades if t.get("status") == "open"],
+            "recent_trades": trades[:20],
+            "stats": stats,
+            "snapshot": {
+                "balance_usd": initial + stats["total_pnl"],
+                "total_pnl_usd": stats["total_pnl"],
+                "drawdown_pct": max(0, (initial - (initial + stats["total_pnl"])) / initial) if initial > 0 else 0,
+            },
             "db_offline": db_offline,
         }
 
@@ -82,7 +173,8 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
         mm_stats = {"total": 0, "wins": 0, "losses": 0, "win_rate": 0, "total_pnl": 0, "avg_pnl": 0}
         try:
             all_trades = await active_repo.get_trades(per_page=200)
-            mm_trades = [t for t in all_trades if t.get("strategy") == "mm_method"]
+            dashboard_strategy = _strategy_for_instance(_active_instance(request))
+            mm_trades = [t for t in all_trades if t.get("strategy") == dashboard_strategy]
             mm_trades.sort(key=lambda t: t.get("created_at", ""), reverse=True)
 
             closed = [t for t in mm_trades if t.get("status") == "closed" and t.get("exit_reason") != "orphan_cleanup"]
@@ -129,6 +221,42 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             except Exception:
                 ctx["mm_scanning_active"] = True
         return templates.TemplateResponse(request, "mm.html", context=ctx)
+
+    @router.get("/bots", response_class=HTMLResponse)
+    @router.get("/mm/bots", response_class=HTMLResponse)
+    @login_required
+    async def bots_compare_page(request: Request):
+        ctx = await _base_context(request)
+        source_instance = getattr(config, "inverse_source_instance_id", "tarakta-mm")
+        inverse_instance = getattr(config, "inverse_instance_id", "tarakta-mm-inverse")
+        source_strategy = getattr(config, "inverse_source_strategy", "mm_method")
+        inverse_strategy = getattr(config, "inverse_strategy_tag", "mm_inverse")
+
+        source = await _bot_summary(source_instance, source_strategy, "Tarakta MM")
+        inverse = await _bot_summary(inverse_instance, inverse_strategy, "Inverse Mirror")
+
+        inverse_by_source = {
+            source_id: t
+            for t in inverse["trades"]
+            if (source_id := _source_id_from_reason(t.get("entry_reason")))
+        }
+        pairs = []
+        for source_trade in source["trades"][:100]:
+            source_id = str(source_trade.get("id") or "")
+            mirror = inverse_by_source.get(source_id)
+            pairs.append({
+                "source": source_trade,
+                "inverse": mirror,
+                "source_id": source_id,
+                "paired": mirror is not None,
+            })
+
+        ctx.update({
+            "source_bot": source,
+            "inverse_bot": inverse,
+            "trade_pairs": pairs,
+        })
+        return templates.TemplateResponse(request, "bots.html", context=ctx)
 
     # --- MM Status ---
 

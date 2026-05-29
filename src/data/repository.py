@@ -225,6 +225,21 @@ class Repository:
         result = await asyncio.to_thread(_exec, query.order("entry_time", desc=True))
         return result.data or []
 
+    async def get_partial_exits(self, trade_id: str) -> list[dict]:
+        """Fetch partial exits for one trade, oldest first."""
+        try:
+            result = await asyncio.to_thread(
+                _exec,
+                self.db.table("partial_exits")
+                .select("*")
+                .eq("trade_id", trade_id)
+                .order("created_at", desc=False),
+            )
+            return result.data or []
+        except Exception as e:
+            logger.warning("get_partial_exits_failed", trade_id=trade_id, error=str(e))
+            return []
+
     async def get_recent_trades_for_symbol(
         self, symbol: str, limit: int = 5, mode: str | None = None
     ) -> list[dict]:

@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+{% block title %}Tarakta - Bot Compare{% endblock %}
+{% block topbar_title %}Bot Compare{% endblock %}
+
+{% block head %}
+<style>
+    .compare-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+    .bot-card { background: var(--bg-card); border: 1px solid var(--border-accent); border-radius: var(--radius-lg); overflow: hidden; }
+    .bot-card.inverse { border-color: rgba(224,64,251,0.22); }
+    .bot-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+    .bot-title { min-width: 0; }
+    .bot-title h2 { color: var(--text-primary); font-size: 14px; line-height: 1.2; }
+    .bot-title .sub { color: var(--text-muted); font-size: 11px; font-family: var(--font-mono); margin-top: 3px; }
+    .bot-pill { padding: 3px 9px; border-radius: 20px; font-size: 10px; font-weight: 700; letter-spacing: 0.05em; background: var(--teal-dim); color: var(--teal); white-space: nowrap; }
+    .bot-card.inverse .bot-pill { background: var(--magenta-dim); color: var(--magenta); }
+    .bot-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; padding: 12px; }
+    .mini-stat { background: rgba(255,255,255,0.025); border: 1px solid var(--border); border-radius: 8px; padding: 10px; min-width: 0; }
+    .mini-stat .label { color: var(--text-muted); font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+    .mini-stat .value { color: var(--teal); font-family: var(--font-mono); font-size: 15px; margin-top: 5px; overflow-wrap: anywhere; }
+    .bot-card.inverse .mini-stat .value { color: var(--magenta); }
+    .bot-section-title { padding: 0 14px 8px; color: var(--text-muted); font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; }
+    .compact-table { width: 100%; border-collapse: collapse; }
+    .compact-table th { color: var(--text-muted); font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; padding: 8px 10px; text-align: left; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+    .compact-table td { padding: 9px 10px; border-bottom: 1px solid var(--border-subtle); color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
+    .compact-table .sym { color: var(--text-primary); font-weight: 700; }
+    .mono { font-family: var(--font-mono); }
+    .pair-table td { vertical-align: top; }
+    .pair-status { display: inline-flex; padding: 2px 7px; border-radius: 10px; font-size: 10px; font-weight: 700; }
+    .pair-status.paired { color: var(--teal); background: var(--teal-dim); }
+    .pair-status.missing { color: var(--magenta); background: var(--magenta-dim); }
+    .empty-small { color: var(--text-muted); padding: 18px; text-align: center; font-size: 12px; }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+    .toolbar h1 { color: var(--text-primary); font-size: 18px; }
+    .toolbar .links { display: flex; gap: 8px; flex-wrap: wrap; }
+    @media (max-width: 1100px) {
+        .compare-grid { grid-template-columns: 1fr; }
+        .bot-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 700px) {
+        .compact-table th:nth-child(4), .compact-table td:nth-child(4) { display: none; }
+        .toolbar { align-items: stretch; }
+        .toolbar .links a { flex: 1; justify-content: center; }
+    }
+</style>
+{% endblock %}
+
+{% macro money(value) -%}
+    {% set v = value | default(0) | float %}
+    <span class="{{ 'positive' if v >= 0 else 'negative' }}">{{ '+' if v >= 0 else '' }}${{ '%.2f'|format(v) }}</span>
+{%- endmacro %}
+
+{% macro bot_panel(bot, inverse=False) %}
+<section class="bot-card {{ 'inverse' if inverse else '' }}">
+    <div class="bot-head">
+        <div class="bot-title">
+            <h2>{{ bot.label }}</h2>
+            <div class="sub">{{ bot.instance_id }} / {{ bot.strategy }}</div>
+        </div>
+        <span class="bot-pill">{{ 'INVERSE' if inverse else 'SOURCE' }}</span>
+    </div>
+    <div class="bot-stats">
+        <div class="mini-stat">
+            <div class="label">Balance</div>
+            <div class="value">${{ '%.2f'|format(bot.snapshot.balance_usd) }}</div>
+        </div>
+        <div class="mini-stat">
+            <div class="label">Total P&L</div>
+            <div class="value">{{ money(bot.stats.total_pnl) }}</div>
+        </div>
+        <div class="mini-stat">
+            <div class="label">Win Rate</div>
+            <div class="value">{{ '%.1f'|format(bot.stats.win_rate * 100) if bot.stats.total else '--' }}%</div>
+        </div>
+        <div class="mini-stat">
+            <div class="label">Open</div>
+            <div class="value">{{ bot.stats.open }}</div>
+        </div>
+    </div>
+
+    <div class="bot-section-title">Open Trades</div>
+    {% if bot.open_trades %}
+    <div class="overflow-x">
+        <table class="compact-table">
+            <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>Qty</th><th>Reason</th></tr></thead>
+            <tbody>
+            {% for t in bot.open_trades[:10] %}
+                <tr>
+                    <td class="sym">{{ (t.symbol or '').replace('/USDT:USDT','') }}</td>
+                    <td><span class="dir-badge {{ t.direction }}">{{ (t.direction or '')|upper }}</span></td>
+                    <td class="mono">{{ '%.4f'|format((t.entry_price or 0)|float) }}</td>
+                    <td class="mono">{{ '%.4f'|format((t.remaining_quantity or t.entry_quantity or 0)|float) }}</td>
+                    <td style="max-width:190px; overflow:hidden; text-overflow:ellipsis;">{{ t.entry_reason or '—' }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-small">No open trades.</div>
+    {% endif %}
+
+    <div class="bot-section-title" style="padding-top:14px;">Recent Closed</div>
+    {% set closed = bot.recent_trades | selectattr("status", "equalto", "closed") | list %}
+    {% if closed %}
+    <div class="overflow-x">
+        <table class="compact-table">
+            <thead><tr><th>Symbol</th><th>Dir</th><th>Exit</th><th>P&L</th></tr></thead>
+            <tbody>
+            {% for t in closed[:10] %}
+                <tr>
+                    <td class="sym">{{ (t.symbol or '').replace('/USDT:USDT','') }}</td>
+                    <td><span class="dir-badge {{ t.direction }}">{{ (t.direction or '')|upper }}</span></td>
+                    <td>{{ t.exit_reason or '—' }}</td>
+                    <td class="mono">{{ money(t.pnl_usd or 0) }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-small">No closed trades yet.</div>
+    {% endif %}
+</section>
+{% endmacro %}
+
+{% block content %}
+<div class="toolbar">
+    <div>
+        <h1>Tarakta MM vs Inverse Mirror</h1>
+        <div style="color:var(--text-muted);font-size:12px;">The inverse bot takes the opposite side of trades opened by the source bot.</div>
+    </div>
+    <div class="links">
+        <a class="btn" href="/mm?instance={{ source_bot.instance_id }}">View Source</a>
+        <a class="btn" href="/mm?instance={{ inverse_bot.instance_id }}">View Inverse</a>
+    </div>
+</div>
+
+<div class="compare-grid">
+    {{ bot_panel(source_bot, inverse=False) }}
+    {{ bot_panel(inverse_bot, inverse=True) }}
+</div>
+
+<section class="panel" style="margin-top:16px;">
+    <div class="panel-header">
+        <h2>Mirror Pairing</h2>
+        <span class="badge">{{ trade_pairs | length }} source rows checked</span>
+    </div>
+    {% if trade_pairs %}
+    <div class="panel-body no-pad">
+        <div class="overflow-x">
+            <table class="data-table pair-table">
+                <thead>
+                    <tr>
+                        <th>Pair</th>
+                        <th>Source Trade</th>
+                        <th>Inverse Trade</th>
+                        <th>Status</th>
+                        <th>P&L</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for row in trade_pairs[:50] %}
+                    {% set s = row.source %}
+                    {% set i = row.inverse %}
+                    <tr>
+                        <td class="td-sym">{{ (s.symbol or '').replace('/USDT:USDT','') }}</td>
+                        <td>
+                            <span class="dir-badge {{ s.direction }}">{{ (s.direction or '')|upper }}</span>
+                            <span class="mono" style="margin-left:8px;">{{ s.status }}</span>
+                            <div style="color:var(--text-muted);font-size:11px;margin-top:3px;">{{ row.source_id }}</div>
+                        </td>
+                        <td>
+                            {% if i %}
+                            <span class="dir-badge {{ i.direction }}">{{ (i.direction or '')|upper }}</span>
+                            <span class="mono" style="margin-left:8px;">{{ i.status }}</span>
+                            <div style="color:var(--text-muted);font-size:11px;margin-top:3px;">{{ i.id }}</div>
+                            {% else %}
+                            <span style="color:var(--text-muted);">No mirror row yet</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <span class="pair-status {{ 'paired' if row.paired else 'missing' }}">{{ 'PAIRED' if row.paired else 'MISSING' }}</span>
+                        </td>
+                        <td class="mono">
+                            Source {{ money(s.pnl_usd or 0) }}
+                            {% if i %}<br>Inverse {{ money(i.pnl_usd or 0) }}{% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% else %}
+    <div class="empty-state">No source trades found for pairing.</div>
+    {% endif %}
+</section>
+{% endblock %}

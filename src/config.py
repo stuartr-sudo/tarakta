@@ -24,6 +24,11 @@ class MarketConfig(BaseModel):
 
 
 class Settings(BaseSettings):
+    # Runtime role. "mm" runs the normal scanner. "inverse_mirror" runs a
+    # separate bot that mirrors another instance's MM trades in the opposite
+    # direction.
+    bot_role: Literal["mm", "inverse_mirror"] = "mm"
+
     # Instance isolation
     instance_id: str = "main"
 
@@ -54,6 +59,7 @@ class Settings(BaseSettings):
 
     # MM Method Engine
     mm_method_enabled: bool = True
+    mm_dashboard_strategy: str = "mm_method"
     mm_scan_interval_minutes: float = 5.0
     # Hard-ceiling sanity backstop, NOT the real limit — the actual
     # constraint is mm_max_aggregate_risk_pct (aggregate-risk budget).
@@ -154,6 +160,17 @@ class Settings(BaseSettings):
     # noise for a real retest, but catches a genuinely new formation
     # price. Set high (e.g. 100) to effectively disable drift check.
     mm_sanity_agent_cache_price_drift_pct: float = 0.5
+
+    # Inverse mirror bot. This mode does not scan for setups. It follows the
+    # source instance's persisted trades and opens/closes the opposite side in
+    # this instance.
+    inverse_source_instance_id: str = "tarakta-mm"
+    inverse_instance_id: str = "tarakta-mm-inverse"
+    inverse_source_strategy: str = "mm_method"
+    inverse_strategy_tag: str = "mm_inverse"
+    inverse_poll_interval_seconds: float = 15.0
+    inverse_quantity_multiplier: float = 1.0
+    inverse_trade_lookback: int = 500
 
     # Scanning defaults
     min_volume_usd: float = 5_000_000

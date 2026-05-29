@@ -1,4 +1,4 @@
-app = "tarakta-mm"
+app = "tarakta-mm-inverse"
 primary_region = "sin"
 
 [build]
@@ -8,13 +8,17 @@ primary_region = "sin"
   LOG_LEVEL = "INFO"
   LOG_FORMAT = "json"
   PORT = "8080"
-  MM_METHOD_ENABLED = "true"
-  BOT_ROLE = "mm"
-  MM_DASHBOARD_STRATEGY = "mm_method"
+  BOT_ROLE = "inverse_mirror"
+  INSTANCE_ID = "tarakta-mm-inverse"
+  MM_DASHBOARD_STRATEGY = "mm_inverse"
   INVERSE_SOURCE_INSTANCE_ID = "tarakta-mm"
   INVERSE_INSTANCE_ID = "tarakta-mm-inverse"
   INVERSE_SOURCE_STRATEGY = "mm_method"
   INVERSE_STRATEGY_TAG = "mm_inverse"
+  INVERSE_POLL_INTERVAL_SECONDS = "15"
+  INVERSE_QUANTITY_MULTIPLIER = "1"
+  MM_SANITY_AGENT_ENABLED = "false"
+  MM_METHOD_ENABLED = "false"
 
 [http_service]
   internal_port = 8080
@@ -26,7 +30,7 @@ primary_region = "sin"
 
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "2048mb"
+  memory = "1024mb"
 
 [checks]
   [checks.health]
