@@ -87,6 +87,7 @@ class InverseMirrorEngine:
         self.trade_lookback = int(getattr(config, "inverse_trade_lookback", 500) or 500)
         self._running = False
         self._restored = False
+        self._failed_open_source_ids: set[str] = set()
 
     async def run(self) -> None:
         self._running = True
@@ -127,6 +128,8 @@ class InverseMirrorEngine:
         for source in source_trades:
             source_id = str(source.get("id") or "")
             if not source_id or source.get("status") != "open":
+                continue
+            if source_id in self._failed_open_source_ids:
                 continue
             mirror = mirrors.get(source_id)
             if mirror is None:
@@ -219,6 +222,11 @@ class InverseMirrorEngine:
             "margin_used": round(margin, 2),
             "entry_cost_usd": round(cost_usd, 2),
             "risk_usd": round(risk_usd, 2),
+            "risk_reward": _as_float(source.get("risk_reward")),
+            "confluence_score": _as_float(source.get("confluence_score")),
+            "signal_reasons": source.get("signal_reasons"),
+            "timeframes_used": source.get("timeframes_used"),
+            "test_group": source.get("test_group") or "control",
             "leverage": int(round(leverage)),
             "instance_id": getattr(self.config, "instance_id", "inverse"),
             "entry_time": datetime.now(timezone.utc).isoformat(),
@@ -227,6 +235,11 @@ class InverseMirrorEngine:
             "mode": getattr(self.config, "trading_mode", "paper"),
             "status": "open",
         })
+        if not row:
+            self._failed_open_source_ids.add(source_id)
+            await self._rollback_unpersisted_open(symbol, direction, filled_qty, source_id)
+            return None
+
         logger.info(
             "inverse_trade_opened",
             source_trade_id=source_id,
@@ -237,6 +250,36 @@ class InverseMirrorEngine:
             quantity=filled_qty,
         )
         return row or {}
+
+    async def _rollback_unpersisted_open(
+        self,
+        symbol: str,
+        direction: str,
+        quantity: float,
+        source_id: str,
+    ) -> None:
+        """Flatten a filled inverse entry if the mirror row cannot be persisted."""
+        if quantity <= 0:
+            return
+        side = _close_side(direction)
+        try:
+            await self.exchange.place_market_order(symbol=symbol, side=side, quantity=quantity)
+            logger.error(
+                "inverse_open_persist_failed_rolled_back",
+                source_trade_id=source_id,
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+            )
+        except Exception as e:
+            logger.error(
+                "inverse_open_persist_failed_rollback_failed",
+                source_trade_id=source_id,
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                error=str(e),
+            )
 
     def _inverse_stop_loss(self, source: dict, entry: float, direction: str) -> float:
         source_tp = _as_float(source.get("take_profit"))

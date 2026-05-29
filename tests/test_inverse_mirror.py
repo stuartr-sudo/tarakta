@@ -68,6 +68,11 @@ class FakeRepo:
         return dict(row)
 
 
+class FailingInsertRepo(FakeRepo):
+    async def insert_trade(self, trade: dict) -> dict:
+        return {}
+
+
 def _source_trade(**overrides) -> dict:
     now = datetime.now(timezone.utc)
     row = {
@@ -82,6 +87,8 @@ def _source_trade(**overrides) -> dict:
         "stop_loss": 95.0,
         "take_profit": 110.0,
         "leverage": 10,
+        "confluence_score": 62.5,
+        "risk_reward": 2.0,
         "entry_time": now.isoformat(),
         "created_at": now.isoformat(),
     }
@@ -118,6 +125,7 @@ async def test_inverse_mirror_opens_opposite_trade_for_source_open():
     assert mirror["entry_reason"].startswith("inverse_of:source-1")
     assert mirror["stop_loss"] == 110.0
     assert mirror["take_profit"] == 95.0
+    assert mirror["confluence_score"] == pytest.approx(62.5)
 
 
 @pytest.mark.asyncio
@@ -186,3 +194,20 @@ async def test_inverse_mirror_reduces_position_for_source_partial():
     mirror = target_repo.trades[0]
     assert mirror["remaining_quantity"] == pytest.approx(70.0)
     assert target_repo.partials["mirror-1"][0]["exit_reason"] == "inverse_partial_of:source-partial-1"
+
+
+@pytest.mark.asyncio
+async def test_inverse_mirror_rolls_back_filled_entry_when_insert_fails():
+    source_repo = FakeRepo("tarakta-mm", trades=[_source_trade()])
+    target_repo = FailingInsertRepo("tarakta-mm-inverse")
+    exchange = FakeExchange(price=100.0)
+    engine = _engine(source_repo, target_repo, exchange)
+
+    await engine.sync_once()
+    await engine.sync_once()
+
+    assert exchange.orders == [
+        {"symbol": "BTC/USDT:USDT", "side": "sell", "quantity": 2.0},
+        {"symbol": "BTC/USDT:USDT", "side": "buy", "quantity": 2.0},
+    ]
+    assert target_repo.trades == []
