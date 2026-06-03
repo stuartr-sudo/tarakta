@@ -854,6 +854,59 @@ async def test_enter_trade_records_margin_from_actual_exchange_leverage(engine: 
 
 
 @pytest.mark.asyncio
+async def test_enter_trade_rolls_back_when_fill_crosses_tp1(engine: MMEngine):
+    """A worse market fill must not persist a long whose TP1 is below entry."""
+    from src.strategy.mm_engine import MMSignal
+
+    engine.config = MagicMock(trading_mode="paper")
+    engine.exchange = MagicMock()
+    engine.exchange.leverage = 10
+    engine.exchange.get_balance = AsyncMock(return_value={"USD": 100_000.0})
+    engine.exchange.place_market_order = AsyncMock(side_effect=[
+        OrderResult(
+            order_id="entry",
+            symbol="SOL/USDT",
+            side="buy",
+            filled_quantity=10.0,
+            avg_price=105.0,
+            fee=0.0,
+            status="closed",
+        ),
+        OrderResult(
+            order_id="rollback",
+            symbol="SOL/USDT",
+            side="sell",
+            filled_quantity=10.0,
+            avg_price=105.0,
+            fee=0.0,
+            status="closed",
+        ),
+    ])
+    engine.repo = AsyncMock()
+    engine.repo.insert_trade = AsyncMock(return_value={"id": "trade-1"})
+
+    signal = MMSignal(
+        symbol="SOL/USDT",
+        direction="long",
+        entry_price=100.0,
+        stop_loss=98.0,
+        target_l1=104.0,
+        target_l2=108.0,
+        target_l3=112.0,
+        risk_reward=2.0,
+    )
+
+    await engine._enter_trade(signal)
+
+    assert engine.exchange.place_market_order.await_count == 2
+    rollback_call = engine.exchange.place_market_order.await_args_list[1].kwargs
+    assert rollback_call["side"] == "sell"
+    assert rollback_call["quantity"] == pytest.approx(10.0)
+    engine.repo.insert_trade.assert_not_called()
+    assert "SOL/USDT" not in engine.positions
+
+
+@pytest.mark.asyncio
 async def test_density_confluence_filter_uses_score_pct_not_raw_points(engine: MMEngine):
     """Noise-mode threshold must compare percent to percent, not raw points."""
     from src.strategy.mm_engine import MMSignal

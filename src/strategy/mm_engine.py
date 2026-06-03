@@ -3456,6 +3456,90 @@ class MMEngine:
             total += max(0.0, risk)
         return round(total, 2)
 
+    @staticmethod
+    def _is_profit_side_price(direction: str, entry_price: float, price: float) -> bool:
+        """Return True when ``price`` is a valid profit target from entry."""
+        if entry_price <= 0 or price <= 0:
+            return False
+        if direction == "long":
+            return price > entry_price
+        return price < entry_price
+
+    @staticmethod
+    def _is_loss_side_stop(direction: str, entry_price: float, stop_loss: float) -> bool:
+        """Return True when ``stop_loss`` is on the loss side of entry."""
+        if entry_price <= 0 or stop_loss <= 0:
+            return False
+        if direction == "long":
+            return stop_loss < entry_price
+        return stop_loss > entry_price
+
+    def _post_fill_geometry_error(self, signal: MMSignal, fill_price: float) -> str | None:
+        """Validate the persisted trade geometry against the actual fill.
+
+        Signals are built against the scan price, but market orders can fill
+        worse. If a fill crosses TP1, the management loop would otherwise
+        mark a fake level hit and take a partial loss as "profit".
+        """
+        direction = signal.direction
+        if direction not in {"long", "short"}:
+            return "invalid_direction"
+        if fill_price <= 0:
+            return "invalid_fill_price"
+        if not self._is_loss_side_stop(direction, fill_price, signal.stop_loss):
+            return "stop_wrong_side_after_fill"
+
+        targets = (
+            ("tp1", signal.target_l1),
+            ("tp2", signal.target_l2),
+            ("tp3", signal.target_l3),
+        )
+        for name, target in targets:
+            if target and not self._is_profit_side_price(direction, fill_price, target):
+                return f"{name}_wrong_side_after_fill"
+        return None
+
+    async def _rollback_invalid_entry(
+        self,
+        signal: MMSignal,
+        entry_side: str,
+        quantity: float,
+        reason: str,
+        fill_price: float,
+    ) -> None:
+        """Flatten a just-filled entry that cannot be managed safely."""
+        if quantity <= 0:
+            return
+        close_side = "sell" if entry_side == "buy" else "buy"
+        try:
+            await self.exchange.place_market_order(
+                symbol=signal.symbol,
+                side=close_side,
+                quantity=quantity,
+            )
+            logger.error(
+                "mm_invalid_entry_rolled_back",
+                symbol=signal.symbol,
+                direction=signal.direction,
+                reason=reason,
+                fill_price=fill_price,
+                stop_loss=signal.stop_loss,
+                tp1=signal.target_l1,
+                tp2=signal.target_l2,
+                tp3=signal.target_l3,
+                quantity=quantity,
+            )
+        except Exception as e:
+            logger.error(
+                "mm_invalid_entry_rollback_failed",
+                symbol=signal.symbol,
+                direction=signal.direction,
+                reason=reason,
+                close_side=close_side,
+                quantity=quantity,
+                error=str(e),
+            )
+
     async def _enter_trade(self, signal: MMSignal) -> None:
         """Execute an MM Method trade entry."""
         # Get balance for position sizing — course E1 (lesson 54): 1% of TOTAL
@@ -3523,6 +3607,29 @@ class MMEngine:
             return
 
         fill_price = result.avg_price or signal.entry_price
+        geometry_error = self._post_fill_geometry_error(signal, fill_price)
+        if geometry_error:
+            logger.warning(
+                "mm_reject_post_fill_geometry",
+                symbol=signal.symbol,
+                direction=signal.direction,
+                reason=geometry_error,
+                signal_entry=signal.entry_price,
+                fill_price=fill_price,
+                stop_loss=signal.stop_loss,
+                tp1=signal.target_l1,
+                tp2=signal.target_l2,
+                tp3=signal.target_l3,
+            )
+            await self._rollback_invalid_entry(
+                signal,
+                side,
+                result.filled_quantity,
+                geometry_error,
+                fill_price,
+            )
+            return
+
         cost_usd = result.filled_quantity * fill_price
         actual_leverage = float(getattr(self.exchange, "leverage", self.leverage) or self.leverage or 1)
         if actual_leverage <= 0:
@@ -3863,15 +3970,27 @@ class MMEngine:
         # to accumulate enough candles. Price hitting the EMA target IS the level.
         target_level = pos.current_level
         is_long = pos.direction == "long"
-        if pos.target_l1 and target_level < 1:
+        if (
+            pos.target_l1
+            and target_level < 1
+            and self._is_profit_side_price(pos.direction, pos.entry_price, pos.target_l1)
+        ):
             if (is_long and current_price >= pos.target_l1) or (not is_long and current_price <= pos.target_l1):
                 target_level = 1
                 logger.info("mm_level_target_hit", symbol=symbol, level=1, target=pos.target_l1, price=current_price)
-        if pos.target_l2 and target_level < 2:
+        if (
+            pos.target_l2
+            and target_level < 2
+            and self._is_profit_side_price(pos.direction, pos.entry_price, pos.target_l2)
+        ):
             if (is_long and current_price >= pos.target_l2) or (not is_long and current_price <= pos.target_l2):
                 target_level = 2
                 logger.info("mm_level_target_hit", symbol=symbol, level=2, target=pos.target_l2, price=current_price)
-        if pos.target_l3 and target_level < 3:
+        if (
+            pos.target_l3
+            and target_level < 3
+            and self._is_profit_side_price(pos.direction, pos.entry_price, pos.target_l3)
+        ):
             if (is_long and current_price >= pos.target_l3) or (not is_long and current_price <= pos.target_l3):
                 target_level = 3
                 logger.info("mm_level_target_hit", symbol=symbol, level=3, target=pos.target_l3, price=current_price)

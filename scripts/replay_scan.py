@@ -295,16 +295,17 @@ class PnlResult:
     """Simulated outcome of one would-have-been signal.
 
     Walks 1H candles forward from the signal bar, checking TP1/TP2/TP3
-    and SL. Tracks partial closes (30/40/30 split) and SL progression
-    (move to breakeven after TP1 per course Lesson 47/48).
+    and SL. Tracks partial closes (30/40/30 split), SL progression
+    (move to breakeven after TP1 per course Lesson 47/48), and the live
+    2-hour MFE scratch rule.
 
     Simplifications — documented here so the P&L number is honest:
     - Fees: flat 0.08% round-trip (4bps per side). Slippage: ignored.
     - Same-bar SL vs TP tie: SL wins (pessimistic — MM course emphasises
       "if stopped, you're stopped"). Real intra-bar ordering is
       unknowable from candle data.
-    - SVC invalidation, refund zone cuts, 200-EMA partial, 2-hour
-      scratch rule: NOT simulated. Only the SL/TP ladder and timeout.
+    - SVC invalidation, refund zone cuts, 200-EMA partial: NOT simulated.
+      Only the SL/TP ladder, 2-hour MFE scratch, and timeout.
     - Max hold: 7 days — if no tier/SL triggers, close at current bar.
     - Sanity agent: not consulted (it's deterministic-only replay).
       Real live P&L may differ (agent could have VETO'd marginal setups).
@@ -331,6 +332,7 @@ class PnlResult:
     realized_pnl_usd: float = 0.0   # net after fees
     r_multiple: float = 0.0         # realized_pnl / initial_risk
     hours_held: float = 0.0
+    max_favorable_excursion_r: float = 0.0
 
 
 def simulate_signal(
@@ -350,6 +352,7 @@ def simulate_signal(
     partial_split: tuple[float, float, float] = (0.30, 0.40, 0.30),
     predictive_mode: bool = False,
     predictive_timeout_hours: int = 24,
+    scratch_mfe_threshold_r: float = 0.3,
 ) -> PnlResult:
     """Walk forward from the signal bar and return the simulated outcome.
 
@@ -452,6 +455,19 @@ def simulate_signal(
         except Exception:
             elapsed_h = 0
 
+        # Live engine B1: scratch if the trade never reached substantial
+        # profit within two hours. Use each bar's best favorable excursion
+        # before applying the 2h check so "within" means any point inside
+        # the window, not just the close at the check.
+        favorable_price = bar_high if is_long else bar_low
+        if sl_distance > 0:
+            if is_long:
+                current_r = (favorable_price - entry) / sl_distance
+            else:
+                current_r = (entry - favorable_price) / sl_distance
+            if current_r > result.max_favorable_excursion_r:
+                result.max_favorable_excursion_r = round(current_r, 3)
+
         if elapsed_h > max_hold_hours:
             # Timeout — close remainder at bar close
             pnl_per_unit = (bar_close - entry) if is_long else (entry - bar_close)
@@ -480,6 +496,21 @@ def simulate_signal(
             exit_reason = "sl"
             exit_ts = ts
             exit_price = fill
+            break
+
+        if (
+            scratch_mfe_threshold_r > 0
+            and elapsed_h >= 2
+            and result.max_favorable_excursion_r < scratch_mfe_threshold_r
+        ):
+            pnl_per_unit = (bar_close - entry) if is_long else (entry - bar_close)
+            units_remaining = quantity * remaining
+            realized_cashflow += pnl_per_unit * units_remaining
+            fees_paid += bar_close * units_remaining * fee_per_side
+            remaining = 0.0
+            exit_reason = "scratch_2h"
+            exit_ts = ts
+            exit_price = bar_close
             break
 
         # Check TPs in order (1 → 2 → 3). Each fires at most once.
@@ -760,7 +791,7 @@ async def replay(
     if engine_overrides:
         print(f"Overrides: {engine_overrides}")
     if pnl_enabled:
-        print("P&L simulation: ON (SL/TP/timeout, 30/40/30 partials, breakeven after TP1, overlapping entries suppressed)")
+        print("P&L simulation: ON (SL/TP/scratch_2h/timeout, 30/40/30 partials, breakeven after TP1, overlapping entries suppressed)")
 
     symbol_results: list[SymbolResult] = []
     for sym in symbols:

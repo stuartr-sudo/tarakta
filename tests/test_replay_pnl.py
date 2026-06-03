@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -150,6 +151,37 @@ class TestTimeout:
         assert result.exit_reason == "timeout"
         # +0.5% on 100% position → ~+0.5R on a 1% SL
         assert 0.3 <= result.r_multiple <= 0.6
+
+
+class TestScratchMFE:
+    def test_scratch_2h_when_mfe_never_clears_threshold(self):
+        # Long entry 100, SL 99. Best favorable move is +0.25R by T+2h,
+        # below the live 0.3R scratch threshold.
+        result = simulate_signal(
+            signal_ts=SIGNAL_TS, direction="long",
+            entry_price=100.0, sl=99.0, tp1=102.0, tp2=103.0, tp3=105.0,
+            forward_candles=_candles(
+                (100.0, 100.20, 99.80, 100.10),
+                (100.1, 100.25, 99.90, 100.05),
+            ),
+        )
+        assert result.exit_reason == "scratch_2h"
+        assert result.max_favorable_excursion_r == pytest.approx(0.25)
+
+    def test_no_scratch_when_mfe_cleared_then_retraced(self):
+        # The course wording is "within two hours"; a move to +0.5R in
+        # the first hour should survive even if price is back near entry
+        # when the two-hour window closes.
+        result = simulate_signal(
+            signal_ts=SIGNAL_TS, direction="long",
+            entry_price=100.0, sl=99.0, tp1=102.0, tp2=103.0, tp3=105.0,
+            forward_candles=_candles(
+                (100.0, 100.50, 99.90, 100.10),
+                (100.1, 100.20, 99.90, 100.00),
+            ),
+        )
+        assert result.exit_reason != "scratch_2h"
+        assert result.max_favorable_excursion_r == pytest.approx(0.5)
 
 
 class TestEdgeCases:
