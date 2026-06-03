@@ -4792,6 +4792,13 @@ class MMEngine:
                     )
                 except Exception as e:
                     logger.debug("mm_partial_exit_audit_failed", error=str(e))
+                if pos.quantity <= 1e-9:
+                    await self._mark_fully_exited_after_partial(
+                        pos,
+                        current_price,
+                        reason=f"tp_l{level}",
+                        final_exit_qty=close_qty,
+                    )
                 logger.info(
                     "mm_partial_profit",
                     symbol=pos.symbol,
@@ -4805,15 +4812,61 @@ class MMEngine:
         except Exception as e:
             logger.warning("mm_partial_failed", symbol=pos.symbol, error=str(e))
 
+    async def _partial_totals(self, trade_id: str) -> dict[str, float]:
+        if hasattr(self.repo, "get_partial_exit_totals"):
+            try:
+                return await self.repo.get_partial_exit_totals(trade_id)
+            except Exception as e:
+                logger.debug("mm_partial_totals_failed", trade_id=trade_id, error=str(e))
+        return {"pnl_usd": 0.0, "fees_usd": 0.0, "exit_quantity": 0.0}
+
+    async def _mark_fully_exited_after_partial(
+        self,
+        pos: MMPosition,
+        price: float,
+        reason: str,
+        final_exit_qty: float,
+    ) -> None:
+        """Close the trade row when a partial tier has fully flattened it."""
+        if not pos.trade_id:
+            self.positions.pop(pos.symbol, None)
+            return
+        totals = await self._partial_totals(pos.trade_id)
+        entry_notional = pos.entry_price * max(pos.original_quantity, 0.0)
+        pnl_usd = totals["pnl_usd"]
+        pnl_pct = (pnl_usd / entry_notional * 100.0) if entry_notional > 0 else 0.0
+        try:
+            await self.repo.update_trade(pos.trade_id, {
+                "status": "closed",
+                "exit_price": price,
+                "exit_quantity": final_exit_qty,
+                "exit_reason": reason,
+                "pnl_usd": round(pnl_usd, 4),
+                "pnl_percent": round(pnl_pct, 4),
+                "fees_usd": round(totals["fees_usd"], 4),
+                "remaining_quantity": 0.0,
+                "exit_time": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as e:
+            logger.debug("mm_full_partial_close_db_update_failed", error=str(e))
+        self.positions.pop(pos.symbol, None)
+        self._cooldowns[pos.symbol] = datetime.now(timezone.utc) + timedelta(hours=self._cooldown_hours)
+
     async def _close_position(self, pos: MMPosition, price: float, reason: str) -> None:
         """Fully close an MM position."""
         if pos.quantity <= 0:
+            await self._mark_fully_exited_after_partial(
+                pos,
+                price,
+                reason=reason,
+                final_exit_qty=0.0,
+            )
             self.positions.pop(pos.symbol, None)
             return
 
         side = "sell" if pos.direction == "long" else "buy"
         try:
-            await self.exchange.place_market_order(
+            result = await self.exchange.place_market_order(
                 symbol=pos.symbol,
                 side=side,
                 quantity=pos.quantity,
@@ -4822,11 +4875,17 @@ class MMEngine:
             logger.warning("mm_close_failed", symbol=pos.symbol, error=str(e))
             return
 
-        # Calculate PnL
+        # Calculate PnL for the remaining leg and include any prior partials.
         if pos.direction == "long":
-            pnl = (price - pos.entry_price) * pos.quantity
+            close_pnl = (price - pos.entry_price) * pos.quantity
         else:
-            pnl = (pos.entry_price - price) * pos.quantity
+            close_pnl = (pos.entry_price - price) * pos.quantity
+        totals = await self._partial_totals(pos.trade_id)
+        pnl = close_pnl + totals["pnl_usd"]
+        final_fee = float(getattr(result, "fee", 0.0) or 0.0)
+        total_fees = totals["fees_usd"] + final_fee
+        entry_notional = pos.entry_price * max(pos.original_quantity, pos.quantity, 0.0)
+        pnl_pct = (pnl / entry_notional * 100.0) if entry_notional > 0 else 0.0
 
         # Update database
         try:
@@ -4836,6 +4895,8 @@ class MMEngine:
                 "exit_quantity": pos.quantity,
                 "exit_reason": reason,
                 "pnl_usd": round(pnl, 4),
+                "pnl_percent": round(pnl_pct, 4),
+                "fees_usd": round(total_fees, 4),
                 "remaining_quantity": 0,
                 "exit_time": datetime.now(timezone.utc).isoformat(),
             })

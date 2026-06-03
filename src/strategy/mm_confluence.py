@@ -333,7 +333,7 @@ class MMConfluenceScorer:
             factors=factors,
             risk_reward=round(rr, 2),
             meets_min_rr=rr >= self.min_rr,
-            meets_min_score=total >= self.min_score,
+            meets_min_score=score_pct >= self.min_score,
             retest_conditions_met=retest.conditions_met,
             grade=grade,
         )

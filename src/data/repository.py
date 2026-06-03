@@ -141,6 +141,23 @@ class Repository:
     ) -> dict:
         """Log a partial exit (TP tier hit)."""
         try:
+            existing = await asyncio.to_thread(
+                _exec,
+                self.db.table("partial_exits")
+                .select("*")
+                .eq("trade_id", trade_id)
+                .eq("tier", tier)
+                .limit(1),
+            )
+            if existing.data:
+                logger.warning(
+                    "duplicate_partial_exit_ignored",
+                    trade_id=trade_id,
+                    tier=tier,
+                    existing_id=existing.data[0].get("id"),
+                )
+                return existing.data[0]
+
             result = await asyncio.to_thread(
                 _exec,
                 self.db.table("partial_exits").insert({
@@ -161,6 +178,15 @@ class Repository:
         except Exception as e:
             logger.error("log_partial_exit_failed", error=str(e), trade_id=trade_id, tier=tier)
             return {}
+
+    async def get_partial_exit_totals(self, trade_id: str) -> dict[str, float]:
+        """Return cumulative gross PnL, fees, and exited quantity for a trade."""
+        partials = await self.get_partial_exits(trade_id)
+        return {
+            "pnl_usd": sum(float(p.get("pnl_usd") or 0.0) for p in partials),
+            "fees_usd": sum(float(p.get("fees_usd") or 0.0) for p in partials),
+            "exit_quantity": sum(float(p.get("exit_quantity") or 0.0) for p in partials),
+        }
 
     async def get_partial_exits(self, trade_id: str) -> list[dict]:
         """Get all partial exits for a trade."""

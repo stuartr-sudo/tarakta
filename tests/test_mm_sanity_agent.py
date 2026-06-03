@@ -4,7 +4,7 @@ These tests cover the parts we can test without a live LLM:
 - Response parsing (tolerant JSON extraction, reject malformed)
 - Cost computation (including cache-aware pricing)
 - User-prompt assembly
-- Graceful degradation when the SDK/API key is missing
+- Fail-closed behavior when the SDK/API key is missing
 - Kill-switch behaviour
 
 The live-LLM fixture test against the BNB pattern lives in a separate
@@ -207,7 +207,7 @@ class TestBuildUserPrompt:
 
 
 # ---------------------------------------------------------------------------
-# Graceful degradation
+# Fail-closed degradation
 # ---------------------------------------------------------------------------
 class TestGracefulDegradation:
     async def test_kill_switch(self):
@@ -229,7 +229,9 @@ class TestGracefulDegradation:
         repo = AsyncMock()
         agent = MMSanityAgent(config=config, repo=repo)
         verdict = await agent.review({"symbol": "X"})
-        assert verdict is None
+        assert verdict is not None
+        assert verdict.decision == "VETO"
+        assert verdict.reason == "sanity_agent_error:client_unavailable"
         # One ERROR row should be written for observability
         repo.insert_mm_agent_decision.assert_awaited_once()
         row = repo.insert_mm_agent_decision.call_args.args[0]
@@ -864,13 +866,15 @@ class TestDecisionCache:
         assert counter["count"] == 2, "5% drift must force fresh call"
 
     async def test_malformed_response_not_cached(self):
-        """If the API returns unparseable JSON, review() returns None
-        (fail-open). That failure must NOT be cached — otherwise a
+        """If the API returns unparseable JSON, review() returns VETO
+        (fail-closed). That failure must NOT be cached — otherwise a
         transient bad response poisons the cache for the whole TTL."""
         agent, _repo, counter = _cache_agent()
         counter["return"] = "malformed"
         v = await agent.review(dict(BASE_CTX))
-        assert v is None
+        assert v is not None
+        assert v.decision == "VETO"
+        assert v.reason == "sanity_agent_error:malformed_json"
         assert len(agent._decision_cache) == 0
         # A retry must be allowed to hit the API
         counter["return"] = "veto"

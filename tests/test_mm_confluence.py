@@ -177,6 +177,20 @@ class TestScore:
         expected_pct = result.total_score / AVAILABLE_MAX * 100
         assert result.score_pct == pytest.approx(expected_pct, abs=0.1)
 
+    def test_meets_min_score_uses_percent_not_raw_points(self):
+        scorer = MMConfluenceScorer(min_rr=1.0, min_score=40.0)
+        ctx = _minimal_context()
+        ctx.formation = {"type": "M", "sessions_spanned": 2}
+        ctx.at_session_changeover = True
+        ctx.at_how_low = True
+        ctx.has_unrecovered_vector = True
+        ctx.rsi_confirmed = True
+        # Raw points are 40, but AVAILABLE_MAX makes this below 40%.
+        result = scorer.score(ctx)
+        assert result.total_score >= 40.0
+        assert result.score_pct < 40.0
+        assert result.meets_min_score is False
+
     def test_all_factors_present(self, scorer: MMConfluenceScorer):
         ctx = _full_context()
         result = scorer.score(ctx)

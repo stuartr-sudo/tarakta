@@ -39,6 +39,13 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _quantity_from_row(row: dict) -> float:
+    """Use explicit remaining_quantity when present, including zero."""
+    if row.get("remaining_quantity") is not None:
+        return _as_float(row.get("remaining_quantity"))
+    return _as_float(row.get("entry_quantity"))
+
+
 def _parse_dt(value: Any) -> datetime | None:
     if value is None:
         return None
@@ -144,7 +151,8 @@ class InverseMirrorEngine:
                 continue
             source_id = _source_id_from_reason(mirror.get("entry_reason"))
             source = source_by_id.get(source_id or "")
-            if source is None or source.get("status") == "closed":
+            source_remaining = _quantity_from_row(source) if source else 0.0
+            if source is None or source.get("status") == "closed" or source_remaining <= 0:
                 await self._close_mirror(mirror, source, reason="source_closed")
 
     async def _restore_exchange_positions(self) -> None:
@@ -159,7 +167,7 @@ class InverseMirrorEngine:
             symbol = t.get("symbol")
             if not symbol:
                 continue
-            qty = _as_float(t.get("remaining_quantity") or t.get("entry_quantity"))
+            qty = _quantity_from_row(t)
             if qty <= 0:
                 continue
             positions[symbol] = SimpleNamespace(
@@ -182,7 +190,7 @@ class InverseMirrorEngine:
             return None
 
         direction = _opposite_direction(source_direction)
-        qty = _as_float(source.get("remaining_quantity") or source.get("entry_quantity"))
+        qty = _quantity_from_row(source)
         qty *= self.quantity_multiplier
         if qty <= 0:
             return None

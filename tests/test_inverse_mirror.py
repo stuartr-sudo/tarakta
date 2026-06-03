@@ -211,3 +211,43 @@ async def test_inverse_mirror_rolls_back_filled_entry_when_insert_fails():
         {"symbol": "BTC/USDT:USDT", "side": "buy", "quantity": 2.0},
     ]
     assert target_repo.trades == []
+
+
+@pytest.mark.asyncio
+async def test_inverse_mirror_does_not_open_when_source_remaining_is_zero():
+    source_repo = FakeRepo("tarakta-mm", trades=[
+        _source_trade(remaining_quantity=0.0, status="open"),
+    ])
+    target_repo = FakeRepo("tarakta-mm-inverse")
+    exchange = FakeExchange(price=100.0)
+
+    await _engine(source_repo, target_repo, exchange).sync_once()
+
+    assert exchange.orders == []
+    assert target_repo.trades == []
+
+
+@pytest.mark.asyncio
+async def test_inverse_mirror_closes_when_source_remaining_reaches_zero():
+    source = _source_trade(status="open", remaining_quantity=0.0, exit_price=90.0)
+    source_repo = FakeRepo("tarakta-mm", trades=[source])
+    target_repo = FakeRepo("tarakta-mm-inverse", trades=[
+        {
+            "id": "mirror-1",
+            "strategy": "mm_inverse",
+            "status": "open",
+            "symbol": "BTC/USDT:USDT",
+            "direction": "short",
+            "entry_price": 100.0,
+            "entry_quantity": 2.0,
+            "remaining_quantity": 2.0,
+            "entry_reason": "inverse_of:source-1",
+        },
+    ])
+    exchange = FakeExchange(price=90.0)
+
+    await _engine(source_repo, target_repo, exchange).sync_once()
+
+    assert exchange.orders == [{"symbol": "BTC/USDT:USDT", "side": "buy", "quantity": 2.0}]
+    assert target_repo.trades[0]["status"] == "closed"
+    assert target_repo.trades[0]["exit_reason"] == "source_closed"

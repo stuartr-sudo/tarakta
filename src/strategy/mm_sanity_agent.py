@@ -314,12 +314,12 @@ class MMSanityAgent:
     # Public entry point
     # -----------------------------------------------------------------
     async def review(self, context: dict[str, Any]) -> AgentVerdict | None:
-        """Review a setup; return an AgentVerdict or None on failure.
+        """Review a setup; return an AgentVerdict.
 
-        None → fail-open (engine approves by default). This is deliberate:
-        we do not want an API outage to halt all MM trading. A row with
-        decision='ERROR' is still written to mm_agent_decisions for
-        observability.
+        If the agent is disabled, return None so deterministic-only trading is
+        an explicit configuration choice. If the agent is enabled but
+        unavailable or errors, return a VETO after logging decision='ERROR'.
+        Money-critical guardrails should fail closed, not silently approve.
         """
         # Kill switch
         if not getattr(self.config, "mm_sanity_agent_enabled", True):
@@ -389,7 +389,7 @@ class MMSanityAgent:
                                      reason="client_unavailable",
                                      raw_response="", model="", latency_ms=0,
                                      cost_usd=0.0)
-            return None
+            return self._error_verdict("client_unavailable", context, model="")
 
         model = await self._choose_model()
         timeout_s = float(getattr(self.config, "mm_sanity_agent_timeout_s", 20.0))
@@ -434,7 +434,7 @@ class MMSanityAgent:
                                      reason=f"timeout_{timeout_s}s",
                                      raw_response="", model=model,
                                      latency_ms=latency_ms, cost_usd=0.0)
-            return None
+            return self._error_verdict(f"timeout_{timeout_s}s", context, model=model)
         except Exception as e:
             latency_ms = int((time.perf_counter() - started) * 1000)
             logger.warning("mm_agent_api_error", symbol=context.get("symbol"),
@@ -443,7 +443,7 @@ class MMSanityAgent:
                                      reason=f"api_error:{e!s}",
                                      raw_response="", model=model,
                                      latency_ms=latency_ms, cost_usd=0.0)
-            return None
+            return self._error_verdict(f"api_error:{e!s}", context, model=model)
 
         latency_ms = int((time.perf_counter() - started) * 1000)
         cost_usd = self._compute_cost(model, usage)
@@ -457,7 +457,7 @@ class MMSanityAgent:
                                      reason="malformed_json",
                                      raw_response=raw_response, model=model,
                                      latency_ms=latency_ms, cost_usd=cost_usd)
-            return None
+            return self._error_verdict("malformed_json", context, model=model)
 
         # Confidence threshold — if below min, downgrade VETO to a logged
         # concern and approve. With default 0.0 every VETO is honoured.
@@ -509,6 +509,21 @@ class MMSanityAgent:
                 )
 
         return verdict
+
+    def _error_verdict(self, reason: str, context: dict[str, Any], model: str) -> AgentVerdict:
+        return AgentVerdict(
+            decision="VETO",
+            reason=f"sanity_agent_error:{reason}",
+            confidence=1.0,
+            htf_trend_4h=str(context.get("htf_trend_4h") or "unknown"),
+            htf_trend_1d=str(context.get("htf_trend_1d") or "unknown"),
+            counter_trend=bool(context.get("counter_trend", False)),
+            concerns=["agent_unavailable"],
+            model=model,
+            latency_ms=0,
+            cost_usd=0.0,
+            raw_response="",
+        )
 
     # -----------------------------------------------------------------
     # Model selection (budget-aware)

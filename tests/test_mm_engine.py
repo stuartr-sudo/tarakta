@@ -731,6 +731,11 @@ async def test_take_partial_uses_original_quantity_for_cumulative_schedule(engin
     engine.repo = AsyncMock()
     engine.repo.update_trade = AsyncMock(return_value={})
     engine.repo.log_partial_exit = AsyncMock(return_value={})
+    engine.repo.get_partial_exit_totals = AsyncMock(return_value={
+        "pnl_usd": 4000.0,
+        "fees_usd": 0.0,
+        "exit_quantity": 100.0,
+    })
     engine.exchange = MagicMock()
     engine.exchange.place_market_order = AsyncMock(
         return_value=OrderResult(
@@ -763,6 +768,48 @@ async def test_take_partial_uses_original_quantity_for_cumulative_schedule(engin
     assert quantities == pytest.approx([30.0, 20.0, 50.0])
     assert pos.quantity == pytest.approx(0.0)
     assert pos.partial_closed_pct == 1.0
+    final_update = engine.repo.update_trade.call_args_list[-1].args[1]
+    assert final_update["status"] == "closed"
+    assert final_update["exit_reason"] == "tp_l3"
+
+
+@pytest.mark.asyncio
+async def test_close_position_includes_prior_partial_pnl(engine: MMEngine):
+    """Final trade PnL must include previous tier exits plus final leg PnL."""
+    engine.repo = AsyncMock()
+    engine.repo.update_trade = AsyncMock(return_value={})
+    engine.repo.get_partial_exit_totals = AsyncMock(return_value={
+        "pnl_usd": 125.0,
+        "fees_usd": 2.5,
+        "exit_quantity": 5.0,
+    })
+    engine.exchange = MagicMock()
+    engine.exchange.place_market_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="close",
+            symbol="BTC/USDT",
+            side="sell",
+            filled_quantity=5.0,
+            avg_price=110.0,
+            fee=0.5,
+            status="closed",
+        )
+    )
+    pos = MMPosition(
+        trade_id="trade-1",
+        symbol="BTC/USDT",
+        direction="long",
+        entry_price=100.0,
+        quantity=5.0,
+        original_quantity=10.0,
+    )
+
+    await engine._close_position(pos, price=110.0, reason="stop_loss")
+
+    updates = engine.repo.update_trade.call_args.args[1]
+    assert updates["pnl_usd"] == pytest.approx(175.0)
+    assert updates["fees_usd"] == pytest.approx(3.0)
+    assert updates["status"] == "closed"
 
 
 @pytest.mark.asyncio
