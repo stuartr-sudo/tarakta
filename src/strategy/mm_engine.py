@@ -190,6 +190,7 @@ class MMSignal:
     target_l2: float = 0.0
     target_l3: float = 0.0
     risk_reward: float = 0.0
+    min_rr_required: float = 0.0
 
     # MM analysis results
     formation_type: str = ""     # "M" or "W"
@@ -345,18 +346,22 @@ class MMEngine:
             getattr(config, "mm_scratch_mfe_threshold_r", SCRATCH_MFE_THRESHOLD_R)
         )
 
-        # Tunable parameters (overridable via settings page)
-        self.risk_pct = RISK_PER_TRADE_PCT
-        self.leverage = 10
-        self.min_rr = MIN_RR_AGGRESSIVE
-        self.min_confluence = MIN_CONFLUENCE_PCT
-        self.min_formation_quality = MIN_FORMATION_QUALITY
-        self.max_sl_pct = MAX_SL_DISTANCE_PCT
-        # Gate threshold: 0 = disabled (default, backwards-compat).
+        # Tunable parameters (overridable via env or settings page)
+        self.risk_pct = float(
+            getattr(config, "mm_risk_pct", getattr(config, "mm_risk_per_trade_pct", RISK_PER_TRADE_PCT))
+        )
+        self.leverage = int(getattr(config, "mm_leverage", getattr(config, "leverage", 10)) or 10)
+        self.min_rr = float(getattr(config, "mm_min_rr", MIN_RR))
+        self.min_confluence = float(getattr(config, "mm_min_confluence", MIN_CONFLUENCE_PCT))
+        self.min_formation_quality = float(
+            getattr(config, "mm_min_formation_quality", MIN_FORMATION_QUALITY)
+        )
+        self.max_sl_pct = float(getattr(config, "mm_max_sl_pct", MAX_SL_DISTANCE_PCT))
+        # Gate threshold: 0 = disabled when explicitly overridden.
         # 1-5 = require N of 5 course-cited gates (multi-session,
-        # hammer-at-peak2, at LOD/LOW, course-variant, HTF). Recommended
-        # production value: 3 — see docs/STATUS_2026-04-26 backtest results.
-        self._gate_threshold = 0
+        # hammer-at-peak2, at LOD/LOW, course-variant, HTF). Default
+        # production value: 3 — see docs/STATUS_2026-04-28 backtest results.
+        self._gate_threshold = max(0, min(5, int(getattr(config, "mm_gate_threshold", 3) or 0)))
 
         # MM Method modules
         self.session_analyzer = MMSessionAnalyzer()
@@ -371,7 +376,7 @@ class MMEngine:
         self.board_meeting_detector = BoardMeetingDetector()
         self.brinks_detector = BrinksDetector()
         self.target_analyzer = TargetAnalyzer()
-        self.risk_calculator = MMRiskCalculator(risk_per_trade=RISK_PER_TRADE_PCT / 100)
+        self.risk_calculator = MMRiskCalculator(risk_per_trade=self.risk_pct / 100)
 
         # C4: BBWP volatility timing indicator (course Trading Strategies lesson 04).
         # Timing-only — does not affect entry decisions. Used for logging/telemetry.
@@ -381,7 +386,9 @@ class MMEngine:
         # State
         self.positions: dict[str, MMPosition] = {}
         self._cooldowns: dict[str, datetime] = {}  # symbol -> earliest re-entry time
-        self._cooldown_hours: float = SYMBOL_COOLDOWN_HOURS  # configurable via settings
+        self._cooldown_hours: float = float(
+            getattr(config, "mm_cooldown_hours", SYMBOL_COOLDOWN_HOURS)
+        )  # configurable via settings
         self._last_prices: dict[str, float] = {}  # symbol -> last known price (survives fetch failures)
         self._oi_cache: dict[str, float] = {}     # symbol -> last Open Interest reading (for rise/fall detection)
 
@@ -414,8 +421,9 @@ class MMEngine:
         # failures rules can't catch (e.g. "three_hits_how exemption voided by
         # accelerating 4H trend"). See docs/MM_SANITY_AGENT_DESIGN.md.
         #
-        # When the API key or SDK is missing, .review() returns None and the
-        # engine fails open (approves). Same for timeouts / API errors.
+        # When enabled and the API key/SDK is missing or the API errors,
+        # .review() returns a VETO-style ERROR verdict. Disable the agent
+        # explicitly for deterministic-only trading.
         from src.strategy.mm_sanity_agent import MMSanityAgent
         self.sanity_agent = MMSanityAgent(config=config, repo=repo)
 
@@ -3061,8 +3069,8 @@ class MMEngine:
         # MM Sanity Agent (Agent 4) — LLM veto layer.
         # ---------------------------------------------------------------
         # Fires on every setup that survives all deterministic rules.
-        # Returns None on failure (API error / timeout / SDK missing / no
-        # key) — we fail OPEN (approve) rather than halt trading. A VETO
+        # Returns None only when the agent is explicitly disabled. API/key
+        # failures return a VETO-style ERROR verdict and fail closed. A VETO
         # decision is binding; a LOW-CONFIDENCE veto is already downgraded
         # inside the agent per `mm_sanity_agent_min_confidence` config.
         #
@@ -3193,6 +3201,7 @@ class MMEngine:
             target_l2=t_l2 or 0,
             target_l3=t_l3 or 0,
             risk_reward=round(rr, 2),
+            min_rr_required=round(effective_min_rr, 2),
             formation_type=best_formation.type,
             formation_variant=best_formation.variant,
             formation_quality=round(best_formation.quality_score, 3),
@@ -3338,7 +3347,7 @@ class MMEngine:
         # --- Signal density edge (course: clean vs noisy market) ---
         density = self._calculate_signal_density(signals)
         effective_min_confluence = self.min_confluence
-        effective_min_rr = self.min_rr
+        density_min_rr = self.min_rr
 
         if density["is_noise"]:
             effective_min_confluence = self.min_confluence + 10
@@ -3350,12 +3359,12 @@ class MMEngine:
                 effective_min_confluence=effective_min_confluence,
             )
         elif density["is_premium"]:
-            effective_min_rr = max(MIN_RR_COURSE_FLOOR, self.min_rr - 0.1)
+            density_min_rr = max(MIN_RR_COURSE_FLOOR, self.min_rr - 0.1)
             logger.info(
                 "mm_density_premium",
                 density_pct=density["density_pct"],
                 top_score_pct=signals[0].confluence_score_pct if signals else 0,
-                effective_min_rr=effective_min_rr,
+                effective_min_rr=density_min_rr,
             )
 
         # Get balance for margin utilization check
@@ -3386,12 +3395,15 @@ class MMEngine:
                 continue
 
             # Density-adjusted R:R filter
-            if signal.risk_reward < effective_min_rr:
+            signal_min_rr = float(getattr(signal, "min_rr_required", 0.0) or self.min_rr)
+            if density["is_premium"]:
+                signal_min_rr = max(MIN_RR_COURSE_FLOOR, min(signal_min_rr, density_min_rr))
+            if signal.risk_reward < signal_min_rr:
                 logger.info(
                     "mm_reject_density_rr",
                     symbol=signal.symbol,
                     rr=signal.risk_reward,
-                    required=effective_min_rr,
+                    required=signal_min_rr,
                 )
                 continue
 

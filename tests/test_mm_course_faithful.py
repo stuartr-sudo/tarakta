@@ -9,6 +9,7 @@ import pytest
 
 from src.strategy.mm_confluence import MAX_POSSIBLE, WEIGHTS
 from src.strategy.mm_engine import (
+    MIN_RR,
     MIN_RR_AGGRESSIVE,
     MIN_RR_COURSE_FLOOR,
     MMEngine,
@@ -37,9 +38,10 @@ def test_rr_course_floor_constant_exists():
     assert MIN_RR_COURSE_FLOOR == 1.4
 
 
-def test_engine_default_min_rr_is_course_floor(engine: MMEngine):
-    """A fresh MMEngine must default min_rr to the course floor 1.4, not 1.0."""
-    assert engine.min_rr == 1.4
+def test_engine_default_min_rr_is_standard_minimum(engine: MMEngine):
+    """A fresh MMEngine defaults to standard 3R; Linda cascade can lower per-signal."""
+    assert engine.min_rr == MIN_RR
+    assert engine.min_rr == 3.0
 
 
 # ---------------------------------------------------------------------------

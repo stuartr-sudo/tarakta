@@ -10,8 +10,8 @@ WHAT THIS DOES
 WHAT IT DOES NOT DO (yet)
   - Does NOT call the sanity agent (would cost real money). Agent is
     disabled via config flag. Deterministic rules only.
-  - Does NOT simulate P&L. Exit behaviour / partial closes / SL progression
-    aren't replayed — that's Tier 4. This is "what signals would fire?"
+  - Only simulates P&L when `--pnl` is supplied. The sanity agent stays off,
+    and overlapping same-symbol entries are suppressed like the live engine.
   - External data feeds (liquidation, correlation) gracefully score zero
     since we can't fetch their live values retroactively.
 
@@ -238,6 +238,15 @@ def _replay_config(**overrides) -> SimpleNamespace:
         mm_max_positions=20,
         mm_risk_per_trade_pct=1.0,
         mm_max_aggregate_risk_pct=5.0,
+        mm_min_rr=3.0,
+        mm_min_confluence=40.0,
+        mm_min_formation_quality=0.4,
+        mm_max_sl_pct=5.0,
+        mm_gate_threshold=3,
+        mm_cooldown_hours=4.0,
+        mm_max_tp1_distance_pct=10.0,
+        mm_max_entry_slippage_pct=1.0,
+        mm_scratch_mfe_threshold_r=0.3,
         mm_initial_balance=100_000.0,
         mm_min_volume_usd=50_000_000,
         mm_majors_only=True,
@@ -623,6 +632,7 @@ async def replay_single_symbol(
 
     step = max(1, hours_step)
     result = SymbolResult(symbol=symbol)
+    simulated_position_until: datetime | None = None
 
     print(f"[{symbol}] stepping through {len(bars_1h)} 1H bars, every {step}h…")
     for ts in bars_1h.index[::step]:
@@ -654,6 +664,14 @@ async def replay_single_symbol(
         stages = dict(engine._scan_stage_counts)
         rejects = dict(engine._scan_reject_counts)
         if signal:
+            if pnl_enabled and simulated_position_until and as_of < simulated_position_until:
+                result.bars.append(BarResult(
+                    ts=as_of,
+                    stage="entry_blocked_open_position",
+                    rejects={"open_position_overlap": 1},
+                ))
+                continue
+
             pnl_res: PnlResult | None = None
             if pnl_enabled:
                 # Slice forward candles (strictly after signal ts)
@@ -694,6 +712,8 @@ async def replay_single_symbol(
                         tp3=signal.target_l3,
                         forward_candles=forward,
                     )
+                if pnl_res is not None and pnl_res.hours_held > 0:
+                    simulated_position_until = as_of + timedelta(hours=pnl_res.hours_held)
             result.bars.append(BarResult(
                 ts=as_of, stage="signal_built",
                 signal={
@@ -704,8 +724,9 @@ async def replay_single_symbol(
                     "tp2": round(signal.target_l2, 6),
                     "tp3": round(signal.target_l3, 6),
                     "rr": round(signal.risk_reward, 2),
+                    "min_rr_required": round(getattr(signal, "min_rr_required", 0.0), 2),
                     "grade": signal.confluence_grade,
-                    "score_pct": round(signal.confluence_score, 1),
+                    "score_pct": round(signal.confluence_score_pct, 1),
                     "variant": signal.formation_variant,
                     "entry_type": signal.entry_type,
                     "reason": signal.reason,
@@ -739,7 +760,7 @@ async def replay(
     if engine_overrides:
         print(f"Overrides: {engine_overrides}")
     if pnl_enabled:
-        print("P&L simulation: ON (SL/TP/timeout, 30/40/30 partials, breakeven after TP1)")
+        print("P&L simulation: ON (SL/TP/timeout, 30/40/30 partials, breakeven after TP1, overlapping entries suppressed)")
 
     symbol_results: list[SymbolResult] = []
     for sym in symbols:
@@ -833,13 +854,13 @@ def _render_symbol_summary(
     if signals:
         print(f"\nSignals ({len(signals)}):")
         print(f"  {'timestamp':<20} {'dir':<6} {'grade':<6} "
-              f"{'score':<7} {'rr':<5} {'variant':<18} {'entry_type'}")
+              f"{'score%':<7} {'rr':<5} {'min':<5} {'variant':<18} {'entry_type'}")
         for r in signals:
             sig = r.signal
             print(
                 f"  {r.ts.strftime('%Y-%m-%d %H:%M'):<20} "
                 f"{sig['direction']:<6} {sig['grade']:<6} "
-                f"{sig['score_pct']:<7} {sig['rr']:<5} "
+                f"{sig['score_pct']:<7} {sig['rr']:<5} {sig['min_rr_required']:<5} "
                 f"{sig['variant']:<18} {sig['entry_type']}"
             )
             print(f"    entry={sig['entry']}  sl={sig['sl']}  tp1={sig['tp1']}")
@@ -969,17 +990,19 @@ def main() -> int:
                     help="Forward-simulate each signal (SL/TP/timeout) + P&L aggregate")
     # Engine-level config overrides for A/B testing rule changes
     ap.add_argument("--min-confluence", type=float, default=None,
-                    help="Override engine.min_confluence threshold (default 35.0)")
+                    help="Override engine.min_confluence threshold (default 40.0)")
     ap.add_argument("--max-sl-pct", type=float, default=None,
                     help="Override engine.max_sl_pct warning threshold (default 5.0)")
     ap.add_argument("--predictive", action="store_true",
                     help="Use limit-order entry at peak2 wick + offset; skip if not filled in N hours")
     ap.add_argument("--predictive-offset-pct", type=float, default=0.5,
-                    help="Offset above peak2 wick (long) or below (short), in %")
+                    help="Offset above peak2 wick (long) or below (short), in %%")
     ap.add_argument("--predictive-timeout-hours", type=int, default=24,
                     help="Timeout for limit fill (h); skip trade if not filled in time")
     ap.add_argument("--min-rr", type=float, default=None,
                     help="Override engine.min_rr threshold")
+    ap.add_argument("--gate-threshold", type=int, default=None,
+                    help="Override engine._gate_threshold (0 disables, 1-5 require N gates)")
     args = ap.parse_args()
 
     # Wire predictive flags into module globals (read by simulate_signal callers).
@@ -1002,6 +1025,8 @@ def main() -> int:
         engine_overrides["max_sl_pct"] = args.max_sl_pct
     if args.min_rr is not None:
         engine_overrides["min_rr"] = args.min_rr
+    if args.gate_threshold is not None:
+        engine_overrides["_gate_threshold"] = max(0, min(5, args.gate_threshold))
 
     return asyncio.run(replay(
         symbols=symbols,

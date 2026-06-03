@@ -75,6 +75,20 @@ class Settings(BaseSettings):
     # new trade when aggregate_open_risk + proposed_trade_risk > cap.
     mm_max_aggregate_risk_pct: float = 5.0
     mm_risk_per_trade_pct: float = 1.0
+    # Course Lesson 53 distinguishes the absolute 1.4R "don't get out of
+    # bed" floor from the standard 3R minimum. Linda cascade logic may
+    # intentionally lower this per-signal; the normal runtime default is 3R.
+    mm_min_rr: float = 3.0
+    # Grade C threshold. Historical rows may have lower thresholds, but new
+    # runtime decisions should use percent-based Grade C by default.
+    mm_min_confluence: float = 40.0
+    mm_min_formation_quality: float = 0.4
+    mm_max_sl_pct: float = 5.0
+    # Empirically validated deterministic gate from docs/STATUS_2026-04-28.
+    # 0 still disables it when deliberately overridden.
+    mm_gate_threshold: int = 3
+    mm_cooldown_hours: float = 4.0
+    mm_leverage: int = 10
     # Max distance from entry to TP1, as % of entry. Engineering cap, NOT
     # an explicit course rule — the course doesn't give a numeric bound
     # on target distance. The intent is to reject 1H/intraday formation
@@ -120,9 +134,8 @@ class Settings(BaseSettings):
     # money-critical judgement task, not a classification. Opus 4.7
     # rejects the legacy thinking={"type":"enabled","budget_tokens":N}
     # shape with a 400 (invalid_request_error); adaptive+effort is the
-    # only supported mode. Hit live on 2026-04-20 00:12 UTC — the first
-    # real setup of the week (NEAR long) approved via fail-open because
-    # the agent errored. This parameter replaces mm_sanity_agent_thinking_budget.
+    # only supported mode. This parameter replaces
+    # mm_sanity_agent_thinking_budget.
     mm_sanity_agent_effort: str = "high"
     mm_sanity_agent_timeout_s: float = 20.0
     mm_sanity_agent_min_confidence: float = 0.0  # 0 = honour every VETO (no shadow)

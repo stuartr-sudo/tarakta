@@ -885,6 +885,39 @@ async def test_density_confluence_filter_uses_score_pct_not_raw_points(engine: M
     enter.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_process_entries_honours_signal_specific_min_rr(engine: MMEngine):
+    """Linda-cascade signals carry a lower accepted R:R floor into entry processing."""
+    from src.strategy.mm_engine import MMSignal
+
+    signal = MMSignal(
+        symbol="ETH/USDT",
+        direction="long",
+        risk_reward=2.0,
+        min_rr_required=1.4,
+        confluence_score=65.0,
+        confluence_score_pct=44.0,
+    )
+    engine.min_rr = 3.0
+    engine.exchange = MagicMock()
+    engine.exchange.get_balance = AsyncMock(return_value={"USD": 100_000.0})
+
+    with patch.object(
+        engine,
+        "_calculate_signal_density",
+        return_value={
+            "is_noise": False,
+            "is_premium": False,
+            "density_pct": 10.0,
+            "direction_alignment": 1.0,
+        },
+    ):
+        with patch.object(engine, "_enter_trade", new_callable=AsyncMock) as enter:
+            await engine._process_entries([signal])
+
+    enter.assert_awaited_once_with(signal)
+
+
 # ---------------------------------------------------------------------------
 # B4 — Linda cascade lowers min R:R threshold
 # ---------------------------------------------------------------------------
@@ -993,8 +1026,8 @@ def test_b4_no_linda_cascade_uses_engine_min_rr(engine: MMEngine):
     assert tracker.cascade_detected(symbol, from_tf="1h", to_tf="4h") is False
     assert tracker.cascade_detected(symbol, from_tf="4h", to_tf="1d") is False
 
-    # Without cascade, effective_min_rr == self.min_rr
-    assert engine.min_rr == 1.4  # MIN_RR_AGGRESSIVE
+    # Without cascade, effective_min_rr == the standard engine minimum.
+    assert engine.min_rr == 3.0
 
 
 # ---------------------------------------------------------------------------

@@ -10,8 +10,9 @@ design, rubric, and rollout plan.
 This module is self-contained: no external LLM-client wrapper dependency,
 just the raw `anthropic` SDK. Extended thinking is always on; system
 prompt is cached with 1h TTL (March 2026 default regressed to 5m so we
-request 1h explicitly). Graceful degradation is fail-open (APPROVE) so an
-API outage never halts MM trading.
+request 1h explicitly). When enabled, unavailable clients/API errors fail
+closed with a VETO-style ERROR verdict. Disable the agent explicitly for
+deterministic-only trading.
 
 Cost / model selection:
 - Default: claude-opus-4-7 with extended thinking.
@@ -207,8 +208,8 @@ class AgentVerdict:
     """Structured verdict returned by the sanity agent.
 
     ``decision`` is the binding call. ``None`` returned by
-    ``MMSanityAgent.review`` (not this dataclass) means the agent failed
-    and the engine should fail-open (approve).
+    ``MMSanityAgent.review`` (not this dataclass) means the agent was
+    explicitly disabled and the engine is running deterministic-only.
     """
 
     decision: str  # "APPROVE" | "VETO"
@@ -237,7 +238,7 @@ class MMSanityAgent:
         agent = MMSanityAgent(config, repo)
         verdict = await agent.review(context)
         if verdict is None:
-            # API failed; fail-open (APPROVE)
+            # Agent disabled; continue deterministic-only.
             ...
         elif verdict.decision == "VETO":
             # Reject the setup

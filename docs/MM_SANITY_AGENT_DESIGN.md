@@ -33,7 +33,7 @@ Fires **after** `best_formation` is locked and confluence has passed, but **befo
 | Pros | Actually prevents losses. Forces discipline. | Preserves pure-algo floor; easy to A/B vs baseline. |
 | Cons | Adds LLM dependency to the critical path; API outages reduce trade count. | Defeats the purpose — the BNB trade still would have fired. |
 
-Mitigation for hard-veto: graceful degradation (§7) fails **open** (approve) on API error so downtime doesn't stop all trading, plus a kill-switch config flag. Phase A shadow mode (§10) lets us quantify actual impact before making it binding.
+Current implementation note: the engine now fails **closed** on enabled-agent API/key errors by returning a VETO-style ERROR verdict. Deterministic-only trading requires explicitly disabling the agent.
 
 **I/O contract:**
 
@@ -86,8 +86,8 @@ verdict = await self.sanity_agent.review(context)  # returns AgentVerdict or Non
 await self.repo.insert_mm_agent_decision(verdict, context_summary)
 
 if verdict is None:
-    # Graceful degradation — API fail/timeout → approve (fail-open)
-    self._advance("sanity_agent_fail_open")
+    # Agent explicitly disabled — deterministic-only mode.
+    self._advance("sanity_agent_disabled")
 elif verdict.decision == "VETO":
     return self._reject(
         "sanity_agent_veto",
@@ -106,7 +106,7 @@ self._last_agent_verdict = verdict
 When `MMSignal` is built at line 2557, it carries the verdict so `insert_trade` writes `mm_agent_decision`, `mm_agent_reason`, `mm_agent_confidence`, `htf_trend_4h`, `htf_trend_1d` to the `trades` row.
 
 **Graceful degradation rules:**
-- API error / timeout / malformed JSON → log + return `None` → fail **open** (approve). Tracked under `sanity_agent_fail_open` funnel counter.
+- API error / timeout / malformed JSON → log + return VETO-style `decision='ERROR'` → fail **closed**.
 - Kill switch `MM_SANITY_AGENT_ENABLED=false` → agent short-circuits, returns `None` without an API call.
 - **Hard latency cap** `MM_SANITY_AGENT_TIMEOUT_S=20` (scan cycle is 5min; 20s is plenty).
 
@@ -428,17 +428,17 @@ Compare to alternatives:
 
 | Failure | Behavior | Notes |
 |---|---|---|
-| API call raises (network, 5xx, auth) | Return `None` → **fail open** (approve). Log `sanity_agent_error` with exception. Record `decision='ERROR'` row in `mm_agent_decisions` with `raw_response=str(e)`. | Production outage must not stop all MM trading. |
+| API call raises (network, 5xx, auth) | Return a VETO-style ERROR verdict → **fail closed**. Log `sanity_agent_error` and record `decision='ERROR'` in `mm_agent_decisions`. | Money-critical guardrails should not silently approve on outage. |
 | Timeout (>20s) | Treated same as API error. `asyncio.wait_for` wraps the call. | |
-| Malformed JSON / missing keys | One retry with `response_format=json_object` and a "your previous output was not valid JSON" nudge. On second failure, fail-open with `decision='ERROR'`. | Keeps noise low. |
+| Malformed JSON / missing keys | One retry with a "your previous output was not valid JSON" nudge. On second failure, fail closed with `decision='ERROR'`. | Keeps noise low. |
 | Agent returns all-APPROVE for days | Drift alert (see §9) triggers if approve-rate > 95% over 50 rolling decisions. Flags prompt regression. | |
 | Agent returns all-VETO | Drift alert if approve-rate < 10% over 50 rolling decisions. Likely a prompt or model issue. | |
 | Kill switch | `MM_SANITY_AGENT_ENABLED=false` (default `true` after Phase C). Short-circuits with no API call and no row written. | First resort when anything is suspicious in prod. |
 | Confidence threshold (optional) | Config `MM_SANITY_AGENT_MIN_CONFIDENCE=0.6`. Below this, we downgrade a VETO to a warning log and approve. Prevents low-confidence agent calls from dominating. | Disabled by default; enable only if noise shows up. |
 | Monthly cost cap | Config `MM_AGENT_MONTHLY_BUDGET_USD` (default $600). When projected monthly spend (trailing-7d × 30) exceeds 90% of cap, auto-downgrade to `claude-sonnet-4-6` for the remainder of the month. Notification sent on every downgrade. Resets on 1st of month. | Keeps Opus-by-default + hard floor on bill. |
-| Model unavailable | If Opus 4.7 returns overloaded_error or similar capacity errors, fall through to Sonnet 4.6 for that call only. Log `sanity_agent_model_fallback`. | Don't fail open just because the premium model blinked. |
+| Model unavailable | If Opus 4.7 returns overloaded_error or similar capacity errors, fall through to Sonnet 4.6 for that call only. Log `sanity_agent_model_fallback`. | Do not approve just because the premium model blinked. |
 
-All funnel buckets: `sanity_agent_approved`, `sanity_agent_veto`, `sanity_agent_fail_open`, `sanity_agent_low_confidence_bypass`, `sanity_agent_model_fallback`, `sanity_agent_budget_downgraded`.
+All funnel buckets: `sanity_agent_approved`, `sanity_agent_veto`, `sanity_agent_error`, `sanity_agent_disabled`, `sanity_agent_low_confidence_bypass`, `sanity_agent_model_fallback`, `sanity_agent_budget_downgraded`.
 
 ---
 
@@ -447,8 +447,8 @@ All funnel buckets: `sanity_agent_approved`, `sanity_agent_veto`, `sanity_agent_
 **Unit tests (`tests/test_mm_sanity_agent.py`):**
 
 1. **Prompt assembly** — given a fixed engine state, `_build_sanity_context()` produces the expected dict. Snapshot test.
-2. **JSON parsing** — handles valid JSON, missing fields, extra fields, trailing prose. Malformed JSON retries then falls open.
-3. **Graceful degradation** — mock the LLM client to raise; verify `None` returned and `sanity_agent_error` logged once.
+2. **JSON parsing** — handles valid JSON, missing fields, extra fields, trailing prose. Malformed JSON retries then fails closed with `decision='ERROR'`.
+3. **Graceful degradation** — mock the LLM client to raise; verify a VETO-style ERROR verdict is returned and `sanity_agent_error` is logged once.
 4. **Kill switch** — with flag off, `review()` returns `None` with zero API calls.
 5. **Latency cap** — mock LLM with `asyncio.sleep(30)`; verify timeout at 20s.
 6. **Integration with `_reject`** — VETO path increments `_scan_reject_counts['sanity_agent_veto']`.
@@ -505,7 +505,7 @@ The first fixture (`counter_4h_trend_accelerating.json`) is non-negotiable for t
 **Alerts (via existing `/usage` threshold mechanism + new rules):**
 - Daily cost > `MM_SANITY_AGENT_ALERT_USD` (default $2/day).
 - Approve-rate < 15% OR > 85% over 50 rolling decisions (drift).
-- `sanity_agent_fail_open` count > 20% of decisions in last hour (API health).
+- `sanity_agent_error` count > 20% of decisions in last hour (API health).
 
 **Post-trade attribution:**
 The `trade_id` foreign key on `mm_agent_decisions` lets us later join: for every closed MM trade, what did the agent say, and was it right? A simple view `mm_agent_hindsight` computes agent precision/recall once we have enough closed trades.
