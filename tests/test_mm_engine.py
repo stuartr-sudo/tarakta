@@ -208,6 +208,7 @@ def _make_position(
     hours_old: float = 3.0,
     original_stop_loss: float | None = None,
     max_favorable_excursion_r: float = 0.0,
+    formation_timeframe: str = "1h",
 ) -> MMPosition:
     """Build a test MMPosition aged `hours_old` hours.
 
@@ -222,6 +223,7 @@ def _make_position(
         quantity=quantity,
         stop_loss=stop_loss,
         current_level=current_level,
+        formation_timeframe=formation_timeframe,
         original_stop_loss=stop_loss if original_stop_loss is None else original_stop_loss,
         max_favorable_excursion_r=max_favorable_excursion_r,
     )
@@ -243,7 +245,7 @@ class _LiveTickerStub:
 async def _run_manage_capture_scratch(
     engine: MMEngine, pos: MMPosition, current_price: float,
 ) -> list[str]:
-    """Wire engine mocks, run _manage_position, return any scratch_2h reasons."""
+    """Wire engine mocks, run _manage_position, return any scratch reasons."""
     engine.positions[pos.symbol] = pos
     engine.exchange = MagicMock()
     engine.exchange.fetch_ticker = AsyncMock(return_value={"last": current_price})
@@ -253,7 +255,7 @@ async def _run_manage_capture_scratch(
     scratch_reasons: list[str] = []
 
     async def _spy_close(p, price, reason):
-        if reason == "scratch_2h":
+        if reason in {"scratch_2h", "scratch_4h_window"}:
             scratch_reasons.append(reason)
             engine.positions.pop(p.symbol, None)
 
@@ -296,6 +298,30 @@ async def test_scratch_does_not_fire_under_2h_regardless_of_pnl(engine: MMEngine
     pos = _make_position(entry_price=50000.0, hours_old=1.5)
     reasons = await _run_manage_capture_scratch(engine, pos, current_price=49500.0)
     assert reasons == [], "Under 2h — scratch rule must not fire"
+
+
+@pytest.mark.asyncio
+async def test_4h_formation_ignores_2h_wall_clock(engine: MMEngine):
+    """4H structures use closed 4H bars, not the normal 2h wall-clock scratch."""
+    pos = _make_position(
+        entry_price=50000.0,
+        hours_old=3.0,
+        formation_timeframe="4h",
+    )
+    reasons = await _run_manage_capture_scratch(engine, pos, current_price=50000.0)
+    assert reasons == []
+
+
+@pytest.mark.asyncio
+async def test_4h_formation_scratches_after_two_closed_4h_bars(engine: MMEngine):
+    """The 2-bar default is an inference from Lesson 13 [102:30], not a direct quote."""
+    pos = _make_position(
+        entry_price=50000.0,
+        hours_old=9.0,
+        formation_timeframe="4h",
+    )
+    reasons = await _run_manage_capture_scratch(engine, pos, current_price=50000.0)
+    assert reasons == ["scratch_4h_window"]
 
 
 @pytest.mark.asyncio
@@ -373,10 +399,10 @@ async def test_scratch_bnb_hypothetical_profit_would_exempt(engine: MMEngine):
     is still valid.
 
     UPDATED 2026-04-22 (P3): "substantial" is now defined in
-    R-multiples (0.3R default), not absolute %. BNB has an 8%-wide
+    R-multiples (0.2R default), not absolute %. BNB has an 8%-wide
     SL here (risk $50.18 per unit), so 0.5% profit = 0.062R — NOT
     substantial by the new definition. The test now uses a price
-    that clears the 0.3R threshold (~2.4% from entry on this wide SL).
+    that clears the 0.2R threshold (~1.6% from entry on this wide SL).
     """
     pos = _make_position(
         symbol="BNB/USDT",
@@ -386,11 +412,11 @@ async def test_scratch_bnb_hypothetical_profit_would_exempt(engine: MMEngine):
         current_level=0,
         hours_old=2.03,
     )
-    # Risk = 50.18; 0.3R threshold = 15.05 → exempt price >= 637.15
-    reasons = await _run_manage_capture_scratch(engine, pos, current_price=637.50)
+    # Risk = 50.18; 0.2R threshold = 10.04 → exempt price >= 632.14
+    reasons = await _run_manage_capture_scratch(engine, pos, current_price=633.0)
     assert reasons == [], (
-        "Up ~2.5% after 2h on an 8%-wide SL is >0.3R → in substantial "
-        "profit → no scratch"
+        "Up ~1.7% after 2h on an 8%-wide SL clears the BE-distance "
+        "threshold → no scratch"
     )
 
 
@@ -432,7 +458,7 @@ async def _run_manage_steps(
     scratch_reasons: list[str] = []
 
     async def _spy_close(p, price, reason):
-        if reason == "scratch_2h":
+        if reason in {"scratch_2h", "scratch_4h_window"}:
             scratch_reasons.append(reason)
             engine.positions.pop(p.symbol, None)
 
@@ -470,10 +496,10 @@ async def test_recovered_trade_not_scratched_after_2h(engine: MMEngine):
     A long trade that went in-the-money (+0.5R) early, then pulled
     back to break-even by the 2h mark, must NOT be scratched. Under
     the old rule it was; under the new MFE rule it survives because
-    MFE cleared 0.3R mid-flight.
+    MFE cleared the 0.2R BE-distance threshold mid-flight.
     """
     pos = _make_position(entry_price=50000.0, stop_loss=49000.0, hours_old=0.5)
-    # Step 1 at 30 min: price at 50500 → MFE=0.5R (clears 0.3 threshold)
+    # Step 1 at 30 min: price at 50500 → MFE=0.5R (clears 0.2 threshold)
     # Step 2 at 60 min: price pulled back to 50000 (flat)
     # Simulate elapsed time: rewind entry_time to age 2.5h for final step
     engine.repo = AsyncMock()
@@ -486,7 +512,7 @@ async def test_recovered_trade_not_scratched_after_2h(engine: MMEngine):
     scratch_reasons: list[str] = []
 
     async def _spy_close(p, price, reason):
-        if reason == "scratch_2h":
+        if reason in {"scratch_2h", "scratch_4h_window"}:
             scratch_reasons.append(reason)
             engine.positions.pop(p.symbol, None)
 
@@ -495,7 +521,7 @@ async def test_recovered_trade_not_scratched_after_2h(engine: MMEngine):
     with patch.object(engine, "_close_position", side_effect=_spy_close):
         with patch.object(engine, "_is_stopped_out", return_value=False):
             await engine._manage_position(pos.symbol)
-    assert pos.max_favorable_excursion_r >= 0.3
+    assert pos.max_favorable_excursion_r >= 0.2
     assert scratch_reasons == []  # under 2h anyway
 
     # Tick 2: time has advanced past 2h; price now back at entry
@@ -523,7 +549,7 @@ async def test_trade_that_never_worked_still_scratches(engine: MMEngine):
     reasons, pos = await _run_manage_steps(
         engine, pos, [50050.0, 49960.0, 50020.0, 49990.0, 50000.0],
     )
-    assert pos.max_favorable_excursion_r < 0.3
+    assert pos.max_favorable_excursion_r < 0.2
     assert reasons == ["scratch_2h"]
 
 
@@ -606,10 +632,10 @@ async def test_persisted_mfe_survives_restart(engine: MMEngine):
 
 
 @pytest.mark.asyncio
-async def test_mfe_threshold_configurable(engine: MMEngine):
-    """Tuning `mm_scratch_mfe_threshold_r` must change the exempt/scratch
+async def test_be_distance_configurable(engine: MMEngine):
+    """Tuning `mm_scratch_be_distance_r` must change the exempt/scratch
     boundary. A threshold of 1.0R means a +0.5R peak no longer exempts."""
-    # Default: 0.3 threshold → 0.5R exempts
+    # Default: 0.2 threshold → 0.5R exempts
     pos_default = _make_position(
         entry_price=50000.0, stop_loss=49000.0, hours_old=2.5,
         max_favorable_excursion_r=0.5,
@@ -620,7 +646,7 @@ async def test_mfe_threshold_configurable(engine: MMEngine):
     assert reasons == []
 
     # Raised threshold: 1.0 → the same 0.5R MFE now gets scratched
-    engine.scratch_mfe_threshold_r = 1.0
+    engine.scratch_be_distance_r = 1.0
     pos_strict = _make_position(
         entry_price=50000.0, stop_loss=49000.0, hours_old=2.5,
         max_favorable_excursion_r=0.5,
@@ -660,14 +686,17 @@ async def test_mfe_skipped_when_original_stop_zero(engine: MMEngine):
     assert reasons == ["scratch_2h"]
 
 
-def test_scratch_mfe_threshold_config_default():
-    """Regression guard: the default threshold must be 0.3R so replay /
+def test_scratch_be_distance_config_default():
+    """Regression guard: the default threshold/window so replay /
     live behaviour stays predictable across deploys."""
     from src.config import Settings
-    from src.strategy.mm_engine import SCRATCH_MFE_THRESHOLD_R
+    from src.strategy.mm_engine import SCRATCH_BE_DISTANCE_R, SCRATCH_WINDOW_4H_BARS
     s = Settings()
-    assert s.mm_scratch_mfe_threshold_r == 0.3
-    assert SCRATCH_MFE_THRESHOLD_R == 0.3
+    assert s.mm_scratch_be_distance_r == 0.2
+    assert s.mm_scratch_mfe_threshold_r == 0.2
+    assert s.mm_scratch_window_4h_bars == 2
+    assert SCRATCH_BE_DISTANCE_R == 0.2
+    assert SCRATCH_WINDOW_4H_BARS == 2
 
 
 # ---------------------------------------------------------------------------

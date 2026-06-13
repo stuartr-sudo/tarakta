@@ -5,8 +5,11 @@ credentials / subscriptions exist, drop in a real implementation of the
 relevant ``Provider``. Until then each provider returns the neutral/empty
 value and the confluence scorer naturally scores that factor as 0.
 
-Providers covered (all currently UNWIRED — awaiting API access):
+Providers covered:
   - ``HyblockProvider``       — liquidation-level clusters + delta (lesson 25, 27)
+                                default: Binance public long/short + OI proxy
+  - ``FundingProvider``       — futures funding rate (lesson 29 flow context)
+  - ``OrderBookProvider``     — top-of-book imbalance (lesson 25/26 flow context)
   - ``TradingLiteProvider``   — limit-order heat map (lesson 25, 26)
   - ``NewsProvider``          — Forex Factory calendar (lesson 32)
   - ``OptionsProvider``       — options expiry / Max Pain / P-C ratio (lesson 33)
@@ -32,7 +35,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Protocol
 
 logger = logging.getLogger(__name__)
@@ -78,6 +81,10 @@ class HyblockData:
     delta: float | None = None          # Positive = more longs exposed
     delta_level: str | None = None      # "low" | "medium" | "high" | "extreme"
     liquidation_clusters: list[LiquidationCluster] | None = None
+    oi_current: float | None = None
+    oi_trend_5h: str | None = None      # "rising" | "falling" | "flat"
+    top_trader_long_pct: float | None = None
+    top_trader_short_pct: float | None = None
     timestamp: datetime | None = None
 
 
@@ -116,6 +123,7 @@ class BinanceLiquidationProvider:
 
     BASE_URL = "https://fapi.binance.com/futures/data"
     OI_URL = "https://fapi.binance.com/fapi/v1/openInterest"
+    OI_HIST_URL = "https://fapi.binance.com/futures/data/openInterestHist"
     CACHE_TTL_SECONDS = 60  # Binance updates every minute
 
     # Course thresholds (Lesson 11)
@@ -139,8 +147,6 @@ class BinanceLiquidationProvider:
         Returns:
             HyblockData with delta, delta_level, and approximate liquidation clusters.
         """
-        from datetime import timezone
-
         # Strip suffix - Binance uses "BTCUSDT" not "BTC/USDT:USDT"
         normalized = symbol.replace("/", "").replace(":USDT", "").replace(":USD", "")
 
@@ -198,11 +204,47 @@ class BinanceLiquidationProvider:
                         ),
                     })
 
+                oi_current: float | None = None
+                oi_trend_5h: str | None = None
+                try:
+                    oi_resp = await client.get(self.OI_URL, params={"symbol": normalized})
+                    if oi_resp.status_code == 200:
+                        oi_json = oi_resp.json()
+                        if isinstance(oi_json, dict) and oi_json.get("openInterest") is not None:
+                            oi_current = float(oi_json["openInterest"])
+                except Exception:
+                    oi_current = None
+
+                try:
+                    oi_hist_resp = await client.get(
+                        self.OI_HIST_URL,
+                        params={"symbol": normalized, "period": "1h", "limit": 5},
+                    )
+                    if oi_hist_resp.status_code == 200:
+                        oi_hist = oi_hist_resp.json()
+                        if isinstance(oi_hist, list) and len(oi_hist) >= 2:
+                            first = float(oi_hist[0].get("sumOpenInterest", 0) or 0)
+                            last = float(oi_hist[-1].get("sumOpenInterest", 0) or 0)
+                            if first > 0:
+                                change_pct = (last - first) / first * 100
+                                if change_pct > 0.5:
+                                    oi_trend_5h = "rising"
+                                elif change_pct < -0.5:
+                                    oi_trend_5h = "falling"
+                                else:
+                                    oi_trend_5h = "flat"
+                except Exception:
+                    oi_trend_5h = None
+
                 result = HyblockData(
                     available=True,
                     delta=round(delta, 4),
                     delta_level=delta_level,
                     liquidation_clusters=clusters,  # type: ignore[arg-type]
+                    oi_current=oi_current,
+                    oi_trend_5h=oi_trend_5h,
+                    top_trader_long_pct=long_pct,
+                    top_trader_short_pct=short_pct,
                     timestamp=datetime.now(timezone.utc),
                 )
                 self._cache[cache_key] = result
@@ -215,6 +257,133 @@ class BinanceLiquidationProvider:
     # Keep protocol-compatible alias so callers using fetch_liquidations still work
     async def fetch_liquidations(self, symbol: str) -> HyblockData:
         return await self.fetch_liquidation_data(symbol)
+
+
+# ---------------------------------------------------------------------------
+# Funding and orderbook flow context
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class FundingData:
+    available: bool = False
+    funding_rate: float | None = None
+    timestamp: datetime | None = None
+
+
+class FundingProvider(Protocol):
+    async def fetch_funding(self, symbol: str) -> FundingData: ...
+
+
+class StubFundingProvider:
+    async def fetch_funding(self, symbol: str) -> FundingData:
+        return FundingData(available=False)
+
+
+class BinanceFundingProvider:
+    """Free Binance futures funding-rate endpoint."""
+
+    URL = "https://fapi.binance.com/fapi/v1/fundingRate"
+    CACHE_TTL_SECONDS = 60
+
+    def __init__(self) -> None:
+        self._cache: dict[str, FundingData] = {}
+        self._cache_time: dict[str, datetime] = {}
+
+    async def fetch_funding(self, symbol: str) -> FundingData:
+        normalized = symbol.replace("/", "").replace(":USDT", "").replace(":USD", "")
+        if normalized in self._cache_time:
+            age = (datetime.now(timezone.utc) - self._cache_time[normalized]).total_seconds()
+            if age < self.CACHE_TTL_SECONDS:
+                return self._cache.get(normalized, FundingData(available=False))
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(self.URL, params={"symbol": normalized, "limit": 1})
+                if resp.status_code != 200:
+                    return FundingData(available=False)
+                payload = resp.json()
+                if not isinstance(payload, list) or not payload:
+                    return FundingData(available=False)
+                rate = float(payload[-1].get("fundingRate"))
+                result = FundingData(
+                    available=True,
+                    funding_rate=rate,
+                    timestamp=datetime.now(timezone.utc),
+                )
+                self._cache[normalized] = result
+                self._cache_time[normalized] = datetime.now(timezone.utc)
+                return result
+        except Exception as e:
+            logger.warning("binance_funding_fetch_failed symbol=%s error=%s", symbol, e)
+            return FundingData(available=False)
+
+
+@dataclass
+class OrderBookData:
+    available: bool = False
+    bid_volume: float | None = None
+    ask_volume: float | None = None
+    imbalance: float | None = None       # bid_volume / ask_volume
+    timestamp: datetime | None = None
+
+
+class OrderBookProvider(Protocol):
+    async def fetch_orderbook(self, symbol: str) -> OrderBookData: ...
+
+
+class StubOrderBookProvider:
+    async def fetch_orderbook(self, symbol: str) -> OrderBookData:
+        return OrderBookData(available=False)
+
+
+class BinanceOrderBookProvider:
+    """Free Binance futures depth endpoint, collapsed into bid/ask imbalance."""
+
+    URL = "https://fapi.binance.com/fapi/v1/depth"
+    CACHE_TTL_SECONDS = 30
+
+    def __init__(self, limit: int = 20) -> None:
+        self.limit = limit
+        self._cache: dict[str, OrderBookData] = {}
+        self._cache_time: dict[str, datetime] = {}
+
+    async def fetch_orderbook(self, symbol: str) -> OrderBookData:
+        normalized = symbol.replace("/", "").replace(":USDT", "").replace(":USD", "")
+        if normalized in self._cache_time:
+            age = (datetime.now(timezone.utc) - self._cache_time[normalized]).total_seconds()
+            if age < self.CACHE_TTL_SECONDS:
+                return self._cache.get(normalized, OrderBookData(available=False))
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    self.URL,
+                    params={"symbol": normalized, "limit": self.limit},
+                )
+                if resp.status_code != 200:
+                    return OrderBookData(available=False)
+                payload = resp.json()
+                bids = payload.get("bids") if isinstance(payload, dict) else None
+                asks = payload.get("asks") if isinstance(payload, dict) else None
+                if not bids or not asks:
+                    return OrderBookData(available=False)
+                bid_volume = sum(float(level[1]) for level in bids[: self.limit])
+                ask_volume = sum(float(level[1]) for level in asks[: self.limit])
+                imbalance = bid_volume / ask_volume if ask_volume > 0 else None
+                result = OrderBookData(
+                    available=True,
+                    bid_volume=bid_volume,
+                    ask_volume=ask_volume,
+                    imbalance=imbalance,
+                    timestamp=datetime.now(timezone.utc),
+                )
+                self._cache[normalized] = result
+                self._cache_time[normalized] = datetime.now(timezone.utc)
+                return result
+        except Exception as e:
+            logger.warning("binance_orderbook_fetch_failed symbol=%s error=%s", symbol, e)
+            return OrderBookData(available=False)
 
 
 # ---------------------------------------------------------------------------
@@ -692,6 +861,14 @@ def _default_hyblock_provider():
     return BinanceLiquidationProvider()
 
 
+def _default_funding_provider():
+    return BinanceFundingProvider()
+
+
+def _default_orderbook_provider():
+    return BinanceOrderBookProvider()
+
+
 def _default_correlation_provider():
     """Return YFinanceCorrelationProvider if yfinance is installed, else Stub."""
     try:
@@ -716,6 +893,8 @@ class DataFeedRegistry:
     Call ``get_status()`` to inspect which providers are currently live.
     """
     hyblock: HyblockProvider = field(default_factory=_default_hyblock_provider)
+    funding: FundingProvider = field(default_factory=_default_funding_provider)
+    orderbook: OrderBookProvider = field(default_factory=_default_orderbook_provider)
     tradinglite: TradingLiteProvider = field(default_factory=StubTradingLiteProvider)
     news: NewsProvider = field(default_factory=StubNewsProvider)
     options: OptionsProvider = field(default_factory=StubOptionsProvider)
@@ -743,6 +922,8 @@ class DataFeedRegistry:
         """
         providers = {
             "hyblock": self.hyblock,
+            "funding": self.funding,
+            "orderbook": self.orderbook,
             "tradinglite": self.tradinglite,
             "news": self.news,
             "options": self.options,
@@ -754,3 +935,46 @@ class DataFeedRegistry:
             name: not type(provider).__name__.startswith("Stub")
             for name, provider in providers.items()
         }
+
+    async def build_flow_snapshot(self, symbol: str) -> dict:
+        """Return committee-ready flow context from free/default providers."""
+        snapshot = {
+            "available": False,
+            "oi_current": None,
+            "oi_trend_5h": None,
+            "funding_rate": None,
+            "top_trader_long_pct": None,
+            "top_trader_short_pct": None,
+            "long_short_delta": None,
+            "delta_level": None,
+            "orderbook_imbalance": None,
+        }
+        try:
+            liq = await self.hyblock.fetch_liquidation_data(symbol)  # type: ignore[attr-defined]
+            if getattr(liq, "available", False):
+                snapshot.update({
+                    "available": True,
+                    "oi_current": getattr(liq, "oi_current", None),
+                    "oi_trend_5h": getattr(liq, "oi_trend_5h", None),
+                    "top_trader_long_pct": getattr(liq, "top_trader_long_pct", None),
+                    "top_trader_short_pct": getattr(liq, "top_trader_short_pct", None),
+                    "long_short_delta": getattr(liq, "delta", None),
+                    "delta_level": getattr(liq, "delta_level", None),
+                })
+        except Exception:
+            pass
+        try:
+            funding = await self.funding.fetch_funding(symbol)
+            if getattr(funding, "available", False):
+                snapshot["available"] = True
+                snapshot["funding_rate"] = getattr(funding, "funding_rate", None)
+        except Exception:
+            pass
+        try:
+            orderbook = await self.orderbook.fetch_orderbook(symbol)
+            if getattr(orderbook, "available", False):
+                snapshot["available"] = True
+                snapshot["orderbook_imbalance"] = getattr(orderbook, "imbalance", None)
+        except Exception:
+            pass
+        return snapshot

@@ -136,6 +136,7 @@ class Formation:
     session_peak2: str | None = None
     at_key_level: bool = False
     confirmed: bool = False
+    timeframe: str = "1h"
 
 
 @dataclass
@@ -370,6 +371,7 @@ class FormationDetector:
         self,
         ohlc: pd.DataFrame,
         direction_bias: str | None = None,
+        timeframe: str = "1h",
     ) -> list[Formation]:
         """Find all M/W formations in recent candle data.
 
@@ -390,6 +392,8 @@ class FormationDetector:
             return []
 
         formations = self.detect_mw(ohlc, lookback=DEFAULT_LOOKBACK)
+        for f in formations:
+            f.timeframe = timeframe
 
         # Tag multi-session formations if session analyzer is available.
         if self.session_analyzer is not None:
@@ -408,6 +412,7 @@ class FormationDetector:
             "mm_formations_detected",
             count=len(formations),
             direction_bias=direction_bias,
+            timeframe=timeframe,
             variants=[f.variant for f in formations],
         )
         return formations

@@ -103,17 +103,19 @@ MAX_TP1_DISTANCE_PCT = 10.0
 # config.mm_max_entry_slippage_pct (settings UI).
 MAX_ENTRY_SLIPPAGE_PCT = 1.0
 
-# 2h scratch rule — Max Favorable Excursion threshold in R-multiples.
-# Course Lesson 13 [47:00]: "If you're not in substantial profit within
-# two hours you scratch the trade." "Within two hours" is a window, not
-# an instant — we track the highest R-multiple reached during the trade
-# and only scratch if peak R never cleared this threshold by the 2h
-# mark. 0.3R reads "substantial" conservatively: enough to rule out
-# noise, small enough that any trade starting to work will have crossed
-# it. Tuneable via config.mm_scratch_mfe_threshold_r. 0 effectively
-# disables the scratch rule (any trade with 0 favorable excursion is
-# already 0R so would always scratch at 0; 0 means "scratch nothing").
-SCRATCH_MFE_THRESHOLD_R = 0.3
+# Scratch rule — breakeven-distance threshold in R-multiples.
+# Course Lesson 13 [44:00]: a correct trade should have moved into
+# enough profit within two hours to move stop to breakeven. We therefore
+# measure peak MFE against the BE ladder's minimum distance, not an
+# arbitrary "substantial profit" proxy. 0 disables the scratch rule.
+SCRATCH_BE_DISTANCE_R = 0.2
+# Deprecated import alias; prefer SCRATCH_BE_DISTANCE_R.
+SCRATCH_MFE_THRESHOLD_R = SCRATCH_BE_DISTANCE_R
+
+# Lesson 13 [102:30] gives only directional permission to hold longer
+# when the structure is found on 4H/daily; it does not specify a bar
+# count. Two closed 4H bars is a conservative inference to test live.
+SCRATCH_WINDOW_4H_BARS = 2
 
 # Maximum margin utilization — don't open new positions if margin > 60% of balance
 MAX_MARGIN_UTILIZATION = 0.60
@@ -195,6 +197,7 @@ class MMSignal:
     # MM analysis results
     formation_type: str = ""     # "M" or "W"
     formation_variant: str = ""
+    formation_timeframe: str = "1h"  # "15m" | "1h" | "4h" | "1d"
     formation_quality: float = 0.0
     cycle_phase: str = ""
     current_level: int = 0
@@ -265,6 +268,7 @@ class MMPosition:
     # Entry metadata (for dashboard display)
     entry_reason: str = ""
     formation_type: str = ""
+    formation_timeframe: str = "1h"
     confluence_grade: str = ""
     cycle_phase: str = ""
     confluence_score: float = 0.0
@@ -290,16 +294,16 @@ class MMPosition:
     # Max Favorable Excursion in R-multiples (P3 fix 2026-04-22).
     # R = distance from entry to original_stop_loss. MFE is the highest
     # R-multiple the trade has reached at any point in its lifetime.
-    # Used by the 2h scratch rule (course Lesson 13 [47:00]):
-    #   "If you're not in substantial profit within two hours you scratch."
+    # Used by the scratch rule (course Lesson 13 [44:00], [47:00]).
     # The course says "within two hours" — meaning at ANY point during
     # that window the trade must have reached substantial profit, not
     # "at the 2h mark". The prior rule (gross > round_trip_fees at the
     # 2h instant) closed winners that had been +1R mid-flight but
     # pulled back to break-even by the check, defeating the intent.
     # MFE tracking + a threshold lets us honour the course quote
-    # faithfully: a trade that ever reached +0.3R during its first 2h
-    # is not scratched, even if it's currently at break-even.
+    # faithfully: a trade that ever reached the breakeven-move threshold
+    # during its scratch window is not scratched, even if it's currently
+    # at break-even.
     max_favorable_excursion_r: float = 0.0
 
 
@@ -341,9 +345,18 @@ class MMEngine:
         self.max_entry_slippage_pct = float(
             getattr(config, "mm_max_entry_slippage_pct", MAX_ENTRY_SLIPPAGE_PCT)
         )
-        # 2h scratch MFE threshold in R-multiples. See SCRATCH_MFE_THRESHOLD_R.
-        self.scratch_mfe_threshold_r = float(
-            getattr(config, "mm_scratch_mfe_threshold_r", SCRATCH_MFE_THRESHOLD_R)
+        # Scratch BE-distance threshold in R-multiples. See SCRATCH_BE_DISTANCE_R.
+        self.scratch_be_distance_r = float(
+            getattr(
+                config,
+                "mm_scratch_be_distance_r",
+                getattr(config, "mm_scratch_mfe_threshold_r", SCRATCH_BE_DISTANCE_R),
+            )
+        )
+        # Deprecated alias retained for tests/older settings code paths.
+        self.scratch_mfe_threshold_r = self.scratch_be_distance_r
+        self.scratch_window_4h_bars = int(
+            getattr(config, "mm_scratch_window_4h_bars", SCRATCH_WINDOW_4H_BARS)
         )
 
         # Tunable parameters (overridable via env or settings page)
@@ -416,16 +429,18 @@ class MMEngine:
         # 9-EMA ribbon (periods 2-100) with trend-flip + yellow-EMA pullback.
         self.ribbon_analyzer = RibbonAnalyzer()
 
-        # MM Sanity Agent (Agent 4) — Opus 4.7 LLM guardrail that reviews every
-        # setup surviving the deterministic rules and vetoes judgement-call
-        # failures rules can't catch (e.g. "three_hits_how exemption voided by
-        # accelerating 4H trend"). See docs/MM_SANITY_AGENT_DESIGN.md.
+        # MM Sanity Agent / Committee — both implement review(context) ->
+        # AgentVerdict | None, so the engine gate stays unchanged.
         #
         # When enabled and the API key/SDK is missing or the API errors,
         # .review() returns a VETO-style ERROR verdict. Disable the agent
         # explicitly for deterministic-only trading.
-        from src.strategy.mm_sanity_agent import MMSanityAgent
-        self.sanity_agent = MMSanityAgent(config=config, repo=repo)
+        if getattr(config, "mm_committee_enabled", False):
+            from src.strategy.mm_committee import MMCommittee
+            self.sanity_agent = MMCommittee(config=config, repo=repo)
+        else:
+            from src.strategy.mm_sanity_agent import MMSanityAgent
+            self.sanity_agent = MMSanityAgent(config=config, repo=repo)
 
         # Course E1 (lesson 54): "if you have $10K OKX and $10K Binance,
         # 1% of $20K" — multi-exchange combined balance for 1% risk.
@@ -457,6 +472,24 @@ class MMEngine:
         self.last_funnel: dict | None = None
 
         logger.info("mm_engine_initialized", scan_interval=scan_interval_minutes)
+
+    @staticmethod
+    def _closed_4h_bars_since(entry_time: datetime, now: datetime) -> int:
+        """Count closed 4H candle boundaries crossed since entry."""
+        if entry_time.tzinfo is None:
+            entry_time = entry_time.replace(tzinfo=timezone.utc)
+        else:
+            entry_time = entry_time.astimezone(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        else:
+            now = now.astimezone(timezone.utc)
+        if now <= entry_time:
+            return 0
+        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        entry_bucket = int((entry_time - epoch).total_seconds() // (4 * 3600))
+        now_bucket = int((now - epoch).total_seconds() // (4 * 3600))
+        return max(0, now_bucket - entry_bucket)
 
     def _reject(self, reason: str, symbol: str, **kwargs) -> None:
         """Log a rejection and increment the per-cycle funnel counter.
@@ -1164,9 +1197,19 @@ class MMEngine:
                         self.max_entry_slippage_pct = float(
                             mm_settings["mm_max_entry_slippage_pct"]
                         )
-                    if "mm_scratch_mfe_threshold_r" in mm_settings:
-                        self.scratch_mfe_threshold_r = float(
+                    if "mm_scratch_be_distance_r" in mm_settings:
+                        self.scratch_be_distance_r = float(
+                            mm_settings["mm_scratch_be_distance_r"]
+                        )
+                        self.scratch_mfe_threshold_r = self.scratch_be_distance_r
+                    elif "mm_scratch_mfe_threshold_r" in mm_settings:
+                        self.scratch_be_distance_r = float(
                             mm_settings["mm_scratch_mfe_threshold_r"]
+                        )
+                        self.scratch_mfe_threshold_r = self.scratch_be_distance_r
+                    if "mm_scratch_window_4h_bars" in mm_settings:
+                        self.scratch_window_4h_bars = int(
+                            mm_settings["mm_scratch_window_4h_bars"]
                         )
                     if "mm_scan_interval" in mm_settings:
                         self.scan_interval = float(mm_settings["mm_scan_interval"]) * 60
@@ -1251,6 +1294,7 @@ class MMEngine:
                     target_l3=tp_l3,
                     entry_reason=t.get("entry_reason", ""),
                     formation_type=t.get("mm_formation", ""),
+                    formation_timeframe=str(t.get("formation_timeframe") or "1h"),
                     confluence_grade=t.get("mm_confluence_grade", ""),
                     cycle_phase=t.get("mm_cycle_phase", ""),
                     confluence_score=float(t.get("confluence_score") or 0),
@@ -1389,6 +1433,7 @@ class MMEngine:
                 "target_l1": pos.target_l1,
                 "entry_reason": pos.entry_reason,
                 "formation_type": pos.formation_type,
+                "formation_timeframe": pos.formation_timeframe,
                 "confluence_grade": pos.confluence_grade,
                 "cycle_phase": pos.cycle_phase,
                 "confluence_score": pos.confluence_score,
@@ -1793,16 +1838,32 @@ class MMEngine:
         except Exception:
             pass  # OI not critical; confluence factor defaults to 0
 
-        # Formation detection (1H)
-        formations = self.formation_detector.detect(candles_1h)
+        # Formation detection: prefer 4H structures, use 1H/15m for retest
+        # execution. TBD System lessons 39-43 chart each timeframe in order;
+        # Lesson 13 [102:30] also says longer holds are only justified when
+        # the structure itself is found on 4H/daily.
+        formations_4h = []
+        if candles_4h is not None and not candles_4h.empty and len(candles_4h) >= 40:
+            formations_4h = self.formation_detector.detect(candles_4h, timeframe="4h")
+        formations_1h = self.formation_detector.detect(candles_1h, timeframe="1h")
 
-        if formations:
-            best_formation = formations[0]
+        if formations_4h:
+            best_formation = formations_4h[0]
+            logger.info(
+                "mm_4h_formation_selected",
+                symbol=symbol,
+                type=best_formation.type,
+                variant=best_formation.variant,
+            )
+        elif formations_1h:
+            best_formation = formations_1h[0]
         else:
             # Course lesson 18 alternative #1: 3 hits at HOW/LOW at Level 3
             # "replace the M or W". Synthesize a Formation-shaped object so
             # the rest of the pipeline works uniformly.
             best_formation = self._try_three_hits_formation(candles_1h, cycle_state)
+            if best_formation is not None:
+                best_formation.timeframe = "1h"
             if best_formation is None:
                 # Course lesson 18 alternative #2: 200 EMA rejection trade.
                 best_formation = self._try_200ema_rejection_formation(
@@ -1811,6 +1872,7 @@ class MMEngine:
                     candles_15m=candles_15m,
                 )
                 if best_formation is not None:
+                    best_formation.timeframe = "1h"
                     logger.info("mm_200ema_rejection_synthesized",
                                 symbol=symbol, type=best_formation.type,
                                 variant=best_formation.variant)
@@ -1827,6 +1889,7 @@ class MMEngine:
             if best_formation is None:
                 best_formation = self._try_board_meeting_formation(candles_1h)
                 if best_formation is not None:
+                    best_formation.timeframe = "1h"
                     logger.info("mm_board_meeting_formation_synthesized",
                                 symbol=symbol, type=best_formation.type,
                                 variant=best_formation.variant)
@@ -1837,6 +1900,7 @@ class MMEngine:
             if best_formation is None and candles_15m is not None:
                 best_formation = self._try_brinks_formation(candles_15m, now, cycle_state)
                 if best_formation is not None:
+                    best_formation.timeframe = "15m"
                     logger.info("mm_brinks_formation_synthesized",
                                 symbol=symbol, type=best_formation.type,
                                 variant=best_formation.variant)
@@ -1848,6 +1912,7 @@ class MMEngine:
                     candles_1h, session, cycle_state, now,
                 )
                 if best_formation is not None:
+                    best_formation.timeframe = "1h"
                     logger.info("mm_nyc_reversal_formation_synthesized",
                                 symbol=symbol, type=best_formation.type,
                                 variant=best_formation.variant)
@@ -1859,6 +1924,7 @@ class MMEngine:
                     candles_1h,
                 )
                 if best_formation is not None:
+                    best_formation.timeframe = "1h"
                     logger.info("mm_stophunt_formation_synthesized",
                                 symbol=symbol, type=best_formation.type,
                                 variant=best_formation.variant)
@@ -1868,6 +1934,7 @@ class MMEngine:
             if best_formation is None:
                 best_formation = self._try_half_batman_formation(candles_1h)
                 if best_formation is not None:
+                    best_formation.timeframe = "1h"
                     logger.info("mm_half_batman_formation_synthesized",
                                 symbol=symbol, type=best_formation.type,
                                 variant=best_formation.variant)
@@ -1881,6 +1948,7 @@ class MMEngine:
                     candles_1h, cycle_state,
                 )
                 if best_formation is not None:
+                    best_formation.timeframe = "1h"
                     logger.info("mm_33_trade_formation_synthesized",
                                 symbol=symbol, type=best_formation.type,
                                 variant=best_formation.variant)
@@ -1896,6 +1964,7 @@ class MMEngine:
                 scalp = self._try_scalp_signal(candles_15m, candles_1h, cycle_state)
                 if scalp is not None and scalp.detected:
                     best_formation = self._formation_from_scalp(scalp, candles_15m)
+                    best_formation.timeframe = "15m"
 
             # A8: Ribbon Scalp — second fallback after VWAP+RSI scalp.
             # Requires 150+ candles (slowest EMA period 100 * 1.5).
@@ -1903,11 +1972,28 @@ class MMEngine:
                 ribbon = self._try_ribbon_signal(candles_15m, cycle_state)
                 if ribbon is not None and ribbon.detected:
                     best_formation = self._formation_from_ribbon(ribbon, candles_15m)
+                    best_formation.timeframe = "15m"
 
             if best_formation is None:
                 return self._reject("no_formation", symbol)
 
         self._advance("formation_found")
+        formation_timeframe = str(getattr(best_formation, "timeframe", "1h") or "1h").lower()
+        if formation_timeframe not in {"15m", "1h", "4h", "1d", "daily"}:
+            formation_timeframe = "1h"
+            best_formation.timeframe = "1h"
+        if formation_timeframe == "4h":
+            formation_candles = candles_4h
+        elif formation_timeframe == "15m":
+            formation_candles = candles_15m
+        else:
+            formation_candles = candles_1h
+        if formation_candles is None or formation_candles.empty:
+            formation_candles = candles_1h
+            formation_timeframe = "1h"
+            best_formation.timeframe = "1h"
+        formation_lookback_start = max(0, len(formation_candles) - 40)
+        formation_peak2_abs_idx = formation_lookback_start + best_formation.peak2_idx
 
         # ---------------------------------------------------------------
         # at_key_level enrichment for standard W/M formations.
@@ -2090,7 +2176,7 @@ class MMEngine:
         # standard formations; relax for synthetic variants where the concept
         # doesn't cleanly apply (three_hits_*, board_meeting — which the course
         # itself says "don't follow the same criteria").
-        if best_formation.variant in ("standard", "multi_session", "final_damage"):
+        if best_formation.variant in ("standard", "multi_session", "final_damage") and formation_timeframe == "1h":
             if candles_1h is not None and candles_15m is not None:
                 _lookback_start = max(0, len(candles_1h) - 40)
                 if not self._check_inside_hits_15m(
@@ -2193,9 +2279,18 @@ class MMEngine:
         self._advance("htf_aligned")
         # ---------------------------------------------------------------
 
-        lookback_start = max(0, len(candles_1h) - 40)  # same window formation detector used
-        formation_abs_idx = lookback_start + best_formation.peak2_idx
-        candles_post_formation = candles_1h.iloc[formation_abs_idx:]
+        lookback_start = formation_lookback_start
+        if formation_timeframe == "4h":
+            try:
+                peak2_ts = formation_candles.index[formation_peak2_abs_idx]
+                candles_post_formation = candles_1h[candles_1h.index >= peak2_ts]
+            except Exception:
+                candles_post_formation = candles_1h.tail(40)
+        else:
+            formation_abs_idx = formation_peak2_abs_idx
+            candles_post_formation = candles_1h.iloc[formation_abs_idx:]
+        if candles_post_formation is None or candles_post_formation.empty:
+            candles_post_formation = candles_1h.tail(40)
         level_analysis = self.level_tracker.analyze(candles_post_formation, direction=direction)
 
         # Feed the Linda multi-TF level tracker on EVERY available TF
@@ -2456,11 +2551,11 @@ class MMEngine:
         # mm_max_entry_slippage_pct (default 1.0%). Below that threshold,
         # current_price is close enough to peak2_wick that entering at
         # market effectively is entering at the retest.
-        peak2_abs_idx_early = lookback_start + best_formation.peak2_idx
+        peak2_abs_idx_early = formation_peak2_abs_idx
         peak2_wick_price_early = 0.0
         try:
-            if 0 <= peak2_abs_idx_early < len(candles_1h):
-                p2 = candles_1h.iloc[peak2_abs_idx_early]
+            if 0 <= peak2_abs_idx_early < len(formation_candles):
+                p2 = formation_candles.iloc[peak2_abs_idx_early]
                 if best_formation.type.upper() == "W":
                     peak2_wick_price_early = float(p2["low"])
                 else:
@@ -2508,19 +2603,27 @@ class MMEngine:
         # M-top (short):    "SL above the high of the candle PRECEDING the 1st spike, OR above HOD"
         # We look at peak1_idx-1 for the preceding candle's low (W) / high (M),
         # and fall back to the peak itself if the preceding candle is unavailable.
-        peak1_abs_idx = lookback_start + best_formation.peak1_idx
+        peak1_abs_idx = formation_lookback_start + best_formation.peak1_idx
         try:
-            if peak1_abs_idx > 0 and peak1_abs_idx - 1 < len(candles_1h):
-                preceding = candles_1h.iloc[peak1_abs_idx - 1]
+            if peak1_abs_idx > 0 and peak1_abs_idx - 1 < len(formation_candles):
+                preceding = formation_candles.iloc[peak1_abs_idx - 1]
             else:
                 preceding = None
         except Exception:
             preceding = None
 
         if best_formation.type.upper() == "W":
-            # Prefer the low of the PRECEDING candle (course rule).
-            # Fallback: min of peak1/peak2 prices (previous behaviour).
-            if preceding is not None:
+            if formation_timeframe == "4h":
+                anchors = [
+                    float(cycle_state.low)
+                    if cycle_state.low and cycle_state.low < float("inf") else 0.0,
+                    float(candles_1h.tail(24)["low"].min()) if len(candles_1h) >= 1 else 0.0,
+                ]
+                valid_anchors = [a for a in anchors if a > 0]
+                sl_ref = min(valid_anchors) if valid_anchors else min(best_formation.peak1_price, best_formation.peak2_price)
+            elif preceding is not None:
+                # Prefer the low of the PRECEDING candle (course rule).
+                # Fallback: min of peak1/peak2 prices (previous behaviour).
                 sl_ref = min(float(preceding["low"]),
                              best_formation.peak1_price,
                              best_formation.peak2_price)
@@ -2529,7 +2632,15 @@ class MMEngine:
             sl_price = sl_ref * 0.998  # 0.2% buffer below invalidation
             trade_direction = "long"
         else:
-            if preceding is not None:
+            if formation_timeframe == "4h":
+                anchors = [
+                    float(cycle_state.how)
+                    if cycle_state.how and cycle_state.how > 0 else 0.0,
+                    float(candles_1h.tail(24)["high"].max()) if len(candles_1h) >= 1 else 0.0,
+                ]
+                valid_anchors = [a for a in anchors if a > 0]
+                sl_ref = max(valid_anchors) if valid_anchors else max(best_formation.peak1_price, best_formation.peak2_price)
+            elif preceding is not None:
                 sl_ref = max(float(preceding["high"]),
                              best_formation.peak1_price,
                              best_formation.peak2_price)
@@ -3077,7 +3188,11 @@ class MMEngine:
         # Derived-feature context is assembled via build_context() so the
         # LLM reasons over pre-computed facts rather than raw candles.
         agent_verdict = None  # type: ignore[assignment]
-        if getattr(self.config, "mm_sanity_agent_enabled", True):
+        agent_enabled = (
+            bool(getattr(self.config, "mm_committee_enabled", False))
+            or bool(getattr(self.config, "mm_sanity_agent_enabled", True))
+        )
+        if agent_enabled:
             try:
                 from src.strategy.mm_sanity_agent import build_context
                 # Asia spike direction — use the existing detector that
@@ -3107,6 +3222,11 @@ class MMEngine:
                 except Exception:
                     recent_trades = []
 
+                try:
+                    flow_context = await self.data_feeds.build_flow_snapshot(symbol)
+                except Exception:
+                    flow_context = {}
+
                 agent_ctx = build_context(
                     symbol=symbol,
                     trade_direction=trade_direction,
@@ -3128,6 +3248,7 @@ class MMEngine:
                     recent_trades=recent_trades,
                     cycle_count=self.cycle_count,
                     now=now,
+                    flow=flow_context,
                 )
                 agent_verdict = await self.sanity_agent.review(agent_ctx)
             except Exception as e:
@@ -3162,8 +3283,8 @@ class MMEngine:
         # peak2 wick: for W, the LOW wick of 2nd peak; for M, the HIGH wick.
         # best_formation.peak2_idx is relative to the 40-bar lookback.
         try:
-            peak2_abs_idx = lookback_start + best_formation.peak2_idx
-            peak2_candle = candles_1h.iloc[peak2_abs_idx]
+            peak2_abs_idx = formation_peak2_abs_idx
+            peak2_candle = formation_candles.iloc[peak2_abs_idx]
             if best_formation.type.upper() == "W":
                 peak2_wick_price = float(peak2_candle["low"])
             else:
@@ -3183,9 +3304,9 @@ class MMEngine:
                 svc_low = float(getattr(level_analysis.svc, "candle_low", 0.0))
             if svc_high == 0.0 or svc_low == 0.0:
                 # Fallback: the 1st-peak candle's full range
-                peak1_abs_idx = lookback_start + best_formation.peak1_idx
-                if 0 <= peak1_abs_idx < len(candles_1h):
-                    p1 = candles_1h.iloc[peak1_abs_idx]
+                peak1_abs_idx = formation_lookback_start + best_formation.peak1_idx
+                if 0 <= peak1_abs_idx < len(formation_candles):
+                    p1 = formation_candles.iloc[peak1_abs_idx]
                     svc_high = float(p1["high"])
                     svc_low = float(p1["low"])
         except Exception:
@@ -3204,6 +3325,7 @@ class MMEngine:
             min_rr_required=round(effective_min_rr, 2),
             formation_type=best_formation.type,
             formation_variant=best_formation.variant,
+            formation_timeframe=formation_timeframe,
             formation_quality=round(best_formation.quality_score, 3),
             cycle_phase=cycle_state.phase,
             current_level=level_analysis.current_level,
@@ -3239,7 +3361,7 @@ class MMEngine:
             mm_agent_concerns=(
                 list(agent_verdict.concerns) if agent_verdict is not None else []
             ),
-            reason=f"{best_formation.type} formation ({best_formation.variant}) "
+            reason=f"{formation_timeframe} {best_formation.type} formation ({best_formation.variant}) "
                    f"grade={confluence_result.grade} R:R={rr:.1f} "
                    f"phase={cycle_state.phase} entry={entry_type}",
         )
@@ -3265,6 +3387,7 @@ class MMEngine:
                 "score": float(confluence_result.score_pct),
                 "reasons": [
                     f"formation={best_formation.type}/{best_formation.variant}",
+                    f"formation_timeframe={formation_timeframe}",
                     f"grade={confluence_result.grade}",
                     f"rr={round(rr, 2)}",
                     f"phase={cycle_state.phase}",
@@ -3280,6 +3403,7 @@ class MMEngine:
                     for factor, score in confluence_result.factors.items()
                 },
                 "current_price": float(current_price),
+                "formation_timeframe": formation_timeframe,
                 "acted_on": False,  # set True later when trade is created
                 "scan_cycle": int(self.cycle_count),
             })
@@ -3661,6 +3785,7 @@ class MMEngine:
                 "entry_reason": signal.reason,
                 "confluence_score": signal.confluence_score,
                 "mm_formation": signal.formation_type,
+                "formation_timeframe": signal.formation_timeframe,
                 "mm_cycle_phase": signal.cycle_phase,
                 "mm_confluence_grade": signal.confluence_grade,
                 # Per-trade MM lifecycle state so restarts preserve the
@@ -3716,6 +3841,7 @@ class MMEngine:
             target_l3=signal.target_l3,
             entry_reason=signal.reason,
             formation_type=signal.formation_type,
+            formation_timeframe=signal.formation_timeframe,
             confluence_grade=signal.confluence_grade,
             cycle_phase=signal.cycle_phase,
             confluence_score=signal.confluence_score,
@@ -3869,42 +3995,24 @@ class MMEngine:
             except Exception as e:
                 logger.debug("mm_refund_zone_check_failed", symbol=symbol, error=str(e))
 
-        # B1: Scratch rule — course Lesson 13 [47:00] verbatim:
+        # B1: Scratch rule — course Lesson 13 [44:00] and [47:00]:
         #
-        #   "If you're not in substantial profit within two hours you
-        #    scratch the trade. It means the Market Maker has a different
-        #    plan. That's the rule. Market Maker only holds the
-        #    consolidation level to get more contracts."
+        #   [44:00] says a correct trade should have moved into enough
+        #   profit within two hours to move stop to breakeven.
+        #   [47:00] says to scratch when it is not in substantial profit
+        #   within two hours because the MM has a different plan.
         #
-        # P3 FIX 2026-04-22 — "within two hours" is a window, not an
-        # instant.
+        # The window is still measured with MFE so "within" means any
+        # favorable excursion during the window, not a snapshot at the
+        # check. The threshold is now `scratch_be_distance_r` (default
+        # 0.2R), matching the BE-ladder distance instead of the old
+        # arbitrary 0.3R "substantial" proxy.
         #
-        # The prior rule measured unrealized P&L at the 2h mark only.
-        # That closed trades that had been +1R mid-flight but pulled
-        # back to break-even by the 2h check — the trade HAD shown
-        # "substantial profit within two hours" but we closed it anyway
-        # because we only looked at the snapshot. User reported the
-        # pattern: "if the initial trade goes in the wrong direction,
-        # but comes back in the direction we expect, it gets closed...
-        # before it can actually realized."
-        #
-        # The fix: track Max Favorable Excursion (MFE) in R-multiples
-        # continuously. "R" = distance from entry to original_stop_loss.
-        # A trade's MFE is the highest R-value it has reached at any
-        # point during its lifetime. At the 2h mark, we check whether
-        # MFE ever cleared `scratch_mfe_threshold_r` (default 0.3R).
-        # If so, the trade has shown "substantial profit within two
-        # hours" per the course and is safe from scratch.
-        #
-        # Threshold rationale: 0.3R is conservative — low enough that
-        # any trade starting to work has crossed it, high enough that
-        # noise alone won't trigger it. Tunable via
-        # config.mm_scratch_mfe_threshold_r.
-        #
-        # MFE persistence: on every tick we update pos.MFE and if it
-        # increased by ≥0.1R since last persist, write to DB so a
-        # mid-trade restart doesn't lose the fact that the bar was
-        # already cleared.
+        # Lesson 13 [102:30] says the 2h rule can be held longer only
+        # when the setup was found on 4H/daily. It does NOT specify an
+        # exact bar count; `scratch_window_4h_bars=2` is a conservative
+        # inference (~8h) and should be tuned after observing live 4H
+        # behaviour.
         #
         # Prior anti-patterns removed here (commit 2a04c2e, reverted):
         # dynamic-by-SL scratch + board-meeting exemption. Both were
@@ -3934,13 +4042,28 @@ class MMEngine:
 
         now = datetime.now(timezone.utc)
         elapsed = (now - pos.entry_time).total_seconds()
-        if elapsed >= 7200:  # 2 hours
-            # Scratch iff MFE never cleared the threshold during the
-            # two-hour window. A trade that was once in substantial
-            # profit but has since retraced is NOT scratched — that's
-            # a separate management concern (breakeven stop, partial
-            # take) handled elsewhere.
-            if pos.max_favorable_excursion_r < self.scratch_mfe_threshold_r:
+        formation_tf = str(getattr(pos, "formation_timeframe", "1h") or "1h").lower()
+        closed_4h_bars = 0
+        scratch_threshold_r = float(getattr(
+            self,
+            "scratch_be_distance_r",
+            getattr(self, "scratch_mfe_threshold_r", SCRATCH_BE_DISTANCE_R),
+        ))
+        if scratch_threshold_r > 0:
+            if formation_tf in {"4h", "1d", "daily"}:
+                closed_4h_bars = self._closed_4h_bars_since(pos.entry_time, now)
+                scratch_window_elapsed = closed_4h_bars >= max(
+                    1, int(getattr(self, "scratch_window_4h_bars", SCRATCH_WINDOW_4H_BARS))
+                )
+                scratch_exit_reason = "scratch_4h_window"
+            else:
+                scratch_window_elapsed = elapsed >= 7200
+                scratch_exit_reason = "scratch_2h"
+
+            # Scratch iff MFE never reached the breakeven-move distance
+            # during the relevant window. A trade that was once eligible
+            # for BE but has since retraced is managed elsewhere.
+            if scratch_window_elapsed and pos.max_favorable_excursion_r < scratch_threshold_r:
                 # Recompute gross for log continuity with the old format
                 if pos.direction == "long":
                     gross = (current_price - pos.entry_price) * pos.quantity
@@ -3949,15 +4072,17 @@ class MMEngine:
                 logger.info(
                     "mm_scratch_rule",
                     symbol=symbol,
+                    formation_timeframe=formation_tf,
                     entry_time=pos.entry_time.isoformat(),
                     elapsed_hours=round(elapsed / 3600, 2),
+                    closed_4h_bars=closed_4h_bars,
                     mfe_r=round(pos.max_favorable_excursion_r, 3),
-                    mfe_threshold_r=self.scratch_mfe_threshold_r,
+                    be_distance_r=scratch_threshold_r,
                     unrealized_gross_usd=round(gross, 2),
                     current_price=current_price,
                     entry_price=pos.entry_price,
                 )
-                await self._close_position(pos, current_price, "scratch_2h")
+                await self._close_position(pos, current_price, scratch_exit_reason)
                 return
 
         # Check stop loss hit

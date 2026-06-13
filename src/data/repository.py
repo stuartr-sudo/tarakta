@@ -46,6 +46,7 @@ class Repository:
         "last_agent3_sl",
         "instance_id",
         "strategy", "entry_reason", "mm_formation", "mm_cycle_phase", "mm_confluence_grade",
+        "formation_timeframe",
         # Per-trade MM lifecycle state (migration 017) — must persist across
         # restarts or SL tightening / SVC invalidation / Refund Zone / 200 EMA
         # partial deduplication are all silently disabled.
@@ -1115,7 +1116,7 @@ class Repository:
         "htf_trend_4h", "htf_trend_1d", "counter_trend",
         "concerns", "input_context", "raw_response",
         "model", "prompt_version", "latency_ms", "cost_usd",
-        "trade_id",
+        "trade_id", "committee",
     }
 
     async def insert_mm_agent_decision(self, decision: dict[str, Any]) -> dict:

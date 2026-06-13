@@ -60,7 +60,8 @@
         <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:1.5rem;">
             {{ slider("mm_scan_interval", "Scan Interval", mm.scan_interval, 1, 30, 1, " min", "How often the MM engine scans for setups") }}
             {{ slider("mm_cooldown_hours", "Symbol Cooldown", mm.cooldown_hours, 0, 24, 1, "h", "Hours to wait before re-entering a symbol after exit") }}
-            {{ slider("mm_scratch_mfe_threshold_r", "Scratch MFE", mm.scratch_mfe_threshold_r, 0, 2, 0.05, "R", "MFE required within 2h to avoid scratch") }}
+            {{ slider("mm_scratch_be_distance_r", "Scratch BE Distance", mm.scratch_be_distance_r, 0, 2, 0.05, "R", "MFE required within scratch window to move stop to breakeven") }}
+            {{ slider("mm_scratch_window_4h_bars", "4H Scratch Bars", mm.scratch_window_4h_bars, 1, 6, 1, " bars", "Closed 4H bars before scratching 4H/daily formations") }}
         </div>
     </div>
 </div>
@@ -96,7 +97,8 @@ const SETTINGS = {
     mm_max_sl_pct:            { divisor: 1,   suffix: '%' },
     mm_max_tp1_distance_pct:  { divisor: 1,   suffix: '%' },
     mm_max_entry_slippage_pct:{ divisor: 1,   suffix: '%' },
-    mm_scratch_mfe_threshold_r:{ divisor: 1,  suffix: 'R' },
+    mm_scratch_be_distance_r:  { divisor: 1,  suffix: 'R' },
+    mm_scratch_window_4h_bars: { divisor: 1,  suffix: ' bars' },
 };
 
 let saveTimeout = null;

@@ -389,7 +389,11 @@ def create_router(config: Settings, repo: Repository) -> APIRouter:
             "max_sl_pct": mm_settings.get("mm_max_sl_pct", getattr(config, "mm_max_sl_pct", 5.0)),
             "max_tp1_distance_pct": mm_settings.get("mm_max_tp1_distance_pct", getattr(config, "mm_max_tp1_distance_pct", 10.0)),
             "max_entry_slippage_pct": mm_settings.get("mm_max_entry_slippage_pct", getattr(config, "mm_max_entry_slippage_pct", 1.0)),
-            "scratch_mfe_threshold_r": mm_settings.get("mm_scratch_mfe_threshold_r", getattr(config, "mm_scratch_mfe_threshold_r", 0.3)),
+            "scratch_be_distance_r": mm_settings.get(
+                "mm_scratch_be_distance_r",
+                mm_settings.get("mm_scratch_mfe_threshold_r", getattr(config, "mm_scratch_be_distance_r", 0.2)),
+            ),
+            "scratch_window_4h_bars": mm_settings.get("mm_scratch_window_4h_bars", getattr(config, "mm_scratch_window_4h_bars", 2)),
             "initial_balance": getattr(config, "mm_initial_balance", 10000.0),
         }
         ctx["instance_id"] = config.instance_id

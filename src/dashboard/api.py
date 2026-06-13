@@ -87,7 +87,9 @@ def create_router(repo: Repository) -> APIRouter:
         "mm_max_sl_pct":            (float, 1.0, 15.0),
         "mm_max_tp1_distance_pct":  (float, 0.0, 50.0),
         "mm_max_entry_slippage_pct": (float, 0.0, 10.0),
+        "mm_scratch_be_distance_r": (float, 0.0, 2.0),
         "mm_scratch_mfe_threshold_r": (float, 0.0, 2.0),
+        "mm_scratch_window_4h_bars": (int, 1, 6),
     }
 
     @router.post("/mm/settings")
@@ -151,8 +153,14 @@ def create_router(repo: Repository) -> APIRouter:
                 mm.max_tp1_distance_pct = parsed["mm_max_tp1_distance_pct"]
             if "mm_max_entry_slippage_pct" in parsed:
                 mm.max_entry_slippage_pct = parsed["mm_max_entry_slippage_pct"]
-            if "mm_scratch_mfe_threshold_r" in parsed:
+            if "mm_scratch_be_distance_r" in parsed:
+                mm.scratch_be_distance_r = parsed["mm_scratch_be_distance_r"]
+                mm.scratch_mfe_threshold_r = parsed["mm_scratch_be_distance_r"]
+            elif "mm_scratch_mfe_threshold_r" in parsed:
+                mm.scratch_be_distance_r = parsed["mm_scratch_mfe_threshold_r"]
                 mm.scratch_mfe_threshold_r = parsed["mm_scratch_mfe_threshold_r"]
+            if "mm_scratch_window_4h_bars" in parsed:
+                mm.scratch_window_4h_bars = int(parsed["mm_scratch_window_4h_bars"])
 
         logger.info("mm_settings_saved", settings=parsed)
         return {"success": True, "saved": parsed}

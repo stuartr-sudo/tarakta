@@ -102,17 +102,20 @@ class Settings(BaseSettings):
     # Lesson 20 / 47) before we skip a setup. 0 disables. See engine
     # comment at the entry-price block for the trade-data rationale.
     mm_max_entry_slippage_pct: float = 1.0
-    # 2h scratch rule MFE threshold in R-multiples (P3 fix 2026-04-22).
-    # Course Lesson 13 [47:00] "If you're not in substantial profit
-    # within two hours you scratch the trade." "Within two hours" is a
-    # WINDOW — we track the highest R-multiple reached during the
-    # trade and only scratch at 2h if peak R never cleared this
-    # threshold. 0.3R reads "substantial" conservatively: low enough
-    # that any trade starting to work has crossed it, high enough to
-    # rule out noise. Tuned down (e.g. 0.2) = more trades kept; tuned
-    # up (e.g. 0.5) = stricter scratch. Set to 0 to effectively
-    # disable the scratch rule (any trade at all is safe).
-    mm_scratch_mfe_threshold_r: float = 0.3
+    # Scratch rule breakeven-distance threshold in R-multiples.
+    # Course Lesson 13 [44:00] says a correct trade should move into
+    # enough profit within two hours to move stop to breakeven. The
+    # engine therefore checks whether peak MFE reached the BE ladder's
+    # minimum distance, not an arbitrary "substantial profit" proxy.
+    # Set to 0 to effectively disable the scratch rule.
+    mm_scratch_be_distance_r: float = 0.2
+    # Compatibility alias for older env/settings rows. Prefer
+    # mm_scratch_be_distance_r for new code.
+    mm_scratch_mfe_threshold_r: float = 0.2
+    # 4H/daily formation scratch window. Lesson 13 [102:30] only gives
+    # directional permission to hold longer for 4H/daily structures; 2
+    # closed 4H bars is the conservative inferred default.
+    mm_scratch_window_4h_bars: int = 2
     mm_initial_balance: float = 10000.0
     # Pair selection — course says MM Method is a majors strategy. Separate
     # from the SMC engine's `min_volume_usd` so we don't disturb that.
@@ -173,6 +176,16 @@ class Settings(BaseSettings):
     # noise for a real retest, but catches a genuinely new formation
     # price. Set high (e.g. 100) to effectively disable drift check.
     mm_sanity_agent_cache_price_drift_pct: float = 0.5
+
+    # MM Agent Committee — disabled by default. Shadow mode returns APPROVE
+    # to the engine while logging what the committee would have done.
+    mm_committee_enabled: bool = False
+    mm_committee_mode: Literal["shadow", "veto"] = "shadow"
+    mm_committee_specialist_model: str = "claude-haiku-4-5-20251001"
+    mm_committee_head_trader_model: str = "claude-sonnet-4-6"
+    mm_committee_escalation_model: str = "claude-opus-4-8"
+    mm_committee_timeout_s: float = 30.0
+    mm_committee_monthly_budget_usd: float = 600.0
 
     # Inverse mirror bot. This mode does not scan for setups. It follows the
     # source instance's persisted trades and opens/closes the opposite side in

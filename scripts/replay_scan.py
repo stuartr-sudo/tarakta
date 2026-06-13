@@ -246,7 +246,9 @@ def _replay_config(**overrides) -> SimpleNamespace:
         mm_cooldown_hours=4.0,
         mm_max_tp1_distance_pct=10.0,
         mm_max_entry_slippage_pct=1.0,
-        mm_scratch_mfe_threshold_r=0.3,
+        mm_scratch_be_distance_r=0.2,
+        mm_scratch_mfe_threshold_r=0.2,
+        mm_scratch_window_4h_bars=2,
         mm_initial_balance=100_000.0,
         mm_min_volume_usd=50_000_000,
         mm_majors_only=True,
@@ -259,6 +261,8 @@ def _replay_config(**overrides) -> SimpleNamespace:
         mm_sanity_agent_effort="high",
         mm_sanity_agent_min_confidence=0.0,
         mm_sanity_agent_monthly_budget_usd=600.0,
+        mm_committee_enabled=False,
+        mm_committee_mode="shadow",
         markets={},
         leverage=10,
     )
@@ -288,6 +292,23 @@ MOVE_SL_TO_BE: bool = True
 PREDICTIVE_MODE: bool = False
 PREDICTIVE_OFFSET_PCT: float = 0.5      # +0.5% above peak2 for higher-low W bias
 PREDICTIVE_TIMEOUT_HOURS: int = 24      # cancel limit if not filled
+
+
+def _closed_4h_bars_since(entry_time: datetime, now: datetime) -> int:
+    if entry_time.tzinfo is None:
+        entry_time = entry_time.replace(tzinfo=timezone.utc)
+    else:
+        entry_time = entry_time.astimezone(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    else:
+        now = now.astimezone(timezone.utc)
+    if now <= entry_time:
+        return 0
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    entry_bucket = int((entry_time - epoch).total_seconds() // (4 * 3600))
+    now_bucket = int((now - epoch).total_seconds() // (4 * 3600))
+    return max(0, now_bucket - entry_bucket)
 
 
 @dataclass
@@ -333,6 +354,7 @@ class PnlResult:
     r_multiple: float = 0.0         # realized_pnl / initial_risk
     hours_held: float = 0.0
     max_favorable_excursion_r: float = 0.0
+    formation_timeframe: str = "1h"
 
 
 def simulate_signal(
@@ -352,7 +374,10 @@ def simulate_signal(
     partial_split: tuple[float, float, float] = (0.30, 0.40, 0.30),
     predictive_mode: bool = False,
     predictive_timeout_hours: int = 24,
-    scratch_mfe_threshold_r: float = 0.3,
+    scratch_be_distance_r: float = 0.2,
+    scratch_mfe_threshold_r: float | None = None,
+    formation_timeframe: str = "1h",
+    scratch_window_4h_bars: int = 2,
 ) -> PnlResult:
     """Walk forward from the signal bar and return the simulated outcome.
 
@@ -367,6 +392,9 @@ def simulate_signal(
     PnlResult with exit_reason='not_filled' (no risk taken, no P&L).
     """
     is_long = direction == "long"
+    if scratch_mfe_threshold_r is not None:
+        scratch_be_distance_r = scratch_mfe_threshold_r
+    formation_timeframe = str(formation_timeframe or "1h").lower()
     # Convert to floats and sanity-check
     entry = float(entry_price)
     sl_initial = float(sl)
@@ -386,6 +414,7 @@ def simulate_signal(
                     entry_ts=signal_ts, entry_price=entry, direction=direction,
                     sl_initial=sl_initial, sl_final=sl_initial,
                     tp1=tp1_f, tp2=tp2_f, tp3=tp3_f,
+                    formation_timeframe=formation_timeframe,
                     exit_reason="not_filled",
                 )
             bar_high = float(row["high"])
@@ -404,6 +433,7 @@ def simulate_signal(
                 entry_ts=signal_ts, entry_price=entry, direction=direction,
                 sl_initial=sl_initial, sl_final=sl_initial,
                 tp1=tp1_f, tp2=tp2_f, tp3=tp3_f,
+                formation_timeframe=formation_timeframe,
                 exit_reason="not_filled",
             )
 
@@ -417,6 +447,7 @@ def simulate_signal(
             entry_ts=signal_ts, entry_price=entry, direction=direction,
             sl_initial=sl_initial, sl_final=sl_initial,
             tp1=tp1_f, tp2=tp2_f, tp3=tp3_f,
+            formation_timeframe=formation_timeframe,
             exit_reason="invalid_risk",
         )
     quantity_notional = risk_usd / (sl_distance / entry)
@@ -442,6 +473,7 @@ def simulate_signal(
         entry_ts=signal_ts, entry_price=entry, direction=direction,
         sl_initial=sl_initial, sl_final=sl_initial,
         tp1=tp1_f, tp2=tp2_f, tp3=tp3_f, risk_usd=risk_usd,
+        formation_timeframe=formation_timeframe,
     )
 
     # Walk forward one 1H bar at a time
@@ -498,17 +530,24 @@ def simulate_signal(
             exit_price = fill
             break
 
+        if formation_timeframe in {"4h", "1d", "daily"}:
+            scratch_elapsed = _closed_4h_bars_since(signal_ts, ts) >= max(1, int(scratch_window_4h_bars))
+            scratch_reason = "scratch_4h_window"
+        else:
+            scratch_elapsed = elapsed_h >= 2
+            scratch_reason = "scratch_2h"
+
         if (
-            scratch_mfe_threshold_r > 0
-            and elapsed_h >= 2
-            and result.max_favorable_excursion_r < scratch_mfe_threshold_r
+            scratch_be_distance_r > 0
+            and scratch_elapsed
+            and result.max_favorable_excursion_r < scratch_be_distance_r
         ):
             pnl_per_unit = (bar_close - entry) if is_long else (entry - bar_close)
             units_remaining = quantity * remaining
             realized_cashflow += pnl_per_unit * units_remaining
             fees_paid += bar_close * units_remaining * fee_per_side
             remaining = 0.0
-            exit_reason = "scratch_2h"
+            exit_reason = scratch_reason
             exit_ts = ts
             exit_price = bar_close
             break
@@ -731,6 +770,9 @@ async def replay_single_symbol(
                         forward_candles=forward,
                         predictive_mode=True,
                         predictive_timeout_hours=pred_timeout_h,
+                        formation_timeframe=getattr(signal, "formation_timeframe", "1h"),
+                        scratch_be_distance_r=getattr(config, "mm_scratch_be_distance_r", 0.2),
+                        scratch_window_4h_bars=getattr(config, "mm_scratch_window_4h_bars", 2),
                     )
                 else:
                     pnl_res = simulate_signal(
@@ -742,6 +784,9 @@ async def replay_single_symbol(
                         tp2=signal.target_l2,
                         tp3=signal.target_l3,
                         forward_candles=forward,
+                        formation_timeframe=getattr(signal, "formation_timeframe", "1h"),
+                        scratch_be_distance_r=getattr(config, "mm_scratch_be_distance_r", 0.2),
+                        scratch_window_4h_bars=getattr(config, "mm_scratch_window_4h_bars", 2),
                     )
                 if pnl_res is not None and pnl_res.hours_held > 0:
                     simulated_position_until = as_of + timedelta(hours=pnl_res.hours_held)
@@ -749,6 +794,7 @@ async def replay_single_symbol(
                 ts=as_of, stage="signal_built",
                 signal={
                     "direction": signal.direction,
+                    "formation_timeframe": getattr(signal, "formation_timeframe", "1h"),
                     "entry": round(signal.entry_price, 6),
                     "sl": round(signal.stop_loss, 6),
                     "tp1": round(signal.target_l1, 6),

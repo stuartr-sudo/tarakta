@@ -155,18 +155,18 @@ class TestTimeout:
 
 class TestScratchMFE:
     def test_scratch_2h_when_mfe_never_clears_threshold(self):
-        # Long entry 100, SL 99. Best favorable move is +0.25R by T+2h,
-        # below the live 0.3R scratch threshold.
+        # Long entry 100, SL 99. Best favorable move is +0.15R by T+2h,
+        # below the live 0.2R BE-distance threshold.
         result = simulate_signal(
             signal_ts=SIGNAL_TS, direction="long",
             entry_price=100.0, sl=99.0, tp1=102.0, tp2=103.0, tp3=105.0,
             forward_candles=_candles(
-                (100.0, 100.20, 99.80, 100.10),
-                (100.1, 100.25, 99.90, 100.05),
+                (100.0, 100.10, 99.80, 100.05),
+                (100.1, 100.15, 99.90, 100.05),
             ),
         )
         assert result.exit_reason == "scratch_2h"
-        assert result.max_favorable_excursion_r == pytest.approx(0.25)
+        assert result.max_favorable_excursion_r == pytest.approx(0.15)
 
     def test_no_scratch_when_mfe_cleared_then_retraced(self):
         # The course wording is "within two hours"; a move to +0.5R in
@@ -182,6 +182,29 @@ class TestScratchMFE:
         )
         assert result.exit_reason != "scratch_2h"
         assert result.max_favorable_excursion_r == pytest.approx(0.5)
+
+    def test_4h_formation_waits_for_two_closed_4h_bars(self):
+        result = simulate_signal(
+            signal_ts=SIGNAL_TS,
+            direction="long",
+            entry_price=100.0,
+            sl=99.0,
+            tp1=102.0,
+            tp2=103.0,
+            tp3=105.0,
+            formation_timeframe="4h",
+            forward_candles=_candles(
+                (100.0, 100.10, 99.80, 100.05),
+                (100.1, 100.15, 99.90, 100.05),
+                (100.1, 100.15, 99.90, 100.05),
+                (100.1, 100.15, 99.90, 100.05),
+                (100.1, 100.15, 99.90, 100.05),
+                (100.1, 100.15, 99.90, 100.05),
+                (100.1, 100.15, 99.90, 100.05),
+                (100.1, 100.15, 99.90, 100.05),
+            ),
+        )
+        assert result.exit_reason == "scratch_4h_window"
 
 
 class TestEdgeCases:

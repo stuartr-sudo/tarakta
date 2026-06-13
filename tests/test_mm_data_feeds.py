@@ -45,6 +45,8 @@ from src.strategy.mm_data_feeds import (
     StubSentimentProvider,
     # Real providers
     BinanceLiquidationProvider,
+    BinanceFundingProvider,
+    BinanceOrderBookProvider,
     YFinanceCorrelationProvider,
     # Registry
     DataFeedRegistry,
@@ -389,14 +391,14 @@ class TestSentimentDataFields:
 
 class TestDataFeedRegistryStatus:
     def test_all_stubs_return_false_status(self):
-        """Default registry: hyblock=True (Binance), correlation=True/False (yfinance),
+        """Default registry: Binance-backed flow providers are live by default,
         rest are False (still stubbed)."""
         registry = DataFeedRegistry()
         status = registry.get_status()
 
         assert isinstance(status, dict)
         expected_keys = {
-            "hyblock", "tradinglite", "news", "options",
+            "hyblock", "funding", "orderbook", "tradinglite", "news", "options",
             "dominance", "correlation", "sentiment",
         }
         assert set(status.keys()) == expected_keys
@@ -405,6 +407,8 @@ class TestDataFeedRegistryStatus:
         assert status["hyblock"] is True, (
             "hyblock should be True (BinanceLiquidationProvider is the default)"
         )
+        assert status["funding"] is True
+        assert status["orderbook"] is True
 
         # These remain stubs — must be False
         always_stub_keys = ("tradinglite", "news", "options", "dominance", "sentiment")
@@ -415,10 +419,10 @@ class TestDataFeedRegistryStatus:
         # correlation is either YFinance (True) or Stub (False) depending on yfinance install
         assert isinstance(status["correlation"], bool)
 
-    def test_status_has_all_seven_providers(self):
+    def test_status_has_all_nine_providers(self):
         registry = DataFeedRegistry()
         status = registry.get_status()
-        assert len(status) == 7
+        assert len(status) == 9
 
     def test_status_values_are_booleans(self):
         registry = DataFeedRegistry()
@@ -446,6 +450,8 @@ class TestDataFeedRegistryStatus:
         """Registry can be constructed with no arguments."""
         registry = DataFeedRegistry()
         assert registry.hyblock is not None
+        assert registry.funding is not None
+        assert registry.orderbook is not None
         assert registry.news is not None
         assert registry.sentiment is not None
 
@@ -453,6 +459,11 @@ class TestDataFeedRegistryStatus:
         """Default hyblock provider is BinanceLiquidationProvider (free, no key)."""
         registry = DataFeedRegistry()
         assert isinstance(registry.hyblock, BinanceLiquidationProvider)
+
+    def test_flow_defaults_are_binance_providers(self):
+        registry = DataFeedRegistry()
+        assert isinstance(registry.funding, BinanceFundingProvider)
+        assert isinstance(registry.orderbook, BinanceOrderBookProvider)
 
     def test_yfinance_provider_is_default_when_installed(self):
         """Default registry uses YFinanceCorrelationProvider when yfinance is importable."""
@@ -790,11 +801,12 @@ class TestBinanceLiquidationProvider:
 
         # Inspect the params passed to .get()
         client_instance = mock_cm.__aenter__.return_value
-        call_kwargs = client_instance.get.call_args
-        params = call_kwargs[1].get("params") or call_kwargs[0][1] if len(call_kwargs[0]) > 1 else {}
-        if not params and call_kwargs.kwargs:
-            params = call_kwargs.kwargs.get("params", {})
-        assert params.get("symbol") == "BTCUSDT"
+        params_seen = [
+            (call.kwargs.get("params") or {})
+            for call in client_instance.get.call_args_list
+        ]
+        assert params_seen
+        assert all(params.get("symbol") == "BTCUSDT" for params in params_seen)
 
     def test_cache_returns_same_result_within_ttl(self):
         """Second call within TTL returns cached result without calling httpx again."""

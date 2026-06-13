@@ -769,8 +769,9 @@ class MMSanityAgent:
 
 SETUP
 symbol={ctx.get('symbol')} direction={ctx.get('direction')} \
-formation={ctx.get('formation_type')}/{ctx.get('formation_variant')}
-grade={ctx.get('grade')} confluence={ctx.get('score_pct')}% \
+	formation={ctx.get('formation_type')}/{ctx.get('formation_variant')}
+	formation_timeframe={ctx.get('formation_timeframe')}
+	grade={ctx.get('grade')} confluence={ctx.get('score_pct')}% \
 retest_met={ctx.get('retest_met')}/4
 entry={ctx.get('entry_price')} sl_ref={ctx.get('sl_ref')}
 formation_quality={ctx.get('formation_quality')} \
@@ -789,7 +790,14 @@ session={ctx.get('session_name')} min_in={ctx.get('minutes_in')}
 asia_range_pct={ctx.get('asia_range_pct')} \
 asia_spike_dir={ctx.get('asia_spike_dir')}
 weekly_phase={ctx.get('weekly_phase')} dow={ctx.get('dow')}
-multi_session_formation={ctx.get('multi_session')}
+	multi_session_formation={ctx.get('multi_session')}
+
+	FLOW DATA
+	oi_current={ctx.get('flow_oi_current')} oi_trend_5h={ctx.get('flow_oi_trend_5h')}
+	funding_rate={ctx.get('flow_funding_rate')} \
+	orderbook_imbalance={ctx.get('flow_orderbook_imbalance')}
+	top_trader_long_pct={ctx.get('flow_top_trader_long_pct')} \
+	top_trader_short_pct={ctx.get('flow_top_trader_short_pct')}
 
 RECENT (last 5 closed {ctx.get('symbol')} MM trades)
 {recent_str}
@@ -879,6 +887,7 @@ def build_context(
     recent_trades: list[dict] | None,
     cycle_count: int | None,
     now: Any,
+    flow: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the pre-computed feature dict sent to the agent.
 
@@ -932,11 +941,14 @@ def build_context(
         except Exception:
             continue
 
+    flow = flow or {}
+
     return {
         "symbol": symbol,
         "direction": trade_direction,
         "formation_type": getattr(best_formation, "type", ""),
         "formation_variant": getattr(best_formation, "variant", ""),
+        "formation_timeframe": getattr(best_formation, "timeframe", "1h") or "1h",
         "formation_quality": round(float(getattr(best_formation, "quality_score", 0.0)), 3),
         "at_key_level": bool(getattr(best_formation, "at_key_level", False)),
         "multi_session": multi_session,
@@ -973,5 +985,12 @@ def build_context(
         "c4h_closes": _closes_last_n(candles_4h, 10),
         "c1h_closes": _closes_last_n(candles_1h, 10),
         "c15m_closes": _closes_last_n(candles_15m, 10),
+        "flow": _jsonable(flow),
+        "flow_oi_current": flow.get("oi_current"),
+        "flow_oi_trend_5h": flow.get("oi_trend_5h"),
+        "flow_funding_rate": flow.get("funding_rate"),
+        "flow_orderbook_imbalance": flow.get("orderbook_imbalance"),
+        "flow_top_trader_long_pct": flow.get("top_trader_long_pct"),
+        "flow_top_trader_short_pct": flow.get("top_trader_short_pct"),
         "cycle_count": cycle_count,
     }
