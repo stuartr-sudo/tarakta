@@ -186,6 +186,21 @@ class Settings(BaseSettings):
     mm_committee_escalation_model: str = "claude-opus-4-8"
     mm_committee_timeout_s: float = 30.0
     mm_committee_monthly_budget_usd: float = 600.0
+    # Claude Code CLI fallback — used when anthropic_api_key is empty. Runs
+    # committee calls through the locally-authenticated `claude` binary
+    # (subscription login), so no API key is required. cli_path empty =
+    # autodetect via PATH + Homebrew locations. cli_timeout_s is per model
+    # call; the committee-wide deadline scales off it (2 stages + slack).
+    mm_committee_cli_enabled: bool = True
+    mm_committee_cli_path: str = ""
+    mm_committee_cli_timeout_s: float = 120.0
+    # Long-lived headless auth for the CLI backend, minted by
+    # `claude setup-token` (browser flow, ~30s, user-run). Needed because a
+    # daemonised bot cannot rely on the interactive Keychain login staying
+    # fresh — observed 2026-07-18: Keychain CLI credentials 401'd while the
+    # desktop app's own session worked. Also the auth story for Fly later
+    # (set as a secret). Empty = rely on ambient CLI login.
+    claude_code_oauth_token: str = ""
 
     # Inverse mirror bot. This mode does not scan for setups. It follows the
     # source instance's persisted trades and opens/closes the opposite side in

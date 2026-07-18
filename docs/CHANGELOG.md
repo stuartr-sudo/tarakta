@@ -17,6 +17,31 @@ Paired docs:
 
 ---
 
+## 2026-07-18 — Committee gets a Claude Code CLI backend (subscription auth, no API key)
+
+Root-cause follow-up to the 2026-07-18 profitability review: every committee call since 2026-06-26 (51 rows) and every sanity-agent call 2026-06-15/17 (165 rows) logged `ERROR client_unavailable` because the runtime had no `ANTHROPIC_API_KEY` — the LLM layer (the only historically profitable configuration, see `docs/MM_AGENT_COMMITTEE_DESIGN.md` §1) was silently dead while shadow mode converted every error to APPROVE.
+
+### Change
+
+New `src/strategy/mm_claude_cli.py` — `ClaudeCLIClient`, an async subprocess wrapper around `claude -p --output-format json --tools "" --strict-mcp-config --no-session-persistence`. `MMCommittee._get_client()` now falls back to it when `anthropic_api_key` is empty, so committee calls run on the user's Claude Code subscription login instead of metered API billing. Design doc already specified the committee "built on the Claude Agent SDK" — this lands that intent.
+
+Details (each observed live during implementation, not speculative):
+
+- Child env scrubbed: harness-injected `SSL_CERT_FILE` broke child TLS (3-min retry loop, "SSL certificate verification failed"); nested-session markers (`CLAUDECODE`, `CLAUDE_CODE_*`, `ANTHROPIC_BASE_URL`) make a child CLI behave as a host-managed subprocess. `CLAUDE_CODE_OAUTH_TOKEN` preserved/injectable.
+- CLI can exit 0 with `is_error:true` inside the JSON (and can exit 1 with the JSON on stdout) — both paths classified into `mm_agent_decisions.reason`.
+- `claude_code_oauth_token` config (env `CLAUDE_CODE_OAUTH_TOKEN` via `.env`) injected into the child env — pydantic loads `.env` into Settings, not `os.environ`, so ambient inheritance alone would not work. Needed because the interactive Keychain CLI login was observed 401-stale on this machine while the desktop app's own session worked; `claude setup-token` mints the durable headless credential.
+- Cost accounting: `usage["backend"]=="claude_cli"` short-circuits `_compute_cost` to the CLI-reported `total_cost_usd` (0 on subscription) — no pricing-table warnings.
+- Committee-wide deadline scales for the CLI backend (`per-call × 2 + 30s`, config `mm_committee_cli_timeout_s=120`) — subprocess calls are slower than SDK streaming.
+
+No DB columns added (no `_TRADE_COLUMNS`/`_MM_AGENT_DECISION_COLUMNS` changes). No engine-gate or course-rule changes — transport only. Fail-open/shadow semantics unchanged; error rows keep flowing to `mm_agent_decisions`.
+
+### Verification
+
+- `tests/test_mm_committee_cli.py` (12 tests): backend selection, env scrub, token injection, JSON parse, `is_error` flag, nonzero exit, review()-level ERROR row, cost short-circuit, timeout scaling. Full suite 776 passed / 1 skipped.
+- Live E2E 2026-07-18 05:25:49Z: `MMCommittee.review()` on instance `main` with no API key selected the CLI backend, ran 5 specialists, classified the (expected, pre-token) 401 into `committee_error:api_error:cli_exit_1:...` with committee JSONB, shadow-APPROVEd. The success path activates when `CLAUDE_CODE_OAUTH_TOKEN` is set in `.env`.
+
+---
+
 ## 2026-04-28 — Engine v2 architecture deployed; sanity agent disabled; experimental cleanup
 
 Five engine fixes shipped to production over 2026-04-26/27, deployed as Fly v50 (image built from main `750eeb5`). Production state captured in [`STATUS_2026-04-28.md`](./STATUS_2026-04-28.md).

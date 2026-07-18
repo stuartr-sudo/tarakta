@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from src.strategy.mm_claude_cli import ClaudeCLIClient, find_claude_cli
 from src.strategy.mm_sanity_agent import AgentVerdict, MODEL_PRICING, _jsonable
 from src.utils.logging import get_logger
 
@@ -69,6 +70,28 @@ class MMCommittee:
             return self._client
         api_key = getattr(self.config, "anthropic_api_key", "") or ""
         if not api_key:
+            # No API key → fall back to the Claude Code CLI, which uses the
+            # user's subscription login (Keychain OAuth) instead of metered
+            # API billing. See src/strategy/mm_claude_cli.py.
+            if bool(getattr(self.config, "mm_committee_cli_enabled", True)):
+                cli_path = find_claude_cli(
+                    str(getattr(self.config, "mm_committee_cli_path", "") or "")
+                )
+                if cli_path:
+                    self._client = ClaudeCLIClient(
+                        cli_path,
+                        timeout_s=float(
+                            getattr(self.config, "mm_committee_cli_timeout_s", 120.0)
+                        ),
+                        oauth_token=str(
+                            getattr(self.config, "claude_code_oauth_token", "") or ""
+                        ),
+                    )
+                    logger.info("mm_committee_backend",
+                                backend="claude_cli", cli_path=cli_path)
+                    return self._client
+                logger.warning("mm_committee_cli_not_found",
+                               hint="no ANTHROPIC_API_KEY and no claude binary")
             return None
         try:
             from anthropic import AsyncAnthropic
@@ -78,6 +101,16 @@ class MMCommittee:
             return None
         self._client = AsyncAnthropic(api_key=api_key)
         return self._client
+
+    def _total_timeout_s(self, client: Any) -> float:
+        """Committee-wide deadline. CLI calls are much slower than SDK calls
+        (subprocess startup + no streaming), and the committee is two
+        sequential stages (specialists, then head trader) — so give the CLI
+        backend two per-call budgets plus slack instead of the SDK default."""
+        base = float(getattr(self.config, "mm_committee_timeout_s", 30.0))
+        if isinstance(client, ClaudeCLIClient):
+            return max(base, client.timeout_s * 2 + 30.0)
+        return base
 
     def _mode(self) -> str:
         mode = str(getattr(self.config, "mm_committee_mode", "shadow") or "shadow").lower()
@@ -137,7 +170,7 @@ class MMCommittee:
         try:
             actual, committee = await asyncio.wait_for(
                 self._run_committee(client, context),
-                timeout=float(getattr(self.config, "mm_committee_timeout_s", 30.0)),
+                timeout=self._total_timeout_s(client),
             )
         except asyncio.TimeoutError:
             actual = self._error_verdict("timeout", context, model="")
@@ -285,6 +318,10 @@ class MMCommittee:
         *,
         max_tokens: int,
     ) -> tuple[str, dict]:
+        if isinstance(client, ClaudeCLIClient):
+            return await client.call(
+                model, system, user_prompt, max_tokens=max_tokens
+            )
         response = await client.messages.create(
             model=model,
             max_tokens=max_tokens,
@@ -432,6 +469,10 @@ class MMCommittee:
         return specialist, head, escalation_allowed
 
     def _compute_cost(self, model: str, usage: dict) -> float:
+        if usage.get("backend") == "claude_cli":
+            # Subscription-billed run: the CLI reports the authoritative cost
+            # (0 for subscription usage). No pricing-table lookup or warning.
+            return round(float(usage.get("total_cost_usd") or 0.0), 6)
         pricing = MODEL_PRICING.get(model)
         if pricing is None and model == "claude-haiku-4-5":
             pricing = MODEL_PRICING.get("claude-haiku-4-5-20251001")
