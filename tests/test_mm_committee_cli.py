@@ -250,6 +250,36 @@ def test_compute_cost_cli_backend_skips_pricing_table():
     ) == 0.42
 
 
+def test_extract_json_survives_fenced_json_with_trailing_prose():
+    # Observed live 2026-07-18: risk specialist emitted fenced JSON then kept
+    # talking, including braces in the trailing prose.
+    agent = MMCommittee(config=_config(api_key=""), repo=AsyncMock())
+    raw = (
+        "```json\n"
+        '{"specialist": "risk", "alignment": -1, "decision": "VETO",\n'
+        ' "reason": "no SL given", "concerns": ["missing stop"]}\n'
+        "```\n\n"
+        "**To complete evaluation, provide:** {SL price, TP price}\n"
+    )
+    data = agent._extract_json(raw)
+    assert data is not None
+    assert data["decision"] == "VETO"
+
+
+def test_extract_json_survives_prose_before_json():
+    agent = MMCommittee(config=_config(api_key=""), repo=AsyncMock())
+    raw = 'Here is my assessment {as requested}:\n{"decision": "APPROVE", "alignment": 2}'
+    data = agent._extract_json(raw)
+    assert data is not None
+    assert data["decision"] == "APPROVE"
+
+
+def test_extract_json_none_on_no_json():
+    agent = MMCommittee(config=_config(api_key=""), repo=AsyncMock())
+    assert agent._extract_json("no braces here") is None
+    assert agent._extract_json("") is None
+
+
 def test_total_timeout_scales_for_cli_backend():
     agent = MMCommittee(config=_config(api_key=""), repo=AsyncMock())
     cli = ClaudeCLIClient("/fake/claude", timeout_s=120.0)

@@ -426,22 +426,27 @@ class MMCommittee:
             return None
 
     def _extract_json(self, raw: str) -> dict | None:
+        """Extract the first JSON object from a model reply.
+
+        Models (the CLI backend especially) wrap JSON in ```fences and append
+        prose after it — observed live 2026-07-18: the risk specialist emitted
+        valid fenced JSON followed by "To complete evaluation, provide: ...".
+        A first-{-to-last-} slice breaks on any trailing brace, so decode
+        incrementally from each candidate '{' and take the first valid object.
+        """
         if not raw:
             return None
         text = raw.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[-1]
-            if text.rstrip().endswith("```"):
-                text = text.rstrip()[:-3]
-        start = text.find("{")
-        end = text.rfind("}")
-        if start < 0 or end <= start:
-            return None
-        try:
-            data = json.loads(text[start: end + 1])
-        except json.JSONDecodeError:
-            return None
-        return data if isinstance(data, dict) else None
+        decoder = json.JSONDecoder()
+        idx = text.find("{")
+        while idx != -1:
+            try:
+                data, _ = decoder.raw_decode(text[idx:])
+            except json.JSONDecodeError:
+                idx = text.find("{", idx + 1)
+                continue
+            return data if isinstance(data, dict) else None
+        return None
 
     def _is_contested(self, specialists: list[SpecialistVerdict]) -> bool:
         if not specialists:

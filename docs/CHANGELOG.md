@@ -40,6 +40,12 @@ No DB columns added (no `_TRADE_COLUMNS`/`_MM_AGENT_DECISION_COLUMNS` changes). 
 - `tests/test_mm_committee_cli.py` (12 tests): backend selection, env scrub, token injection, JSON parse, `is_error` flag, nonzero exit, review()-level ERROR row, cost short-circuit, timeout scaling. Full suite 776 passed / 1 skipped.
 - Live E2E 2026-07-18 05:25:49Z: `MMCommittee.review()` on instance `main` with no API key selected the CLI backend, ran 5 specialists, classified the (expected, pre-token) 401 into `committee_error:api_error:cli_exit_1:...` with committee JSONB, shadow-APPROVEd. The success path activates when `CLAUDE_CODE_OAUTH_TOKEN` is set in `.env`.
 
+### Same-day follow-up — robust JSON extraction (first authenticated run)
+
+Token installed 2026-07-18 ~09:00Z. First authenticated committee run failed `malformed_specialist_response:risk`: the specialist emitted valid fenced JSON then **kept talking** ("To complete evaluation, provide: {SL price, TP price}") — the old first-`{`-to-last-`}` slice broke on trailing braces. `_extract_json` rewritten to incremental `json.JSONDecoder.raw_decode` from each candidate `{` (first valid object wins; immune to prose before/after). 3 regression tests added (18 total in the CLI test file).
+
+**First real committee verdict logged 2026-07-18 09:18:28Z** (instance `main`, shadow): **VETO** — "Friday entry with midweek_reversal phase mismatch violates cycle timing rules (docs 22, 44)". Specialists: structure +1, flow_data 0, cycle −2, htf +2, risk +1; head trader `claude-sonnet-4-6`; latency 28.2s; `cost_usd` 0.12 is the CLI's informational estimate (subscription-billed, not dollars). Root causes of the six-week outage, fully resolved: (1) no ANTHROPIC_API_KEY → CLI backend added; (2) `~/.zshrc` exported an **empty** `SSL_CERT_FILE` (python3→Homebrew 3.14 lost `certifi`), breaking TLS for every Node tool in login shells — line disabled with explanation; (3) stale Keychain CLI login → durable `claude setup-token` credential in `.env`.
+
 ---
 
 ## 2026-04-28 — Engine v2 architecture deployed; sanity agent disabled; experimental cleanup
