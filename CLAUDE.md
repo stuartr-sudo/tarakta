@@ -43,7 +43,7 @@ Before modifying the sanity agent (`src/strategy/mm_sanity_agent.py`), read `doc
 
 Before making ANY rule change (scratch rule, confluence weights, target hierarchy, SL progression, etc.), read the relevant lesson in `docs/courses/mmm-masterclasses/` FIRST. The bot is only valuable if it implements the course; inventing rules is how we got the BNB disaster on 2026-04-17. **Cite the exact lesson + timestamp in the commit message.**
 
-For the running history of every engine change with course citations: see `docs/CHANGELOG.md`. For current project state: see the latest `docs/STATUS_YYYY-MM-DD.md` (most recent is `docs/STATUS_2026-04-28.md` — engine v2 deployed, sanity agent disabled). For what's coming next: see `docs/ROADMAP.md`.
+For the running history of every engine change with course citations: see `docs/CHANGELOG.md`. For current project state: see the latest `docs/STATUS_YYYY-MM-DD.md` (most recent is `docs/STATUS_2026-07-19.md` — full handoff: committee live in shadow on the Claude Code subscription CLI backend, vision experiments gated, location-first nominator queued). For what's coming next: see `docs/ROADMAP.md`.
 
 **Fresh session onboarding order:** (1) latest STATUS doc for today's state → (2) CHANGELOG for history → (3) ROADMAP for next steps → (4) this file for gotchas → (5) run `python3 scripts/agent_review.py --days 2` and `python3 scripts/replay_scan.py --symbol BNB --days 7` to ground in actual bot behaviour.
 
@@ -131,7 +131,7 @@ Engine computes every derived feature (4H trend direction + strength + accelerat
 python3 -m src.main
 
 # Tests — asyncio_mode = "auto" is configured
-pytest                              # all tests (should be 641 passing, 1 skipped)
+pytest                              # all tests (should be 779 passing, 1 skipped)
 pytest tests/test_mm_sanity_agent.py # single file
 pytest -x                           # stop on first failure
 
@@ -164,6 +164,7 @@ fly secrets set ANTHROPIC_API_KEY=sk-ant-... --app tarakta-mm
 - **Unused lookup dicts.** `LEVEL_EMA_FALLBACKS` was defined in `mm_targets.py` and never referenced anywhere. It fooled reviewers into thinking the fallback was wired. Before trusting any config/lookup dict, grep to confirm it's actually used. Deleted 2026-04-20 per `eb1f130`.
 - **Don't invent rules not in the course.** Commit `2a04c2e` shipped a "dynamic-by-SL scratch + board-meeting exemption" rule that wasn't in the course. Reverted same day by `eb1f130`. When the engine surprises you, read the course BEFORE inventing a fix. Cite the exact lesson + timestamp in the commit.
 - **Measure what the course measures.** The old scratch rule checked `current_level == 0` when Lesson 13 [47:00] says "substantial profit." Two different signals. A rule is only course-faithful if it measures the thing the course describes. Current scratch rule checks unrealized P&L.
+- **Committee runs on the Claude Code subscription CLI, not an API key.** When `anthropic_api_key` is empty, `MMCommittee` falls back to `src/strategy/mm_claude_cli.py` (`claude -p`, auth via `CLAUDE_CODE_OAUTH_TOKEN` in `.env` — never print it). The CLI can exit 0 with `is_error:true` in its JSON; `_extract_json` uses incremental `raw_decode` because models append prose after fenced JSON. Child env is scrubbed of `SSL_CERT_FILE`/`CLAUDE_CODE_*` markers — keep `_ENV_STRIP`. Full story: CHANGELOG 2026-07-18 + STATUS_2026-07-19.
 - **Prompt caching TTL.** Anthropic changed the default from 1h → 5m silently in March 2026. The sanity agent requests `ttl=1h` explicitly in `mm_sanity_agent._call_model`. Don't remove that — 5m is useless for our cadence.
 - **Direction-aware scoring.** `mm_confluence._score_ema_alignment` takes `trade_direction` from `MMContext` and scores 0 when EMA alignment opposes the trade. Before migration 018 it awarded full 8 pts either way, which inflated counter-trend setup scores. Keep it direction-aware.
 - **Deploy flag.** Always `--depot=false --remote-only`. Depot builder on Fly times out on this image.
@@ -263,6 +264,6 @@ FastAPI + Jinja2, port 8080. Health check at `/health`.
 
 `pyproject.toml` sets `asyncio_mode = "auto"` — don't `@pytest.mark.asyncio` async tests, it's redundant.
 
-Full suite: **740 passing, 1 skipped** as of 2026-04-28 (engine v2 deploy + cleanup). CI runs `pytest -x`. Lint runs `ruff check src/ tests/`.
+Full suite: **779 passing, 1 skipped** as of 2026-07-19 (committee CLI backend + robust JSON extraction). CI runs `pytest -x`. Lint runs `ruff check src/ tests/`. Use the framework interpreter (`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3`) — bare `python3` resolves to Homebrew 3.14 with no project deps.
 
 `tests/test_mm_sanity_agent.py` covers parse_response, compute_cost, build_user_prompt, graceful degradation, and the `build_context` canary for the BNB 2026-04-17 pattern (counter-trend + accelerating + Grade F must all be visible to the model). Do not mock away the BNB canary — it's the regression test for the class of failure this whole agent exists to catch.
