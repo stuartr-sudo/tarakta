@@ -11,6 +11,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ ./src/
 COPY migrations/ ./migrations/
+# mm_committee.py resolves skill files at <repo-root>/docs/agent-committee/skills
+# (parents[2] of src/strategy/). Without this the committee raises
+# FileNotFoundError on its first call in the container.
+COPY docs/agent-committee/ ./docs/agent-committee/
 
 EXPOSE 8080
 
