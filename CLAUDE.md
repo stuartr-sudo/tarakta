@@ -45,7 +45,7 @@ Before making ANY rule change (scratch rule, confluence weights, target hierarch
 
 For the running history of every engine change with course citations: see `docs/CHANGELOG.md`. For current project state: see the latest `docs/STATUS_YYYY-MM-DD.md` (most recent is `docs/STATUS_2026-07-19.md` — full handoff: committee live in shadow on the Claude Code subscription CLI backend, vision experiments gated, location-first nominator queued). For what's coming next: see `docs/ROADMAP.md`.
 
-**Fresh session onboarding order:** (1) latest STATUS doc for today's state → (2) CHANGELOG for history → (3) ROADMAP for next steps → (4) this file for gotchas → (5) run `python3 scripts/agent_review.py --days 2` and `python3 scripts/replay_scan.py --symbol BNB --days 7` to ground in actual bot behaviour.
+**Fresh session onboarding order:** (0) **`LAUNCH_HANDOFF.md` at the repo root — start here**, it states what is running, what is blocked on the user, and what to do next → (1) latest STATUS doc for today's state → (2) CHANGELOG for history → (3) ROADMAP for next steps → (4) this file for gotchas → (5) run `python3 scripts/agent_review.py --days 2` and `python3 scripts/replay_scan.py --symbol BNB --days 7` to ground in actual bot behaviour.
 
 ## Architecture
 
