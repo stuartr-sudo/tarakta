@@ -51,10 +51,18 @@ paper mode.
 
 Tier-0 free data feeds (commit `92a3f4e`) are live on both bots: dominance
 (CoinGecko), Fear & Greed, RSS news-event boolean, retail-crowd + taker
-ratios. Next feed step per docs/DATAFEEDS_2026-07-31.md: the **Binance
-websocket layer** (markPrice@1s SL checks → the −1.39R overshoot; aggTrade
-CVD; Bybit allLiquidation) — deliberately deferred to a focused session:
-it is money-path engine surgery needing course citations + replay parity.
+ratios. **The Binance websocket layer SHIPPED same evening** (commits
+`25156a7` + `3e1b045`, verified streaming on BOTH bots): markPrice@1s
+drives a 2s fast-stop loop (same SL predicate/close path — attacks the
+measured −1.39R overshoot), !forceOrder liquidations feed the committee
+context. Gotchas baked into the code comments: futures ws now REQUIRES the
+routed `/market/stream` path (legacy unrouted URL hangs on upgrade), and
+the Mac's framework Python has NO default CA path (pass certifi
+explicitly). Pre-ship adversarial review caught a stale-reference
+double-close hazard — identity guards now in _close_position /
+_take_partial / _mark_fully_exited_after_partial. Kill switch:
+MM_WS_ENABLED=false. Still open from the ws queue: aggTrade CVD and the
+Bybit allLiquidation self-built heatmap.
 
 <details><summary>Superseded plan (pre-2026-07-31, kept for context)</summary>
 
