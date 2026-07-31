@@ -1,7 +1,12 @@
 # LAUNCH HANDOFF — read this first
 
-**Last updated:** 2026-07-22 by Claude (Fable 5) · **Repo:** https://github.com/stuartr-sudo/tarakta · **Local:** `/Users/stuarta/tarakta`
-**Branch:** `main` == `codex/tarakta-stabilization` == `22ba0bd` (pushed, clean) · **Tests:** 779 passed / 1 skipped
+**Last updated:** 2026-07-31 by Claude (Fable 5) · **Repo:** https://github.com/stuartr-sudo/tarakta · **Local:** `/Users/stuarta/tarakta`
+**Branch:** `main` == `codex/tarakta-stabilization` (pushed, clean) · **Tests:** 779 passed / 1 skipped
+
+> **Session log:** 2026-07-26 and 2026-07-31 sessions were state-verification
+> only — **no code changes since 2026-07-22**. Everything below was re-verified
+> on 2026-07-31: local bot healthy and scanning, Fly auth still dead (§3 still
+> blocked on the user), git in sync.
 
 This file is the single entry point for a new agent or human session. It states
 what is running, what is broken, what is blocked on the user, and what to do
@@ -28,7 +33,7 @@ paper mode.
 
 | Thing | State | Control |
 |---|---|---|
-| **Local bot** (instance `main`) | ✅ Running, healthy, ~cycle 766+, scanning 10 pairs / 5 min | launchd `com.tarakta.bot`; restart: `launchctl kickstart -k gui/501/com.tarakta.bot`; stop: `launchctl unload ~/Library/LaunchAgents/com.tarakta.bot.plist` (a plain `kill` just gets KeepAlive-restarted). Logs: `/tmp/tarakta-bot.launchd.out.log` |
+| **Local bot** (instance `main`) | ✅ Running, healthy, scanning 10 pairs / 5 min (verified 2026-07-31; the in-log cycle counter resets to 0 whenever launchd restarts the process — a low cycle number is NOT a problem) | launchd `com.tarakta.bot`; restart: `launchctl kickstart -k gui/501/com.tarakta.bot`; stop: `launchctl unload ~/Library/LaunchAgents/com.tarakta.bot.plist` (a plain `kill` just gets KeepAlive-restarted). Logs: `/tmp/tarakta-bot.launchd.out.log` |
 | **Committee** (5 Haiku specialists + Sonnet head trader) | ✅ Live in **shadow** (logs verdicts, blocks nothing) | `.env`: `MM_COMMITTEE_ENABLED=true`, `MM_COMMITTEE_MODE=shadow`. Auth = `CLAUDE_CODE_OAUTH_TOKEN` in `.env` (1-year token from `claude setup-token`). **Never print that value.** |
 | **Fly prod** `tarakta-mm` | ⚠️ April build, bleeding, 3 stale open positions | **BLOCKED on user** — see §3 |
 | **Inverse mirror** `tarakta-mm-inverse` | Idle; lost −$1.1k; recommended for retirement | Not yet disabled |
