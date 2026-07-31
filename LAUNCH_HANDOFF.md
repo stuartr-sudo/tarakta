@@ -35,10 +35,30 @@ paper mode.
 |---|---|---|
 | **Local bot** (instance `main`) | ✅ Running, healthy, scanning 10 pairs / 5 min (verified 2026-07-31; the in-log cycle counter resets to 0 whenever launchd restarts the process — a low cycle number is NOT a problem) | launchd `com.tarakta.bot`; restart: `launchctl kickstart -k gui/501/com.tarakta.bot`; stop: `launchctl unload ~/Library/LaunchAgents/com.tarakta.bot.plist` (a plain `kill` just gets KeepAlive-restarted). Logs: `/tmp/tarakta-bot.launchd.out.log` |
 | **Committee** (5 Haiku specialists + Sonnet head trader) | ✅ Live in **shadow** (logs verdicts, blocks nothing) | `.env`: `MM_COMMITTEE_ENABLED=true`, `MM_COMMITTEE_MODE=shadow`. Auth = `CLAUDE_CODE_OAUTH_TOKEN` in `.env` (1-year token from `claude setup-token`). **Never print that value.** |
-| **Fly prod** `tarakta-mm` | ⚠️ April build, bleeding, 3 stale open positions | **BLOCKED on user** — see §3 |
+| **Fly NEW** `tarakta-mm2` (new account, instance `tarakta-fly`) | ✅ LIVE 2026-07-31: current main, region `sin` (Binance access verified from first scan cycle), 1 machine (HA second machine deliberately destroyed — two machines on one instance_id double-trade), scanning ACTIVE on a fresh $100k paper book, committee SHADOW | `fly deploy --app tarakta-mm2 --config fly.toml --depot=false --remote-only`. Committee needs `ANTHROPIC_API_KEY` secret (user one-liner in §3) — until set, decisions log ERROR client_unavailable (expected, shadow-safe) |
+| **Fly OLD** `tarakta-mm` (dead account) | ⚠️ April build, still trading junk; Fly account unreachable | Only kill switch: its own dashboard Stop button https://tarakta-mm.fly.dev/mm (app login). User to press it. |
 | **Inverse mirror** `tarakta-mm-inverse` | Idle; lost −$1.1k; recommended for retirement | Not yet disabled |
 
-## 3. BLOCKED ON USER — the Fly path (UPDATED 2026-07-31: fresh-account plan)
+## 3. Fly status (UPDATED 2026-07-31 evening: DEPLOYED — two user actions left)
+
+`tarakta-mm2` is live on the new account (see §2). Remaining user actions:
+
+1. **Anthropic key** (activates the committee on Fly via the SDK): with the
+   key on the clipboard, run the one-liner Claude provided in chat — it
+   writes `env.local` AND sets the Fly secret in one go (the secret set
+   auto-restarts the machine). Never commit/print the key.
+2. **Press Stop on the OLD app**: https://tarakta-mm.fly.dev/mm (any time).
+
+Tier-0 free data feeds (commit `92a3f4e`) are live on both bots: dominance
+(CoinGecko), Fear & Greed, RSS news-event boolean, retail-crowd + taker
+ratios. Next feed step per docs/DATAFEEDS_2026-07-31.md: the **Binance
+websocket layer** (markPrice@1s SL checks → the −1.39R overshoot; aggTrade
+CVD; Bybit allLiquidation) — deliberately deferred to a focused session:
+it is money-path engine surgery needing course citations + replay parity.
+
+<details><summary>Superseded plan (pre-2026-07-31, kept for context)</summary>
+
+## OLD §3 — BLOCKED ON USER — the Fly path (fresh-account plan)
 
 Plan changed: Stuart is creating a **new Fly.io account** (old account token
 dead), and he now has a **funded Anthropic API key** — which means the
@@ -73,6 +93,8 @@ the old app can't be stopped, pass a fresh instance id as arg 3 instead.
 The old account's app will keep running its April build until stopped via its
 dashboard or until the old account is recovered/deleted — its dashboard Stop
 button is the practical kill switch.
+
+</details>
 
 ## 4. How to check status in 60 seconds
 
