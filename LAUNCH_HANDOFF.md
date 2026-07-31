@@ -38,40 +38,41 @@ paper mode.
 | **Fly prod** `tarakta-mm` | ⚠️ April build, bleeding, 3 stale open positions | **BLOCKED on user** — see §3 |
 | **Inverse mirror** `tarakta-mm-inverse` | Idle; lost −$1.1k; recommended for retirement | Not yet disabled |
 
-## 3. BLOCKED ON USER — the one open action
+## 3. BLOCKED ON USER — the Fly path (UPDATED 2026-07-31: fresh-account plan)
 
-Stuart asked for Fly prod to be **redeployed**. It cannot be done without him:
-`~/.fly/config.yml` has a dead token, so every `flyctl` command fails.
+Plan changed: Stuart is creating a **new Fly.io account** (old account token
+dead), and he now has a **funded Anthropic API key** — which means the
+committee can run on Fly via the plain SDK (`anthropic>=0.40.0` is already in
+the image; no Claude CLI, no extra RAM needed). Everything is scripted in
+`scripts/fly_bootstrap_new_account.sh`; read its header before running.
 
-**He must run (browser login, ~20s):**
+**User steps (~3 min total):**
+1. Create the account in a browser: https://fly.io/app/sign-up — agents must
+   not create accounts.
+2. `fly auth login`
+3. Put `ANTHROPIC_API_KEY=sk-ant-...` in **`env.local`** at the repo root
+   (gitignored; the local bot does NOT read it). **NOT in `.env`** — that
+   would silently flip the LOCAL bot from the free subscription CLI to
+   metered API billing.
+4. Stop the OLD Fly app's scanning via its own dashboard (app login, no Fly
+   account needed): https://tarakta-mm.fly.dev/mm → Stop. Two live bots on
+   one instance_id fight over positions.
+
+**Then (user or agent):**
 ```bash
-fly auth login
+./scripts/fly_bootstrap_new_account.sh          # tarakta-mm2, sin, INSTANCE_ID=tarakta-mm
 ```
+The script: creates the app, pipes secrets from `.env` + `env.local` into Fly
+(values never printed), sets paper mode + committee SHADOW, and deploys with
+the mandatory `--depot=false --remote-only`. With INSTANCE_ID=tarakta-mm the
+new app ADOPTS the old book: comes up **paused** (`scanning_active:false` in
+engine_state, read at startup) and manages the 3 stale open positions (expect
+NEAR — open since 2026-07-01, $1,368 risk — to realise its hidden loss). If
+the old app can't be stopped, pass a fresh instance id as arg 3 instead.
 
-**Then the agent runs:**
-```bash
-fly deploy --depot=false --remote-only --app tarakta-mm
-```
-(`--depot=false --remote-only` is mandatory — the Depot builder times out on
-this image. See CLAUDE.md.)
-
-**What the redeploy does, and why it is the fix:** the engine reads
-`engine_state.config_overrides.mm_engine_settings` **only at startup**
-(`mm_engine.run()`, ~line 1178). That row has held `scanning_active: false`
-since 2026-06-03 but the machine never restarted, so it kept trading. A
-redeploy restarts it → **it comes up paused**: no new entries, bleed stops, and
-it finally manages its 3 stale positions (expect NEAR — open since 2026-07-01,
-$1,368 risk — to realise a loss that is currently hiding as unrealised).
-
-**Important:** the redeploy does **not** bring the committee to Fly (no `claude`
-CLI, no token in the image). Correct end state: **deploy it and leave it
-paused** as a healthy standby. Local Mac stays the live experiment. Making Fly
-the real home later needs: node + Claude CLI in the image,
-`CLAUDE_CODE_OAUTH_TOKEN` as a Fly secret, and probably 4GB RAM (6 CLI
-subprocesses per committee run will OOM a 2GB shared machine).
-
-Fly secrets (Binance, Supabase, dashboard auth) are **already set** from prior
-deploys — a redeploy reuses them. Nothing to re-enter.
+The old account's app will keep running its April build until stopped via its
+dashboard or until the old account is recovered/deleted — its dashboard Stop
+button is the practical kill switch.
 
 ## 4. How to check status in 60 seconds
 
