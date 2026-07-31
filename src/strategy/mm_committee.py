@@ -215,6 +215,14 @@ class MMCommittee:
             ]
         )
         contested = self._is_contested(specialists)
+        if contested and escalation_allowed:
+            # Contested bench + budget headroom (<75% of cap): the final call
+            # is worth the strongest model. Previously the escalation model
+            # was configured but never consumed — the boolean was only
+            # rendered into the prompt.
+            head_model = str(getattr(
+                self.config, "mm_committee_escalation_model", head_model,
+            ))
         head_verdict, head_raw, head_usage, head_latency_ms = await self._call_head_trader(
             client=client,
             model=head_model,
@@ -458,9 +466,9 @@ class MMCommittee:
         specialist = str(getattr(
             self.config,
             "mm_committee_specialist_model",
-            "claude-haiku-4-5-20251001",
+            "claude-sonnet-5",
         ))
-        head = str(getattr(self.config, "mm_committee_head_trader_model", "claude-sonnet-4-6"))
+        head = str(getattr(self.config, "mm_committee_head_trader_model", "claude-opus-5"))
         cap = float(getattr(self.config, "mm_committee_monthly_budget_usd", 600.0))
         if cap <= 0:
             return specialist, head, True

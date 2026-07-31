@@ -130,15 +130,15 @@ class Settings(BaseSettings):
     # a course-fluent sanity check. See docs/MM_SANITY_AGENT_DESIGN.md.
     anthropic_api_key: str = ""
     mm_sanity_agent_enabled: bool = True
-    mm_sanity_agent_model: str = "claude-opus-4-7"
-    mm_sanity_agent_fallback_model: str = "claude-sonnet-4-6"
-    # Adaptive thinking effort on Opus 4.7 / Sonnet 4.6. Accepted values:
+    mm_sanity_agent_model: str = "claude-opus-5"
+    mm_sanity_agent_fallback_model: str = "claude-sonnet-5"
+    # Adaptive thinking effort (Claude 4.6+ models). Accepted values:
     # "low" | "medium" | "high" | "max". Default "high" — this is a
-    # money-critical judgement task, not a classification. Opus 4.7
-    # rejects the legacy thinking={"type":"enabled","budget_tokens":N}
-    # shape with a 400 (invalid_request_error); adaptive+effort is the
-    # only supported mode. This parameter replaces
-    # mm_sanity_agent_thinking_budget.
+    # money-critical judgement task, not a classification. Opus 5 /
+    # Sonnet 5 (like 4.7/4.6 before them) reject the legacy
+    # thinking={"type":"enabled","budget_tokens":N} shape with a 400
+    # (invalid_request_error); adaptive+effort is the only supported
+    # mode. This parameter replaces mm_sanity_agent_thinking_budget.
     mm_sanity_agent_effort: str = "high"
     mm_sanity_agent_timeout_s: float = 20.0
     mm_sanity_agent_min_confidence: float = 0.0  # 0 = honour every VETO (no shadow)
@@ -181,9 +181,15 @@ class Settings(BaseSettings):
     # to the engine while logging what the committee would have done.
     mm_committee_enabled: bool = False
     mm_committee_mode: Literal["shadow", "veto"] = "shadow"
-    mm_committee_specialist_model: str = "claude-haiku-4-5-20251001"
-    mm_committee_head_trader_model: str = "claude-sonnet-4-6"
-    mm_committee_escalation_model: str = "claude-opus-4-8"
+    # Claude 5 tiering (2026-07-31, user-directed supersede): specialists on
+    # Sonnet 5 (Haiku verdicts were unreliable), head trader on Opus 5 (same
+    # price as Opus 4.8, stronger judgement), escalation on Fable 5 —
+    # Anthropic's most capable model, only fired on contested verdicts.
+    # NOTE (API transport only): Fable 5 requires the org to have 30-day
+    # data retention enabled, or calls 400. The CLI transport is exempt.
+    mm_committee_specialist_model: str = "claude-sonnet-5"
+    mm_committee_head_trader_model: str = "claude-opus-5"
+    mm_committee_escalation_model: str = "claude-fable-5"
     mm_committee_timeout_s: float = 30.0
     mm_committee_monthly_budget_usd: float = 600.0
     # Claude Code CLI fallback — used when anthropic_api_key is empty. Runs

@@ -17,6 +17,20 @@ Paired docs:
 
 ---
 
+## 2026-07-31 — Committee superseded to the Claude 5 family; escalation model actually wired
+
+User-directed supersede ("Haiku and Sonnet are not very reliable... Need to supersede please"). Not a course change — model plumbing only; no strategy rule touched.
+
+### Change
+
+- `src/config.py`: `mm_committee_specialist_model` `claude-haiku-4-5-20251001` → `claude-sonnet-5`; `mm_committee_head_trader_model` `claude-sonnet-4-6` → `claude-opus-5` (same $5/$25 price as Opus 4.8 — capability upgrade at zero price delta); `mm_committee_escalation_model` `claude-opus-4-8` → `claude-fable-5`. Sanity-agent defaults follow (`claude-opus-5` / fallback `claude-sonnet-5`).
+- `src/strategy/mm_committee.py`: **`mm_committee_escalation_model` was configured but never consumed** — the same unused-config class as `LEVEL_EMA_FALLBACKS` (CLAUDE.md gotcha). "Escalation" only ever rendered `escalation_allowed=<bool>` into the head prompt. Now a contested bench (min alignment ≤ −2 AND max ≥ +1) with budget headroom (spend < 75% of cap) runs the head-trader call on the escalation model. `mm_agent_decisions.committee.head_trader_model` already records the model per decision, so escalations are observable with no schema change.
+- `MODEL_PRICING` (`src/strategy/mm_sanity_agent.py`, shared by committee `_compute_cost`): added `claude-fable-5` ($10/$50), `claude-opus-5` ($5/$25), `claude-opus-4-8` ($5/$25), `claude-sonnet-5` ($3/$15 standard — intro $2/$10 runs through 2026-08-31 but we book at standard so the budget cap never under-counts). Corrected stale `claude-opus-4-7` row $15/$75 → $5/$25 (2026 repricing); the old row overstated API-path spend 3× and would have tripped the 90% budget downgrade early.
+- DB override audit per the model-change rule: no `mm_committee_*`/`mm_sanity_*` keys in any `engine_state.config_overrides` row (legacy `agent_models` keys are OpenAI-era, unread by this engine). New defaults take effect on process restart with nothing to clear.
+- Caveat: Fable 5 over the **API transport** requires the org to have 30-day data retention enabled (400 otherwise). The CLI/subscription transport is exempt. Committee fails open on ERROR either way, so a retention 400 can't halt trading.
+
+---
+
 ## 2026-07-18 — Committee gets a Claude Code CLI backend (subscription auth, no API key)
 
 Root-cause follow-up to the 2026-07-18 profitability review: every committee call since 2026-06-26 (51 rows) and every sanity-agent call 2026-06-15/17 (165 rows) logged `ERROR client_unavailable` because the runtime had no `ANTHROPIC_API_KEY` — the LLM layer (the only historically profitable configuration, see `docs/MM_AGENT_COMMITTEE_DESIGN.md` §1) was silently dead while shadow mode converted every error to APPROVE.

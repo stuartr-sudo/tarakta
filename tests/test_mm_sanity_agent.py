@@ -122,18 +122,19 @@ class TestComputeCost:
         return MMSanityAgent(config=SimpleNamespace(), repo=MagicMock())
 
     def test_opus_with_cache_hit(self):
-        # 800 fresh input + 10K cached read + 1500 output on Opus 4.7
+        # 800 fresh input + 10K cached read + 1500 output on Opus 5
+        # ($5/$25 per MTok; cache read 0.1x input, per 2026 repricing)
         usage = {
             "input_tokens": 800,
             "output_tokens": 1500,
             "cache_read_input_tokens": 10_000,
             "cache_creation_input_tokens": 0,
         }
-        cost = self._agent()._compute_cost("claude-opus-4-7", usage)
+        cost = self._agent()._compute_cost("claude-opus-5", usage)
         expected = (
-            800 * 15.00
-            + 10_000 * 1.50
-            + 1500 * 75.00
+            800 * 5.00
+            + 10_000 * 0.50
+            + 1500 * 25.00
         ) / 1_000_000
         assert abs(cost - round(expected, 6)) < 1e-6
 

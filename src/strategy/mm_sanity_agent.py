@@ -41,11 +41,39 @@ logger = get_logger(__name__)
 # cache read = 0.1x input (90% discount). Published Anthropic prices.
 # ---------------------------------------------------------------------------
 MODEL_PRICING: dict[str, dict[str, float]] = {
+    "claude-fable-5": {
+        "input": 10.00,
+        "cache_write_1h": 20.00,   # 2x input
+        "cache_read": 1.00,        # 0.1x input
+        "output": 50.00,
+    },
+    "claude-opus-5": {
+        "input": 5.00,
+        "cache_write_1h": 10.00,
+        "cache_read": 0.50,
+        "output": 25.00,
+    },
+    "claude-opus-4-8": {
+        "input": 5.00,
+        "cache_write_1h": 10.00,
+        "cache_read": 0.50,
+        "output": 25.00,
+    },
+    # Sonnet 5 standard rates ($2/$10 intro through 2026-08-31 — we book
+    # at standard so the budget cap never under-counts after the promo).
+    "claude-sonnet-5": {
+        "input": 3.00,
+        "cache_write_1h": 6.00,
+        "cache_read": 0.30,
+        "output": 15.00,
+    },
+    # Opus 4.7 was repriced to $5/$25 in 2026 — old $15/$75 row overstated
+    # spend 3x and would have tripped the budget downgrade early.
     "claude-opus-4-7": {
-        "input": 15.00,
-        "cache_write_1h": 30.00,   # 2x input
-        "cache_read": 1.50,        # 0.1x input
-        "output": 75.00,
+        "input": 5.00,
+        "cache_write_1h": 10.00,
+        "cache_read": 0.50,
+        "output": 25.00,
     },
     "claude-sonnet-4-6": {
         "input": 3.00,
