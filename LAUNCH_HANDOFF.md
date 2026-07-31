@@ -142,8 +142,12 @@ outcomes. Veto reasons repeatedly cite *"not at key level"* and *"sideways
 4. Exit fixes (course-cited + replay-validated): stop-fill realism, level-advance
    audit, scratch bound.
 5. Committee → veto mode after the §5 gate.
-6. Free connectors for stubs: CoinGecko (dominance), Alternative.me (sentiment),
-   CryptoPanic/RSS (news), 2nd CCXT exchange for resilience.
+6. Datafeeds: full verified catalog in `docs/DATAFEEDS_2026-07-31.md` —
+   Tier 0 is all free (Binance ratio endpoints + websockets [markPrice@1s SL
+   checks attack the −1.39R overshoot], Coinalyze, CoinGecko+CMC dominance,
+   Fear & Greed, CoinDesk/Cointelegraph RSS; CryptoPanic free tier is DEAD),
+   Tier 1 is CoinAnk $30/mo (only sub-$50 liquidation-heatmap API; 7-day
+   trial first). Feed work stays subordinate to the nominator.
 7. ERROR-streak alert on `mm_agent_decisions`.
 
 ## 8. Gotchas that will bite you (beyond CLAUDE.md)
