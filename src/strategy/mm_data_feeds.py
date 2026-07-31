@@ -85,6 +85,12 @@ class HyblockData:
     oi_trend_5h: str | None = None      # "rising" | "falling" | "flat"
     top_trader_long_pct: float | None = None
     top_trader_short_pct: float | None = None
+    # Retail crowd (globalLongShortAccountRatio) vs the top traders above —
+    # lesson 11: when the retail crowd is the long side, that is the liquidity.
+    global_long_pct: float | None = None
+    global_short_pct: float | None = None
+    # takerlongshortRatio: taker buy/sell volume ratio = aggression read.
+    taker_buy_sell_ratio: float | None = None
     timestamp: datetime | None = None
 
 
@@ -236,6 +242,34 @@ class BinanceLiquidationProvider:
                 except Exception:
                     oi_trend_5h = None
 
+                # Retail crowd + taker aggression (free, same host; verified
+                # returning live data 2026-07-31 — docs/DATAFEEDS_2026-07-31.md)
+                global_long_pct = global_short_pct = None
+                try:
+                    g_resp = await client.get(
+                        f"{self.BASE_URL}/globalLongShortAccountRatio",
+                        params={"symbol": normalized, "period": "1h", "limit": 1},
+                    )
+                    if g_resp.status_code == 200:
+                        g_json = g_resp.json()
+                        if g_json:
+                            global_long_pct = float(g_json[-1]["longAccount"])
+                            global_short_pct = float(g_json[-1]["shortAccount"])
+                except Exception:
+                    pass
+                taker_buy_sell_ratio = None
+                try:
+                    t_resp = await client.get(
+                        f"{self.BASE_URL}/takerlongshortRatio",
+                        params={"symbol": normalized, "period": "1h", "limit": 1},
+                    )
+                    if t_resp.status_code == 200:
+                        t_json = t_resp.json()
+                        if t_json:
+                            taker_buy_sell_ratio = float(t_json[-1]["buySellRatio"])
+                except Exception:
+                    pass
+
                 result = HyblockData(
                     available=True,
                     delta=round(delta, 4),
@@ -245,6 +279,9 @@ class BinanceLiquidationProvider:
                     oi_trend_5h=oi_trend_5h,
                     top_trader_long_pct=long_pct,
                     top_trader_short_pct=short_pct,
+                    global_long_pct=global_long_pct,
+                    global_short_pct=global_short_pct,
+                    taker_buy_sell_ratio=taker_buy_sell_ratio,
                     timestamp=datetime.now(timezone.utc),
                 )
                 self._cache[cache_key] = result
@@ -507,6 +544,119 @@ class StubNewsProvider:
         return NewsCalendarData(available=False)
 
 
+class RssNewsProvider:
+    """Free "major crypto news happening NOW" boolean from two RSS feeds
+    (lesson 32 — red-event no-trade windows, crypto-native variant).
+
+    CoinDesk + Cointelegraph RSS, keyword-matched. A "red" event = matching
+    headlines from BOTH feeds inside the coincidence window (one outlet
+    running a story is noise; two is an event). Both feeds verified live
+    2026-07-31; CoinDesk 308-redirects on the trailing slash (we follow
+    redirects) and Cointelegraph wants a real User-Agent
+    (docs/DATAFEEDS_2026-07-31.md).
+    """
+
+    FEEDS = (
+        "https://www.coindesk.com/arc/outboundfeeds/rss/",
+        "https://cointelegraph.com/rss",
+    )
+    KEYWORDS = (
+        "hack", "exploit", "stolen", "bankrupt", "insolven", "halts",
+        "halted", "suspends", "sec sues", "sec charges", "lawsuit",
+        "etf approv", "etf reject", "emergency", "crash", "plunge",
+        "flash crash", "depeg", "fomc", "rate decision", "rate cut",
+        "rate hike", "cpi", "liquidation cascade", "ban",
+    )
+    COINCIDENCE_WINDOW_MINUTES = 45
+    CACHE_TTL_SECONDS = 600
+    HEADERS = {"User-Agent": "tarakta-mm/1.0 (paper-trading research bot)"}
+
+    def __init__(self) -> None:
+        self._cache: NewsCalendarData | None = None
+        self._cache_time: datetime | None = None
+
+    def _parse_feed(self, xml_text: str) -> list[tuple[str, datetime]]:
+        """Return [(title, pub_utc)] for a feed; malformed items skipped."""
+        import xml.etree.ElementTree as ET
+        from email.utils import parsedate_to_datetime
+        out: list[tuple[str, datetime]] = []
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            return out
+        for item in root.iter("item"):
+            title = (item.findtext("title") or "").strip()
+            pub_raw = item.findtext("pubDate") or ""
+            if not title or not pub_raw:
+                continue
+            try:
+                pub = parsedate_to_datetime(pub_raw)
+                if pub.tzinfo is None:
+                    pub = pub.replace(tzinfo=timezone.utc)
+                out.append((title, pub.astimezone(timezone.utc)))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def _keyword_hit(self, title: str) -> bool:
+        low = title.lower()
+        return any(k in low for k in self.KEYWORDS)
+
+    def evaluate(self, feeds_items: list[list[tuple[str, datetime]]]) -> NewsCalendarData:
+        """Pure decision logic, unit-testable without network."""
+        now = datetime.now(timezone.utc)
+        window = self.COINCIDENCE_WINDOW_MINUTES * 60
+        hits_per_feed: list[list[NewsEvent]] = []
+        for items in feeds_items:
+            hits = [
+                NewsEvent(title=t, currency="CRYPTO", impact="red",
+                          forecast=None, previous=None, time=p)
+                for (t, p) in items
+                if (now - p).total_seconds() <= window and self._keyword_hit(t)
+            ]
+            hits_per_feed.append(hits)
+        all_hits = [h for hits in hits_per_feed for h in hits]
+        all_hits.sort(key=lambda e: e.time, reverse=True)
+        feeds_with_hits = sum(1 for hits in hits_per_feed if hits)
+        event_now = feeds_with_hits >= 2
+        return NewsCalendarData(
+            available=True,
+            upcoming_events=all_hits,
+            next_high_impact=all_hits[0] if event_now else None,
+            minutes_to_next=0.0 if event_now else None,
+        )
+
+    async def fetch_upcoming(self, hours_ahead: float = 72) -> NewsCalendarData:
+        if self._cache is not None and self._cache_time is not None:
+            age = (datetime.now(timezone.utc) - self._cache_time).total_seconds()
+            if age < self.CACHE_TTL_SECONDS:
+                return self._cache
+        feeds_items: list[list[tuple[str, datetime]]] = []
+        try:
+            import httpx
+            async with httpx.AsyncClient(
+                timeout=10.0, headers=self.HEADERS, follow_redirects=True
+            ) as client:
+                for url in self.FEEDS:
+                    try:
+                        resp = await client.get(url)
+                        feeds_items.append(
+                            self._parse_feed(resp.text)
+                            if resp.status_code == 200 else []
+                        )
+                    except Exception:
+                        feeds_items.append([])
+        except Exception as e:
+            logger.warning("rss_news_fetch_failed: %s", e)
+            return NewsCalendarData(available=False)
+        if not any(feeds_items):
+            return NewsCalendarData(available=False)
+        result = self.evaluate(feeds_items)
+        self._cache = result
+        self._cache_time = datetime.now(timezone.utc)
+        return result
+
+
 # ---------------------------------------------------------------------------
 # Options expiry (basedmoney.io / Deribit style)
 # ---------------------------------------------------------------------------
@@ -605,6 +755,111 @@ class StubDominanceProvider:
     """Returns ``available=False`` until a real dominance provider is wired."""
     async def fetch_dominances(self) -> DominanceData:
         return DominanceData(available=False)
+
+
+class CoinGeckoDominanceProvider:
+    """Free dominance/totals via CoinGecko ``/global`` (lesson 31).
+
+    One call returns total market cap plus per-coin market-cap percentages
+    (BTC.D, ETH.D, USDT.D directly; TOTAL2/TOTAL3 are arithmetic on the
+    same numbers, so TradingView CRYPTOCAP symbols are not needed).
+    Keyless works (IP-shared limit); an optional demo API key raises limits.
+    Data refreshes ~every 10 min upstream, so we cache 10 min — one real
+    request per cycle window. Verified live 2026-07-31
+    (docs/DATAFEEDS_2026-07-31.md).
+
+    Trends need history: we keep a rolling in-memory window and compare the
+    current reading against the closest sample ~1h back. Cold start (first
+    hour after boot) reports trend "" — callers already treat "" as unknown.
+    """
+
+    URL = "https://api.coingecko.com/api/v3/global"
+    CACHE_TTL_SECONDS = 600
+    TREND_WINDOW_SECONDS = 3600
+    TREND_EPS_PCT_POINTS = 0.15  # movement below this is "flat"
+    HISTORY_MAX_SECONDS = 6 * 3600
+
+    def __init__(self, api_key: str = "") -> None:
+        self.api_key = api_key
+        self._cache: DominanceData | None = None
+        self._cache_time: datetime | None = None
+        # (ts, btc_d, eth_d, usdt_d, alt3_share)
+        self._history: list[tuple[datetime, float, float, float, float]] = []
+
+    def _trend(self, now_value: float, index: int) -> str:
+        """Compare against the sample closest to TREND_WINDOW_SECONDS ago."""
+        if not self._history:
+            return ""
+        now = datetime.now(timezone.utc)
+        target = self.TREND_WINDOW_SECONDS
+        best = min(
+            self._history,
+            key=lambda h: abs((now - h[0]).total_seconds() - target),
+        )
+        if (now - best[0]).total_seconds() < target * 0.5:
+            return ""  # nothing old enough yet
+        moved = now_value - best[index]
+        if moved > self.TREND_EPS_PCT_POINTS:
+            return "rising"
+        if moved < -self.TREND_EPS_PCT_POINTS:
+            return "falling"
+        return "flat"
+
+    async def fetch_dominances(self) -> DominanceData:
+        if self._cache is not None and self._cache_time is not None:
+            age = (datetime.now(timezone.utc) - self._cache_time).total_seconds()
+            if age < self.CACHE_TTL_SECONDS:
+                return self._cache
+        try:
+            import httpx
+            headers = {"x-cg-demo-api-key": self.api_key} if self.api_key else {}
+            async with httpx.AsyncClient(timeout=8.0, headers=headers) as client:
+                resp = await client.get(self.URL)
+                if resp.status_code != 200:
+                    return DominanceData(available=False)
+                payload = resp.json()
+            pct = (payload.get("data") or {}).get("market_cap_percentage") or {}
+            btc_d = float(pct.get("btc") or 0)
+            eth_d = float(pct.get("eth") or 0)
+            usdt_d = float(pct.get("usdt") or 0)
+            if btc_d <= 0:
+                return DominanceData(available=False)
+            alt3_share = max(0.0, 100.0 - btc_d - eth_d - usdt_d)
+
+            btc_trend = self._trend(btc_d, 1)
+            eth_trend = self._trend(eth_d, 2)
+            usdt_trend = self._trend(usdt_d, 3)
+            alt3_trend = self._trend(alt3_share, 4)
+
+            now = datetime.now(timezone.utc)
+            self._history.append((now, btc_d, eth_d, usdt_d, alt3_share))
+            cutoff = self.HISTORY_MAX_SECONDS
+            self._history = [
+                h for h in self._history
+                if (now - h[0]).total_seconds() <= cutoff
+            ]
+
+            result = DominanceData(
+                available=True,
+                btc_dominance_pct=round(btc_d, 2),
+                btc_dominance_trend=btc_trend,
+                eth_dominance_pct=round(eth_d, 2),
+                eth_dominance_trend=eth_trend,
+                usdt_dominance_pct=round(usdt_d, 2),
+                usdt_dominance_trend=usdt_trend,
+                is_alt_season=(
+                    btc_trend == "falling"
+                    and usdt_trend == "falling"
+                    and eth_trend == "rising"
+                ),
+                is_degen_season=(alt3_trend == "rising" and btc_trend == "falling"),
+            )
+            self._cache = result
+            self._cache_time = now
+            return result
+        except Exception as e:
+            logger.warning("coingecko_dominance_fetch_failed: %s", e)
+            return DominanceData(available=False)
 
 
 # ---------------------------------------------------------------------------
@@ -851,6 +1106,46 @@ class StubSentimentProvider:
         return SentimentData(available=False)
 
 
+class FearGreedSentimentProvider:
+    """Free Alternative.me Fear & Greed index (lesson 32).
+
+    No auth, updates ~daily upstream — cached 1h here. Extreme Fear (0-25)
+    = contrarian-buy context, Extreme Greed (75-100) = contrarian-sell.
+    Verified live 2026-07-31 (docs/DATAFEEDS_2026-07-31.md).
+    """
+
+    URL = "https://api.alternative.me/fng/"
+    CACHE_TTL_SECONDS = 3600
+
+    def __init__(self) -> None:
+        self._cache: SentimentData | None = None
+        self._cache_time: datetime | None = None
+
+    async def fetch_sentiment(self) -> SentimentData:
+        if self._cache is not None and self._cache_time is not None:
+            age = (datetime.now(timezone.utc) - self._cache_time).total_seconds()
+            if age < self.CACHE_TTL_SECONDS:
+                return self._cache
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.get(self.URL, params={"limit": 1})
+                if resp.status_code != 200:
+                    return SentimentData(available=False)
+                payload = resp.json()
+            rows = payload.get("data") or []
+            if not rows:
+                return SentimentData(available=False)
+            value = int(rows[0].get("value"))
+            result = SentimentData(available=True, fear_greed_index=value)
+            self._cache = result
+            self._cache_time = datetime.now(timezone.utc)
+            return result
+        except Exception as e:
+            logger.warning("fear_greed_fetch_failed: %s", e)
+            return SentimentData(available=False)
+
+
 # ---------------------------------------------------------------------------
 # Default registry — swap stubs for real providers when credentials arrive
 # ---------------------------------------------------------------------------
@@ -896,11 +1191,11 @@ class DataFeedRegistry:
     funding: FundingProvider = field(default_factory=_default_funding_provider)
     orderbook: OrderBookProvider = field(default_factory=_default_orderbook_provider)
     tradinglite: TradingLiteProvider = field(default_factory=StubTradingLiteProvider)
-    news: NewsProvider = field(default_factory=StubNewsProvider)
+    news: NewsProvider = field(default_factory=RssNewsProvider)
     options: OptionsProvider = field(default_factory=StubOptionsProvider)
-    dominance: DominanceProvider = field(default_factory=StubDominanceProvider)
+    dominance: DominanceProvider = field(default_factory=CoinGeckoDominanceProvider)
     correlation: CorrelationProvider = field(default_factory=_default_correlation_provider)
-    sentiment: SentimentProvider = field(default_factory=StubSentimentProvider)
+    sentiment: SentimentProvider = field(default_factory=FearGreedSentimentProvider)
 
 
     def get_status(self) -> dict[str, bool]:
@@ -945,9 +1240,19 @@ class DataFeedRegistry:
             "funding_rate": None,
             "top_trader_long_pct": None,
             "top_trader_short_pct": None,
+            "global_long_pct": None,
+            "taker_buy_sell_ratio": None,
             "long_short_delta": None,
             "delta_level": None,
             "orderbook_imbalance": None,
+            "btc_dominance_pct": None,
+            "btc_dominance_trend": None,
+            "usdt_dominance_pct": None,
+            "usdt_dominance_trend": None,
+            "is_alt_season": None,
+            "fear_greed_index": None,
+            "news_event_now": None,
+            "news_headline": None,
         }
         try:
             liq = await self.hyblock.fetch_liquidation_data(symbol)  # type: ignore[attr-defined]
@@ -958,6 +1263,8 @@ class DataFeedRegistry:
                     "oi_trend_5h": getattr(liq, "oi_trend_5h", None),
                     "top_trader_long_pct": getattr(liq, "top_trader_long_pct", None),
                     "top_trader_short_pct": getattr(liq, "top_trader_short_pct", None),
+                    "global_long_pct": getattr(liq, "global_long_pct", None),
+                    "taker_buy_sell_ratio": getattr(liq, "taker_buy_sell_ratio", None),
                     "long_short_delta": getattr(liq, "delta", None),
                     "delta_level": getattr(liq, "delta_level", None),
                 })
@@ -975,6 +1282,37 @@ class DataFeedRegistry:
             if getattr(orderbook, "available", False):
                 snapshot["available"] = True
                 snapshot["orderbook_imbalance"] = getattr(orderbook, "imbalance", None)
+        except Exception:
+            pass
+        # Market-wide feeds below are cached inside their providers (10-60 min
+        # TTLs), so per-symbol calls cost nothing beyond the first each window.
+        try:
+            dom = await self.dominance.fetch_dominances()
+            if getattr(dom, "available", False):
+                snapshot.update({
+                    "available": True,
+                    "btc_dominance_pct": getattr(dom, "btc_dominance_pct", None),
+                    "btc_dominance_trend": getattr(dom, "btc_dominance_trend", None) or None,
+                    "usdt_dominance_pct": getattr(dom, "usdt_dominance_pct", None),
+                    "usdt_dominance_trend": getattr(dom, "usdt_dominance_trend", None) or None,
+                    "is_alt_season": getattr(dom, "is_alt_season", None),
+                })
+        except Exception:
+            pass
+        try:
+            senti = await self.sentiment.fetch_sentiment()
+            if getattr(senti, "available", False):
+                snapshot["available"] = True
+                snapshot["fear_greed_index"] = getattr(senti, "fear_greed_index", None)
+        except Exception:
+            pass
+        try:
+            news = await self.news.fetch_upcoming(hours_ahead=1)
+            if getattr(news, "available", False):
+                snapshot["available"] = True
+                event = getattr(news, "next_high_impact", None)
+                snapshot["news_event_now"] = event is not None
+                snapshot["news_headline"] = getattr(event, "title", None) if event else None
         except Exception:
             pass
         return snapshot

@@ -270,17 +270,22 @@ async def test_data_feed_stubs_return_unavailable():
     from src.strategy.mm_data_feeds import (
         DataFeedRegistry,
         BinanceLiquidationProvider,
+        CoinGeckoDominanceProvider,
+        FearGreedSentimentProvider,
+        RssNewsProvider,
         StubCorrelationProvider,
     )
     r = DataFeedRegistry()
     heat = await r.tradinglite.fetch_heatmap("BTC/USDT")
-    news = await r.news.fetch_upcoming()
     opts = await r.options.fetch_next_expiry("BTC/USDT")
-    dom = await r.dominance.fetch_dominances()
-    sent = await r.sentiment.fetch_sentiment()
     # These remain stubs — must always return available=False
-    for obj in (heat, news, opts, dom, sent):
+    for obj in (heat, opts):
         assert obj.available is False, f"stub {type(obj).__name__} should be unavailable"
+    # Upgraded to real free providers 2026-07-31 (docs/DATAFEEDS_2026-07-31.md);
+    # type-check only — unit tests must not hit the network.
+    assert isinstance(r.news, RssNewsProvider)
+    assert isinstance(r.dominance, CoinGeckoDominanceProvider)
+    assert isinstance(r.sentiment, FearGreedSentimentProvider)
     # hyblock is now BinanceLiquidationProvider (live free API) — just check the type
     assert isinstance(r.hyblock, BinanceLiquidationProvider)
     # Correlation may use YFinanceCorrelationProvider (real) — only check stub case

@@ -411,10 +411,15 @@ class TestDataFeedRegistryStatus:
         assert status["orderbook"] is True
 
         # These remain stubs — must be False
-        always_stub_keys = ("tradinglite", "news", "options", "dominance", "sentiment")
+        always_stub_keys = ("tradinglite", "options")
         for provider_name in always_stub_keys:
             assert status[provider_name] is False, (
                 f"Provider '{provider_name}' should be False (stub) but got True"
+            )
+        # Upgraded to real free providers 2026-07-31 (docs/DATAFEEDS_2026-07-31.md)
+        for provider_name in ("news", "dominance", "sentiment"):
+            assert status[provider_name] is True, (
+                f"Provider '{provider_name}' should be True (real free provider)"
             )
         # correlation is either YFinance (True) or Stub (False) depending on yfinance install
         assert isinstance(status["correlation"], bool)
@@ -443,8 +448,11 @@ class TestDataFeedRegistryStatus:
 
         assert status["hyblock"] is True
         # These are always stubs regardless of yfinance availability
-        for key in ("tradinglite", "news", "options", "dominance", "sentiment"):
+        for key in ("tradinglite", "options"):
             assert status[key] is False
+        # Real free providers as of 2026-07-31 (docs/DATAFEEDS_2026-07-31.md)
+        for key in ("news", "dominance", "sentiment"):
+            assert status[key] is True
 
     def test_stub_default_registry_instantiation(self):
         """Registry can be constructed with no arguments."""
