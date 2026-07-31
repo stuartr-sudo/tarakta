@@ -450,6 +450,13 @@ class MMEngine:
         self.cycle_count = 0
         self._running = True
         self._scanning_active = True  # MM Engine starts active (unlike main bot)
+        # Live websocket feed (mark price + liquidations) — started in run()
+        # when mm_ws_enabled. See src/strategy/mm_ws_feed.py for why.
+        self._ws_feed = None  # type: ignore[assignment]
+        # Reentrancy guard for _close_position: the ws fast-stop loop and the
+        # 5-min manage cycle can both reach a close for the same trade; the
+        # first claim wins, the second returns without acting.
+        self._closing_trades: set[str] = set()
 
         # Per-cycle funnel state — all reset at start of each scan, reported in mm_scan_funnel.
         # Rejection reasons (why pairs drop out).
@@ -1338,6 +1345,30 @@ class MMEngine:
         # the exchange's semaphore is bound to THIS loop.
         price_task = asyncio.create_task(self._price_refresh_loop())
 
+        # Websocket layer: live mark prices drive the fast-stop loop so SL
+        # fills happen seconds after the level is crossed instead of at the
+        # next 5-min poll (measured overshoot without it: avg −1.39R across
+        # 41 stops May–Jul 2026). Kill switch: MM_WS_ENABLED=false.
+        ws_task = None
+        fast_stop_task = None
+        # Fail closed when config is absent (test fixtures pass config=None) —
+        # a bare getattr default of True would open live sockets from tests.
+        ws_enabled = (
+            bool(getattr(self.config, "mm_ws_enabled", True))
+            if self.config is not None else False
+        )
+        if ws_enabled:
+            try:
+                from src.strategy.mm_ws_feed import BinanceWsFeed
+                self._ws_feed = BinanceWsFeed(list(self.positions.keys()))
+                ws_task = asyncio.create_task(self._ws_feed.run())
+                fast_stop_task = asyncio.create_task(self._fast_stop_loop())
+                logger.info("mm_ws_feed_started",
+                            initial_symbols=len(self.positions))
+            except Exception as e:
+                self._ws_feed = None
+                logger.warning("mm_ws_feed_start_failed", error=str(e))
+
         try:
             while self._running:
                 try:
@@ -1349,11 +1380,16 @@ class MMEngine:
 
                 await asyncio.sleep(self.scan_interval)
         finally:
-            price_task.cancel()
-            try:
-                await price_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            if self._ws_feed is not None:
+                self._ws_feed.stop()
+            for task in (price_task, ws_task, fast_stop_task):
+                if task is None:
+                    continue
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
         logger.info("mm_engine_stopped")
 
@@ -1387,6 +1423,54 @@ class MMEngine:
             except Exception as e:
                 logger.debug("mm_price_refresh_error", error=str(e))
             await asyncio.sleep(interval_s)
+
+    async def _fast_stop_loop(self) -> None:
+        """WS-driven stop-loss enforcement between 5-min cycles.
+
+        Execution realism, not a rule change: the SAME `_is_stopped_out`
+        predicate and the SAME `_close_position` path as the manage cycle —
+        just evaluated on a ~1s-fresh mark price every couple of seconds,
+        the way a resting stop-market order behaves on a real exchange.
+        Stale or missing ws prices simply fall through to the 5-min cycle
+        (fail-open to existing behaviour).
+        """
+        interval = float(getattr(self.config, "mm_ws_stop_interval_s", 2.0))
+        max_age = float(getattr(self.config, "mm_ws_price_max_age_s", 15.0))
+        while self._running:
+            try:
+                await self._fast_stop_check_once(max_age)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug("mm_fast_stop_error", error=str(e))
+            await asyncio.sleep(interval)
+
+    async def _fast_stop_check_once(self, max_age: float) -> None:
+        """One fast-stop pass over open positions (extracted for tests)."""
+        feed = self._ws_feed
+        if feed is None or not self.positions:
+            return
+        for sym, pos in list(self.positions.items()):
+            pq = feed.get_price(sym)
+            if pq is None:
+                continue
+            price, age = pq
+            if age > max_age:
+                continue
+            # Freshest price for the dashboard too.
+            self._last_prices[sym] = price
+            if pos.trade_id in self._closing_trades:
+                continue
+            if self._is_stopped_out(pos, price):
+                logger.info(
+                    "mm_ws_fast_stop",
+                    symbol=sym,
+                    direction=pos.direction,
+                    price=price,
+                    stop_loss=pos.stop_loss,
+                    price_age_s=round(age, 1),
+                )
+                await self._close_position(pos, price, "stop_loss")
 
     async def shutdown(self) -> None:
         """Graceful shutdown."""
@@ -1496,6 +1580,15 @@ class MMEngine:
             except Exception as e:
                 logger.warning("mm_engine_pairs_error", error=str(e))
                 pairs = []
+
+            # Keep the ws feed subscribed to everything we scan or hold.
+            if self._ws_feed is not None:
+                try:
+                    self._ws_feed.ensure_symbols(
+                        list(pairs) + list(self.positions.keys())
+                    )
+                except Exception:
+                    pass
 
             # 4. Scan each pair — reset ALL per-cycle telemetry so mm_scan_funnel
             # shows just this cycle's activity.
@@ -3226,6 +3319,15 @@ class MMEngine:
                     flow_context = await self.data_feeds.build_flow_snapshot(symbol)
                 except Exception:
                     flow_context = {}
+                # Real-time liquidation events from the ws feed (course
+                # lesson 27 — cascades as stopping-volume context).
+                if self._ws_feed is not None:
+                    try:
+                        flow_context["ws_liquidations_5m"] = (
+                            self._ws_feed.liquidation_stats(symbol, window_s=300)
+                        )
+                    except Exception:
+                        pass
 
                 agent_ctx = build_context(
                     symbol=symbol,
@@ -4989,6 +5091,10 @@ class MMEngine:
         row but no history was kept, so the dashboard could not surface which
         levels fired).
         """
+        # Stale-reference guard (see _close_position): the manage cycle holds
+        # `pos` across awaits; the ws fast-stop loop may have closed it since.
+        if self.positions.get(pos.symbol) is not pos:
+            return
         target_close_pct = PROFIT_SCHEDULE.get(level, 0)
         if target_close_pct <= pos.partial_closed_pct:
             return  # Already closed enough
@@ -5084,6 +5190,11 @@ class MMEngine:
         final_exit_qty: float,
     ) -> None:
         """Close the trade row when a partial tier has fully flattened it."""
+        # Stale-reference guard (see _close_position). Callers inside the
+        # guarded close path still pass: the position is popped from
+        # self.positions only after _close_position_inner returns.
+        if self.positions.get(pos.symbol) is not pos:
+            return
         if not pos.trade_id:
             self.positions.pop(pos.symbol, None)
             return
@@ -5110,6 +5221,29 @@ class MMEngine:
 
     async def _close_position(self, pos: MMPosition, price: float, reason: str) -> None:
         """Fully close an MM position."""
+        # Reentrancy guard: the position is popped from self.positions only at
+        # the END of this coroutine, so a second caller (ws fast-stop loop vs
+        # 5-min manage cycle) could otherwise start a duplicate close while the
+        # first is awaiting the exchange/DB.
+        if pos.trade_id in self._closing_trades:
+            return
+        # Identity check: the guard set only covers closes IN FLIGHT. A caller
+        # holding a stale `pos` reference (the 5-min manage cycle captures pos
+        # before many awaits) can arrive AFTER a fast-stop close completed and
+        # released the guard — pos.quantity is still non-zero on the stale
+        # object, so without this check a duplicate order fires (and the paper
+        # exchange would open a phantom reverse position).
+        if self.positions.get(pos.symbol) is not pos:
+            return
+        self._closing_trades.add(pos.trade_id)
+        try:
+            await self._close_position_inner(pos, price, reason)
+        finally:
+            self._closing_trades.discard(pos.trade_id)
+
+    async def _close_position_inner(
+        self, pos: MMPosition, price: float, reason: str
+    ) -> None:
         if pos.quantity <= 0:
             await self._mark_fully_exited_after_partial(
                 pos,

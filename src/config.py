@@ -194,6 +194,15 @@ class Settings(BaseSettings):
     mm_committee_cli_enabled: bool = True
     mm_committee_cli_path: str = ""
     mm_committee_cli_timeout_s: float = 120.0
+    # Binance websocket layer (src/strategy/mm_ws_feed.py). markPrice@1s
+    # drives the engine's fast-stop loop — SL enforcement within seconds of
+    # the level being crossed instead of at the next 5-min poll (measured
+    # overshoot without it: avg −1.39R across 41 stops May–Jul 2026).
+    # Execution realism only; the SL predicate and close path are unchanged.
+    mm_ws_enabled: bool = True
+    mm_ws_stop_interval_s: float = 2.0    # fast-stop evaluation cadence
+    mm_ws_price_max_age_s: float = 15.0   # ignore ws price older than this
+
     # Long-lived headless auth for the CLI backend, minted by
     # `claude setup-token` (browser flow, ~30s, user-run). Needed because a
     # daemonised bot cannot rely on the interactive Keychain login staying

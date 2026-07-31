@@ -785,6 +785,7 @@ async def test_take_partial_uses_original_quantity_for_cumulative_schedule(engin
         quantity=100.0,
         original_quantity=100.0,
     )
+    engine.positions[pos.symbol] = pos  # stale-reference guard requires registration
 
     await engine._take_partial(pos, level=1, current_price=110.0)
     await engine._take_partial(pos, level=2, current_price=120.0)
@@ -832,6 +833,7 @@ async def test_close_position_includes_prior_partial_pnl(engine: MMEngine):
         quantity=5.0,
         original_quantity=10.0,
     )
+    engine.positions[pos.symbol] = pos  # stale-reference guard requires registration
 
     await engine._close_position(pos, price=110.0, reason="stop_loss")
 
