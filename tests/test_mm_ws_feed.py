@@ -67,6 +67,7 @@ def test_stream_url_and_ensure_symbols():
     assert feed._stream_url() is None
     feed.ensure_symbols(["BTC/USDT:USDT", "ETH/USDT:USDT"])
     url = feed._stream_url()
+    assert url.startswith("wss://fstream.binance.com/market/stream?streams=")
     assert "btcusdt@markPrice@1s" in url
     assert "ethusdt@markPrice@1s" in url
     assert "!forceOrder@arr" in url

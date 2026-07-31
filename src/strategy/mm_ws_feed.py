@@ -32,7 +32,11 @@ from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-WS_BASE = "wss://fstream.binance.com/stream"
+# Routed base per Binance's websocket restructuring: market-data streams live
+# under /market; unrouted connections silently push nothing (verified live
+# 2026-07-31 — the unrouted legacy path timed out on upgrade from two
+# independent networks, the routed one streamed immediately).
+WS_BASE = "wss://fstream.binance.com/market/stream"
 
 # Reconnect backoff schedule (seconds). Binance also closes every
 # connection at the 24h mark — that close is expected and reconnects
@@ -170,6 +174,23 @@ class BinanceWsFeed:
     def _backoff(attempt: int) -> float:
         return _BACKOFF_STEPS[min(attempt, len(_BACKOFF_STEPS) - 1)]
 
+    @staticmethod
+    def _ssl_context():
+        """Explicit CA bundle via certifi, falling back to system defaults.
+
+        The Mac's framework Python has NO default CA path
+        (ssl.get_default_verify_paths().cafile is None), so aiohttp's default
+        context trusts nothing and every TLS handshake fails. ccxt/httpx work
+        because they pass certifi explicitly — do the same. Never disable
+        verification.
+        """
+        import ssl
+        try:
+            import certifi
+            return ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            return ssl.create_default_context()
+
     # ------------------------------------------------------------------
     # Connection loop
     # ------------------------------------------------------------------
@@ -193,7 +214,8 @@ class BinanceWsFeed:
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.ws_connect(
-                        url, heartbeat=30.0, max_msg_size=2 ** 20
+                        url, heartbeat=30.0, max_msg_size=2 ** 20,
+                        ssl=self._ssl_context(),
                     ) as ws:
                         self.connected = True
                         logger.info("mm_ws_connected",
