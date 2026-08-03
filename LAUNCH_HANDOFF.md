@@ -1,12 +1,20 @@
 # LAUNCH HANDOFF — read this first
 
-**Last updated:** 2026-07-31 by Claude (Fable 5) · **Repo:** https://github.com/stuartr-sudo/tarakta · **Local:** `/Users/stuarta/tarakta`
-**Branch:** `main` == `codex/tarakta-stabilization` (pushed, clean) · **Tests:** 779 passed / 1 skipped
+**Last updated:** 2026-08-03 by Claude (Fable 5) · **Repo:** https://github.com/stuartr-sudo/tarakta · **Local:** `/Users/stuarta/tarakta`
+**Branch:** `main` == `codex/tarakta-stabilization` (pushed, clean) · **Tests:** 797 passed / 1 skipped
 
-> **Session log:** 2026-07-26 and 2026-07-31 sessions were state-verification
-> only — **no code changes since 2026-07-22**. Everything below was re-verified
-> on 2026-07-31: local bot healthy and scanning, Fly auth still dead (§3 still
-> blocked on the user), git in sync.
+> **Session log 2026-07-31→08-03 (this account is out of usage; a second
+> Claude account continues on the SAME laptop/folder — memory dir is shared):**
+> (1) Committee superseded to the **Claude 5 family** and the escalation model
+> — previously configured but never consumed — was actually wired (`4dafbd4`,
+> deployed to Fly `tarakta-mm2` AND local, both verified healthy after).
+> (2) **180d × 5-coin deterministic backtest ran**: −$8,671 / −8.7R / 24% WR
+> over 38 signals. (3) Stuart asked "what if we reversed every trade?" —
+> tested empirically; raw reversal looks great (50% WR) but it's ENTIRELY a
+> serial-re-entry artifact; per independent idea both directions are ~0R.
+> **Read `docs/BACKTEST_180D_2026-08-03.md` — it reranks the failure causes**
+> (re-entry martingale ≈ 8R of the damage) and is the basis for the new build
+> queue item 1b below. No engine rule changes were made.
 
 This file is the single entry point for a new agent or human session. It states
 what is running, what is broken, what is blocked on the user, and what to do
@@ -137,7 +145,16 @@ closed trades / ≥2 weeks** (~10 more days at ~2 verdicts/day), scored against
 outcomes. Veto reasons repeatedly cite *"not at key level"* and *"sideways
 4H/1D"* — the location problem, live.
 
-## 6. Why it is not profitable (verified, ranked)
+## 6. Why it is not profitable (verified, ranked — UPDATED 2026-08-03)
+
+**New evidence:** `docs/BACKTEST_180D_2026-08-03.md` (180d × ETH/BTC/SOL/DOGE/
+ADA, 38 signals, −8.7R). Key reranking: **~8R of the −8.7R comes from serial
+re-entry** — a stopped loser frees the position slot in 1–3h and the
+still-present formation re-enters the same wrong idea 3–7× (BTC 2026-07-20/21:
+7 consecutive shorts; the live committee vetoed all 7 in shadow). Per
+independent idea, entries are ~0R in BOTH directions (reversal tested and
+rejected — the live inverse bot losing −$1.1k confirms). Original causes below
+still stand; the re-entry martingale sits on top of them:
 
 1. **Wrong candidates.** The detector is a 40-bar swing-pair matcher (1H: sees
    40h of history; 4H path: ~6.7 days). The course demands setups **only** at
@@ -156,6 +173,13 @@ outcomes. Veto reasons repeatedly cite *"not at key level"* and *"sideways
    committee context — zero deterministic decisions use it.
 
 ## 7. Build queue (agreed with Stuart, in order)
+
+1b. **NEW (2026-08-03, smallest + highest-certainty): post-stop-loss re-entry
+   cooldown** per symbol+setup — kills the ~8R martingale documented in
+   `docs/BACKTEST_180D_2026-08-03.md`. **Before shipping: find the course's
+   own re-entry guidance and cite lesson+timestamp in the commit** (CLAUDE.md
+   rule — do not invent the rule shape). Suggested start: search course
+   transcripts for re-entry / "stopped out" / "wait for" guidance.
 
 1. **Vision judge calibration** — gate NOT passed (0/8 on positive controls;
    1 approval in 60+ charts = hanging judge). Plan in
@@ -202,3 +226,5 @@ outcomes. Veto reasons repeatedly cite *"not at key level"* and *"sideways
 | `docs/agent-committee/skills/` | Committee skill files (`structure_vision_specialist_DRAFT.md` is NOT loaded — vision is ungated) |
 | `experiments/vision/` | Chart renderer, vision helper, both backtests, control gates, results JSONL + README. **Wired into nothing.** |
 | `CODEX_PLAN.md`, `docs/MM_AGENT_COMMITTEE_DESIGN.md` | Governing plans |
+| `docs/BACKTEST_180D_2026-08-03.md` | 180d backtest + reversal analysis: full 38-signal table, cause reranking |
+| `scripts/replay_reversal_test.py` | Diagnostic: re-sims a replay log's signals both directions under symmetric management |
