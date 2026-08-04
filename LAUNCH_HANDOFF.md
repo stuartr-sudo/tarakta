@@ -57,7 +57,11 @@ paper mode.
    on Fly now has an SDK client (Claude 5 models, ~$0.10/run, ~$5–8/mo at
    current cadence, $600/mo cap in config). Watch `mm_agent_decisions` for
    the first APPROVE/VETO from instance `tarakta-fly` — ERROR
-   `client_unavailable` should no longer appear.
+   `client_unavailable` should no longer appear. Same evening the
+   `tarakta-fly` ledger was **reset to zero** (2 trades + 2 signals +
+   engine_state deleted, machine restarted, book back at $100k, scanning
+   active) so the paper record starts clean from committee activation.
+   `main`, `tarakta-mm`, and `tarakta-mm-inverse` ledgers were untouched.
 2. **Press Stop on the OLD app**: https://tarakta-mm.fly.dev/mm (any time).
    Still outstanding — the April build answers /health as of 2026-08-04.
 
