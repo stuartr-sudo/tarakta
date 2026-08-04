@@ -51,11 +51,15 @@ paper mode.
 
 `tarakta-mm2` is live on the new account (see §2). Remaining user actions:
 
-1. **Anthropic key** (activates the committee on Fly via the SDK): with the
-   key on the clipboard, run the one-liner Claude provided in chat — it
-   writes `env.local` AND sets the Fly secret in one go (the secret set
-   auto-restarts the machine). Never commit/print the key.
+1. ~~**Anthropic key**~~ **DONE 2026-08-04**: `ANTHROPIC_API_KEY` is set as a
+   Fly secret on `tarakta-mm2` (via clipboard→pbpaste, never printed) and
+   mirrored in gitignored `env.local`. Machine restarted healthy; committee
+   on Fly now has an SDK client (Claude 5 models, ~$0.10/run, ~$5–8/mo at
+   current cadence, $600/mo cap in config). Watch `mm_agent_decisions` for
+   the first APPROVE/VETO from instance `tarakta-fly` — ERROR
+   `client_unavailable` should no longer appear.
 2. **Press Stop on the OLD app**: https://tarakta-mm.fly.dev/mm (any time).
+   Still outstanding — the April build answers /health as of 2026-08-04.
 
 Tier-0 free data feeds (commit `92a3f4e`) are live on both bots: dominance
 (CoinGecko), Fear & Greed, RSS news-event boolean, retail-crowd + taker
