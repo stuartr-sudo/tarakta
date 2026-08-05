@@ -42,7 +42,7 @@ paper mode.
 | Thing | State | Control |
 |---|---|---|
 | **Local bot** (instance `main`) | ✅ Running, healthy, scanning 10 pairs / 5 min (verified 2026-07-31; the in-log cycle counter resets to 0 whenever launchd restarts the process — a low cycle number is NOT a problem) | launchd `com.tarakta.bot`; restart: `launchctl kickstart -k gui/501/com.tarakta.bot`; stop: `launchctl unload ~/Library/LaunchAgents/com.tarakta.bot.plist` (a plain `kill` just gets KeepAlive-restarted). Logs: `/tmp/tarakta-bot.launchd.out.log` |
-| **Committee** (5 Sonnet-5 specialists + Opus-5 head trader; Fable 5 on contested escalation — Claude 5 supersede 2026-07-31) | ✅ Live in **shadow** (logs verdicts, blocks nothing) | `.env`: `MM_COMMITTEE_ENABLED=true`, `MM_COMMITTEE_MODE=shadow`. Auth = `CLAUDE_CODE_OAUTH_TOKEN` in `.env` (1-year token from `claude setup-token`). **Never print that value.** Fable-5-on-API needs org 30-day retention (CLI transport exempt). |
+| **Committee** (5 Sonnet-5 specialists + Opus-5 head trader; Fable 5 on contested escalation — Claude 5 supersede 2026-07-31) | 🔴 **VETO MODE on BOTH bots since 2026-08-05** (Stuart's explicit call, deliberately overriding the ≥30-trade shadow gate at n≈9): a committee VETO now **blocks** the entry; committee ERROR also blocks (fail-closed). First veto-mode day followed the committee twice-vetoing the XRP W-long both engines took in shadow hours earlier. | Local `.env` + Fly secret: `MM_COMMITTEE_MODE=veto` (`shadow` to revert). Local auth = `CLAUDE_CODE_OAUTH_TOKEN` in `.env` (free CLI). Fly auth = `ANTHROPIC_API_KEY` secret (SDK, ~$0.10–0.15/run). **Never print either value.** |
 | **Fly NEW** `tarakta-mm2` (new account, instance `tarakta-fly`) | ✅ LIVE 2026-07-31: current main, region `sin` (Binance access verified from first scan cycle), 1 machine (HA second machine deliberately destroyed — two machines on one instance_id double-trade), scanning ACTIVE on a fresh $100k paper book, committee SHADOW | `fly deploy --app tarakta-mm2 --config fly.toml --depot=false --remote-only`. Committee needs `ANTHROPIC_API_KEY` secret (user one-liner in §3) — until set, decisions log ERROR client_unavailable (expected, shadow-safe) |
 | **Fly OLD** `tarakta-mm` (dead account) | ⚠️ April build, still trading junk; Fly account unreachable | Only kill switch: its own dashboard Stop button https://tarakta-mm.fly.dev/mm (app login). User to press it. |
 | **Inverse mirror** `tarakta-mm-inverse` | Idle; lost −$1.1k; recommended for retirement | Not yet disabled |
@@ -152,6 +152,11 @@ conclude anything.** Gate before flipping `MM_COMMITTEE_MODE=veto`: **≥30
 closed trades / ≥2 weeks** (~10 more days at ~2 verdicts/day), scored against
 outcomes. Veto reasons repeatedly cite *"not at key level"* and *"sideways
 4H/1D"* — the location problem, live.
+
+> **SUPERSEDED 2026-08-05:** Stuart chose to flip veto mode ON (both bots)
+> before the gate was met — an explicit, informed override, not an accident.
+> Shadow-vs-outcome scoring continues from `mm_agent_decisions` regardless;
+> keep scoring so the early flip can be evaluated retroactively.
 
 ## 6. Why it is not profitable (verified, ranked — UPDATED 2026-08-03)
 
