@@ -17,6 +17,65 @@ Paired docs:
 
 ---
 
+## 2026-08-15 — FMWB gate made course-faithful; Lesson-13/16 re-setup rule added
+
+Driven by the verified backtest sweep (`docs/BACKTEST_VERIFIED_2026-08-15.md`):
+the unconditional weekly-bias gate blocked 176 shorts in 90d×6sym that re-simmed
+to +24R/41%WR while the 12 surviving signals went 0-for-12; serial re-entry of
+the same failed idea cost ~8R of the 180d backtest's −8.7R (24h/one-per-idea
+counterfactuals recover +9.0/+11.5R at a cost of +0.63R in winners).
+
+### Change 1 — FMWB weekly-bias gate (`mm_engine._fmwb_required_direction`, `mm_weekend_trap`)
+
+**Wrong before:** the larger of the up/down moves after the weekly open was
+labelled "false" *by definition* — no break-out required, no failure required,
+no expiry — so in a trending week the gate banned the with-trend direction for
+the whole week (all-long August, 0 wins).
+
+**Right now (course):** the bias binds only when the move (a) **broke OUT of
+the weekend range** — *"A Fake Move Monday is... a wick... or a decent move
+that breaks out of an area"*; a move inside the range is explicitly **not**
+one: *"I wouldn't consider this a Fake Move Monday"* (Lesson 10 [25:00]); (b)
+**failed back inside** — *"He spiked the high. He reversed the price."*
+(Lesson 3 [55:30]); and (c) the week is still Sun/Mon/Tue NY — *"Tuesday's
+the real start of the week"* (Lesson 10 [33:00]), expiring at the midweek
+reversal (*"Usually a midweek reversal every week"*, Lesson 3 [26:00];
+weekly-setup quiz: two trend changes per week). No-FMWB weeks are normal and
+block nothing (Lesson 9 [72:30] *"I don't think we got one"*; Lesson 20
+[46:30] *"if you can't find it just move on"*). Detection window widened
+8h → 31h: *"Fake Move Monday can happen on Sunday... it says Sunday /
+Monday"* (Lesson 9 [50:00]).
+
+### Change 2 — re-setup rule after a stop-out (`stale_formation_after_stop` gate)
+
+**Wrong before:** after a stop-out, the 40-bar detector re-found the same
+M/W and re-entered the same failed idea 3–7× (BTC 2026-07-21, 2026-08-10/11
+live). Only a 4h in-memory symbol cooldown stood in the way, and it died on
+restart.
+
+**Right now (course):** re-entry demands a complete re-setup on a **new**
+formation — *"getting stopped out, if you get stopped out there is no trade
+for another two hours minimum"* (Lesson 13 [79:00], enforced by the existing
+`mm_cooldown_hours` ≥ course minimum); *"cut the trade and re-setup"*
+(Lesson 13 [45:30]); *"Set your high and low of the day again... start
+again"* (Lesson 6 [23:30]–[25:30]); *"You reset. You identified a new W and
+you jumped back in"* (Lesson 16 [58:30]). Implementation: `_recent_stops`
+registry per (symbol, direction) updated on `stop_loss` closes, **seeded from
+the DB on restart** (new `repository.get_recent_stop_losses`, 7d window; also
+re-arms the time cooldown) — a signal whose formation second peak completed
+BEFORE the last same-direction stop is rejected as `stale_formation_after_stop`.
+Kill switch: `MM_REQUIRE_NEW_FORMATION_AFTER_STOP=false` or the runtime
+override. Note: the backtest-optimal window was 24h; the course states 2h
+*minimum*, so the stricter time window is left to the operator via the
+existing `mm_cooldown_hours` runtime setting rather than hard-coded.
+
+Tests: `tests/test_mm_reentry_fmwb.py` (14 new; suite 811 passed / 1 skipped).
+Validation replay (BTC/ETH 30d): 0 exceptions; `against_weekly_bias` now fires
+only with `broke_box=True failed=True`; direction mix restored (4 short /
+5 long vs 100% one-way); first winners in the window under the new gate.
+
+---
+
 ## 2026-07-31 — Committee superseded to the Claude 5 family; escalation model actually wired
 
 User-directed supersede ("Haiku and Sonnet are not very reliable... Need to supersede please"). Not a course change — model plumbing only; no strategy rule touched.

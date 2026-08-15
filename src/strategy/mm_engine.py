@@ -27,6 +27,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from src.strategy.mm_board_meetings import BoardMeetingDetector
@@ -399,6 +400,14 @@ class MMEngine:
         # State
         self.positions: dict[str, MMPosition] = {}
         self._cooldowns: dict[str, datetime] = {}  # symbol -> earliest re-entry time
+        # Lesson 13 [45:30]/[47:30], Lesson 6 [25:30], Lesson 16 [58:30]:
+        # after a stop-out, only a NEW formation justifies re-entry. Registry
+        # of last stop-loss exit per (symbol, direction); seeded from DB on
+        # restart so the rule survives process restarts.
+        self._recent_stops: dict[tuple[str, str], datetime] = {}
+        self._require_new_formation_after_stop: bool = bool(
+            getattr(config, "mm_require_new_formation_after_stop", True)
+        )
         self._cooldown_hours: float = float(
             getattr(config, "mm_cooldown_hours", SYMBOL_COOLDOWN_HOURS)
         )  # configurable via settings
@@ -519,6 +528,77 @@ class MMEngine:
         reached, not just the hard gates.
         """
         self._scan_stage_counts[stage] = self._scan_stage_counts.get(stage, 0) + 1
+
+    @staticmethod
+    def _fmwb_required_direction(
+        weekend, current_price: float, now: datetime
+    ) -> tuple[str | None, dict]:
+        """Course-faithful weekly-bias check. Returns (required trade
+        direction or None, telemetry dict).
+
+        A false move only binds direction when ALL of:
+        1. It broke OUT of the weekend range — "a decent move that breaks
+           out of an area... everybody who decided to go short on the
+           weekend got stopped out" (Lesson 10 [25:00]). A move that stays
+           inside the box traps no one: "I wouldn't consider this a Fake
+           Move Monday" (same passage).
+        2. It FAILED — price reversed back inside the range: "He spiked the
+           high. He reversed the price." (Lesson 3 [55:30]).
+        3. The week is still early: the real move trades Sunday/Monday
+           confirmation into Tuesday ("Tuesday's the real start of the
+           week", Lesson 10 [33:00]) and expires at the midweek-reversal
+           window ("Usually a midweek reversal every week", Lesson 3
+           [26:00]; weekly-setup quiz: two trend changes per week). We
+           enforce the bias Sun/Mon/Tue NY and release it Wednesday on.
+
+        Some weeks simply have no false move (Lesson 9 [72:30] "I don't
+        think we got one"; Lesson 20 [46:30] "if you can't find it just
+        move on") — then NO direction is blocked.
+        """
+        info: dict = {"binding": False, "broke_box": False, "failed": False,
+                      "expired": False, "fmwb_dir": ""}
+        fmwb = getattr(weekend, "fmwb", None)
+        if fmwb is None or not getattr(fmwb, "detected", False):
+            return None, info
+        info["fmwb_dir"] = str(getattr(fmwb, "direction", ""))
+        ny_now = now.astimezone(ZoneInfo("America/New_York"))
+        # Python weekday(): Mon=0 ... Sun=6. Bias may bind Sun/Mon/Tue only.
+        info["expired"] = ny_now.weekday() not in (6, 0, 1)
+        info["broke_box"] = bool(getattr(fmwb, "broke_box", False))
+        trap_box = getattr(weekend, "trap_box", None)
+        if info["broke_box"] and trap_box is not None and getattr(trap_box, "detected", False):
+            if fmwb.direction == "up":
+                info["failed"] = current_price < float(getattr(trap_box, "wick_high", 0.0))
+            else:
+                info["failed"] = current_price > float(getattr(trap_box, "wick_low", 0.0))
+        if info["broke_box"] and info["failed"] and not info["expired"]:
+            info["binding"] = True
+            return ("short" if fmwb.direction == "up" else "long"), info
+        return None, info
+
+    @staticmethod
+    def _formation_completed_at(formation, frames: dict) -> datetime | None:
+        """UTC timestamp of the candle at the formation's second peak — the
+        moment the formation completed. None when unresolvable (synthesized
+        formations without a peak index, missing frames): the caller must
+        then NOT block, per "if unknowable, only the time cooldown applies".
+        """
+        try:
+            tf = str(getattr(formation, "timeframe", "1h") or "1h").lower()
+            df = frames.get("1d" if tf == "daily" else tf)
+            idx = getattr(formation, "peak2_idx", None)
+            if df is None or idx is None:
+                return None
+            idx = int(idx)
+            if idx < 0 or idx >= len(df.index):
+                return None
+            ts = df.index[idx]
+            completed = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+            if completed.tzinfo is None:
+                completed = completed.replace(tzinfo=timezone.utc)
+            return completed.astimezone(timezone.utc)
+        except Exception:
+            return None
 
     def _try_board_meeting_formation(self, candles_1h):
         """Course lesson 22: board-meeting M/W as an entry trigger.
@@ -1222,6 +1302,10 @@ class MMEngine:
                         self.scan_interval = float(mm_settings["mm_scan_interval"]) * 60
                     if "mm_cooldown_hours" in mm_settings:
                         self._cooldown_hours = float(mm_settings["mm_cooldown_hours"])
+                    if "mm_require_new_formation_after_stop" in mm_settings:
+                        self._require_new_formation_after_stop = bool(
+                            mm_settings["mm_require_new_formation_after_stop"]
+                        )
                     if "mm_risk_pct" in mm_settings:
                         self.risk_pct = float(mm_settings["mm_risk_pct"])
                         self.risk_calculator = MMRiskCalculator(risk_per_trade=self.risk_pct / 100)
@@ -1336,6 +1420,38 @@ class MMEngine:
                             symbols=list(self.positions.keys()))
         except Exception as e:
             logger.warning("mm_position_restore_failed", error=str(e))
+
+        # Seed the re-entry registry from recent stop-losses so the Lesson
+        # 13/16 re-setup rule (and the symbol cooldown floor) survive a
+        # restart — otherwise a restart amnesties every recent stop-out.
+        try:
+            recent_stops = await self.repo.get_recent_stop_losses(hours=168)
+            now_utc = datetime.now(timezone.utc)
+            for row in recent_stops:
+                sym = row.get("symbol")
+                direction = row.get("direction")
+                exit_raw = row.get("exit_time")
+                if not sym or not direction or not exit_raw:
+                    continue
+                try:
+                    stopped_at = datetime.fromisoformat(str(exit_raw).replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if stopped_at.tzinfo is None:
+                    stopped_at = stopped_at.replace(tzinfo=timezone.utc)
+                key = (sym, direction)
+                if key not in self._recent_stops or stopped_at > self._recent_stops[key]:
+                    self._recent_stops[key] = stopped_at
+                # Re-arm the time cooldown if the stop was recent enough.
+                cooldown_until = stopped_at + timedelta(hours=self._cooldown_hours)
+                if cooldown_until > now_utc and cooldown_until > self._cooldowns.get(sym, now_utc):
+                    self._cooldowns[sym] = cooldown_until
+            if self._recent_stops:
+                logger.info("mm_reentry_registry_seeded",
+                            entries=len(self._recent_stops),
+                            cooldowns_rearmed=len(self._cooldowns))
+        except Exception as e:
+            logger.warning("mm_reentry_registry_seed_failed", error=str(e))
 
         logger.info("mm_engine_started", scanning_active=self._scanning_active)
 
@@ -1713,6 +1829,12 @@ class MMEngine:
         now = datetime.now(timezone.utc)
         # Expire old cooldowns
         self._cooldowns = {s: t for s, t in self._cooldowns.items() if t > now}
+        # Prune stop-out records past the formation-detector horizon (the
+        # 4H path sees ~6.7 days; older formations can't be re-detected).
+        stop_horizon = now - timedelta(days=7)
+        self._recent_stops = {
+            k: t for k, t in self._recent_stops.items() if t > stop_horizon
+        }
         # Filter out pairs with open positions or on cooldown
         return [p for p in pairs if p not in self.positions and p not in self._cooldowns]
 
@@ -2535,16 +2657,29 @@ class MMEngine:
         # Weekend trap analysis
         weekend = self.weekend_trap_analyzer.analyze(candles_1h, now)
 
-        # Bug 6: Weekly bias gating — FMWB direction determines allowed trade direction
-        # FMWB direction is the FALSE move. Real move is opposite.
-        if weekend.fmwb.detected:
-            # "up" false move → real direction bearish → only shorts
-            # "down" false move → real direction bullish → only longs
-            real_direction = "short" if weekend.fmwb.direction == "up" else "long"
-            if trade_direction != real_direction:
+        # Weekly bias gating — a CONFIRMED false move implies the real move
+        # is opposite. Confirmation requires break-out-of-box + failure, and
+        # the bias expires at the midweek-reversal window — see
+        # _fmwb_required_direction for the course citations. Backtested
+        # 2026-08-15 (docs/BACKTEST_VERIFIED_2026-08-15.md): the previous
+        # unconditional version blocked 176 shorts in 90d that re-simmed to
+        # +24R while the surviving signals went 0-for-12.
+        required_dir, fmwb_info = self._fmwb_required_direction(
+            weekend, current_price, now
+        )
+        if required_dir is not None:
+            if trade_direction != required_dir:
                 return self._reject("against_weekly_bias", symbol,
-                                    trade_dir=trade_direction, fmwb_dir=weekend.fmwb.direction,
-                                    real_dir=real_direction)
+                                    trade_dir=trade_direction,
+                                    fmwb_dir=weekend.fmwb.direction,
+                                    real_dir=required_dir,
+                                    broke_box=fmwb_info["broke_box"],
+                                    failed=fmwb_info["failed"])
+        elif weekend.fmwb.detected:
+            # Detected but unconfirmed (never left the box / hasn't failed)
+            # or expired (Wed+): course says draw no directional inference.
+            logger.info("mm_fmwb_bias_not_binding", symbol=symbol,
+                        direction=trade_direction, **fmwb_info)
         else:
             # Course C2 (lesson 15): "if you don't see the false breakout in
             # your weekend box, also look for W's and Ms. Look for W's and
@@ -2563,6 +2698,36 @@ class MMEngine:
                 logger.info("mm_warn_no_weekly_bias", symbol=symbol, direction=trade_direction)
 
         self._advance("direction_ok")
+
+        # Re-entry discipline after a stop-out. The symbol-level time
+        # cooldown (Lesson 13 [79:00]: "if you get stopped out there is no
+        # trade for another two hours minimum") is enforced upstream via
+        # self._cooldowns. This gate adds the second half of the course
+        # rule: re-entry must be a complete RE-SETUP on a NEW formation —
+        # "You reset. You identified a new W and you jumped back in"
+        # (Lesson 16 [58:30]); "Set your high and low of the day again...
+        # start again" (Lesson 6 [23:30]-[25:30]); "cut the trade and
+        # re-setup" (Lesson 13 [45:30]). A formation that completed BEFORE
+        # the last same-direction stop-out is the SAME failed idea being
+        # re-detected — the serial re-entry pattern measured at ~8R of the
+        # 180d backtest loss (docs/BACKTEST_VERIFIED_2026-08-15.md: one-per-
+        # idea dedup recovered +11.5R with only +0.63R of winners lost).
+        if self._require_new_formation_after_stop:
+            last_stop = self._recent_stops.get((symbol, trade_direction))
+            if last_stop is not None:
+                formed_at = self._formation_completed_at(
+                    best_formation,
+                    {"15m": candles_15m, "1h": candles_1h,
+                     "4h": candles_4h, "1d": candles_1d},
+                )
+                if formed_at is not None and formed_at <= last_stop:
+                    return self._reject(
+                        "stale_formation_after_stop", symbol,
+                        direction=trade_direction,
+                        formation=best_formation.type,
+                        formed_at=formed_at.isoformat(),
+                        stopped_at=last_stop.isoformat(),
+                    )
 
         # Bug 5: Three hits rule — check HOW and LOW for reversal/continuation signals
         three_hits_at_how = None
@@ -5218,6 +5383,8 @@ class MMEngine:
             logger.debug("mm_full_partial_close_db_update_failed", error=str(e))
         self.positions.pop(pos.symbol, None)
         self._cooldowns[pos.symbol] = datetime.now(timezone.utc) + timedelta(hours=self._cooldown_hours)
+        if reason == "stop_loss":
+            self._recent_stops[(pos.symbol, pos.direction)] = datetime.now(timezone.utc)
 
     async def _close_position(self, pos: MMPosition, price: float, reason: str) -> None:
         """Fully close an MM position."""
@@ -5308,6 +5475,10 @@ class MMEngine:
         self.positions.pop(pos.symbol, None)
         # Cooldown: don't re-enter this symbol for _cooldown_hours
         self._cooldowns[pos.symbol] = datetime.now(timezone.utc) + timedelta(hours=self._cooldown_hours)
+        if reason == "stop_loss":
+            # Lesson 13/16 re-setup rule: remember the stop so only a NEW
+            # formation can justify the next same-direction entry.
+            self._recent_stops[(pos.symbol, pos.direction)] = datetime.now(timezone.utc)
 
     @staticmethod
     def _is_valid_target(price: float, direction: str, entry: float) -> bool:

@@ -103,8 +103,12 @@ class WeekendAnalysis:
 # Constants
 # ---------------------------------------------------------------------------
 
-# How many hours after Sunday 5pm NY to look for the FMWB
-FMWB_WINDOW_HOURS = 8  # Look for FMWB within 8 hours of weekly open
+# How many hours after Sunday 5pm NY to look for the FMWB.
+# Course: the false move happens "Sunday/Monday" — either day, not just the
+# Sunday-evening open (Lesson 9 [50:00] "Fake Move Monday can happen on
+# Sunday... it says Sunday / Monday"; Lesson 3 [14:30] "The beginning of the
+# week is Sunday/Monday"). 31h = Sunday 5pm NY through end of Monday NY.
+FMWB_WINDOW_HOURS = 31
 
 # Minimum % move to qualify as FMWB (relative to weekend box range)
 FMWB_MIN_MOVE_PCT = 0.3  # FMWB must move at least 30% of weekend box range

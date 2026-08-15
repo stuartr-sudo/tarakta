@@ -187,21 +187,19 @@ still stand; the re-entry martingale sits on top of them:
 
 ## 7. Build queue (agreed with Stuart, in order)
 
-1b. **post-stop-loss re-entry cooldown** per symbol+direction — **VERIFIED
-   2026-08-15** (`docs/BACKTEST_VERIFIED_2026-08-15.md`): 24h cooldown = +9.0R
-   on the 180d set / +3.0R on a fresh 90d set, killing 12 losers at the cost
-   of +0.63R of micro-winners. 1h does nothing, 4h too short. **Before
-   shipping: find the course's own re-entry guidance and cite
-   lesson+timestamp in the commit** (CLAUDE.md rule).
+1b. ~~post-stop-loss re-entry cooldown~~ **SHIPPED 2026-08-15** as the
+   course-cited re-setup rule (`stale_formation_after_stop` gate +
+   DB-seeded stop registry; L13 [79:00]/[45:30], L6 [25:30], L16 [58:30] —
+   see CHANGELOG). The course states 2h *minimum*; the backtest-optimal 24h
+   window is available without a deploy via `mm_cooldown_hours` in
+   /mm/settings if the operator wants it stricter.
 
-1c. **NEW (2026-08-15, verified): FMWB weekly-bias gate fix + min-SL floor.**
-   (a) The gate blocked 176 shorts in 90d×6sym; re-simmed they return +24R/41%WR
-   while the 12 taken signals went 0-for-12 — the gate asserts real_direction
-   from the week's first move without requiring the move to break the weekend
-   box and fail (`broke_box` computed but ignored, no expiry). Fix: assert only
-   on broke-box-and-failed, with expiry; re-read C2 L15 + cite. (b) Two live
-   micro-stop trades (SL 0.007%/0.022% from entry) filled −87.7R/−15.4R —
-   add a minimum SL-distance floor in mm_risk (sanity bound, no course rule).
+1c. ~~FMWB weekly-bias gate fix~~ **SHIPPED 2026-08-15** — bias now binds
+   only on broke-box-AND-failed spikes, Sun/Mon/Tue NY, expiring at the
+   midweek reversal; no-FMWB weeks block nothing; detection window 8h→31h
+   (Sunday/Monday per L9 [50:00]). Citations in CHANGELOG. Min-SL floor:
+   already existed since 2026-04-15 (`sl_too_tight`, 0.30%/0.50%) — the
+   −87.7R micro-stop fills predate it; nothing to build.
    **Tested and REJECTED — do not build:** daily-trend hard filter (with-trend
    shorts were the worst replay bucket), funding-rate gates (inert; live
    "aligned" bucket went 0/11), reversal/flip (re-confirmed dead).

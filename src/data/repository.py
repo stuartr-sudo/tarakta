@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from src.data.db import Database
@@ -265,6 +265,26 @@ class Repository:
             return result.data or []
         except Exception as e:
             logger.warning("get_partial_exits_failed", trade_id=trade_id, error=str(e))
+            return []
+
+    async def get_recent_stop_losses(self, hours: int = 168) -> list[dict]:
+        """Closed stop-loss exits in the window — seeds the re-entry
+        registry (Lesson 13 re-setup rule) after a restart."""
+        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        try:
+            query = (
+                self.db.table("trades")
+                .select("symbol, direction, exit_time")
+                .eq("status", "closed")
+                .eq("strategy", "mm_method")
+                .eq("exit_reason", "stop_loss")
+                .eq("instance_id", self.instance_id)
+                .gte("exit_time", since)
+            )
+            result = await asyncio.to_thread(_exec, query)
+            return result.data or []
+        except Exception as e:
+            logger.warning("get_recent_stop_losses_failed", error=str(e))
             return []
 
     async def get_recent_trades_for_symbol(

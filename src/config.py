@@ -88,6 +88,12 @@ class Settings(BaseSettings):
     # 0 still disables it when deliberately overridden.
     mm_gate_threshold: int = 3
     mm_cooldown_hours: float = 4.0
+    # Course Lesson 13 [45:30]/[47:30] + Lesson 6 [25:30] + Lesson 16 [58:30]:
+    # after a stop-out the old setup is void — re-entry requires a NEW
+    # confirmed formation ("You reset. You identified a new W and you jumped
+    # back in"). When true, a signal whose formation completed BEFORE the
+    # last same-direction stop-out on the symbol is rejected.
+    mm_require_new_formation_after_stop: bool = True
     mm_leverage: int = 10
     # Max distance from entry to TP1, as % of entry. Engineering cap, NOT
     # an explicit course rule — the course doesn't give a numeric bound
