@@ -187,12 +187,24 @@ still stand; the re-entry martingale sits on top of them:
 
 ## 7. Build queue (agreed with Stuart, in order)
 
-1b. **NEW (2026-08-03, smallest + highest-certainty): post-stop-loss re-entry
-   cooldown** per symbol+setup — kills the ~8R martingale documented in
-   `docs/BACKTEST_180D_2026-08-03.md`. **Before shipping: find the course's
-   own re-entry guidance and cite lesson+timestamp in the commit** (CLAUDE.md
-   rule — do not invent the rule shape). Suggested start: search course
-   transcripts for re-entry / "stopped out" / "wait for" guidance.
+1b. **post-stop-loss re-entry cooldown** per symbol+direction — **VERIFIED
+   2026-08-15** (`docs/BACKTEST_VERIFIED_2026-08-15.md`): 24h cooldown = +9.0R
+   on the 180d set / +3.0R on a fresh 90d set, killing 12 losers at the cost
+   of +0.63R of micro-winners. 1h does nothing, 4h too short. **Before
+   shipping: find the course's own re-entry guidance and cite
+   lesson+timestamp in the commit** (CLAUDE.md rule).
+
+1c. **NEW (2026-08-15, verified): FMWB weekly-bias gate fix + min-SL floor.**
+   (a) The gate blocked 176 shorts in 90d×6sym; re-simmed they return +24R/41%WR
+   while the 12 taken signals went 0-for-12 — the gate asserts real_direction
+   from the week's first move without requiring the move to break the weekend
+   box and fail (`broke_box` computed but ignored, no expiry). Fix: assert only
+   on broke-box-and-failed, with expiry; re-read C2 L15 + cite. (b) Two live
+   micro-stop trades (SL 0.007%/0.022% from entry) filled −87.7R/−15.4R —
+   add a minimum SL-distance floor in mm_risk (sanity bound, no course rule).
+   **Tested and REJECTED — do not build:** daily-trend hard filter (with-trend
+   shorts were the worst replay bucket), funding-rate gates (inert; live
+   "aligned" bucket went 0/11), reversal/flip (re-confirmed dead).
 
 1. **Vision judge calibration** — gate NOT passed (0/8 on positive controls;
    1 approval in 60+ charts = hanging judge). Plan in
