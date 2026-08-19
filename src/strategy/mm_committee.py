@@ -289,12 +289,39 @@ class MMCommittee:
         user_prompt = self._render_specialist_prompt(name, context)
         started = time.perf_counter()
         raw, usage = await self._call_model(client, model, system, user_prompt, max_tokens=1024)
+        cost = self._compute_cost(model, usage)
+        try:
+            parsed = self._parse_specialist(raw, name)
+        except ValueError:
+            # One malformed specialist used to abort the whole committee run
+            # (24 such ERRORs on tarakta-fly 2026-08-05..18, all the risk
+            # specialist on the SDK path). Send it back once for re-forming;
+            # if still unparseable, carry it as NEUTRAL so the other four
+            # specialists + head trader still get their say.
+            logger.warning("mm_committee_specialist_reform", specialist=name, model=model)
+            reform_prompt = (
+                f"{user_prompt}\n\nYour previous reply was not valid JSON and was "
+                "discarded. Reply again with ONLY the JSON object — no prose, no "
+                "code fences."
+            )
+            raw2, usage2 = await self._call_model(client, model, system, reform_prompt, max_tokens=1024)
+            cost += self._compute_cost(model, usage2)
+            try:
+                parsed = self._parse_specialist(raw2, name)
+                raw = raw2
+            except ValueError:
+                logger.warning("mm_committee_specialist_neutralised", specialist=name, model=model)
+                parsed = SpecialistVerdict(
+                    name=name, alignment=0, decision="NEUTRAL",
+                    reason="malformed_specialist_response_after_retry",
+                    concerns=["malformed_response"],
+                )
+                raw = raw2
         latency_ms = int((time.perf_counter() - started) * 1000)
-        parsed = self._parse_specialist(raw, name)
         parsed.raw_response = raw
         parsed.model = model
         parsed.latency_ms = latency_ms
-        parsed.cost_usd = self._compute_cost(model, usage)
+        parsed.cost_usd = cost
         return parsed
 
     async def _call_head_trader(

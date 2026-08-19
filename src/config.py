@@ -122,6 +122,27 @@ class Settings(BaseSettings):
     # directional permission to hold longer for 4H/daily structures; 2
     # closed 4H bars is the conservative inferred default.
     mm_scratch_window_4h_bars: int = 2
+    # Day-trade mode (user-directed 2026-08-19: "try again with day trading,
+    # not 15m"). Course Lesson 16 [45:30-46:00]: "if you are Day Trading
+    # only, meaning you're trading the Daily setup ... your trade should be
+    # done before you even really go to bed. Potentially like two sessions
+    # at most, but usually within a session." Lesson 5 [06:00-06:30]: end
+    # of day is 5pm New York — the MM brings price back toward the
+    # high/low of the day and into the Dead Gap trap. When ON:
+    #   (1) a 1H (daily-setup) formation is preferred over a 4H one when
+    #       both are present on a symbol (Lesson 10 [08:00]: same formation
+    #       on every timeframe; 1H = the daily setup, 4H = weekly/swing);
+    #   (2) 1H/15m-formation positions still open at the Dead Gap (5pm NY)
+    #       are closed ("day_trade_eod") unless the stop is already in
+    #       profit (Lesson 10 [45:00]: "put your stop loss in profit" if
+    #       you want to hold beyond the day trade) — same exemption shape
+    #       as the Friday weekend-hold rule;
+    #   (3) positions are managed (SL/TP/exits) through the Dead Gap
+    #       instead of being left untouched — scanning for NEW entries is
+    #       still skipped there (trap zone).
+    # 4H-formation positions keep swing management unchanged. OFF restores
+    # the prior 4H-preferred selection and no EOD exit.
+    mm_day_trade_mode: bool = True
     mm_initial_balance: float = 10000.0
     # Pair selection — course says MM Method is a majors strategy. Separate
     # from the SMC engine's `min_volume_usd` so we don't disturb that.

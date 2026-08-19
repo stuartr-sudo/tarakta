@@ -130,3 +130,38 @@ async def test_bnb_canary_is_binding_in_veto_mode():
     row = repo.insert_mm_agent_decision.call_args.args[0]
     assert row["decision"] == "VETO"
     assert row["committee"]["status"] == "deterministic_canary"
+
+
+@pytest.mark.asyncio
+async def test_malformed_specialist_is_sent_back_once_then_neutralised():
+    """A single malformed specialist must not abort the committee run.
+    First retry asks the model to re-form; a second failure → NEUTRAL."""
+    committee = MMCommittee(config=_config("veto"), repo=MagicMock())
+    committee._load_skill = MagicMock(return_value="system")  # type: ignore[method-assign]
+    calls: list[str] = []
+
+    async def fake_call(client, model, system, user_prompt, *, max_tokens):
+        calls.append(user_prompt)
+        return "not json at all", {"input_tokens": 10, "output_tokens": 5}
+
+    committee._call_model = fake_call  # type: ignore[method-assign]
+    verdict = await committee._call_specialist(None, "risk", "risk.md", "m", _ctx())
+    assert len(calls) == 2
+    assert "not valid JSON" in calls[1]          # reform prompt sent back
+    assert verdict.decision == "NEUTRAL" and verdict.alignment == 0
+    assert verdict.reason == "malformed_specialist_response_after_retry"
+
+
+@pytest.mark.asyncio
+async def test_malformed_specialist_reform_succeeds_on_retry():
+    committee = MMCommittee(config=_config("veto"), repo=MagicMock())
+    committee._load_skill = MagicMock(return_value="system")  # type: ignore[method-assign]
+    replies = iter(["garbage", '{"decision":"VETO","alignment":-2,"reason":"late entry"}'])
+
+    async def fake_call(client, model, system, user_prompt, *, max_tokens):
+        return next(replies), {"input_tokens": 10, "output_tokens": 5}
+
+    committee._call_model = fake_call  # type: ignore[method-assign]
+    verdict = await committee._call_specialist(None, "risk", "risk.md", "m", _ctx())
+    assert verdict.decision == "VETO" and verdict.alignment == -2
+    assert verdict.reason == "late entry"

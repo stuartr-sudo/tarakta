@@ -359,6 +359,8 @@ class MMEngine:
         self.scratch_window_4h_bars = int(
             getattr(config, "mm_scratch_window_4h_bars", SCRATCH_WINDOW_4H_BARS)
         )
+        # Day-trade mode — see config.mm_day_trade_mode for the course citations.
+        self.day_trade_mode = bool(getattr(config, "mm_day_trade_mode", False))
 
         # Tunable parameters (overridable via env or settings page)
         self.risk_pct = float(
@@ -1666,7 +1668,7 @@ class MMEngine:
             logger.info("mm_engine_weekend_skip", cycle=self.cycle_count)
             return
 
-        if session.session_name == "dead_zone":
+        if session.session_name == "dead_zone" and not self.day_trade_mode:
             logger.info("mm_engine_dead_zone_skip", cycle=self.cycle_count)
             return
 
@@ -1687,6 +1689,14 @@ class MMEngine:
                 await self._manage_position(symbol)
             except Exception as e:
                 logger.warning("mm_manage_error", symbol=symbol, error=str(e))
+
+        if session.session_name == "dead_zone":
+            # Day-trade mode: positions were managed above (so the 5pm-NY
+            # day_trade_eod exit can fire), but the Dead Gap is a trap
+            # zone (Lesson 5 [06:30]) — never open NEW entries in it.
+            logger.info("mm_engine_dead_zone_skip", cycle=self.cycle_count,
+                        managed_positions=len(self.positions))
+            return
 
         # 3. Only scan for new entries if scanning is active
         if self._scanning_active:
@@ -2062,7 +2072,16 @@ class MMEngine:
             formations_4h = self.formation_detector.detect(candles_4h, timeframe="4h")
         formations_1h = self.formation_detector.detect(candles_1h, timeframe="1h")
 
-        if formations_4h:
+        if self.day_trade_mode and formations_1h:
+            # Day-trade mode: the 1H formation IS the daily setup (Lesson 16
+            # [45:30]); take it ahead of a coexisting 4H structure. The 4H
+            # path still runs when no 1H formation exists.
+            best_formation = formations_1h[0]
+            if formations_4h:
+                logger.info("mm_day_trade_1h_preferred", symbol=symbol,
+                            type=best_formation.type, variant=best_formation.variant,
+                            shadowed_4h=formations_4h[0].variant)
+        elif formations_4h:
             best_formation = formations_4h[0]
             logger.info(
                 "mm_4h_formation_selected",
@@ -4356,6 +4375,30 @@ class MMEngine:
         if self._is_stopped_out(pos, current_price):
             await self._close_position(pos, current_price, "stop_loss")
             return
+
+        # Day-trade end-of-day exit. Lesson 16 [46:00]: on the daily setup
+        # "your trade should be done before you even really go to bed ...
+        # two sessions at most, but usually within a session." Lesson 5
+        # [06:00]: end of day is 5pm New York, MM brings price back toward
+        # the high/low of the day, then the Dead Gap trap. Only 1H/15m
+        # (daily-setup) positions; 4H structures are swing trades. Exempt
+        # when the stop is already in profit — Lesson 10 [45:00]: hold
+        # past the day trade by "put[ting] your stop loss in profit".
+        if (
+            self.day_trade_mode
+            and formation_tf in {"1h", "15m"}
+            and self.session_analyzer.is_dead_zone(now)
+        ):
+            if pos.current_level >= 1 and pos.sl_moved_to_breakeven:
+                logger.info("mm_day_trade_eod_hold_allowed", symbol=symbol,
+                            level=pos.current_level, sl_at_breakeven=True)
+            else:
+                logger.info("mm_day_trade_eod_exit", symbol=symbol,
+                            formation_timeframe=formation_tf,
+                            elapsed_hours=round(elapsed / 3600, 2),
+                            mfe_r=round(pos.max_favorable_excursion_r, 3))
+                await self._close_position(pos, current_price, "day_trade_eod")
+                return
 
         # Bug 2: Target-based level advancement — check if price has reached targets.
         # This complements the PVSRA vector-based level tracker which needs time

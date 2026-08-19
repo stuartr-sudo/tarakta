@@ -76,6 +76,32 @@ only with `broke_box=True failed=True`; direction mix restored (4 short /
 
 ---
 
+## 2026-08-19 — Day-trade mode (course Daily setup) + committee specialist re-form/NEUTRAL
+
+User-directed: "I'd like to try again with day trading. Not 15m. But day trading please." and "Send it back for reforming; fix is small (retry that one specialist, or treat a single malformed specialist as NEUTRAL)."
+
+### Day-trade mode — `mm_day_trade_mode` (default ON)
+
+Course basis (read before coding, per CLAUDE.md):
+- **Lesson 16 [45:30–46:00]**: "if you are Day Trading only, meaning you're trading the Daily setup. All you're looking for is your three levels, and then once you identify the M or the W that forms on the other side of that trade, or a Stopping Volume Candle, you exit... There's no need to move stops... On the daily setup, your trade should be done before you even really go to bed. Potentially like two sessions at most, but usually within a session, if you pick it right."
+- **Lesson 5 [06:00–06:30]**: "end of day is 5pm New York... the goal is to bring the price back close to either a High or the Low of the day... back into consolidation... the Dead Gap is 5pm New York to 8pm New York... they basically just want to trap us in consolidation there."
+- **Lesson 10 [08:00]**: "You will find the same formation on every time-frame" (so the 1H formation is the day trade; the 4H is the swing). **Lesson 10 [45:00]**: if you want to hold a day trade beyond, "put your stop loss in profit."
+
+What it does (`src/strategy/mm_engine.py`):
+1. `_analyze_pair`: when BOTH a 1H and a 4H formation exist on a symbol, the 1H (daily setup) is taken (`mm_day_trade_1h_preferred` log carries the shadowed 4H variant). Previously 4H was always preferred. 4H path unchanged when no 1H formation exists.
+2. `_manage_position`: new `day_trade_eod` exit — a 1H/15m-formation position still open in the Dead Gap (5pm–8pm NY) is closed, **unless** `current_level >= 1 and sl_moved_to_breakeven` (stop in profit → hold allowed, `mm_day_trade_eod_hold_allowed`) — the same exemption shape as the Friday weekend-hold rule. 4H positions untouched (swing management).
+3. `_cycle`: in day-trade mode the Dead Gap no longer skips position management (it used to skip the whole cycle, leaving positions unmanaged for 3h except the ws fast-stop). Scanning for NEW entries is still skipped in the Dead Gap (trap zone).
+
+Not done (deliberately): no change to the SL-progression ladder ("no need to move stops" — left as is; interacts with scratch/BE logic), no three-hits-to-the-high exit signal yet (Lesson 10 [43:30]) — candidates for the next iteration once we have day-trade outcomes to look at. Kill switch: `MM_DAY_TRADE_MODE=false` restores prior behaviour exactly.
+
+Context for why: since June the 4H bucket was the only positive one (n=25, +$544), 1H break-even (n=18), 15m scalp paths −$4.4k (n=60). The user explicitly wants day trades but NOT 15m — this mode trades the 1H daily setup with day-trade management and leaves 15m untouched. Expect more 1H trades and shorter holds; measure before judging.
+
+### Committee: malformed specialist → send back once, then NEUTRAL
+
+`MMCommittee._call_specialist`: one unparseable specialist reply used to raise `malformed_specialist_response:<name>` and abort the whole run (24 ERRORs on tarakta-fly 2026-08-05..18, all the risk specialist on the SDK path; in veto mode ERROR → VETO, so fail-closed but 24 lost evaluations). Now: re-send the same prompt once with an explicit "reply with ONLY the JSON object" instruction (`mm_committee_specialist_reform`); if still malformed, carry the specialist as `NEUTRAL` alignment 0 with `reason=malformed_specialist_response_after_retry` (`mm_committee_specialist_neutralised`) so the other four + head trader still decide. Cost of both calls is booked. Tests: `tests/test_mm_committee.py` (+2), `tests/test_mm_day_trade_mode.py` (new, 5). Suite: 818 passed / 1 skipped.
+
+---
+
 ## 2026-07-31 — Committee superseded to the Claude 5 family; escalation model actually wired
 
 User-directed supersede ("Haiku and Sonnet are not very reliable... Need to supersede please"). Not a course change — model plumbing only; no strategy rule touched.

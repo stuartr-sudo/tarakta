@@ -1,8 +1,28 @@
 # LAUNCH HANDOFF — read this first
 
-**Last updated:** 2026-08-03 by Claude (Fable 5) · **Repo:** https://github.com/stuartr-sudo/tarakta · **Local:** `/Users/stuarta/tarakta`
-**Branch:** `main` == `codex/tarakta-stabilization` (pushed, clean) · **Tests:** 797 passed / 1 skipped
+**Last updated:** 2026-08-19 by Claude (Fable 5) · **Repo:** https://github.com/stuartr-sudo/tarakta · **Local:** `/Users/stuarta/tarakta`
+**Branch:** `main` == `codex/tarakta-stabilization` (pushed, clean) · **Tests:** 818 passed / 1 skipped
 
+> **Session log 2026-08-19 — DAY-TRADE MODE shipped (ON by default, both bots)
+> + committee specialist re-form fix.** Full detail + course citations in
+> `docs/CHANGELOG.md` (top entry). In one paragraph: `mm_day_trade_mode=True`
+> makes the engine (1) prefer the 1H daily-setup formation over a coexisting 4H
+> one, (2) close 1H/15m positions still open at the Dead Gap (5pm NY) as
+> `day_trade_eod` unless the stop is already in profit, (3) manage positions
+> through the Dead Gap (new entries still blocked there). 4H positions are
+> unchanged (swing). Kill switch `MM_DAY_TRADE_MODE=false`. **Watch for:** the
+> new exit reason `day_trade_eod` in `trades`, `mm_day_trade_1h_preferred` in
+> logs, and whether the 1H bucket's P&L (break-even since June) improves or
+> worsens — judge after ≥20 day trades, not sooner. The committee fix: one
+> malformed specialist is re-asked once then carried as NEUTRAL instead of
+> aborting the run (24 lost Fly evaluations 08-05..18 were this). Also note:
+> committee is in **VETO mode on both bots since 2026-08-05**, Fly has the API
+> key installed; 9 closed trades since then, near flat; the LINK 08-18 +$600
+> TP3 win is analysed in the 08-19 session transcript (why it worked: impulse
+> base key level + 3-touch retest + committee waited for the reaction candle;
+> what limited it: entry slipped 9.372→9.44, turning a 3.3R idea into 0.9R —
+> **entry precision at a qualified level is the next highest-value fix**).
+>
 > **Session log 2026-07-31→08-03 (this account is out of usage; a second
 > Claude account continues on the SAME laptop/folder — memory dir is shared):**
 > (1) Committee superseded to the **Claude 5 family** and the escalation model
