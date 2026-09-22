@@ -49,7 +49,7 @@ promote only out-of-sample survivors to paper trading.
 - MM course is guidance only — its ideas enter as individually testable hypotheses (S4),
   not as a gate stack.
 - Paper mode only. Any move to real money is Stuart's decision, made after the paper
-  ladder in §6.
+  ladder in §7.
 
 ## 3. Architecture
 
@@ -141,15 +141,17 @@ Long top 3–5, short bottom 3–5, hold 24h or 48h, catastrophe stop 3 × ATR. 
 both momentum and reversal form. Rationale: near market-neutral, so it can earn in
 chop.
 
-**S3 — Funding-extreme fade.**
+**S3 — Funding extremes (fade and follow).**
 When a symbol's funding rate is in the top/bottom 5% of its own trailing 90 days, trade
-against the crowd (and collect the funding). ATR stop or time stop. Rationale: crowded
-leverage unwinds; live data showed shorts entered while funding < 0 at 59% WR.
+the extreme. ATR stop or time stop. Tested in both forms: *fade* (against the crowd,
+collecting funding; rationale: crowded leverage unwinds) and *follow* (with the crowd).
+Live data points toward follow: shorts entered while funding < 0 went 16/27 (59% WR)
+and "funding-aligned" contrarian trades went 0/11 (BACKTEST_VERIFIED_2026-08-15 H4),
+suggesting funding acts as a trend/regime proxy.
 
 **S4 — Course sweep, tested systematically.**
 A 1H bar wicks through the prior day's or week's high/low by ≥ x ATR (x ∈ {0.1, 0.25})
-and closes back
-inside; trade the reversal. Stop beyond the wick plus buffer; target the day/week
+and closes back inside; trade the reversal. Stop beyond the wick plus buffer; target the day/week
 range midpoint. Variants with/without the course's London/NY session-open timing.
 Rationale: the course's core stop-hunt idea, tested on thousands of events instead of
 ~40.
