@@ -1,7 +1,17 @@
 # LAUNCH HANDOFF — read this first
 
-**Last updated:** 2026-08-19 by Claude (Fable 5) · **Repo:** https://github.com/stuartr-sudo/tarakta · **Local:** `/Users/stuarta/tarakta`
-**Branch:** `main` == `codex/tarakta-stabilization` (pushed, clean) · **Tests:** 818 passed / 1 skipped
+**Last updated:** 2026-09-23 by Claude (Opus 5.5) · **Repo:** https://github.com/stuartr-sudo/tarakta · **Local:** `/Users/stuarta/tarakta`
+**Branch:** `main` (pushed; `codex/tarakta-stabilization` lags by the 2026-09-23 docs-only commits) · **Tests:** 818 passed / 1 skipped
+
+> **Session log 2026-09-23 — STRATEGY PIVOT APPROVED (design only, no code yet).**
+> Review of 174 live MM trades: −$11.5k, 33% WR, −0.71R/trade; every backtest
+> negative; reversal test ~0R → the MM entry signal has no edge. Stuart approved an
+> evidence-first pivot: multi-year Binance research harness + pre-registered
+> tournament of short-horizon strategies (≤48h hold, ≤20% max DD), only holdout
+> survivors go to paper on a separate `sys-paper` instance. MM bots untouched.
+> **Spec (read first):** `docs/superpowers/specs/2026-09-23-systematic-pivot-design.md`.
+> **Next step:** Stuart reviews the spec → write the implementation plan
+> (superpowers:writing-plans) → build milestone 1 (data layer). No bot changes yet.
 
 > **Session log 2026-08-19 — DAY-TRADE MODE shipped (ON by default, both bots)
 > + committee specialist re-form fix.** Full detail + course citations in
